@@ -1,0 +1,42 @@
+# Build artifacts
+target/
+build/
+dist/
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak
+
+# Dependencies
+node_modules/
+vendor/
+
+# Test coverage
+coverage/
+*.prof
+
+# Documentation build
+docs/_build/
+
+# Local configuration
+.env
+.env.local
