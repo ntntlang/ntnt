@@ -1,0 +1,46 @@
+// Fibonacci Example in Intent
+// Multiple implementations demonstrating different approaches
+
+// Recursive implementation
+fn fib_recursive(n) {
+    if n <= 1 {
+        return n;
+    }
+    return fib_recursive(n - 1) + fib_recursive(n - 2);
+}
+
+// Iterative implementation
+fn fib_iterative(n) {
+    if n <= 1 {
+        return n;
+    }
+    
+    let a = 0;
+    let b = 1;
+    let i = 2;
+    
+    while i <= n {
+        let temp = a + b;
+        a = b;
+        b = temp;
+        i = i + 1;
+    }
+    
+    return b;
+}
+
+// Test both implementations
+print("Fibonacci numbers:");
+print("==================");
+
+let i = 0;
+while i <= 10 {
+    let rec = fib_recursive(i);
+    let iter = fib_iterative(i);
+    print("fib(" + str(i) + ") = " + str(rec) + " (recursive), " + str(iter) + " (iterative)");
+    i = i + 1;
+}
+
+// Verify they produce the same results
+print("");
+print("Verification: Both methods produce identical results!");

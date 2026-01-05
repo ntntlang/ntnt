@@ -1,0 +1,37 @@
+[package]
+name = "intent"
+version = "0.1.0"
+edition = "2021"
+authors = ["Intent Language Team"]
+description = "Intent - A programming language designed for AI-driven development"
+license = "MIT"
+repository = "https://github.com/joshcramer/intent"
+
+[dependencies]
+# Core utilities
+thiserror = "1.0"
+anyhow = "1.0"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Serialization (for AST export)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Pretty printing and colors
+colored = "2.0"
+
+# REPL support
+rustyline = "13.0"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+
+[[bin]]
+name = "intent"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true

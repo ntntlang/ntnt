@@ -7,16 +7,19 @@ The Intent programming language ecosystem is designed as a comprehensive platfor
 ## Core Components
 
 ### Language Runtime
+
 - **Compiler**: Transforms Intent source code into executable bytecode or native code
 - **Virtual Machine**: Executes Intent programs with built-in observability
 - **Standard Library**: Core types, data structures, and utilities optimized for AI development
 
 ### Development Ecosystem
+
 - **Agent Framework**: Runtime environment for AI coding agents
 - **Collaboration System**: Multi-agent communication and coordination protocols
 - **Observability Engine**: Logging, monitoring, and explainability infrastructure
 
 ### Tooling
+
 - **IDE Integration**: Language server protocol implementation
 - **Build System**: Integrated compilation, testing, and deployment
 - **Package Manager**: Dependency resolution with semantic versioning
@@ -24,16 +27,19 @@ The Intent programming language ecosystem is designed as a comprehensive platfor
 ## Architecture Principles
 
 ### AI-First Design
+
 - Deterministic syntax for reliable code generation
 - Formal contracts as first-class language constructs
 - Structured editing primitives for safe refactoring
 
 ### Human Oversight
+
 - Approval gates for critical decisions
 - Transparent decision logging
 - Human-in-the-loop workflows
 
 ### Composability
+
 - Modular design with clear interfaces
 - Effect system for predictable side effects
 - Protocol-based concurrency

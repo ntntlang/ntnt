@@ -1,0 +1,50 @@
+// Hello World in Intent
+// This demonstrates basic Intent language features
+
+// Variable declaration
+let greeting = "Hello, World!";
+print(greeting);
+
+// Function definition
+fn greet(name) {
+    return "Hello, " + name + "!";
+}
+
+// Function call
+let message = greet("Intent");
+print(message);
+
+// Arithmetic
+let x = 10;
+let y = 20;
+let sum = x + y;
+print("Sum: " + str(sum));
+
+// Control flow
+if sum > 25 {
+    print("Sum is greater than 25");
+} else {
+    print("Sum is 25 or less");
+}
+
+// Loops
+let counter = 0;
+while counter < 5 {
+    print("Counter: " + str(counter));
+    counter = counter + 1;
+}
+
+// Arrays
+let numbers = [1, 2, 3, 4, 5];
+print("Array length: " + str(len(numbers)));
+print("First element: " + str(numbers[0]));
+
+// Factorial function with recursion
+fn factorial(n) {
+    if n <= 1 {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+print("Factorial of 5: " + str(factorial(5)));

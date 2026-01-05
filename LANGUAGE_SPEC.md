@@ -17,6 +17,7 @@ This document specifies the syntax, semantics, and core features of the Intent p
 ## Lexical Structure
 
 ### Keywords
+
 ```
 contract, requires, ensures, invariant, effect, protocol, intent, approve
 fn, let, mut, if, else, match, loop, while, return, break, continue
@@ -24,11 +25,13 @@ type, struct, enum, impl, use, mod, pub
 ```
 
 ### Identifiers
+
 - Start with letter or underscore
 - Contain letters, digits, underscores
 - Case-sensitive
 
 ### Literals
+
 - Integers: `42`, `0x2A`, `0b101010`
 - Floats: `3.14`, `1.0e-10`
 - Strings: `"hello"`, `'single'`
@@ -39,6 +42,7 @@ type, struct, enum, impl, use, mod, pub
 ## Types
 
 ### Primitive Types
+
 - `Int`: Arbitrary precision integers
 - `Float`: IEEE 754 floating point
 - `Bool`: Boolean values
@@ -46,6 +50,7 @@ type, struct, enum, impl, use, mod, pub
 - `Unit`: The unit type `()`
 
 ### Compound Types
+
 - Arrays: `[T]`
 - Tuples: `(T1, T2, ...)`
 - Structs: Named product types
@@ -53,6 +58,7 @@ type, struct, enum, impl, use, mod, pub
 - Functions: `(T1, T2) -> T3`
 
 ### Type Annotations
+
 ```intent
 let x: Int = 42;
 let name: String = "Intent";
@@ -63,6 +69,7 @@ let name: String = "Intent";
 Contracts specify behavioral requirements for code.
 
 ### Function Contracts
+
 ```intent
 fn transfer_funds(amount: Int, from: Account, to: Account) -> Result<(), Error>
 requires amount > 0 && from.balance >= amount
@@ -73,6 +80,7 @@ ensures to.balance == old(to.balance) + amount
 ```
 
 ### Class Invariants
+
 ```intent
 struct Account {
     balance: Int
@@ -86,6 +94,7 @@ impl Account {
 ## Functions and Methods
 
 ### Function Definition
+
 ```intent
 fn add(x: Int, y: Int) -> Int {
     return x + y;
@@ -93,6 +102,7 @@ fn add(x: Int, y: Int) -> Int {
 ```
 
 ### Methods
+
 ```intent
 impl Point {
     fn distance(&self, other: &Point) -> Float {
@@ -106,11 +116,13 @@ impl Point {
 Effects track side effects and error conditions.
 
 ### Effect Types
+
 ```intent
 fn read_file(path: String) -> Result<String, IOError> / {IO, Error}
 ```
 
 ### Effect Handlers
+
 ```intent
 try {
     let content = read_file("data.txt")?;
@@ -123,6 +135,7 @@ try {
 ## Concurrency
 
 ### Protocols
+
 ```intent
 protocol Handshake {
     send Hello(String) -> receive HelloAck(String) -> end
@@ -130,6 +143,7 @@ protocol Handshake {
 ```
 
 ### Async Operations
+
 ```intent
 async fn fetch_data(url: String) -> Result<Data, NetworkError> {
     // implementation
@@ -139,6 +153,7 @@ async fn fetch_data(url: String) -> Result<Data, NetworkError> {
 ## Modules
 
 ### Module Declaration
+
 ```intent
 mod math {
     pub fn add(a: Int, b: Int) -> Int {
@@ -148,6 +163,7 @@ mod math {
 ```
 
 ### Imports
+
 ```intent
 use math::add;
 use std::collections::HashMap;
@@ -195,4 +211,4 @@ fn update_ui(component: Component) {
 
 ---
 
-*This specification is preliminary and subject to change. See the whitepaper for detailed motivation and examples.*
+_This specification is preliminary and subject to change. See the whitepaper for detailed motivation and examples._
