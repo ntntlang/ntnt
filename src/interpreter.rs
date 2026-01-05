@@ -1,9 +1,17 @@
 //! Interpreter for Intent
 //!
 //! A tree-walking interpreter for executing Intent programs.
+//! 
+//! ## Contract Support
+//! 
+//! This interpreter fully supports design-by-contract with:
+//! - `requires` clauses (preconditions) evaluated before function execution
+//! - `ensures` clauses (postconditions) evaluated after function execution
+//! - `old(expr)` to capture pre-execution values for postcondition checks
+//! - `result` to reference the return value in postconditions
 
 use crate::ast::*;
-use crate::contracts::{ContractChecker, ContractClause, ContractSpec};
+use crate::contracts::{ContractChecker, OldValues, StoredValue};
 use crate::error::{IntentError, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -37,13 +45,13 @@ pub enum Value {
         fields: HashMap<String, Value>,
     },
     
-    /// Function value
+    /// Function value with contract
     Function {
         name: String,
         params: Vec<Parameter>,
         body: Block,
         closure: Rc<RefCell<Environment>>,
-        contract: Option<ContractSpec>,
+        contract: Option<FunctionContract>,
     },
     
     /// Native/built-in function
@@ -61,6 +69,15 @@ pub enum Value {
     
     /// Continue (for loop control)
     Continue,
+}
+
+/// Function contract with parsed expressions for runtime evaluation
+#[derive(Debug, Clone)]
+pub struct FunctionContract {
+    /// Precondition expressions
+    pub requires: Vec<Expression>,
+    /// Postcondition expressions
+    pub ensures: Vec<Expression>,
 }
 
 impl Value {
@@ -192,6 +209,12 @@ pub struct Interpreter {
     contracts: ContractChecker,
     /// Struct type definitions
     structs: HashMap<String, Vec<Field>>,
+    /// Struct invariants
+    struct_invariants: HashMap<String, Vec<Expression>>,
+    /// Old values for current function call (used in postconditions)
+    current_old_values: Option<OldValues>,
+    /// Current function's result value (used in postconditions)
+    current_result: Option<Value>,
 }
 
 impl Interpreter {
@@ -201,6 +224,9 @@ impl Interpreter {
             environment: env,
             contracts: ContractChecker::new(),
             structs: HashMap::new(),
+            struct_invariants: HashMap::new(),
+            current_old_values: None,
+            current_result: None,
         };
         interpreter.define_builtins();
         interpreter
@@ -373,15 +399,12 @@ impl Interpreter {
                 body,
                 attributes: _,
             } => {
-                let contract_spec = contract.as_ref().map(|c| {
-                    let mut spec = ContractSpec::new();
-                    for req in &c.requires {
-                        spec.add_requires(format!("{:?}", req), None);
+                // Convert AST Contract to FunctionContract with expressions
+                let func_contract = contract.as_ref().map(|c| {
+                    FunctionContract {
+                        requires: c.requires.clone(),
+                        ensures: c.ensures.clone(),
                     }
-                    for ens in &c.ensures {
-                        spec.add_ensures(format!("{:?}", ens), None);
-                    }
-                    spec
                 });
 
                 let func = Value::Function {
@@ -389,7 +412,7 @@ impl Interpreter {
                     params: params.clone(),
                     body: body.clone(),
                     closure: Rc::clone(&self.environment),
-                    contract: contract_spec,
+                    contract: func_contract,
                 };
                 self.environment.borrow_mut().define(name.clone(), func);
                 Ok(Value::Unit)
@@ -476,10 +499,15 @@ impl Interpreter {
             }
 
             Statement::Impl {
-                type_name: _,
+                type_name,
                 methods,
-                invariants: _,
+                invariants,
             } => {
+                // Store invariants for this type
+                if !invariants.is_empty() {
+                    self.struct_invariants.insert(type_name.clone(), invariants.clone());
+                }
+                
                 for method in methods {
                     self.eval_statement(method)?;
                 }
@@ -583,6 +611,21 @@ impl Interpreter {
                 function,
                 arguments,
             } => {
+                // Special handling for old() in postconditions
+                if let Expression::Identifier(name) = function.as_ref() {
+                    if name == "old" && arguments.len() == 1 {
+                        // Look up the pre-execution value
+                        let key = format!("{:?}", &arguments[0]);
+                        if let Some(ref old_values) = self.current_old_values {
+                            if let Some(stored) = old_values.get(&key) {
+                                return Ok(self.stored_to_value(stored));
+                            }
+                        }
+                        // If not in postcondition context, just evaluate normally
+                        return self.eval_expression(&arguments[0]);
+                    }
+                }
+                
                 let callee = self.eval_expression(function)?;
                 let args: Result<Vec<Value>> = arguments
                     .iter()
@@ -742,7 +785,7 @@ impl Interpreter {
     fn call_function(&mut self, callee: Value, args: Vec<Value>) -> Result<Value> {
         match callee {
             Value::Function {
-                name: _,
+                name,
                 params,
                 body,
                 closure,
@@ -755,21 +798,6 @@ impl Interpreter {
                     });
                 }
 
-                // Check preconditions
-                if let Some(ref spec) = contract {
-                    for clause in &spec.requires {
-                        // For now, just log - real implementation would evaluate the condition
-                        let _ = self.contracts.check_requires(
-                            &ContractClause {
-                                condition: clause.condition.clone(),
-                                message: clause.message.clone(),
-                                requires_approval: false,
-                            },
-                            true, // Would actually evaluate the condition
-                        );
-                    }
-                }
-
                 // Create new environment with closure as parent
                 let func_env = Rc::new(RefCell::new(Environment::with_parent(closure)));
 
@@ -780,7 +808,25 @@ impl Interpreter {
 
                 // Save current environment and switch to function's environment
                 let previous = Rc::clone(&self.environment);
-                self.environment = func_env;
+                self.environment = Rc::clone(&func_env);
+
+                // Check preconditions BEFORE execution
+                if let Some(ref func_contract) = contract {
+                    for req_expr in &func_contract.requires {
+                        let condition_str = Self::format_expression(req_expr);
+                        let result = self.eval_expression(req_expr)?;
+                        if !result.is_truthy() {
+                            self.environment = previous;
+                            return Err(IntentError::ContractViolation(
+                                format!("Precondition failed in '{}': {}", name, condition_str)
+                            ));
+                        }
+                        self.contracts.check_precondition(&condition_str, true, None)?;
+                    }
+
+                    // Capture old values for postconditions containing old()
+                    self.current_old_values = Some(self.capture_old_values(&func_contract.ensures)?);
+                }
 
                 // Execute function body
                 let mut result = Value::Unit;
@@ -792,22 +838,36 @@ impl Interpreter {
                     }
                 }
 
-                // Restore environment
-                self.environment = previous;
+                // Store result for postcondition evaluation
+                self.current_result = Some(result.clone());
+                
+                // Bind 'result' in environment for postcondition evaluation
+                self.environment.borrow_mut().define("result".to_string(), result.clone());
 
-                // Check postconditions
-                if let Some(ref spec) = contract {
-                    for clause in &spec.ensures {
-                        let _ = self.contracts.check_ensures(
-                            &ContractClause {
-                                condition: clause.condition.clone(),
-                                message: clause.message.clone(),
-                                requires_approval: false,
-                            },
-                            true,
-                        );
+                // Check postconditions AFTER execution
+                if let Some(ref func_contract) = contract {
+                    for ens_expr in &func_contract.ensures {
+                        let condition_str = Self::format_expression(ens_expr);
+                        let postcond_result = self.eval_expression(ens_expr)?;
+                        if !postcond_result.is_truthy() {
+                            // Clear state before returning error
+                            self.current_old_values = None;
+                            self.current_result = None;
+                            self.environment = previous;
+                            return Err(IntentError::ContractViolation(
+                                format!("Postcondition failed in '{}': {}", name, condition_str)
+                            ));
+                        }
+                        self.contracts.check_postcondition(&condition_str, true, None)?;
                     }
                 }
+
+                // Clear contract evaluation state
+                self.current_old_values = None;
+                self.current_result = None;
+                
+                // Restore environment
+                self.environment = previous;
 
                 Ok(result)
             }
@@ -825,6 +885,133 @@ impl Interpreter {
             _ => Err(IntentError::TypeError(
                 "Can only call functions".to_string(),
             )),
+        }
+    }
+
+    /// Capture old values from expressions in postconditions
+    fn capture_old_values(&mut self, ensures: &[Expression]) -> Result<OldValues> {
+        let mut old_values = OldValues::new();
+        
+        for expr in ensures {
+            self.extract_old_calls(expr, &mut old_values)?;
+        }
+        
+        Ok(old_values)
+    }
+    
+    /// Recursively find old() calls in an expression and capture their values
+    fn extract_old_calls(&mut self, expr: &Expression, old_values: &mut OldValues) -> Result<()> {
+        match expr {
+            Expression::Call { function, arguments } => {
+                // Check if this is an old() call
+                if let Expression::Identifier(name) = function.as_ref() {
+                    if name == "old" && arguments.len() == 1 {
+                        // Evaluate the inner expression now (pre-execution)
+                        let inner_expr = &arguments[0];
+                        let key = format!("{:?}", inner_expr);
+                        if !old_values.contains(&key) {
+                            let value = self.eval_expression(inner_expr)?;
+                            old_values.store(key, self.value_to_stored(&value));
+                        }
+                    }
+                }
+                // Also check arguments for nested old() calls
+                for arg in arguments {
+                    self.extract_old_calls(arg, old_values)?;
+                }
+            }
+            Expression::Binary { left, right, .. } => {
+                self.extract_old_calls(left, old_values)?;
+                self.extract_old_calls(right, old_values)?;
+            }
+            Expression::Unary { operand, .. } => {
+                self.extract_old_calls(operand, old_values)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    
+    /// Convert a runtime Value to a StoredValue for old() tracking
+    fn value_to_stored(&self, value: &Value) -> StoredValue {
+        match value {
+            Value::Int(n) => StoredValue::Int(*n),
+            Value::Float(f) => StoredValue::Float(*f),
+            Value::Bool(b) => StoredValue::Bool(*b),
+            Value::String(s) => StoredValue::String(s.clone()),
+            Value::Array(arr) => StoredValue::Array(
+                arr.iter().map(|v| self.value_to_stored(v)).collect()
+            ),
+            Value::Unit => StoredValue::Unit,
+            _ => StoredValue::Unit, // Functions and other complex types stored as Unit
+        }
+    }
+    
+    /// Convert a StoredValue back to a runtime Value
+    fn stored_to_value(&self, stored: &StoredValue) -> Value {
+        match stored {
+            StoredValue::Int(n) => Value::Int(*n),
+            StoredValue::Float(f) => Value::Float(*f),
+            StoredValue::Bool(b) => Value::Bool(*b),
+            StoredValue::String(s) => Value::String(s.clone()),
+            StoredValue::Array(arr) => Value::Array(
+                arr.iter().map(|v| self.stored_to_value(v)).collect()
+            ),
+            StoredValue::Unit => Value::Unit,
+        }
+    }
+    
+    /// Format an expression as a human-readable string for error messages
+    fn format_expression(expr: &Expression) -> String {
+        match expr {
+            Expression::Integer(n) => n.to_string(),
+            Expression::Float(f) => f.to_string(),
+            Expression::String(s) => format!("\"{}\"", s),
+            Expression::Bool(b) => b.to_string(),
+            Expression::Unit => "()".to_string(),
+            Expression::Identifier(name) => name.clone(),
+            Expression::Binary { left, operator, right } => {
+                let op_str = match operator {
+                    BinaryOp::Add => "+",
+                    BinaryOp::Sub => "-",
+                    BinaryOp::Mul => "*",
+                    BinaryOp::Div => "/",
+                    BinaryOp::Mod => "%",
+                    BinaryOp::Pow => "**",
+                    BinaryOp::Eq => "==",
+                    BinaryOp::Ne => "!=",
+                    BinaryOp::Lt => "<",
+                    BinaryOp::Le => "<=",
+                    BinaryOp::Gt => ">",
+                    BinaryOp::Ge => ">=",
+                    BinaryOp::And => "&&",
+                    BinaryOp::Or => "||",
+                };
+                format!("{} {} {}", Self::format_expression(left), op_str, Self::format_expression(right))
+            }
+            Expression::Unary { operator, operand } => {
+                let op_str = match operator {
+                    UnaryOp::Neg => "-",
+                    UnaryOp::Not => "!",
+                };
+                format!("{}{}", op_str, Self::format_expression(operand))
+            }
+            Expression::Call { function, arguments } => {
+                let func_str = Self::format_expression(function);
+                let args_str: Vec<String> = arguments.iter().map(Self::format_expression).collect();
+                format!("{}({})", func_str, args_str.join(", "))
+            }
+            Expression::FieldAccess { object, field } => {
+                format!("{}.{}", Self::format_expression(object), field)
+            }
+            Expression::Index { object, index } => {
+                format!("{}[{}]", Self::format_expression(object), Self::format_expression(index))
+            }
+            Expression::Array(elements) => {
+                let elems: Vec<String> = elements.iter().map(Self::format_expression).collect();
+                format!("[{}]", elems.join(", "))
+            }
+            _ => format!("{:?}", expr),
         }
     }
 
@@ -1003,5 +1190,97 @@ mod tests {
             "let x = 0; while x < 5 { x = x + 1; } x"
         ).unwrap();
         assert!(matches!(result, Value::Int(5)));
+    }
+
+    #[test]
+    fn test_contract_precondition_passes() {
+        // Precondition passes when b != 0
+        let result = eval(r#"
+            fn divide(a, b) requires b != 0 { return a / b; }
+            divide(10, 2)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(5)));
+    }
+
+    #[test]
+    fn test_contract_precondition_fails() {
+        // Precondition fails when b == 0
+        let result = eval(r#"
+            fn divide(a, b) requires b != 0 { return a / b; }
+            divide(10, 0)
+        "#);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Precondition failed"));
+    }
+
+    #[test]
+    fn test_contract_postcondition_passes() {
+        // Postcondition passes when result >= 0
+        let result = eval(r#"
+            fn absolute(x) ensures result >= 0 { 
+                if x < 0 { return -x; } 
+                return x; 
+            }
+            absolute(-5)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(5)));
+    }
+
+    #[test]
+    fn test_contract_postcondition_fails() {
+        // Postcondition fails intentionally
+        let result = eval(r#"
+            fn bad_absolute(x) ensures result > 100 { 
+                if x < 0 { return -x; } 
+                return x; 
+            }
+            bad_absolute(5)
+        "#);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Postcondition failed"));
+    }
+
+    #[test]
+    fn test_contract_with_result() {
+        // Use result keyword in postcondition
+        let result = eval(r#"
+            fn double(x) ensures result == x * 2 { 
+                return x * 2; 
+            }
+            double(7)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(14)));
+    }
+
+    #[test]
+    fn test_contract_with_old() {
+        // Use old() to capture pre-execution value
+        let result = eval(r#"
+            fn increment(x) ensures result == old(x) + 1 { 
+                return x + 1; 
+            }
+            increment(10)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(11)));
+    }
+
+    #[test]
+    fn test_multiple_contracts() {
+        // Multiple requires and ensures
+        let result = eval(r#"
+            fn clamp(value, min_val, max_val) 
+                requires min_val <= max_val
+                ensures result >= min_val
+                ensures result <= max_val
+            { 
+                if value < min_val { return min_val; }
+                if value > max_val { return max_val; }
+                return value;
+            }
+            clamp(15, 0, 10)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(10)));
     }
 }

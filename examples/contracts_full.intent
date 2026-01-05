@@ -1,0 +1,259 @@
+// Intent Language - Full Contract System Example
+// ===============================================
+// This example demonstrates the complete design-by-contract system
+// with preconditions (requires), postconditions (ensures), old() values,
+// and the result keyword.
+
+// Example 1: Simple Preconditions
+// -------------------------------
+// The `requires` clause specifies conditions that MUST be true before
+// the function executes. If violated, a contract error is raised.
+
+fn divide(a, b)
+    requires b != 0  // Prevents division by zero
+{
+    return a / b;
+}
+
+// Test valid division
+print("=== Example 1: Preconditions ===");
+print("10 / 2 = " + str(divide(10, 2)));
+print("100 / 5 = " + str(divide(100, 5)));
+
+// Uncomment to see precondition failure:
+// print(divide(10, 0));  // Error: Precondition failed
+
+
+// Example 2: Postconditions with `result`
+// ---------------------------------------
+// The `ensures` clause specifies conditions that MUST be true after
+// the function executes. Use `result` to refer to the return value.
+
+fn absolute(x)
+    ensures result >= 0  // Return value is always non-negative
+{
+    if x < 0 {
+        return -x;
+    }
+    return x;
+}
+
+print("");
+print("=== Example 2: Postconditions ===");
+print("absolute(-5) = " + str(absolute(-5)));
+print("absolute(3) = " + str(absolute(3)));
+print("absolute(0) = " + str(absolute(0)));
+
+
+// Example 3: Combined Preconditions and Postconditions
+// ----------------------------------------------------
+// Functions can have multiple contract clauses.
+
+fn sqrt_int(n)
+    requires n >= 0              // Input must be non-negative
+    ensures result >= 0          // Output is non-negative
+    ensures result * result <= n // Output squared doesn't exceed input
+{
+    // Simple integer square root implementation
+    if n == 0 {
+        return 0;
+    }
+    
+    let guess = n / 2;
+    let mut result_val = guess;
+    
+    while result_val * result_val > n {
+        result_val = result_val - 1;
+    }
+    
+    return result_val;
+}
+
+print("");
+print("=== Example 3: Combined Contracts ===");
+print("sqrt_int(16) = " + str(sqrt_int(16)));
+print("sqrt_int(25) = " + str(sqrt_int(25)));
+print("sqrt_int(10) = " + str(sqrt_int(10)));
+
+
+// Example 4: Using old() in Postconditions
+// ----------------------------------------
+// The `old(expr)` function captures the value of an expression
+// BEFORE the function executes, for use in postconditions.
+
+fn increment(x)
+    ensures result == old(x) + 1  // Result equals original x plus 1
+{
+    return x + 1;
+}
+
+print("");
+print("=== Example 4: old() Values ===");
+print("increment(5) = " + str(increment(5)));
+print("increment(0) = " + str(increment(0)));
+print("increment(-3) = " + str(increment(-3)));
+
+
+// Example 5: Array Contract Example
+// ---------------------------------
+// Contracts work with complex data structures too.
+
+fn double_first(arr)
+    requires len(arr) > 0  // Array must not be empty
+{
+    return arr[0] * 2;
+}
+
+print("");
+print("=== Example 5: Array Contracts ===");
+let nums = [5, 10, 15];
+print("double_first([5, 10, 15]) = " + str(double_first(nums)));
+
+
+// Example 6: Bounded Value Contract
+// ---------------------------------
+// Ensuring values stay within expected ranges.
+
+fn clamp(value, min_val, max_val)
+    requires min_val <= max_val  // Valid range
+    ensures result >= min_val    // Result at least min
+    ensures result <= max_val    // Result at most max
+{
+    if value < min_val {
+        return min_val;
+    }
+    if value > max_val {
+        return max_val;
+    }
+    return value;
+}
+
+print("");
+print("=== Example 6: Bounded Values ===");
+print("clamp(5, 0, 10) = " + str(clamp(5, 0, 10)));
+print("clamp(-5, 0, 10) = " + str(clamp(-5, 0, 10)));
+print("clamp(15, 0, 10) = " + str(clamp(15, 0, 10)));
+
+
+// Example 7: Factorial with Contracts
+// -----------------------------------
+// Mathematical function with strong guarantees.
+
+fn factorial(n)
+    requires n >= 0           // No negative factorials
+    requires n <= 12          // Prevent overflow (12! = 479001600)
+    ensures result >= 1       // Factorial always positive
+{
+    if n <= 1 {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+print("");
+print("=== Example 7: Factorial ===");
+print("factorial(0) = " + str(factorial(0)));
+print("factorial(5) = " + str(factorial(5)));
+print("factorial(10) = " + str(factorial(10)));
+
+
+// Example 8: Bank Account Simulation
+// ----------------------------------
+// Real-world example with multiple contract clauses.
+
+fn withdraw(balance, amount)
+    requires amount > 0           // Must withdraw positive amount
+    requires amount <= balance    // Cannot overdraw
+    ensures result >= 0           // Balance stays non-negative
+    ensures result == old(balance) - amount  // Correct deduction
+{
+    return balance - amount;
+}
+
+fn deposit(balance, amount)
+    requires amount > 0           // Must deposit positive amount
+    ensures result > old(balance) // Balance increases
+    ensures result == old(balance) + amount  // Correct addition
+{
+    return balance + amount;
+}
+
+print("");
+print("=== Example 8: Bank Account ===");
+let mut account_balance = 100;
+print("Initial balance: " + str(account_balance));
+
+account_balance = deposit(account_balance, 50);
+print("After deposit(50): " + str(account_balance));
+
+account_balance = withdraw(account_balance, 30);
+print("After withdraw(30): " + str(account_balance));
+
+
+// Example 9: Search Function with Contract
+// ----------------------------------------
+// Contracts can express complex relationships.
+
+fn find_max(arr)
+    requires len(arr) > 0  // Must have at least one element
+{
+    let mut max = arr[0];
+    let mut i = 1;
+    
+    while i < len(arr) {
+        if arr[i] > max {
+            max = arr[i];
+        }
+        i = i + 1;
+    }
+    
+    return max;
+}
+
+print("");
+print("=== Example 9: Find Maximum ===");
+let values = [3, 7, 2, 9, 1, 5];
+print("find_max([3, 7, 2, 9, 1, 5]) = " + str(find_max(values)));
+
+
+// Example 10: Contract Violation Demo
+// -----------------------------------
+// Demonstrates what happens when contracts fail.
+
+fn safe_divide(a, b)
+    requires b != 0
+{
+    return a / b;
+}
+
+print("");
+print("=== Example 10: Contract Violation ===");
+print("Attempting safe_divide(10, 0)...");
+// Uncomment to see the contract violation error:
+// let bad_result = safe_divide(10, 0);
+
+
+// Summary
+// -------
+// Intent's contract system provides:
+// 
+// 1. PRECONDITIONS (requires):
+//    - Checked BEFORE function execution
+//    - Express what caller must guarantee
+//    - Catch bugs at the call site
+//
+// 2. POSTCONDITIONS (ensures):
+//    - Checked AFTER function execution
+//    - Express what function guarantees to caller
+//    - Use `result` for return value
+//    - Use `old(expr)` for pre-execution values
+//
+// 3. BENEFITS:
+//    - Self-documenting code
+//    - Automatic runtime verification
+//    - Clear API contracts
+//    - Bug prevention at boundaries
+//    - AI-friendly specifications
+
+print("");
+print("=== All contract examples passed! ===");
