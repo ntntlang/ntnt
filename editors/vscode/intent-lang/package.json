@@ -1,0 +1,62 @@
+{
+  "name": "intent-lang",
+  "displayName": "Intent Language",
+  "description": "Syntax highlighting and language support for the Intent programming language",
+  "version": "0.1.0",
+  "publisher": "intent-lang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joshcramer/intent"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "intent",
+    "programming language",
+    "contracts",
+    "design by contract",
+    "AI"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "intent",
+        "aliases": [
+          "Intent",
+          "intent"
+        ],
+        "extensions": [
+          ".intent",
+          ".itn"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/intent-light.png",
+          "dark": "./icons/intent-dark.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "intent",
+        "scopeName": "source.intent",
+        "path": "./syntaxes/intent.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "intent",
+        "path": "./snippets/intent.json"
+      }
+    ]
+  },
+  "icon": "icons/intent-logo.png",
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  }
+}
