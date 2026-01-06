@@ -20,6 +20,7 @@ cargo build --release
 ## File Extensions
 
 Intent supports two file extensions:
+
 - `.intent` - Standard Intent source files
 - `.itn` - Short form (convenient for quick scripts)
 
@@ -62,11 +63,15 @@ fn withdraw(account: BankAccount, amount: Int) -> Bool
 ## Editor Support
 
 ### VS Code
+
 Install the Intent Language extension for syntax highlighting:
+
 ```bash
 cp -r editors/vscode/intent-lang ~/.vscode/extensions/
 ```
+
 Then restart VS Code. The extension provides:
+
 - Syntax highlighting for `.intent` and `.itn` files
 - Code snippets for common patterns
 - Bracket matching and auto-closing

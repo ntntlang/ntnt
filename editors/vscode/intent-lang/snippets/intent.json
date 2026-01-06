@@ -1,187 +1,107 @@
 {
   "Function with contracts": {
     "prefix": "fnc",
-    "body": [
-      "fn ${1:name}(${2:params})",
-      "    requires ${3:precondition}",
-      "    ensures ${4:postcondition}",
-      "{",
-      "    $0",
-      "}"
-    ],
+    "body": ["fn ${1:name}(${2:params})", "    requires ${3:precondition}", "    ensures ${4:postcondition}", "{", "    $0", "}"],
     "description": "Function with requires/ensures contracts"
   },
   "Function": {
     "prefix": "fn",
-    "body": [
-      "fn ${1:name}(${2:params}) {",
-      "    $0",
-      "}"
-    ],
+    "body": ["fn ${1:name}(${2:params}) {", "    $0", "}"],
     "description": "Function definition"
   },
   "Function with return type": {
     "prefix": "fnr",
-    "body": [
-      "fn ${1:name}(${2:params}) -> ${3:ReturnType} {",
-      "    $0",
-      "}"
-    ],
+    "body": ["fn ${1:name}(${2:params}) -> ${3:ReturnType} {", "    $0", "}"],
     "description": "Function with return type"
   },
   "Struct": {
     "prefix": "struct",
-    "body": [
-      "struct ${1:Name} {",
-      "    ${2:field}: ${3:Type}",
-      "}"
-    ],
+    "body": ["struct ${1:Name} {", "    ${2:field}: ${3:Type}", "}"],
     "description": "Struct definition"
   },
   "Struct with invariant": {
     "prefix": "structi",
-    "body": [
-      "struct ${1:Name} {",
-      "    ${2:field}: ${3:Type}",
-      "}",
-      "",
-      "impl ${1:Name} {",
-      "    invariant ${4:self.field > 0}",
-      "}"
-    ],
+    "body": ["struct ${1:Name} {", "    ${2:field}: ${3:Type}", "}", "", "impl ${1:Name} {", "    invariant ${4:self.field > 0}", "}"],
     "description": "Struct with invariant"
   },
   "Impl block": {
     "prefix": "impl",
-    "body": [
-      "impl ${1:Type} {",
-      "    $0",
-      "}"
-    ],
+    "body": ["impl ${1:Type} {", "    $0", "}"],
     "description": "Implementation block"
   },
   "If-else": {
     "prefix": "if",
-    "body": [
-      "if ${1:condition} {",
-      "    $0",
-      "} else {",
-      "    ",
-      "}"
-    ],
+    "body": ["if ${1:condition} {", "    $0", "} else {", "    ", "}"],
     "description": "If-else statement"
   },
   "While loop": {
     "prefix": "while",
-    "body": [
-      "while ${1:condition} {",
-      "    $0",
-      "}"
-    ],
+    "body": ["while ${1:condition} {", "    $0", "}"],
     "description": "While loop"
   },
   "For loop": {
     "prefix": "for",
-    "body": [
-      "for ${1:item} in ${2:collection} {",
-      "    $0",
-      "}"
-    ],
+    "body": ["for ${1:item} in ${2:collection} {", "    $0", "}"],
     "description": "For-in loop"
   },
   "Let binding": {
     "prefix": "let",
-    "body": [
-      "let ${1:name} = ${2:value}"
-    ],
+    "body": ["let ${1:name} = ${2:value}"],
     "description": "Let binding"
   },
   "Mutable let": {
     "prefix": "letm",
-    "body": [
-      "let mut ${1:name} = ${2:value}"
-    ],
+    "body": ["let mut ${1:name} = ${2:value}"],
     "description": "Mutable let binding"
   },
   "Match expression": {
     "prefix": "match",
-    "body": [
-      "match ${1:value} {",
-      "    ${2:pattern} => ${3:result},",
-      "    _ => ${4:default}",
-      "}"
-    ],
+    "body": ["match ${1:value} {", "    ${2:pattern} => ${3:result},", "    _ => ${4:default}", "}"],
     "description": "Match expression"
   },
   "Requires clause": {
     "prefix": "req",
-    "body": [
-      "requires ${1:condition}"
-    ],
+    "body": ["requires ${1:condition}"],
     "description": "Precondition"
   },
   "Ensures clause": {
     "prefix": "ens",
-    "body": [
-      "ensures ${1:condition}"
-    ],
+    "body": ["ensures ${1:condition}"],
     "description": "Postcondition"
   },
   "Invariant clause": {
     "prefix": "inv",
-    "body": [
-      "invariant ${1:self.field > 0}"
-    ],
+    "body": ["invariant ${1:self.field > 0}"],
     "description": "Type invariant"
   },
   "Old value": {
     "prefix": "old",
-    "body": [
-      "old(${1:expr})"
-    ],
+    "body": ["old(${1:expr})"],
     "description": "Reference to pre-execution value"
   },
   "Enum": {
     "prefix": "enum",
-    "body": [
-      "enum ${1:Name} {",
-      "    ${2:Variant1},",
-      "    ${3:Variant2}",
-      "}"
-    ],
+    "body": ["enum ${1:Name} {", "    ${2:Variant1},", "    ${3:Variant2}", "}"],
     "description": "Enum definition"
   },
   "Trait": {
     "prefix": "trait",
-    "body": [
-      "trait ${1:Name} {",
-      "    fn ${2:method}(${3:self})${4: -> ReturnType}",
-      "}"
-    ],
+    "body": ["trait ${1:Name} {", "    fn ${2:method}(${3:self})${4: -> ReturnType}", "}"],
     "description": "Trait definition"
   },
   "Test function": {
     "prefix": "test",
-    "body": [
-      "#[test]",
-      "fn test_${1:name}() {",
-      "    $0",
-      "}"
-    ],
+    "body": ["#[test]", "fn test_${1:name}() {", "    $0", "}"],
     "description": "Test function"
   },
   "Print": {
     "prefix": "pr",
-    "body": [
-      "print(${1:\"message\"})"
-    ],
+    "body": ["print(${1:\"message\"})"],
     "description": "Print statement"
   },
   "Assert": {
     "prefix": "ass",
-    "body": [
-      "assert(${1:condition}, ${2:\"message\"})"
-    ],
+    "body": ["assert(${1:condition}, ${2:\"message\"})"],
     "description": "Assert statement"
   }
 }

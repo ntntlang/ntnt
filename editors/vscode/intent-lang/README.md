@@ -30,29 +30,29 @@ The extension provides semantic highlighting for:
 
 ## Snippets
 
-| Prefix | Description |
-|--------|-------------|
-| `fn` | Function definition |
-| `fnc` | Function with contracts (requires/ensures) |
-| `fnr` | Function with return type |
-| `struct` | Struct definition |
-| `structi` | Struct with invariant |
-| `impl` | Implementation block |
-| `if` | If-else statement |
-| `while` | While loop |
-| `for` | For-in loop |
-| `let` | Let binding |
-| `letm` | Mutable let binding |
-| `match` | Match expression |
-| `req` | Requires clause |
-| `ens` | Ensures clause |
-| `inv` | Invariant clause |
-| `old` | Old value reference |
-| `enum` | Enum definition |
-| `trait` | Trait definition |
-| `test` | Test function |
-| `pr` | Print statement |
-| `ass` | Assert statement |
+| Prefix    | Description                                |
+| --------- | ------------------------------------------ |
+| `fn`      | Function definition                        |
+| `fnc`     | Function with contracts (requires/ensures) |
+| `fnr`     | Function with return type                  |
+| `struct`  | Struct definition                          |
+| `structi` | Struct with invariant                      |
+| `impl`    | Implementation block                       |
+| `if`      | If-else statement                          |
+| `while`   | While loop                                 |
+| `for`     | For-in loop                                |
+| `let`     | Let binding                                |
+| `letm`    | Mutable let binding                        |
+| `match`   | Match expression                           |
+| `req`     | Requires clause                            |
+| `ens`     | Ensures clause                             |
+| `inv`     | Invariant clause                           |
+| `old`     | Old value reference                        |
+| `enum`    | Enum definition                            |
+| `trait`   | Trait definition                           |
+| `test`    | Test function                              |
+| `pr`      | Print statement                            |
+| `ass`     | Assert statement                           |
 
 ## Example
 
@@ -64,14 +64,14 @@ struct BankAccount {
 
 impl BankAccount {
     invariant self.balance >= 0
-    
+
     fn deposit(self, amount: Int)
         requires amount > 0
         ensures self.balance == old(self.balance) + amount
     {
         self.balance = self.balance + amount
     }
-    
+
     fn withdraw(self, amount: Int) -> Bool
         requires amount > 0
         ensures result == true implies self.balance == old(self.balance) - amount
@@ -88,9 +88,11 @@ impl BankAccount {
 ## Installation
 
 ### From VS Code Marketplace
+
 Search for "Intent Language" in the VS Code Extensions view.
 
 ### Manual Installation
+
 1. Clone or download this extension
 2. Copy the `intent-lang` folder to your VS Code extensions directory:
    - **Windows**: `%USERPROFILE%\.vscode\extensions`
@@ -99,6 +101,7 @@ Search for "Intent Language" in the VS Code Extensions view.
 3. Restart VS Code
 
 ### Development
+
 ```bash
 # Package the extension
 cd editors/vscode/intent-lang

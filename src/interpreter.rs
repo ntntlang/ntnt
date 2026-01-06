@@ -359,6 +359,212 @@ impl Interpreter {
                 },
             },
         );
+
+        // ============================================
+        // Math functions
+        // ============================================
+
+        // Absolute value
+        self.environment.borrow_mut().define(
+            "abs".to_string(),
+            Value::NativeFunction {
+                name: "abs".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::Int(n) => Ok(Value::Int(n.abs())),
+                        Value::Float(f) => Ok(Value::Float(f.abs())),
+                        _ => Err(IntentError::TypeError("abs() requires a number".to_string())),
+                    }
+                },
+            },
+        );
+
+        // Minimum of two values
+        self.environment.borrow_mut().define(
+            "min".to_string(),
+            Value::NativeFunction {
+                name: "min".to_string(),
+                arity: 2,
+                func: |args| {
+                    match (&args[0], &args[1]) {
+                        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.min(b))),
+                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.min(*b))),
+                        (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).min(*b))),
+                        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.min(*b as f64))),
+                        _ => Err(IntentError::TypeError("min() requires numbers".to_string())),
+                    }
+                },
+            },
+        );
+
+        // Maximum of two values
+        self.environment.borrow_mut().define(
+            "max".to_string(),
+            Value::NativeFunction {
+                name: "max".to_string(),
+                arity: 2,
+                func: |args| {
+                    match (&args[0], &args[1]) {
+                        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.max(b))),
+                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.max(*b))),
+                        (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).max(*b))),
+                        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.max(*b as f64))),
+                        _ => Err(IntentError::TypeError("max() requires numbers".to_string())),
+                    }
+                },
+            },
+        );
+
+        // Round to nearest integer
+        self.environment.borrow_mut().define(
+            "round".to_string(),
+            Value::NativeFunction {
+                name: "round".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::Int(n) => Ok(Value::Int(*n)),
+                        Value::Float(f) => Ok(Value::Int(f.round() as i64)),
+                        _ => Err(IntentError::TypeError("round() requires a number".to_string())),
+                    }
+                },
+            },
+        );
+
+        // Floor (round down)
+        self.environment.borrow_mut().define(
+            "floor".to_string(),
+            Value::NativeFunction {
+                name: "floor".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::Int(n) => Ok(Value::Int(*n)),
+                        Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
+                        _ => Err(IntentError::TypeError("floor() requires a number".to_string())),
+                    }
+                },
+            },
+        );
+
+        // Ceil (round up)
+        self.environment.borrow_mut().define(
+            "ceil".to_string(),
+            Value::NativeFunction {
+                name: "ceil".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::Int(n) => Ok(Value::Int(*n)),
+                        Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
+                        _ => Err(IntentError::TypeError("ceil() requires a number".to_string())),
+                    }
+                },
+            },
+        );
+
+        // Square root
+        self.environment.borrow_mut().define(
+            "sqrt".to_string(),
+            Value::NativeFunction {
+                name: "sqrt".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::Int(n) => {
+                            if *n < 0 {
+                                Err(IntentError::RuntimeError("sqrt() of negative number".to_string()))
+                            } else {
+                                Ok(Value::Float((*n as f64).sqrt()))
+                            }
+                        }
+                        Value::Float(f) => {
+                            if *f < 0.0 {
+                                Err(IntentError::RuntimeError("sqrt() of negative number".to_string()))
+                            } else {
+                                Ok(Value::Float(f.sqrt()))
+                            }
+                        }
+                        _ => Err(IntentError::TypeError("sqrt() requires a number".to_string())),
+                    }
+                },
+            },
+        );
+
+        // Power (x^y)
+        self.environment.borrow_mut().define(
+            "pow".to_string(),
+            Value::NativeFunction {
+                name: "pow".to_string(),
+                arity: 2,
+                func: |args| {
+                    match (&args[0], &args[1]) {
+                        (Value::Int(base), Value::Int(exp)) => {
+                            if *exp >= 0 {
+                                Ok(Value::Int(base.pow(*exp as u32)))
+                            } else {
+                                Ok(Value::Float((*base as f64).powi(*exp as i32)))
+                            }
+                        }
+                        (Value::Float(base), Value::Int(exp)) => {
+                            Ok(Value::Float(base.powi(*exp as i32)))
+                        }
+                        (Value::Int(base), Value::Float(exp)) => {
+                            Ok(Value::Float((*base as f64).powf(*exp)))
+                        }
+                        (Value::Float(base), Value::Float(exp)) => {
+                            Ok(Value::Float(base.powf(*exp)))
+                        }
+                        _ => Err(IntentError::TypeError("pow() requires numbers".to_string())),
+                    }
+                },
+            },
+        );
+
+        // Sign function (-1, 0, or 1)
+        self.environment.borrow_mut().define(
+            "sign".to_string(),
+            Value::NativeFunction {
+                name: "sign".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::Int(n) => Ok(Value::Int(n.signum())),
+                        Value::Float(f) => {
+                            if *f > 0.0 {
+                                Ok(Value::Int(1))
+                            } else if *f < 0.0 {
+                                Ok(Value::Int(-1))
+                            } else {
+                                Ok(Value::Int(0))
+                            }
+                        }
+                        _ => Err(IntentError::TypeError("sign() requires a number".to_string())),
+                    }
+                },
+            },
+        );
+
+        // Clamp value between min and max
+        self.environment.borrow_mut().define(
+            "clamp".to_string(),
+            Value::NativeFunction {
+                name: "clamp".to_string(),
+                arity: 3,
+                func: |args| {
+                    match (&args[0], &args[1], &args[2]) {
+                        (Value::Int(val), Value::Int(min), Value::Int(max)) => {
+                            Ok(Value::Int(*val.max(min).min(max)))
+                        }
+                        (Value::Float(val), Value::Float(min), Value::Float(max)) => {
+                            Ok(Value::Float(val.max(*min).min(*max)))
+                        }
+                        _ => Err(IntentError::TypeError("clamp() requires numbers of same type".to_string())),
+                    }
+                },
+            },
+        );
     }
 
     /// Evaluate a program
@@ -1454,5 +1660,96 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Invariant violated"));
+    }
+
+    // ============================================
+    // Math function tests
+    // ============================================
+
+    #[test]
+    fn test_abs() {
+        assert!(matches!(eval("abs(-5)").unwrap(), Value::Int(5)));
+        assert!(matches!(eval("abs(5)").unwrap(), Value::Int(5)));
+        assert!(matches!(eval("abs(0)").unwrap(), Value::Int(0)));
+        // Float
+        if let Value::Float(f) = eval("abs(-3.14)").unwrap() {
+            assert!((f - 3.14).abs() < 0.001);
+        } else {
+            panic!("Expected float");
+        }
+    }
+
+    #[test]
+    fn test_min_max() {
+        assert!(matches!(eval("min(3, 7)").unwrap(), Value::Int(3)));
+        assert!(matches!(eval("min(7, 3)").unwrap(), Value::Int(3)));
+        assert!(matches!(eval("max(3, 7)").unwrap(), Value::Int(7)));
+        assert!(matches!(eval("max(7, 3)").unwrap(), Value::Int(7)));
+        // Mixed int/float
+        if let Value::Float(f) = eval("min(3, 2.5)").unwrap() {
+            assert!((f - 2.5).abs() < 0.001);
+        } else {
+            panic!("Expected float");
+        }
+    }
+
+    #[test]
+    fn test_round_floor_ceil() {
+        // round (Rust rounds away from zero for .5)
+        assert!(matches!(eval("round(3.4)").unwrap(), Value::Int(3)));
+        assert!(matches!(eval("round(3.5)").unwrap(), Value::Int(4)));
+        assert!(matches!(eval("round(3.6)").unwrap(), Value::Int(4)));
+        assert!(matches!(eval("round(-2.5)").unwrap(), Value::Int(-3))); // rounds away from zero
+        // floor
+        assert!(matches!(eval("floor(3.9)").unwrap(), Value::Int(3)));
+        assert!(matches!(eval("floor(-3.1)").unwrap(), Value::Int(-4)));
+        // ceil
+        assert!(matches!(eval("ceil(3.1)").unwrap(), Value::Int(4)));
+        assert!(matches!(eval("ceil(-3.9)").unwrap(), Value::Int(-3)));
+    }
+
+    #[test]
+    fn test_sqrt() {
+        if let Value::Float(f) = eval("sqrt(16)").unwrap() {
+            assert!((f - 4.0).abs() < 0.001);
+        } else {
+            panic!("Expected float");
+        }
+        if let Value::Float(f) = eval("sqrt(2.0)").unwrap() {
+            assert!((f - 1.414).abs() < 0.01);
+        } else {
+            panic!("Expected float");
+        }
+        // Negative should error
+        assert!(eval("sqrt(-1)").is_err());
+    }
+
+    #[test]
+    fn test_pow() {
+        assert!(matches!(eval("pow(2, 3)").unwrap(), Value::Int(8)));
+        assert!(matches!(eval("pow(2, 0)").unwrap(), Value::Int(1)));
+        assert!(matches!(eval("pow(5, 2)").unwrap(), Value::Int(25)));
+        // Float exponent
+        if let Value::Float(f) = eval("pow(4, 0.5)").unwrap() {
+            assert!((f - 2.0).abs() < 0.001);
+        } else {
+            panic!("Expected float");
+        }
+    }
+
+    #[test]
+    fn test_sign() {
+        assert!(matches!(eval("sign(42)").unwrap(), Value::Int(1)));
+        assert!(matches!(eval("sign(-42)").unwrap(), Value::Int(-1)));
+        assert!(matches!(eval("sign(0)").unwrap(), Value::Int(0)));
+        assert!(matches!(eval("sign(3.14)").unwrap(), Value::Int(1)));
+        assert!(matches!(eval("sign(-3.14)").unwrap(), Value::Int(-1)));
+    }
+
+    #[test]
+    fn test_clamp() {
+        assert!(matches!(eval("clamp(5, 0, 10)").unwrap(), Value::Int(5)));
+        assert!(matches!(eval("clamp(-5, 0, 10)").unwrap(), Value::Int(0)));
+        assert!(matches!(eval("clamp(15, 0, 10)").unwrap(), Value::Int(10)));
     }
 }

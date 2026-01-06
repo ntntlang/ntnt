@@ -2,18 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Intent",
   "scopeName": "source.intent",
-  "patterns": [
-    { "include": "#comments" },
-    { "include": "#strings" },
-    { "include": "#numbers" },
-    { "include": "#keywords" },
-    { "include": "#contracts" },
-    { "include": "#types" },
-    { "include": "#functions" },
-    { "include": "#operators" },
-    { "include": "#punctuation" },
-    { "include": "#variables" }
-  ],
+  "patterns": [{ "include": "#comments" }, { "include": "#strings" }, { "include": "#numbers" }, { "include": "#keywords" }, { "include": "#contracts" }, { "include": "#types" }, { "include": "#functions" }, { "include": "#operators" }, { "include": "#punctuation" }, { "include": "#variables" }],
   "repository": {
     "comments": {
       "patterns": [
