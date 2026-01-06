@@ -10,9 +10,10 @@ This document specifies the syntax, semantics, and core features of the Intent p
 2. [Types](#types)
 3. [Contracts](#contracts)
 4. [Functions and Methods](#functions-and-methods)
-5. [Effects](#effects)
-6. [Concurrency](#concurrency)
-7. [Modules](#modules)
+5. [Built-in Functions](#built-in-functions)
+6. [Effects](#effects)
+7. [Concurrency](#concurrency)
+8. [Modules](#modules)
 
 ## Lexical Structure
 
@@ -66,9 +67,12 @@ let name: String = "Intent";
 
 ## Contracts
 
-Contracts specify behavioral requirements for code.
+Contracts specify behavioral requirements for code. Intent enforces contracts at runtime with detailed error messages.
 
 ### Function Contracts
+
+The `requires` clause specifies preconditions that must be true when a function is called.
+The `ensures` clause specifies postconditions that must be true when a function returns.
 
 ```intent
 fn transfer_funds(amount: Int, from: Account, to: Account) -> Result<(), Error>
@@ -79,11 +83,51 @@ ensures to.balance == old(to.balance) + amount
 }
 ```
 
-### Class Invariants
+### The `old()` Function
+
+The `old()` function captures the value of an expression at function entry, allowing postconditions to compare pre-state and post-state:
+
+```intent
+fn increment(counter: Counter)
+ensures counter.value == old(counter.value) + 1
+{
+    counter.value = counter.value + 1
+}
+```
+
+### The `result` Keyword
+
+In postconditions, `result` refers to the return value of the function:
+
+```intent
+fn double(x: Int) -> Int
+ensures result == x * 2
+{
+    return x * 2
+}
+```
+
+### Conditional Postconditions
+
+Use `implies` for conditional guarantees:
+
+```intent
+fn safe_divide(a: Int, b: Int) -> Int
+requires b != 0
+ensures b > 0 implies result >= 0
+{
+    return a / b
+}
+```
+
+### Struct Invariants
+
+Invariants are automatically checked after construction and after any method call or field assignment:
 
 ```intent
 struct Account {
-    balance: Int
+    balance: Int,
+    owner: String
 }
 
 impl Account {
@@ -109,6 +153,45 @@ impl Point {
         // implementation
     }
 }
+```
+
+## Built-in Functions
+
+Intent provides built-in functions available without imports.
+
+### I/O Functions
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `print` | `(...args) -> Unit` | Print values to stdout |
+| `len` | `(collection) -> Int` | Length of string or array |
+
+### Math Functions
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `abs` | `(x: Number) -> Number` | Absolute value |
+| `min` | `(a: Number, b: Number) -> Number` | Minimum of two values |
+| `max` | `(a: Number, b: Number) -> Number` | Maximum of two values |
+| `round` | `(x: Float) -> Int` | Round to nearest integer |
+| `floor` | `(x: Float) -> Int` | Round down to integer |
+| `ceil` | `(x: Float) -> Int` | Round up to integer |
+| `sqrt` | `(x: Number) -> Float` | Square root |
+| `pow` | `(base: Number, exp: Number) -> Number` | Exponentiation |
+| `sign` | `(x: Number) -> Int` | Sign (-1, 0, or 1) |
+| `clamp` | `(x: Number, min: Number, max: Number) -> Number` | Clamp to range |
+
+### Examples
+
+```intent
+// Math operations
+let x = abs(-42)           // 42
+let smaller = min(10, 20)  // 10
+let larger = max(10, 20)   // 20
+let rounded = round(3.7)   // 4
+let root = sqrt(16)        // 4.0
+let squared = pow(2, 3)    // 8
+let bounded = clamp(15, 0, 10)  // 10
 ```
 
 ## Effects
@@ -211,4 +294,4 @@ fn update_ui(component: Component) {
 
 ---
 
-_This specification is preliminary and subject to change. See the whitepaper for detailed motivation and examples._
+_This specification is preliminary and subject to change. See the whitepaper for detailed motivation and the [ROADMAP.md](ROADMAP.md) for the 13-phase implementation plan._
