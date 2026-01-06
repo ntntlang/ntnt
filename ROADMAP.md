@@ -4,662 +4,774 @@ This document outlines the comprehensive plan for implementing all features desc
 
 ---
 
-## Current Status (Phase 1 Complete ✅)
+## Current Status
 
+### Completed ✅
 - [x] Lexer with full token support
 - [x] Recursive descent parser
 - [x] Complete AST definitions
 - [x] Tree-walking interpreter
-- [x] Basic type system (Int, Float, String, Bool, Array, Object, Function, Null)
-- [x] **Full contract system with runtime enforcement**
-- [x] **Struct invariants with automatic checking**
+- [x] Basic type system (Int, Float, String, Bool, Array, Object, Function, Unit)
+- [x] Full contract system (`requires`, `ensures`, `old()`, `result`)
+- [x] Struct invariants with automatic checking
+- [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, etc.)
 - [x] CLI with REPL, run, parse, lex, check commands
-- [x] 27 unit tests passing
-- [x] Example programs including comprehensive contract and invariant examples
+- [x] VS Code extension with syntax highlighting
+- [x] 34 unit tests passing
+- [x] Dual file extensions: `.intent` and `.itn`
 
 ---
 
 ## Phase 1: Core Contract System ✅ COMPLETE
 
-**Goal:** Full implementation of first-class contracts as described in the whitepaper.
+**Status:** Complete  
+**Duration:** Weeks 1-3
 
 ### 1.1 Runtime Contract Enforcement ✅
-
 - [x] Precondition (`requires`) evaluation before function execution
 - [x] Postcondition (`ensures`) evaluation after function execution
-- [x] Access to `old()` values in postconditions for comparing pre/post state
+- [x] Access to `old()` values in postconditions
 - [x] Access to `result` in postconditions
 - [x] Contract violation error handling with clear messages
 
 ### 1.2 Class/Struct Invariants ✅
-
-- [x] `invariant` clause support on types (parsing)
-- [x] Invariant storage in interpreter
-- [x] Invariant checking on construction (struct literals)
+- [x] `invariant` clause support in impl blocks
+- [x] Invariant checking on struct construction
 - [x] Invariant checking after method calls
-- [x] Invariant checking after direct field assignments
+- [x] Invariant checking after field assignments
 - [x] `self` keyword access in invariant expressions
 
-### 1.3 Contract Inheritance (Deferred to Phase 4)
-
-> **Note:** Contract inheritance requires a trait/interface system or class hierarchy.
-> This has been moved to Phase 4 (Module System & Traits).
-
-- [ ] Contracts propagate to overriding methods
-- [ ] Liskov Substitution Principle enforcement
-- [ ] Contravariant preconditions, covariant postconditions
-
-### 1.4 Contract-Based Testing (Deferred to Phase 7)
-
-> **Note:** Test generation requires more advanced type inference and analysis.
-> This has been moved to Phase 7 (Testing Framework).
-
-- [ ] Auto-generate test cases from contracts
-- [ ] Property-based testing integration
-- [ ] Contract coverage metrics
-
-**Deliverables:**
-
-- ✅ Full contract runtime with `requires`, `ensures`
-- ✅ `old()` function for pre-execution value capture
-- ✅ `result` keyword for postcondition evaluation
-- ✅ Human-readable contract error messages
-- ✅ Struct invariants with automatic enforcement
-- ✅ Struct literal syntax `Name { field: value }`
-- ✅ Field assignment with invariant checking
-- ✅ Comprehensive examples:
-  - `examples/contracts_full.intent` - 10 contract examples
-  - `examples/invariants_full.intent` - 7 invariant examples
-- ✅ 27 unit tests (10 contract/invariant-specific)
-
 ---
 
-## Phase 2: Type System Enhancement (Weeks 4-6)
+## Phase 2: Type System & Pattern Matching (Weeks 4-7)
 
-**Goal:** Rich type system supporting effects, algebraic types, and generics.
+**Goal:** Rich type system enabling safe, expressive code.
 
-### 2.1 Typed Error Effects
-
-- [ ] Effect type syntax: `fn foo() -> Result<T, E> with io, network`
-- [ ] Effect inference
-- [ ] Effect handlers
-- [ ] Effect polymorphism
-- [ ] Built-in effects: `io`, `network`, `database`, `random`, `time`
-
-### 2.2 Algebraic Data Types
-
-- [ ] Sum types (tagged unions/enums with data)
-- [ ] Product types (structs/records)
-- [ ] Pattern matching with exhaustiveness checking
-- [ ] Option and Result types as built-ins
-
-### 2.3 Generics
-
-- [ ] Generic functions: `fn map<T, U>(arr: [T], f: fn(T) -> U) -> [U]`
-- [ ] Generic types: `type Stack<T> = { items: [T] }`
-- [ ] Type constraints/bounds
-- [ ] Variance annotations
-
-### 2.4 Advanced Type Features
-
-- [ ] Type aliases
-- [ ] Structural typing for objects
-- [ ] Nominal typing for classes
-- [ ] Type inference improvements
-- [ ] Refinement types (dependent on contracts)
-
-**Deliverables:**
-
-- Complete effect system
-- ADTs with pattern matching
-- Full generics support
-- Enhanced type inference
-
----
-
-## Phase 3: Semantic Versioning & Structured Edits (Weeks 7-9)
-
-**Goal:** Language-level versioning and AST manipulation.
-
-### 3.1 Semantic Versioning Enforcement
-
-- [ ] API signature tracking per version
-- [ ] Breaking change detection (removed/changed public APIs)
-- [ ] Automatic semver bump suggestions
-- [ ] `@since(version)` annotations
-- [ ] `@deprecated(version, replacement)` annotations
-- [ ] Compatibility layer generation
-
-### 3.2 Structured Edits
-
-- [ ] AST-based diff representation
-- [ ] Edit operations: `rename`, `move`, `extract`, `inline`
-- [ ] Semantic-preserving transformations
-- [ ] Edit conflict detection and resolution
-- [ ] Machine-readable edit format (JSON AST patches)
-
-### 3.3 Refactoring Support
-
-- [ ] Extract function/method
-- [ ] Inline variable/function
-- [ ] Rename with all references
-- [ ] Move to module
-- [ ] Change signature with call-site updates
-
-**Deliverables:**
-
-- Versioning CLI commands
-- Structured diff format
-- Refactoring engine
-
----
-
-## Phase 4: Concurrency & Session Types (Weeks 10-13)
-
-**Goal:** Safe concurrent programming with protocol enforcement.
-
-### 4.1 Concurrency Primitives
-
-- [ ] Async/await syntax
-- [ ] Channels for communication
-- [ ] Spawn/join for tasks
-- [ ] Structured concurrency (scoped tasks)
-
-### 4.2 Session Types
-
-- [ ] Protocol definitions for communication patterns
-- [ ] Type-checked message sequences
-- [ ] Deadlock prevention through protocol compliance
-- [ ] Multi-party session types
+### 2.1 Algebraic Data Types
+- [ ] Enum types with associated data
+- [ ] `Option<T>` and `Result<T, E>` as built-ins
+- [ ] Pattern matching with `match` expressions
+- [ ] Exhaustiveness checking
+- [ ] Destructuring in `let` bindings
 
 ```intent
-protocol OrderFlow {
-    state Created -> Pending | Cancelled
-    state Pending -> Completed | Cancelled
-    state Completed -> end
-    state Cancelled -> end
+enum Result<T, E> {
+    Ok(T),
+    Err(E)
+}
+
+match result {
+    Ok(value) => print("Got: " + value),
+    Err(e) => print("Error: " + e)
 }
 ```
 
-### 4.3 Synchronization
+### 2.2 Generics
+- [ ] Generic functions: `fn map<T, U>(arr: [T], f: fn(T) -> U) -> [U]`
+- [ ] Generic types: `struct Stack<T> { items: [T] }`
+- [ ] Type constraints: `fn sort<T: Comparable>(arr: [T]) -> [T]`
+- [ ] Type inference for generics
 
-- [ ] Mutex/RwLock types with scoped guards
-- [ ] Atomic operations
-- [ ] Safe shared state patterns
-- [ ] Actor model support
+### 2.3 Type System Improvements
+- [ ] Type aliases: `type UserId = String`
+- [ ] Union types: `String | Int`
+- [ ] Nullable types: `String?` (sugar for `Option<String>`)
+- [ ] Never type for functions that don't return
+
+### 2.4 Effects System (Foundation)
+- [ ] Effect annotations: `fn read_file(path: String) -> String with io`
+- [ ] Effect tracking through call chains
+- [ ] Pure function marking
+- [ ] Built-in effects: `io`, `async`, `throws`
 
 **Deliverables:**
-
-- Async runtime
-- Channel implementation
-- Session type checker
-- Concurrency examples
+- ADTs with pattern matching
+- Generic functions and types
+- Enhanced type inference
+- Effect annotation system
 
 ---
 
-## Phase 5: Intent Encoding & AI Integration (Weeks 14-17)
+## Phase 3: Module System & Standard Library (Weeks 8-11)
 
-**Goal:** First-class support for expressing and tracking intent.
+**Goal:** Code organization and essential functionality.
 
-### 5.1 Intent Annotations
-
-- [ ] `intent` blocks in code
-- [ ] Natural language to code mapping
-- [ ] Intent preservation checking
-- [ ] Intent-based search and navigation
+### 3.1 Module System
+- [ ] File-based modules
+- [ ] `import` / `export` syntax
+- [ ] Public/private visibility (`pub` keyword)
+- [ ] Module aliasing: `import http as web`
+- [ ] Selective imports: `import { get, post } from http`
 
 ```intent
-intent "Calculate shipping cost based on weight and destination" {
-    fn calculateShipping(weight: Float, dest: String) -> Float
-        requires weight > 0
-        ensures result >= 0
-    {
-        // implementation
+// math.intent
+pub fn factorial(n: Int) -> Int
+    requires n >= 0
+{
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+
+// main.intent
+import { factorial } from "./math"
+print(factorial(5))
+```
+
+### 3.2 Core Standard Library
+- [ ] `std/collections`: List, Map, Set, Queue, Stack
+- [ ] `std/string`: split, join, trim, replace, regex
+- [ ] `std/math`: trig functions, constants (PI, E)
+- [ ] `std/time`: DateTime, Duration, timestamps
+- [ ] `std/json`: parse, stringify
+- [ ] `std/crypto`: hashing, UUID generation
+
+### 3.3 I/O Library
+- [ ] `std/fs`: File read/write, directory operations
+- [ ] `std/path`: Path manipulation
+- [ ] `std/env`: Environment variables, args
+- [ ] `std/process`: Spawn processes, exit codes
+
+**Deliverables:**
+- Module system with imports/exports
+- Core standard library
+- File system and I/O operations
+
+---
+
+## Phase 4: Traits & Interfaces (Weeks 12-14)
+
+**Goal:** Polymorphism and code reuse.
+
+### 4.1 Trait Definitions
+- [ ] Trait declaration syntax
+- [ ] Required methods
+- [ ] Default method implementations
+- [ ] Associated types
+
+```intent
+trait Serializable {
+    fn to_json(self) -> String
+    fn from_json(json: String) -> Self
+}
+
+trait Comparable {
+    fn compare(self, other: Self) -> Int
+    
+    // Default implementations
+    fn less_than(self, other: Self) -> Bool {
+        return self.compare(other) < 0
     }
 }
 ```
 
-### 5.2 Intent Registry
+### 4.2 Trait Implementations
+- [ ] `impl Trait for Type` syntax
+- [ ] Multiple trait implementations
+- [ ] Trait bounds in generics
+- [ ] Orphan rules for coherence
 
-- [ ] Store intents with code references
-- [ ] Track intent fulfillment status
+### 4.3 Contract Inheritance (Moved from Phase 1.3)
+- [ ] Contracts propagate to trait implementations
+- [ ] Liskov Substitution Principle enforcement
+- [ ] Contravariant preconditions, covariant postconditions
+
+**Deliverables:**
+- Full trait system
+- Contract inheritance
+- Polymorphic dispatch
+
+---
+
+## Phase 5: HTTP & Web Server (Weeks 15-18)
+
+**Goal:** First-class web application support.
+
+### 5.1 HTTP Server
+- [ ] Built-in HTTP server: `std/http/server`
+- [ ] Request/Response types with contracts
+- [ ] Routing DSL or decorator-based routing
+- [ ] Middleware support
+- [ ] Static file serving
+
+```intent
+import { Server, Request, Response } from "std/http"
+
+fn handle_users(req: Request) -> Response
+    requires req.method == "GET"
+    ensures result.status >= 200
+    ensures result.status < 600
+{
+    let users = db.query("SELECT * FROM users")
+    return Response.json(users)
+}
+
+let app = Server.new()
+    .get("/users", handle_users)
+    .post("/users", create_user)
+    .middleware(logging)
+    .middleware(auth)
+
+app.listen(8080)
+```
+
+### 5.2 HTTP Client
+- [ ] `std/http/client` for outbound requests
+- [ ] Async HTTP with connection pooling
+- [ ] Timeout and retry configuration
+- [ ] Request/Response interceptors
+
+### 5.3 WebSocket Support
+- [ ] WebSocket server
+- [ ] WebSocket client
+- [ ] Message framing
+- [ ] Connection state management
+
+### 5.4 Routing & Middleware
+- [ ] Path parameters: `/users/{id}`
+- [ ] Query string parsing
+- [ ] Request body parsing (JSON, form data)
+- [ ] CORS middleware
+- [ ] Rate limiting middleware
+- [ ] Compression middleware
+
+### 5.5 API Contracts
+- [ ] OpenAPI/Swagger generation from contracts
+- [ ] Request validation from contracts
+- [ ] Response validation
+- [ ] API versioning support
+
+```intent
+@api(version: "1.0")
+fn get_user(id: String) -> Response<User>
+    requires id.len() > 0
+    ensures result.status == 200 implies result.body.id == id
+{
+    // Implementation
+}
+```
+
+**Deliverables:**
+- Production HTTP server
+- HTTP client
+- WebSocket support
+- OpenAPI integration
+
+---
+
+## Phase 6: Database & Persistence (Weeks 19-22)
+
+**Goal:** Type-safe database access.
+
+### 6.1 Database Abstraction
+- [ ] Connection pooling
+- [ ] Transaction support with contracts
+- [ ] Query builder
+- [ ] Migration system
+
+```intent
+import { Database, Transaction } from "std/db"
+
+fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), DbError>
+    requires amount > 0
+    ensures /* total balance unchanged */
+{
+    db.transaction(|tx| {
+        tx.execute("UPDATE accounts SET balance = balance - ? WHERE id = ?", [amount, from])?
+        tx.execute("UPDATE accounts SET balance = balance + ? WHERE id = ?", [amount, to])?
+        Ok(())
+    })
+}
+```
+
+### 6.2 Database Drivers
+- [ ] PostgreSQL driver
+- [ ] MySQL driver
+- [ ] SQLite driver
+- [ ] Connection string configuration
+
+### 6.3 ORM Layer (Optional)
+- [ ] Model definitions
+- [ ] Automatic migrations
+- [ ] Relationship mapping
+- [ ] Query generation
+
+### 6.4 Caching
+- [ ] `std/cache` abstraction
+- [ ] In-memory cache
+- [ ] Redis client
+- [ ] Cache invalidation patterns
+
+**Deliverables:**
+- Database connection management
+- PostgreSQL, MySQL, SQLite drivers
+- Transaction support
+- Caching layer
+
+---
+
+## Phase 7: Async & Concurrency (Weeks 23-26)
+
+**Goal:** Scalable async I/O and safe concurrency.
+
+### 7.1 Async Runtime
+- [ ] `async`/`await` syntax
+- [ ] Future/Promise type
+- [ ] Async function contracts
+- [ ] Executor/runtime (Tokio-based)
+
+```intent
+async fn fetch_user(id: String) -> Result<User, HttpError>
+    requires id.len() > 0
+{
+    let response = await http.get("/users/" + id)
+    return response.json()
+}
+
+// Concurrent execution
+let (user, posts) = await (
+    fetch_user(id),
+    fetch_posts(id)
+)
+```
+
+### 7.2 Concurrency Primitives
+- [ ] Channels for message passing
+- [ ] `spawn` for task creation
+- [ ] `select` for multiple channel operations
+- [ ] Structured concurrency (task scopes)
+
+### 7.3 Synchronization
+- [ ] Mutex with scoped guards
+- [ ] RwLock
+- [ ] Atomic types
+- [ ] Once (initialization)
+
+### 7.4 Parallel Collections
+- [ ] Parallel map/filter/reduce
+- [ ] Work stealing scheduler
+- [ ] Parallel iterators
+
+**Deliverables:**
+- Async/await runtime
+- Channel-based concurrency
+- Synchronization primitives
+- Parallel processing
+
+---
+
+## Phase 8: Testing Framework (Weeks 27-29)
+
+**Goal:** Comprehensive testing support.
+
+### 8.1 Test Runner
+- [ ] `#[test]` attribute for test functions
+- [ ] Test discovery
+- [ ] Parallel test execution
+- [ ] Test filtering and selection
+
+```intent
+#[test]
+fn test_user_creation() {
+    let user = User.new("Alice", "alice@example.com")
+    assert(user.name == "Alice")
+    assert(user.email.contains("@"))
+}
+
+#[test]
+#[should_panic]
+fn test_invalid_email() {
+    User.new("Bob", "invalid-email")  // Should fail invariant
+}
+```
+
+### 8.2 Contract-Based Testing (Moved from Phase 1.4)
+- [ ] Auto-generate test cases from contracts
+- [ ] Property-based testing with contracts
+- [ ] Contract coverage metrics
+- [ ] Mutation testing
+
+### 8.3 Mocking Framework
+- [ ] Mock trait implementations
+- [ ] Spy functions
+- [ ] Stub responses
+- [ ] Verification assertions
+
+### 8.4 Integration Testing
+- [ ] Test fixtures
+- [ ] Database test utilities
+- [ ] HTTP test client
+- [ ] Test containers
+
+**Deliverables:**
+- Test runner with discovery
+- Contract-based test generation
+- Mocking framework
+- Integration test utilities
+
+---
+
+## Phase 9: Performance & Compilation (Weeks 30-34)
+
+**Goal:** Production performance through compilation.
+
+### 9.1 Bytecode Compiler
+- [ ] Intent bytecode format (IBC)
+- [ ] Bytecode interpreter (faster than tree-walking)
+- [ ] Bytecode serialization/loading
+- [ ] Debug info in bytecode
+
+### 9.2 JIT Compilation (Optional)
+- [ ] Hot path detection
+- [ ] Native code generation for hot paths
+- [ ] Profile-guided optimization
+
+### 9.3 Native Compilation
+- [ ] LLVM backend (or Cranelift)
+- [ ] Ahead-of-time compilation
+- [ ] Static binary generation
+- [ ] Cross-compilation support
+
+### 9.4 Performance Features
+- [ ] Escape analysis
+- [ ] Inline caching
+- [ ] Dead code elimination
+- [ ] Constant folding
+
+### 9.5 Memory Management
+- [ ] Reference counting with cycle detection
+- [ ] Optional tracing GC
+- [ ] Memory pools for hot paths
+- [ ] Arena allocators
+
+**Deliverables:**
+- Bytecode compiler and VM
+- Native compilation option
+- 10-100x interpreter performance improvement
+
+---
+
+## Phase 10: Tooling & DevEx (Weeks 35-38)
+
+**Goal:** World-class developer experience.
+
+### 10.1 Language Server (LSP)
+- [ ] Full LSP implementation
+- [ ] Go to definition
+- [ ] Find references
+- [ ] Hover documentation
+- [ ] Code completion
+- [ ] Inline diagnostics
+- [ ] Code actions (quick fixes)
+
+### 10.2 Package Manager
+- [ ] Package registry
+- [ ] Dependency resolution
+- [ ] Lock files
+- [ ] Semantic versioning enforcement
+- [ ] Private registries
+
+```bash
+intent pkg init
+intent pkg add http
+intent pkg add db --version "^2.0"
+intent pkg publish
+```
+
+### 10.3 Build System
+- [ ] Project configuration (`intent.toml`)
+- [ ] Build caching
+- [ ] Incremental compilation
+- [ ] Build profiles (dev, release, test)
+
+### 10.4 Debugging
+- [ ] Breakpoints
+- [ ] Step debugging
+- [ ] Variable inspection
+- [ ] Call stack navigation
+- [ ] DAP (Debug Adapter Protocol) support
+
+### 10.5 Documentation Generator
+- [ ] Doc comments (`///`)
+- [ ] Automatic API documentation
+- [ ] Contract documentation
+- [ ] Example extraction and testing
+- [ ] Markdown support
+
+**Deliverables:**
+- Full LSP server
+- Package manager with registry
+- Build system
+- Debugger
+
+---
+
+## Phase 11: Deployment & Operations (Weeks 39-42)
+
+**Goal:** Production deployment support.
+
+### 11.1 Container Support
+- [ ] Dockerfile generation
+- [ ] Minimal base images
+- [ ] Multi-stage builds
+- [ ] Health check endpoints
+
+### 11.2 Configuration Management
+- [ ] Environment-based config
+- [ ] Config file support (TOML, YAML, JSON)
+- [ ] Secrets management
+- [ ] Feature flags
+
+### 11.3 Observability
+- [ ] Structured logging (`std/log`)
+- [ ] Metrics collection (Prometheus format)
+- [ ] Distributed tracing (OpenTelemetry)
+- [ ] Health endpoints
+
+```intent
+import { Logger, Metrics } from "std/observe"
+
+let log = Logger.new("api")
+let requests = Metrics.counter("http_requests_total")
+
+fn handle_request(req: Request) -> Response {
+    requests.inc(labels: { path: req.path, method: req.method })
+    log.info("Handling request", { path: req.path })
+    // ...
+}
+```
+
+### 11.4 Graceful Shutdown
+- [ ] Signal handling
+- [ ] Connection draining
+- [ ] Shutdown hooks
+- [ ] Timeout configuration
+
+**Deliverables:**
+- Container deployment support
+- Configuration management
+- Logging, metrics, tracing
+- Graceful lifecycle management
+
+---
+
+## Phase 12: AI Integration & Intent Encoding (Weeks 43-48)
+
+**Goal:** First-class AI development support.
+
+### 12.1 Intent Annotations
+- [ ] `intent` blocks linking natural language to code
+- [ ] Intent registry and tracking
 - [ ] Intent coverage reports
-- [ ] Intent drift detection
 
-### 5.3 AI Agent Hooks
+```intent
+intent "Calculate shipping cost based on weight and destination" {
+    fn calculate_shipping(weight: Float, dest: String) -> Float
+        requires weight > 0
+        ensures result >= 0
+    {
+        // AI can verify this implementation matches intent
+    }
+}
+```
 
+### 12.2 AI Agent SDK
 - [ ] Agent communication protocol
 - [ ] Context provision API
 - [ ] Suggestion acceptance/rejection tracking
 - [ ] Learning from corrections
 
-### 5.4 Constraint Declarations
+### 12.3 Semantic Versioning Enforcement
+- [ ] API signature tracking
+- [ ] Breaking change detection
+- [ ] Automatic semver suggestions
+- [ ] `@since` and `@deprecated` annotations
 
-- [ ] Declarative constraints: performance, security, accessibility
-- [ ] Constraint validation hooks
-- [ ] Constraint violation reporting
-
-```intent
-constraint performance {
-    response_time < 200ms
-    memory_usage < 100MB
-}
-```
+### 12.4 Structured Edits
+- [ ] AST-based diff format
+- [ ] Semantic-preserving transformations
+- [ ] Refactoring operations
+- [ ] Machine-readable edit format
 
 **Deliverables:**
-
-- Intent syntax and parser
-- Intent registry system
+- Intent annotation system
 - AI agent SDK
-- Constraint system
+- Semantic versioning tools
+- Structured edit engine
 
 ---
 
-## Phase 6: Workflow Primitives (Weeks 18-22)
+## Phase 13: Advanced Features (Weeks 49-52+)
 
-**Goal:** Built-in support for development workflows.
+**Goal:** Cutting-edge language capabilities.
 
-### 6.1 Pull Requests as First-Class Objects
+### 13.1 Session Types
+- [ ] Protocol definitions
+- [ ] Type-checked message sequences
+- [ ] Deadlock prevention
 
-- [ ] PR type in language
-- [ ] PR creation from code
-- [ ] PR state machine
-- [ ] PR-scoped variables and context
+### 13.2 Human Approval Mechanisms
+- [ ] `@requires_approval` annotations
+- [ ] Approval workflows
+- [ ] Audit trails
 
-```intent
-pr = PullRequest.create(
-    title: "Add user authentication",
-    branch: "feature/auth",
-    reviewers: ["alice", "bob"]
-)
+### 13.3 UI DSL (Optional)
+- [ ] Declarative UI components
+- [ ] Accessibility constraints
+- [ ] Design system integration
 
-pr.addCommit(message: "Implement login endpoint")
-pr.requestReview()
-```
-
-### 6.2 CI Pipelines Built-In
-
-- [ ] Pipeline DSL in Intent
-- [ ] Built-in test runner integration
-- [ ] Deployment stage definitions
-- [ ] Pipeline visualization
-
-```intent
-pipeline main {
-    stage test {
-        run tests/*
-        requires coverage > 80%
-    }
-
-    stage deploy {
-        requires approval from @tech-lead
-        run deploy to production
-    }
-}
-```
-
-### 6.3 Commit Rationales
-
-- [ ] Required rationale annotations on commits
-- [ ] Structured commit metadata
-- [ ] Rationale templates
-- [ ] Rationale-based changelog generation
-
-### 6.4 Structured Reviews
-
-- [ ] Review comments as typed data
-- [ ] Review state machine
-- [ ] Auto-review capabilities
-- [ ] Review templates and checklists
-
-### 6.5 Agent Collaboration
-
-- [ ] Agent-to-agent message passing
-- [ ] Shared context protocols
-- [ ] Negotiation patterns
-- [ ] Consensus mechanisms
-
-**Deliverables:**
-
-- PR API and runtime
-- Pipeline engine
-- Commit metadata system
-- Review system
-- Agent collaboration framework
+### 13.4 Workflow Primitives
+- [ ] Pull request types
+- [ ] CI pipeline DSL
+- [ ] Agent collaboration
 
 ---
 
-## Phase 7: Observability & Explainability (Weeks 23-26)
+## Web Application Architecture
 
-**Goal:** Full transparency into AI decision-making and code execution.
+Intent is designed to build production web applications. Here's the target architecture:
 
-### 7.1 Compile-Time Reasoning Logs
-
-- [ ] Type inference trace
-- [ ] Contract verification steps
-- [ ] Optimization decisions
-- [ ] Warning/error rationales
-
-### 7.2 Runtime Beliefs
-
-- [ ] Belief state tracking
-- [ ] Confidence levels for operations
-- [ ] Belief updates on new information
-- [ ] Belief conflict detection
-
-```intent
-belief {
-    "User authentication is secure": 0.95,
-    "Database connection is stable": 0.8
-}
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Load Balancer                          │
+│                    (nginx/haproxy)                          │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+          ┌───────────────┼───────────────┐
+          │               │               │
+          ▼               ▼               ▼
+    ┌──────────┐    ┌──────────┐    ┌──────────┐
+    │  Intent  │    │  Intent  │    │  Intent  │
+    │  Server  │    │  Server  │    │  Server  │
+    │  :8080   │    │  :8081   │    │  :8082   │
+    └────┬─────┘    └────┬─────┘    └────┬─────┘
+         │               │               │
+         └───────────────┼───────────────┘
+                         │
+         ┌───────────────┼───────────────┐
+         │               │               │
+         ▼               ▼               ▼
+    ┌──────────┐   ┌──────────┐   ┌──────────┐
+    │ Postgres │   │  Redis   │   │ External │
+    │    DB    │   │  Cache   │   │   APIs   │
+    └──────────┘   └──────────┘   └──────────┘
 ```
 
-### 7.3 Provenance Tags
+### Performance Targets
+- **Throughput:** 50,000+ requests/second per instance
+- **Latency:** <5ms p99 for simple endpoints
+- **Memory:** <100MB base footprint
+- **Startup:** <500ms cold start
 
-- [ ] Track data origin
-- [ ] Track transformation history
-- [ ] Audit trail for values
-- [ ] Provenance queries
-
-### 7.4 Dashboards & Alerts
-
-- [ ] Built-in metrics collection
-- [ ] Dashboard generation
-- [ ] Belief shift alerts
-- [ ] Anomaly detection
-
-### 7.5 Traceability
-
-- [ ] Code to requirement mapping
-- [ ] Change impact analysis
-- [ ] Decision tree visualization
-- [ ] Audit reports
-
-**Deliverables:**
-
-- Observability runtime
-- Belief tracking system
-- Provenance engine
-- Dashboard framework
-
----
-
-## Phase 8: Human Approval Mechanisms (Weeks 27-30)
-
-**Goal:** Safe human-in-the-loop controls for AI autonomy.
-
-### 8.1 Approval Annotations
-
-- [ ] `@requires_approval` on functions/modules
-- [ ] Approval scope definitions
-- [ ] Approval delegation
-
-```intent
-@requires_approval(from: ["product-owner"])
-fn deleteUserData(userId: String) -> Result<(), Error>
-```
-
-### 8.2 Approval Constructs
-
-- [ ] `await_approval()` runtime call
-- [ ] Approval timeout handling
-- [ ] Approval escalation
-- [ ] Batch approval for similar operations
-
-### 8.3 Gradual Autonomy
-
-- [ ] Trust levels for agents
-- [ ] Trust-based approval thresholds
-- [ ] Autonomy metrics and reporting
-- [ ] Trust adjustment based on track record
-
-### 8.4 Audit Trails
-
-- [ ] Complete action logging
-- [ ] Approval chain records
-- [ ] Compliance reporting
-- [ ] Forensic analysis support
-
-### 8.5 Emergency Intervention
-
-- [ ] Kill switch mechanism
-- [ ] Rollback capabilities
-- [ ] Safe mode operation
-- [ ] Incident response protocols
-
-**Deliverables:**
-
-- Approval system
-- Trust management
-- Audit logging
-- Emergency controls
-
----
-
-## Phase 9: UI/UX Constraints (Weeks 31-34)
-
-**Goal:** Declarative UI with built-in accessibility and design constraints.
-
-### 9.1 UI DSL
-
-- [ ] Component declarations
-- [ ] Layout system
-- [ ] Styling with constraints
-- [ ] Reactive data binding
-
-```intent
-ui MainPage {
-    layout: grid(columns: 2, gap: 16px)
-
-    component Header {
-        style: { background: theme.primary }
-    }
-
-    component PostList {
-        constraint: responsive(
-            mobile: columns(1),
-            desktop: columns(2)
-        )
-    }
-}
-```
-
-### 9.2 Accessibility Constraints
-
-- [ ] WCAG compliance checking
-- [ ] Contrast validation
-- [ ] Screen reader support
-- [ ] Keyboard navigation requirements
-
-### 9.3 Design System Integration
-
-- [ ] Theme definitions
-- [ ] Component constraints (colors, spacing, typography)
-- [ ] Design token validation
-- [ ] Consistency checking
-
-### 9.4 Performance Constraints
-
-- [ ] Load time budgets
-- [ ] Bundle size limits
-- [ ] Render performance targets
-- [ ] Constraint violation reporting
-
-**Deliverables:**
-
-- UI DSL parser and runtime
-- Accessibility checker
-- Design system framework
-- Performance budget system
-
----
-
-## Phase 10: Standard Library & Ecosystem (Weeks 35-40)
-
-**Goal:** Production-ready standard library and tooling.
-
-### 10.1 Core Library
-
-- [ ] Collections (List, Map, Set, Queue, Stack)
-- [ ] String manipulation
-- [ ] Math utilities
-- [ ] Date/Time handling
-- [ ] JSON/YAML serialization
-- [ ] Regular expressions
-
-### 10.2 I/O Library
-
-- [ ] File system operations
-- [ ] Network (HTTP client/server)
-- [ ] Database connectors
-- [ ] Stream processing
-
-### 10.3 Testing Framework
-
-- [ ] Unit test runner
-- [ ] Property-based testing
-- [ ] Mocking framework
-- [ ] Coverage reporting
-- [ ] Snapshot testing
-
-### 10.4 Build System
-
-- [ ] Package manager
-- [ ] Dependency resolution
-- [ ] Build caching
-- [ ] Cross-compilation
-
-### 10.5 IDE Support
-
-- [ ] Language server (LSP)
-- [ ] Syntax highlighting
-- [ ] Code completion
-- [ ] Inline diagnostics
-- [ ] Refactoring support
-
-### 10.6 Documentation
-
-- [ ] Doc comment syntax
-- [ ] API documentation generator
-- [ ] Example extraction and testing
-- [ ] Tutorial system
-
-**Deliverables:**
-
-- Full standard library
-- Package manager
-- Language server
-- Documentation generator
+### Deployment Options
+1. **Standalone binary** - Single executable, no runtime needed
+2. **Container** - Minimal Docker images (~20MB)
+3. **Serverless** - AWS Lambda, Cloudflare Workers (future)
 
 ---
 
 ## Implementation Priority Matrix
 
-| Phase            | Complexity | Dependencies | Business Value | Recommended Order |
-| ---------------- | ---------- | ------------ | -------------- | ----------------- |
-| 1. Contracts     | Medium     | None         | Very High      | 1st               |
-| 2. Type System   | High       | Phase 1      | Very High      | 2nd               |
-| 3. Versioning    | Medium     | None         | High           | 3rd               |
-| 4. Concurrency   | High       | Phase 2      | High           | 4th               |
-| 5. Intent/AI     | Medium     | Phases 1-2   | Very High      | 5th               |
-| 6. Workflows     | High       | Phases 1-3   | High           | 6th               |
-| 7. Observability | Medium     | Phases 1-5   | Very High      | 7th               |
-| 8. Approvals     | Medium     | Phase 6-7    | Critical       | 8th               |
-| 9. UI/UX         | Medium     | Phases 1-2   | Medium         | 9th               |
-| 10. Ecosystem    | High       | All          | Critical       | Ongoing           |
+| Phase | Complexity | Business Value | Web App Critical? |
+|-------|------------|----------------|-------------------|
+| 1. Contracts ✅ | Medium | Very High | Yes |
+| 2. Type System | High | Very High | Yes |
+| 3. Modules & Stdlib | Medium | Very High | Yes |
+| 4. Traits | Medium | High | Yes |
+| 5. HTTP & Web | High | **Critical** | **Yes** |
+| 6. Database | High | **Critical** | **Yes** |
+| 7. Async | High | **Critical** | **Yes** |
+| 8. Testing | Medium | High | Yes |
+| 9. Compilation | Very High | High | For performance |
+| 10. Tooling | High | Very High | For adoption |
+| 11. Deployment | Medium | High | Yes |
+| 12. AI Integration | Medium | High | Differentiator |
+| 13. Advanced | High | Medium | Future |
 
 ---
 
 ## Milestones
 
-### M1: Contract-Driven Development (Week 6)
+### M1: Developer Preview (Week 14) 
+- Type system with generics
+- Module system
+- Trait system
+- Basic standard library
 
-- Full contract system
-- Enhanced type system
-- Contract-based testing
-
-### M2: Safe Concurrency (Week 13)
-
+### M2: Web Alpha (Week 26)
+- HTTP server/client
+- Database connectivity
 - Async/await
-- Session types
-- Semantic versioning
+- Basic testing
 
-### M3: AI-Native Development (Week 22)
-
-- Intent encoding
-- Workflow primitives
-- Agent collaboration
-
-### M4: Production Ready (Week 30)
-
+### M3: Production Beta (Week 38)
+- Performance compilation
+- Full tooling (LSP, package manager)
 - Observability
-- Human approval
-- Audit trails
+- Documentation
 
-### M5: Full Ecosystem (Week 40)
-
-- Standard library
-- Package manager
-- IDE support
-- UI framework
-
----
-
-## Resource Requirements
-
-### Development Team
-
-- 2-3 Language/Compiler engineers
-- 1-2 Runtime engineers
-- 1 Tooling engineer
-- 1 Documentation/DevRel
-
-### Infrastructure
-
-- CI/CD pipeline
-- Package registry
-- Documentation site
-- Community forum
-
-### Testing
-
-- Comprehensive test suite
-- Fuzzing infrastructure
-- Performance benchmarks
-- Compatibility testing
-
----
-
-## Risk Mitigation
-
-| Risk                      | Mitigation                                |
-| ------------------------- | ----------------------------------------- |
-| Scope creep               | Strict phase boundaries, feature freezes  |
-| Performance issues        | Early benchmarking, optimization sprints  |
-| Adoption barriers         | Developer documentation, migration guides |
-| AI integration complexity | Incremental rollout, fallback mechanisms  |
-| Breaking changes          | Semantic versioning from day 1            |
+### M4: 1.0 Release (Week 48)
+- Battle-tested web framework
+- Complete standard library
+- AI integration
+- Production deployments
 
 ---
 
 ## Success Metrics
 
-- **Developer Experience:** Time to first program < 30 minutes
-- **Correctness:** Contract violations caught before production
-- **Performance:** Within 2x of Rust for compute-bound tasks
-- **AI Compatibility:** 90%+ of AI-generated code compiles
-- **Adoption:** 1000+ repos within first year
+- **Performance:** Within 2x of Go/Rust for web workloads
+- **Developer Experience:** First API endpoint in <30 minutes
+- **Reliability:** Contract violations caught before production
+- **Scalability:** Linear scaling to 10+ instances
+- **AI Compatibility:** 95%+ of AI-generated code compiles
 
 ---
 
-## Next Steps
+## Getting Started with Web Development (Future)
 
-1. **Immediate:** Begin Phase 1 contract implementation
-2. **Week 2:** Set up CI/CD with property-based testing
-3. **Week 4:** Release alpha with full contract support
-4. **Month 2:** Community preview and feedback collection
-5. **Month 3:** Phase 2 type system enhancements
+```intent
+// server.intent
+import { Server, Router } from "std/http"
+import { Pool } from "std/db/postgres"
+import { Logger } from "std/log"
+
+let log = Logger.new("api")
+let db = Pool.connect(env("DATABASE_URL"))
+
+struct User {
+    id: String,
+    name: String,
+    email: String
+}
+
+impl User {
+    invariant self.email.contains("@")
+}
+
+fn get_user(id: String) -> Response<User>
+    requires id.len() > 0
+{
+    let user = db.query_one("SELECT * FROM users WHERE id = $1", [id])?
+    Response.json(user)
+}
+
+fn create_user(req: Request<User>) -> Response<User>
+    requires req.body.name.len() > 0
+    ensures result.status == 201
+{
+    let user = db.insert("users", req.body)?
+    log.info("Created user", { id: user.id })
+    Response.created(user)
+}
+
+let app = Server.new()
+    .get("/users/{id}", get_user)
+    .post("/users", create_user)
+    .middleware(logging)
+
+app.listen(8080)
+```
 
 ---
 
-_This roadmap is a living document. Updates will be made as implementation progresses and priorities evolve based on community feedback and AI capability advancements._
+_This roadmap is a living document updated as implementation progresses._
