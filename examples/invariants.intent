@@ -1,0 +1,43 @@
+// Intent Language - Struct Invariants Example
+// ============================================
+// This example demonstrates invariant checking on struct types.
+// Invariants are conditions that must always hold for a type.
+
+// Define a struct for a bank account
+struct BankAccount {
+    balance: Int,
+    owner: String
+}
+
+// Define invariants for BankAccount
+// The invariant ensures balance is never negative
+impl BankAccount {
+    invariant balance >= 0
+}
+
+print("=== Struct Invariants Example ===");
+print("");
+
+// Create a valid account - invariant passes
+print("Creating valid account with balance 100...");
+let account = BankAccount { balance: 100, owner: "Alice" };
+print("Account created successfully!");
+print("Balance: " + str(account.balance));
+print("Owner: " + account.owner);
+
+print("");
+
+// Create another valid account
+print("Creating account with zero balance...");
+let empty_account = BankAccount { balance: 0, owner: "Bob" };
+print("Empty account created successfully!");
+print("Balance: " + str(empty_account.balance));
+
+print("");
+print("=== Invariant Violation Demo ===");
+print("Attempting to create account with negative balance...");
+// Uncomment to see invariant violation:
+// let bad_account = BankAccount { balance: -50, owner: "Mallory" };
+
+print("");
+print("=== All invariant examples passed! ===");

@@ -699,10 +699,16 @@ impl Interpreter {
                 for (field_name, expr) in fields {
                     field_values.insert(field_name.clone(), self.eval_expression(expr)?);
                 }
-                Ok(Value::Struct {
+                
+                let struct_val = Value::Struct {
                     name: name.clone(),
                     fields: field_values,
-                })
+                };
+                
+                // Check invariants on construction
+                self.check_struct_invariants(name, &struct_val)?;
+                
+                Ok(struct_val)
             }
 
             Expression::Assign { target, value } => {
@@ -710,9 +716,52 @@ impl Interpreter {
                 match target.as_ref() {
                     Expression::Identifier(name) => {
                         if self.environment.borrow_mut().set(name, val.clone()) {
+                            // After assignment, check if this is a struct and verify invariants
+                            if let Value::Struct { name: struct_name, .. } = &val {
+                                self.check_struct_invariants(struct_name, &val)?;
+                            }
                             Ok(val)
                         } else {
                             Err(IntentError::UndefinedVariable(name.clone()))
+                        }
+                    }
+                    Expression::FieldAccess { object, field } => {
+                        // Handle field assignment (e.g., obj.field = value)
+                        if let Expression::Identifier(var_name) = object.as_ref() {
+                            // Get the current struct
+                            let current = self.environment.borrow().get(var_name)
+                                .ok_or_else(|| IntentError::UndefinedVariable(var_name.clone()))?;
+                            
+                            if let Value::Struct { name: struct_name, mut fields } = current {
+                                // Update the field
+                                if fields.contains_key(field) {
+                                    fields.insert(field.clone(), val.clone());
+                                    
+                                    let new_struct = Value::Struct {
+                                        name: struct_name.clone(),
+                                        fields: fields.clone(),
+                                    };
+                                    
+                                    // Check invariants after field mutation
+                                    self.check_struct_invariants(&struct_name, &new_struct)?;
+                                    
+                                    // Update the variable
+                                    self.environment.borrow_mut().set(var_name, new_struct);
+                                    Ok(val)
+                                } else {
+                                    Err(IntentError::RuntimeError(
+                                        format!("Unknown field '{}' on struct '{}'", field, struct_name)
+                                    ))
+                                }
+                            } else {
+                                Err(IntentError::RuntimeError(
+                                    format!("Cannot assign field on non-struct value")
+                                ))
+                            }
+                        } else {
+                            Err(IntentError::RuntimeError(
+                                "Cannot assign to complex field access".to_string()
+                            ))
                         }
                     }
                     _ => Err(IntentError::RuntimeError(
@@ -755,12 +804,39 @@ impl Interpreter {
                     .map(|arg| self.eval_expression(arg))
                     .collect();
                 let mut args = args?;
+                
+                // Keep track of struct name for invariant checking
+                let struct_name = if let Value::Struct { name, .. } = &obj {
+                    Some(name.clone())
+                } else {
+                    None
+                };
+                
                 args.insert(0, obj);
                 
                 // Look up method in environment
                 let func = self.environment.borrow().get(method);
                 if let Some(func) = func {
-                    self.call_function(func, args)
+                    let result = self.call_function(func, args)?;
+                    
+                    // After method call, check if self (first arg) was modified and verify invariants
+                    // This requires looking up the updated value if it was bound to a variable
+                    if let Some(struct_name) = struct_name {
+                        // If the object came from a variable, check the updated value's invariants
+                        if let Expression::Identifier(var_name) = object.as_ref() {
+                            // Clone to avoid borrow conflict
+                            let updated_obj = self.environment.borrow().get(var_name);
+                            if let Some(updated_obj) = updated_obj {
+                                if let Value::Struct { name, .. } = &updated_obj {
+                                    if name == &struct_name {
+                                        self.check_struct_invariants(name, &updated_obj)?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    Ok(result)
                 } else {
                     Err(IntentError::UndefinedFunction(method.clone()))
                 }
@@ -1013,6 +1089,54 @@ impl Interpreter {
             }
             _ => format!("{:?}", expr),
         }
+    }
+    
+    /// Check struct invariants after construction or mutation
+    fn check_struct_invariants(&mut self, struct_name: &str, struct_val: &Value) -> Result<()> {
+        // Look up invariants for this struct type
+        let invariants = match self.struct_invariants.get(struct_name) {
+            Some(inv) => inv.clone(),
+            None => return Ok(()), // No invariants defined
+        };
+        
+        if invariants.is_empty() {
+            return Ok(());
+        }
+        
+        // Get struct fields
+        let fields = match struct_val {
+            Value::Struct { fields, .. } => fields,
+            _ => return Ok(()),
+        };
+        
+        // Create a temporary environment with struct fields as variables
+        let previous = Rc::clone(&self.environment);
+        let inv_env = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+        
+        // Bind struct fields to environment (also bind 'self' to the struct)
+        for (field_name, field_val) in fields {
+            inv_env.borrow_mut().define(field_name.clone(), field_val.clone());
+        }
+        inv_env.borrow_mut().define("self".to_string(), struct_val.clone());
+        
+        self.environment = inv_env;
+        
+        // Check each invariant
+        for inv_expr in &invariants {
+            let condition_str = Self::format_expression(inv_expr);
+            let result = self.eval_expression(inv_expr)?;
+            
+            if !result.is_truthy() {
+                self.environment = previous;
+                return Err(IntentError::ContractViolation(
+                    format!("Invariant violated for '{}': {}", struct_name, condition_str)
+                ));
+            }
+            self.contracts.check_invariant(&condition_str, true, None)?;
+        }
+        
+        self.environment = previous;
+        Ok(())
     }
 
     fn eval_binary_op(&self, op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value> {
@@ -1282,5 +1406,53 @@ mod tests {
             clamp(15, 0, 10)
         "#).unwrap();
         assert!(matches!(result, Value::Int(10)));
+    }
+
+    #[test]
+    fn test_struct_literal() {
+        // Basic struct literal creation
+        let result = eval(r#"
+            struct Point {
+                x: Int,
+                y: Int
+            }
+            let p = Point { x: 10, y: 20 };
+            p.x + p.y
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(30)));
+    }
+
+    #[test]
+    fn test_struct_invariant_passes() {
+        // Struct invariant passes on construction
+        let result = eval(r#"
+            struct Counter {
+                value: Int
+            }
+            impl Counter {
+                invariant self.value >= 0
+            }
+            let c = Counter { value: 5 };
+            c.value
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(5)));
+    }
+
+    #[test]
+    fn test_struct_invariant_fails() {
+        // Struct invariant fails on construction
+        let result = eval(r#"
+            struct Counter {
+                value: Int
+            }
+            impl Counter {
+                invariant self.value >= 0
+            }
+            let c = Counter { value: -1 };
+            c.value
+        "#);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Invariant violated"));
     }
 }

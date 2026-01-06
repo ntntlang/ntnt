@@ -12,9 +12,10 @@ This document outlines the comprehensive plan for implementing all features desc
 - [x] Tree-walking interpreter
 - [x] Basic type system (Int, Float, String, Bool, Array, Object, Function, Null)
 - [x] **Full contract system with runtime enforcement**
+- [x] **Struct invariants with automatic checking**
 - [x] CLI with REPL, run, parse, lex, check commands
-- [x] 24 unit tests passing
-- [x] Example programs including comprehensive contract examples
+- [x] 27 unit tests passing
+- [x] Example programs including comprehensive contract and invariant examples
 
 ---
 
@@ -30,21 +31,28 @@ This document outlines the comprehensive plan for implementing all features desc
 - [x] Access to `result` in postconditions
 - [x] Contract violation error handling with clear messages
 
-### 1.2 Class/Struct Invariants (Partial)
+### 1.2 Class/Struct Invariants ✅
 
 - [x] `invariant` clause support on types (parsing)
 - [x] Invariant storage in interpreter
-- [ ] Invariant checking on construction
-- [ ] Invariant checking after method calls
-- [ ] Invariant preservation across mutations
+- [x] Invariant checking on construction (struct literals)
+- [x] Invariant checking after method calls
+- [x] Invariant checking after direct field assignments
+- [x] `self` keyword access in invariant expressions
 
-### 1.3 Contract Inheritance
+### 1.3 Contract Inheritance (Deferred to Phase 4)
+
+> **Note:** Contract inheritance requires a trait/interface system or class hierarchy.
+> This has been moved to Phase 4 (Module System & Traits).
 
 - [ ] Contracts propagate to overriding methods
 - [ ] Liskov Substitution Principle enforcement
 - [ ] Contravariant preconditions, covariant postconditions
 
-### 1.4 Contract-Based Testing
+### 1.4 Contract-Based Testing (Deferred to Phase 7)
+
+> **Note:** Test generation requires more advanced type inference and analysis.
+> This has been moved to Phase 7 (Testing Framework).
 
 - [ ] Auto-generate test cases from contracts
 - [ ] Property-based testing integration
@@ -56,8 +64,13 @@ This document outlines the comprehensive plan for implementing all features desc
 - ✅ `old()` function for pre-execution value capture
 - ✅ `result` keyword for postcondition evaluation
 - ✅ Human-readable contract error messages
-- ✅ Comprehensive contract examples (`examples/contracts_full.intent`)
-- ✅ 7 contract-specific unit tests
+- ✅ Struct invariants with automatic enforcement
+- ✅ Struct literal syntax `Name { field: value }`
+- ✅ Field assignment with invariant checking
+- ✅ Comprehensive examples:
+  - `examples/contracts_full.intent` - 10 contract examples
+  - `examples/invariants_full.intent` - 7 invariant examples
+- ✅ 27 unit tests (10 contract/invariant-specific)
 
 ---
 

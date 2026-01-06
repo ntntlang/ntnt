@@ -648,6 +648,19 @@ impl Parser {
         loop {
             if self.match_token(&[TokenKind::LeftParen]) {
                 expr = self.finish_call(expr)?;
+            } else if self.check(&TokenKind::LeftBrace) {
+                // Check if this is a struct literal (Identifier followed by { name: })
+                // Only treat as struct literal if it's an identifier and looks like struct syntax
+                if let Expression::Identifier(name) = &expr {
+                    if self.is_struct_literal() {
+                        self.advance(); // consume the {
+                        expr = self.finish_struct_literal(name.clone())?;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
             } else if self.match_token(&[TokenKind::Dot]) {
                 let name = self.consume_identifier("Expected property name after '.'")?;
                 if self.match_token(&[TokenKind::LeftParen]) {
@@ -687,6 +700,57 @@ impl Parser {
             function: Box::new(callee),
             arguments,
         })
+    }
+
+    fn finish_struct_literal(&mut self, name: String) -> Result<Expression> {
+        let mut fields = Vec::new();
+        
+        if !self.check(&TokenKind::RightBrace) {
+            loop {
+                let field_name = self.consume_identifier("Expected field name")?;
+                self.consume(&TokenKind::Colon, "Expected ':' after field name")?;
+                let value = self.expression()?;
+                fields.push((field_name, value));
+                
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+        }
+        
+        self.consume(&TokenKind::RightBrace, "Expected '}' after struct fields")?;
+        
+        Ok(Expression::StructLiteral { name, fields })
+    }
+    
+    /// Check if the upcoming tokens look like a struct literal ({ name: value })
+    /// This looks ahead without consuming tokens
+    fn is_struct_literal(&self) -> bool {
+        // Look for pattern: { identifier :
+        let mut pos = self.current;
+        
+        // Check for {
+        if pos >= self.tokens.len() {
+            return false;
+        }
+        if !matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::LeftBrace)) {
+            return false;
+        }
+        pos += 1;
+        
+        // Check for } (empty struct literal)
+        if matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::RightBrace)) {
+            return true;
+        }
+        
+        // Check for identifier
+        if !matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::Identifier(_))) {
+            return false;
+        }
+        pos += 1;
+        
+        // Check for :
+        matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::Colon))
     }
 
     fn arguments(&mut self) -> Result<Vec<Expression>> {
