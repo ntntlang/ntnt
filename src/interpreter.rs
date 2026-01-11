@@ -380,6 +380,70 @@ fn days_to_ymd(days: i64) -> (i64, i64, i64) {
     (year, m as i64, d as i64)
 }
 
+/// URL encode a string (keeps safe characters)
+fn url_encode(s: &str) -> String {
+    let mut result = String::new();
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' | ':' | '?' | '#' | '[' | ']' | '@' | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=' => {
+                result.push(c);
+            }
+            _ => {
+                for byte in c.to_string().as_bytes() {
+                    result.push_str(&format!("%{:02X}", byte));
+                }
+            }
+        }
+    }
+    result
+}
+
+/// URL encode a component (more aggressive, for query params)
+fn url_encode_component(s: &str) -> String {
+    let mut result = String::new();
+    for c in s.chars() {
+        match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => {
+                result.push(c);
+            }
+            _ => {
+                for byte in c.to_string().as_bytes() {
+                    result.push_str(&format!("%{:02X}", byte));
+                }
+            }
+        }
+    }
+    result
+}
+
+/// URL decode a string
+fn url_decode(s: &str) -> std::result::Result<String, String> {
+    let mut result = Vec::new();
+    let mut chars = s.chars().peekable();
+    
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if hex.len() == 2 {
+                match u8::from_str_radix(&hex, 16) {
+                    Ok(byte) => result.push(byte),
+                    Err(_) => return Err(format!("Invalid percent encoding: %{}", hex)),
+                }
+            } else {
+                return Err("Incomplete percent encoding".to_string());
+            }
+        } else if c == '+' {
+            result.push(b' ');
+        } else {
+            for byte in c.to_string().as_bytes() {
+                result.push(*byte);
+            }
+        }
+    }
+    
+    String::from_utf8(result).map_err(|e| e.to_string())
+}
+
 impl Interpreter {
     pub fn new() -> Self {
         let env = Rc::new(RefCell::new(Environment::new()));
@@ -968,6 +1032,8 @@ impl Interpreter {
         self.init_std_path();
         self.init_std_json();
         self.init_std_time();
+        self.init_std_crypto();
+        self.init_std_url();
     }
     
     /// std/string module functions
@@ -2351,6 +2417,401 @@ impl Interpreter {
         });
         
         self.loaded_modules.insert("std/time".to_string(), time_module);
+    }
+    
+    /// std/crypto module functions - Cryptographic operations
+    fn init_std_crypto(&mut self) {
+        use sha2::{Sha256, Digest};
+        use hmac::{Hmac, Mac};
+        use uuid::Uuid;
+        use rand::RngCore;
+        
+        let mut crypto_module: HashMap<String, Value> = HashMap::new();
+        
+        // sha256(data) -> String - SHA-256 hash as hex string
+        crypto_module.insert("sha256".to_string(), Value::NativeFunction {
+            name: "sha256".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(data) => {
+                        let mut hasher = Sha256::new();
+                        hasher.update(data.as_bytes());
+                        let result = hasher.finalize();
+                        Ok(Value::String(hex::encode(result)))
+                    }
+                    Value::Array(bytes) => {
+                        // Handle array of bytes
+                        let byte_vec: std::result::Result<Vec<u8>, _> = bytes.iter().map(|v| {
+                            match v {
+                                Value::Int(i) => Ok(*i as u8),
+                                _ => Err(IntentError::TypeError("sha256() array must contain integers".to_string())),
+                            }
+                        }).collect();
+                        let byte_vec = byte_vec?;
+                        let mut hasher = Sha256::new();
+                        hasher.update(&byte_vec);
+                        let result = hasher.finalize();
+                        Ok(Value::String(hex::encode(result)))
+                    }
+                    _ => Err(IntentError::TypeError("sha256() requires a string or byte array".to_string())),
+                }
+            },
+        });
+        
+        // sha256_bytes(data) -> [Int] - SHA-256 hash as byte array
+        crypto_module.insert("sha256_bytes".to_string(), Value::NativeFunction {
+            name: "sha256_bytes".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(data) => {
+                        let mut hasher = Sha256::new();
+                        hasher.update(data.as_bytes());
+                        let result = hasher.finalize();
+                        let bytes: Vec<Value> = result.iter().map(|b| Value::Int(*b as i64)).collect();
+                        Ok(Value::Array(bytes))
+                    }
+                    _ => Err(IntentError::TypeError("sha256_bytes() requires a string".to_string())),
+                }
+            },
+        });
+        
+        // hmac_sha256(key, data) -> String - HMAC-SHA256 as hex string
+        crypto_module.insert("hmac_sha256".to_string(), Value::NativeFunction {
+            name: "hmac_sha256".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::String(key), Value::String(data)) => {
+                        type HmacSha256 = Hmac<Sha256>;
+                        let mut mac = HmacSha256::new_from_slice(key.as_bytes())
+                            .map_err(|e| IntentError::RuntimeError(format!("HMAC error: {}", e)))?;
+                        mac.update(data.as_bytes());
+                        let result = mac.finalize();
+                        Ok(Value::String(hex::encode(result.into_bytes())))
+                    }
+                    _ => Err(IntentError::TypeError("hmac_sha256() requires two strings (key, data)".to_string())),
+                }
+            },
+        });
+        
+        // uuid() -> String - Generate a random UUID v4
+        crypto_module.insert("uuid".to_string(), Value::NativeFunction {
+            name: "uuid".to_string(),
+            arity: 0,
+            func: |_args| {
+                Ok(Value::String(Uuid::new_v4().to_string()))
+            },
+        });
+        
+        // random_bytes(n) -> [Int] - Generate n cryptographically secure random bytes
+        crypto_module.insert("random_bytes".to_string(), Value::NativeFunction {
+            name: "random_bytes".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Int(n) => {
+                        if *n < 0 || *n > 1024 * 1024 {
+                            return Err(IntentError::RuntimeError("random_bytes() size must be 0-1048576".to_string()));
+                        }
+                        let mut bytes = vec![0u8; *n as usize];
+                        rand::thread_rng().fill_bytes(&mut bytes);
+                        let values: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
+                        Ok(Value::Array(values))
+                    }
+                    _ => Err(IntentError::TypeError("random_bytes() requires an integer".to_string())),
+                }
+            },
+        });
+        
+        // random_hex(n) -> String - Generate n random bytes as hex string
+        crypto_module.insert("random_hex".to_string(), Value::NativeFunction {
+            name: "random_hex".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Int(n) => {
+                        if *n < 0 || *n > 1024 * 1024 {
+                            return Err(IntentError::RuntimeError("random_hex() size must be 0-1048576".to_string()));
+                        }
+                        let mut bytes = vec![0u8; *n as usize];
+                        rand::thread_rng().fill_bytes(&mut bytes);
+                        Ok(Value::String(hex::encode(bytes)))
+                    }
+                    _ => Err(IntentError::TypeError("random_hex() requires an integer".to_string())),
+                }
+            },
+        });
+        
+        // hex_encode(bytes) -> String - Encode bytes as hex
+        crypto_module.insert("hex_encode".to_string(), Value::NativeFunction {
+            name: "hex_encode".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Array(bytes) => {
+                        let byte_vec: std::result::Result<Vec<u8>, _> = bytes.iter().map(|v| {
+                            match v {
+                                Value::Int(i) => Ok(*i as u8),
+                                _ => Err(IntentError::TypeError("hex_encode() array must contain integers".to_string())),
+                            }
+                        }).collect();
+                        Ok(Value::String(hex::encode(byte_vec?)))
+                    }
+                    Value::String(s) => {
+                        Ok(Value::String(hex::encode(s.as_bytes())))
+                    }
+                    _ => Err(IntentError::TypeError("hex_encode() requires array or string".to_string())),
+                }
+            },
+        });
+        
+        // hex_decode(hex_str) -> Result<[Int], Error> - Decode hex string to bytes
+        crypto_module.insert("hex_decode".to_string(), Value::NativeFunction {
+            name: "hex_decode".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(hex_str) => {
+                        match hex::decode(hex_str) {
+                            Ok(bytes) => {
+                                let values: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
+                                Ok(Value::EnumValue {
+                                    enum_name: "Result".to_string(),
+                                    variant: "Ok".to_string(),
+                                    values: vec![Value::Array(values)],
+                                })
+                            }
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("hex_decode() requires a string".to_string())),
+                }
+            },
+        });
+        
+        self.loaded_modules.insert("std/crypto".to_string(), crypto_module);
+    }
+    
+    /// std/url module functions - URL parsing and encoding
+    fn init_std_url(&mut self) {
+        let mut url_module: HashMap<String, Value> = HashMap::new();
+        
+        // parse(url) -> Result<Map, Error> - Parse URL into components
+        url_module.insert("parse".to_string(), Value::NativeFunction {
+            name: "parse".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(url_str) => {
+                        // Simple URL parser
+                        let mut result = HashMap::new();
+                        let url = url_str.as_str();
+                        
+                        // Extract scheme
+                        let (scheme, rest) = if let Some(pos) = url.find("://") {
+                            (Some(&url[..pos]), &url[pos + 3..])
+                        } else {
+                            (None, url)
+                        };
+                        
+                        if let Some(s) = scheme {
+                            result.insert("scheme".to_string(), Value::String(s.to_string()));
+                        }
+                        
+                        // Extract fragment
+                        let (rest, fragment) = if let Some(pos) = rest.find('#') {
+                            (&rest[..pos], Some(&rest[pos + 1..]))
+                        } else {
+                            (rest, None)
+                        };
+                        
+                        if let Some(f) = fragment {
+                            result.insert("fragment".to_string(), Value::String(f.to_string()));
+                        }
+                        
+                        // Extract query
+                        let (rest, query) = if let Some(pos) = rest.find('?') {
+                            (&rest[..pos], Some(&rest[pos + 1..]))
+                        } else {
+                            (rest, None)
+                        };
+                        
+                        if let Some(q) = query {
+                            result.insert("query".to_string(), Value::String(q.to_string()));
+                            
+                            // Parse query parameters
+                            let mut params = HashMap::new();
+                            for pair in q.split('&') {
+                                if let Some(eq_pos) = pair.find('=') {
+                                    let key = &pair[..eq_pos];
+                                    let value = &pair[eq_pos + 1..];
+                                    params.insert(key.to_string(), Value::String(value.to_string()));
+                                } else if !pair.is_empty() {
+                                    params.insert(pair.to_string(), Value::String("".to_string()));
+                                }
+                            }
+                            result.insert("params".to_string(), Value::Map(params));
+                        }
+                        
+                        // Extract host and path
+                        let (host_part, path) = if let Some(pos) = rest.find('/') {
+                            (&rest[..pos], &rest[pos..])
+                        } else {
+                            (rest, "")
+                        };
+                        
+                        // Extract port from host
+                        let (host, port) = if let Some(pos) = host_part.rfind(':') {
+                            let potential_port = &host_part[pos + 1..];
+                            if potential_port.chars().all(|c| c.is_ascii_digit()) {
+                                (&host_part[..pos], potential_port.parse::<i64>().ok())
+                            } else {
+                                (host_part, None)
+                            }
+                        } else {
+                            (host_part, None)
+                        };
+                        
+                        // Extract username:password from host
+                        let (auth, host) = if let Some(pos) = host.find('@') {
+                            (Some(&host[..pos]), &host[pos + 1..])
+                        } else {
+                            (None, host)
+                        };
+                        
+                        if let Some(a) = auth {
+                            if let Some(colon) = a.find(':') {
+                                result.insert("username".to_string(), Value::String(a[..colon].to_string()));
+                                result.insert("password".to_string(), Value::String(a[colon + 1..].to_string()));
+                            } else {
+                                result.insert("username".to_string(), Value::String(a.to_string()));
+                            }
+                        }
+                        
+                        if !host.is_empty() {
+                            result.insert("host".to_string(), Value::String(host.to_string()));
+                        }
+                        
+                        if let Some(p) = port {
+                            result.insert("port".to_string(), Value::Int(p));
+                        }
+                        
+                        if !path.is_empty() {
+                            result.insert("path".to_string(), Value::String(path.to_string()));
+                        }
+                        
+                        result.insert("href".to_string(), Value::String(url_str.clone()));
+                        
+                        Ok(Value::EnumValue {
+                            enum_name: "Result".to_string(),
+                            variant: "Ok".to_string(),
+                            values: vec![Value::Map(result)],
+                        })
+                    }
+                    _ => Err(IntentError::TypeError("parse() requires a URL string".to_string())),
+                }
+            },
+        });
+        
+        // encode(str) -> String - URL encode a string
+        url_module.insert("encode".to_string(), Value::NativeFunction {
+            name: "encode".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(s) => {
+                        let encoded = url_encode(s);
+                        Ok(Value::String(encoded))
+                    }
+                    _ => Err(IntentError::TypeError("encode() requires a string".to_string())),
+                }
+            },
+        });
+        
+        // encode_component(str) -> String - URL encode a component (more aggressive encoding)
+        url_module.insert("encode_component".to_string(), Value::NativeFunction {
+            name: "encode_component".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(s) => {
+                        let encoded = url_encode_component(s);
+                        Ok(Value::String(encoded))
+                    }
+                    _ => Err(IntentError::TypeError("encode_component() requires a string".to_string())),
+                }
+            },
+        });
+        
+        // decode(str) -> Result<String, Error> - URL decode a string
+        url_module.insert("decode".to_string(), Value::NativeFunction {
+            name: "decode".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(s) => {
+                        match url_decode(s) {
+                            Ok(decoded) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::String(decoded)],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e)],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("decode() requires a string".to_string())),
+                }
+            },
+        });
+        
+        // build_query(params) -> String - Build query string from map
+        url_module.insert("build_query".to_string(), Value::NativeFunction {
+            name: "build_query".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Map(params) => {
+                        let pairs: Vec<String> = params.iter()
+                            .map(|(k, v)| {
+                                let key = url_encode_component(k);
+                                let value = url_encode_component(&v.to_string());
+                                format!("{}={}", key, value)
+                            })
+                            .collect();
+                        Ok(Value::String(pairs.join("&")))
+                    }
+                    _ => Err(IntentError::TypeError("build_query() requires a map".to_string())),
+                }
+            },
+        });
+        
+        // join(base, path) -> String - Join base URL with path
+        url_module.insert("join".to_string(), Value::NativeFunction {
+            name: "join".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::String(base), Value::String(path)) => {
+                        let base = base.trim_end_matches('/');
+                        let path = path.trim_start_matches('/');
+                        Ok(Value::String(format!("{}/{}", base, path)))
+                    }
+                    _ => Err(IntentError::TypeError("join() requires two strings".to_string())),
+                }
+            },
+        });
+        
+        self.loaded_modules.insert("std/url".to_string(), url_module);
     }
     
     /// Handle import statement
@@ -5529,5 +5990,185 @@ mod tests {
             d.millis
         "#).unwrap();
         assert!(matches!(result, Value::Int(5000)));
+    }
+    
+    // ==================== std/crypto tests ====================
+    
+    #[test]
+    fn test_std_crypto_sha256() {
+        let result = eval(r#"
+            import { sha256 } from "std/crypto"
+            sha256("hello")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            // SHA256 of "hello" is well-known
+            assert_eq!(s, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+        } else {
+            panic!("Expected String");
+        }
+    }
+    
+    #[test]
+    fn test_std_crypto_sha256_bytes() {
+        let result = eval(r#"
+            import { sha256_bytes } from "std/crypto"
+            let hash = sha256_bytes("test")
+            len(hash)
+        "#).unwrap();
+        // SHA256 produces 32 bytes
+        assert!(matches!(result, Value::Int(32)));
+    }
+    
+    #[test]
+    fn test_std_crypto_hmac() {
+        let result = eval(r#"
+            import { hmac_sha256 } from "std/crypto"
+            hmac_sha256("key", "data")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            // HMAC-SHA256("key", "data") is known
+            assert_eq!(s, "5031fe3d989c6d1537a013fa6e739da23463fdaec3b70137d828e36ace221bd0");
+        } else {
+            panic!("Expected String");
+        }
+    }
+    
+    #[test]
+    fn test_std_crypto_uuid() {
+        let result = eval(r#"
+            import { uuid } from "std/crypto"
+            let id = uuid()
+            len(id)
+        "#).unwrap();
+        // UUID v4 is 36 characters (with hyphens)
+        assert!(matches!(result, Value::Int(36)));
+    }
+    
+    #[test]
+    fn test_std_crypto_random_bytes() {
+        let result = eval(r#"
+            import { random_bytes } from "std/crypto"
+            let bytes = random_bytes(16)
+            len(bytes)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(16)));
+    }
+    
+    #[test]
+    fn test_std_crypto_random_hex() {
+        let result = eval(r#"
+            import { random_hex } from "std/crypto"
+            let hex = random_hex(8)
+            len(hex)
+        "#).unwrap();
+        // 8 bytes = 16 hex characters
+        assert!(matches!(result, Value::Int(16)));
+    }
+    
+    #[test]
+    fn test_std_crypto_hex_encode_decode() {
+        let result = eval(r#"
+            import { hex_encode, hex_decode } from "std/crypto"
+            let hex = hex_encode("hello")
+            match hex_decode(hex) {
+                Ok(bytes) => len(bytes),
+                Err(_) => -1,
+            }
+        "#).unwrap();
+        // "hello" is 5 bytes
+        assert!(matches!(result, Value::Int(5)));
+    }
+    
+    // ==================== std/url tests ====================
+    
+    #[test]
+    fn test_std_url_parse() {
+        let result = eval(r#"
+            import { parse } from "std/url"
+            match parse("https://example.com:8080/path?foo=bar#section") {
+                Ok(url) => url.host,
+                Err(_) => "error",
+            }
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "example.com");
+        } else {
+            panic!("Expected String");
+        }
+    }
+    
+    #[test]
+    fn test_std_url_parse_port() {
+        let result = eval(r#"
+            import { parse } from "std/url"
+            match parse("https://example.com:8080/path") {
+                Ok(url) => url.port,
+                Err(_) => -1,
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(8080)));
+    }
+    
+    #[test]
+    fn test_std_url_parse_query_params() {
+        let result = eval(r#"
+            import { parse } from "std/url"
+            match parse("https://example.com?name=alice&age=30") {
+                Ok(url) => url.params.name,
+                Err(_) => "error",
+            }
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "alice");
+        } else {
+            panic!("Expected String");
+        }
+    }
+    
+    #[test]
+    fn test_std_url_encode_decode() {
+        let result = eval(r#"
+            import { encode_component, decode } from "std/url"
+            let encoded = encode_component("hello world!")
+            match decode(encoded) {
+                Ok(decoded) => decoded,
+                Err(_) => "error",
+            }
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello world!");
+        } else {
+            panic!("Expected String");
+        }
+    }
+    
+    #[test]
+    fn test_std_url_build_query() {
+        let result = eval(r#"
+            import { build_query } from "std/url"
+            let params = map { "name": "alice", "age": "30" }
+            build_query(params)
+        "#).unwrap();
+        if let Value::String(s) = result {
+            // Order may vary, but should contain both params
+            assert!(s.contains("name=alice"));
+            assert!(s.contains("age=30"));
+            assert!(s.contains("&"));
+        } else {
+            panic!("Expected String");
+        }
+    }
+    
+    #[test]
+    fn test_std_url_join() {
+        let result = eval(r#"
+            import { join } from "std/url"
+            join("https://example.com/api", "users/123")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "https://example.com/api/users/123");
+        } else {
+            panic!("Expected String");
+        }
     }
 }

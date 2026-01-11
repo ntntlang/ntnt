@@ -57,6 +57,8 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
   - `std/path`: Path manipulation (join, dirname, basename, extension, resolve, normalize)
   - `std/json`: JSON parsing and stringification (parse, stringify, stringify_pretty)
   - `std/time`: Time operations (now, sleep, elapsed, format_timestamp, duration_secs)
+  - `std/crypto`: Cryptographic functions (sha256, hmac_sha256, uuid, random_bytes, hex_encode)
+  - `std/url`: URL parsing and encoding (parse, encode, decode, build_query, join)
 
 ### Language Runtime (Planned)
 

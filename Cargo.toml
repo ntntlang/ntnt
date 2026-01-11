@@ -1,6 +1,6 @@
 [package]
 name = "intent"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["Intent Language Team"]
 description = "Intent - A programming language designed for AI-driven development"
@@ -24,6 +24,13 @@ colored = "2.0"
 
 # REPL support
 rustyline = "13.0"
+
+# Crypto
+sha2 = "0.10"
+hmac = "0.12"
+uuid = { version = "1.6", features = ["v4"] }
+rand = "0.8"
+hex = "0.4"
 
 [dev-dependencies]
 pretty_assertions = "1.4"

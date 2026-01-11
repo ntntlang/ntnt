@@ -13,7 +13,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "intent")]
 #[command(author = "Intent Language Team")]
-#[command(version = "0.1.4")]
+#[command(version = "0.1.5")]
 #[command(about = "Intent - A programming language for AI-driven development", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -176,6 +176,8 @@ fn print_repl_help() {
     println!("  {}     - std/path: join, dirname, basename, extension, resolve", "Paths".cyan());
     println!("  {}      - std/json: parse, stringify, stringify_pretty", "JSON".cyan());
     println!("  {}      - std/time: now, sleep, elapsed, format_timestamp", "Time".cyan());
+    println!("  {}    - std/crypto: sha256, hmac_sha256, uuid, random_bytes", "Crypto".cyan());
+    println!("  {}       - std/url: parse, encode, decode, build_query, join", "URL".cyan());
     println!();
     println!("{}", "Basic Examples:".yellow().bold());
     println!("  {}           - Variable binding", "let x = 42;".cyan());

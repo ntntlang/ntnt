@@ -30,7 +30,7 @@ This document outlines the implementation plan for Intent, a programming languag
 - [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, etc.)
 - [x] CLI with REPL, run, parse, lex, check commands
 - [x] VS Code extension with syntax highlighting
-- [x] 127 unit tests passing
+- [x] 140 unit tests passing
 - [x] Dual file extensions: `.intent` and `.itn`
 - [x] Algebraic Data Types with enums
 - [x] Option<T> and Result<T, E> built-ins
@@ -40,7 +40,7 @@ This document outlines the implementation plan for Intent, a programming languag
 - [x] Union types
 - [x] Effect annotations foundation
 - [x] Module system with imports/exports
-- [x] Standard library: std/string, std/math, std/collections, std/env, std/fs, std/path, std/json, std/time
+- [x] Standard library: std/string, std/math, std/collections, std/env, std/fs, std/path, std/json, std/time, std/crypto, std/url
 - [x] Traits with default implementations
 - [x] For-in loops and ranges
 - [x] Defer statement
@@ -274,12 +274,12 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 }
 ```
 
-### 5.6 Supporting Libraries ✅ PARTIALLY COMPLETE
+### 5.6 Supporting Libraries ✅ COMPLETE
 
 - [x] `std/json`: parse, stringify, stringify_pretty
 - [x] `std/time`: now, now_millis, now_nanos, sleep, elapsed, format_timestamp, duration_secs, duration_millis
-- [ ] `std/crypto`: sha256, hmac, uuid, random_bytes
-- [ ] `std/url`: parse, encode, decode
+- [x] `std/crypto`: sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode
+- [x] `std/url`: parse, encode, encode_component, decode, build_query, join
 
 **Deliverables:**
 
@@ -287,8 +287,7 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] File system operations
 - [ ] HTTP server and client
 - [ ] PostgreSQL database driver
-- [x] JSON, time utilities
-- [ ] Crypto, URL utilities
+- [x] JSON, time, crypto, URL utilities
 
 ---
 

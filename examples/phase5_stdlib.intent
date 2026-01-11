@@ -1,5 +1,5 @@
 // Phase 5 Standard Library Demo
-// Demonstrates std/fs, std/path, std/json, and std/time modules
+// Demonstrates std/fs, std/path, std/json, std/time, std/crypto, and std/url modules
 
 // =============== std/time ===============
 print("=== Time Module ===")
@@ -234,3 +234,118 @@ match parse(serialized) {
 
 print("")
 print("=== Phase 5 Demo Complete ===")
+
+// =============== std/crypto ===============
+print("")
+print("=== Crypto Module ===")
+
+import { sha256, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode } from "std/crypto"
+
+// SHA-256 hashing
+let hash = sha256("Hello, Intent!")
+print("SHA-256 of 'Hello, Intent!': ")
+print(hash)
+
+// Hash of known value for verification
+let known_hash = sha256("hello")
+print("SHA-256 of 'hello': ")
+print(known_hash)
+
+// HMAC-SHA256
+let hmac = hmac_sha256("secret-key", "message to authenticate")
+print("HMAC-SHA256: ")
+print(hmac)
+
+// Generate UUID
+let id1 = uuid()
+let id2 = uuid()
+print("Generated UUID 1: ")
+print(id1)
+print("Generated UUID 2: ")
+print(id2)
+
+// Random bytes
+let random = random_bytes(8)
+print("8 random bytes: ")
+print(random)
+
+// Random hex
+let random_h = random_hex(16)
+print("16 random bytes as hex: ")
+print(random_h)
+
+// Hex encode/decode roundtrip
+let original_text = "Intent Lang"
+let encoded = hex_encode(original_text)
+print("Hex encoded 'Intent Lang': ")
+print(encoded)
+
+match hex_decode(encoded) {
+    Ok(bytes) => {
+        print("Decoded byte count: ")
+        print(len(bytes))
+    },
+    Err(e) => print("Decode error"),
+}
+
+// =============== std/url ===============
+print("")
+print("=== URL Module ===")
+
+import { parse as parse_url, encode, encode_component, decode, build_query, join as url_join } from "std/url"
+
+// Parse a URL
+let url = "https://user:pass@api.example.com:8080/v1/users?name=alice&active=true#profile"
+match parse_url(url) {
+    Ok(parsed) => {
+        print("Parsed URL components:")
+        print("  Scheme: ")
+        print(parsed.scheme)
+        print("  Host: ")
+        print(parsed.host)
+        print("  Port: ")
+        print(parsed.port)
+        print("  Path: ")
+        print(parsed.path)
+        print("  Username: ")
+        print(parsed.username)
+        print("  Query: ")
+        print(parsed.query)
+        print("  Fragment: ")
+        print(parsed.fragment)
+        print("  Param 'name': ")
+        print(parsed.params.name)
+    },
+    Err(e) => print("Parse error"),
+}
+
+// URL encoding
+let unsafe_string = "hello world & special=chars!"
+let encoded_url = encode_component(unsafe_string)
+print("URL encoded: ")
+print(encoded_url)
+
+match decode(encoded_url) {
+    Ok(decoded) => {
+        print("URL decoded: ")
+        print(decoded)
+    },
+    Err(e) => print("Decode error"),
+}
+
+// Build query string from map
+let query_params = map { "search": "intent lang", "page": "1", "limit": "10" }
+let query_string = build_query(query_params)
+print("Built query string: ")
+print(query_string)
+
+// Join URL parts
+let base = "https://api.example.com/v2"
+let endpoint = "users/123/profile"
+let full_url = url_join(base, endpoint)
+print("Joined URL: ")
+print(full_url)
+
+print("")
+print("=== All Phase 5 Modules Demo Complete ===")
+print("Modules covered: std/time, std/path, std/fs, std/json, std/crypto, std/url")
