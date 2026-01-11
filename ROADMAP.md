@@ -30,7 +30,7 @@ This document outlines the implementation plan for Intent, a programming languag
 - [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, etc.)
 - [x] CLI with REPL, run, parse, lex, check commands
 - [x] VS Code extension with syntax highlighting
-- [x] 110 unit tests passing
+- [x] 127 unit tests passing
 - [x] Dual file extensions: `.intent` and `.itn`
 - [x] Algebraic Data Types with enums
 - [x] Option<T> and Result<T, E> built-ins
@@ -40,11 +40,11 @@ This document outlines the implementation plan for Intent, a programming languag
 - [x] Union types
 - [x] Effect annotations foundation
 - [x] Module system with imports/exports
-- [x] Standard library: std/string, std/math, std/collections, std/env
+- [x] Standard library: std/string, std/math, std/collections, std/env, std/fs, std/path, std/json, std/time
 - [x] Traits with default implementations
 - [x] For-in loops and ranges
 - [x] Defer statement
-- [x] Map literals
+- [x] Map literals with field access (dot notation)
 - [x] String interpolation and raw strings
 
 ---
@@ -212,11 +212,10 @@ let (user, posts) = await all(
 )
 ```
 
-### 5.2 File System I/O
+### 5.2 File System I/O ✅ COMPLETE
 
-- [ ] `std/fs`: read_file, write_file, exists, mkdir, readdir, remove
-- [ ] `std/path`: join, dirname, basename, extension, resolve
-- [ ] Async file operations
+- [x] `std/fs`: read_file, write_file, read_bytes, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size
+- [x] `std/path`: join, dirname, basename, extension, stem, resolve, is_absolute, is_relative, with_extension, normalize
 
 ### 5.3 HTTP Server
 
@@ -275,20 +274,21 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 }
 ```
 
-### 5.6 Supporting Libraries
+### 5.6 Supporting Libraries ✅ PARTIALLY COMPLETE
 
-- [ ] `std/json`: parse, stringify
-- [ ] `std/time`: DateTime, Duration, now, sleep, formatting
+- [x] `std/json`: parse, stringify, stringify_pretty
+- [x] `std/time`: now, now_millis, now_nanos, sleep, elapsed, format_timestamp, duration_secs, duration_millis
 - [ ] `std/crypto`: sha256, hmac, uuid, random_bytes
 - [ ] `std/url`: parse, encode, decode
 
 **Deliverables:**
 
-- Async/await runtime
-- File system operations
-- HTTP server and client
-- PostgreSQL database driver
-- JSON, time, crypto utilities
+- [ ] Async/await runtime
+- [x] File system operations
+- [ ] HTTP server and client
+- [ ] PostgreSQL database driver
+- [x] JSON, time utilities
+- [ ] Crypto, URL utilities
 
 ---
 

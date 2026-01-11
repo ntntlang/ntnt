@@ -302,6 +302,84 @@ pub struct TraitMethodInfo {
     pub has_default: bool,
 }
 
+/// Convert JSON value to Intent Value
+fn json_to_intent_value(json: &serde_json::Value) -> Value {
+    match json {
+        serde_json::Value::Null => Value::Unit,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Float(f)
+            } else {
+                Value::Unit
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Array(arr) => {
+            Value::Array(arr.iter().map(json_to_intent_value).collect())
+        }
+        serde_json::Value::Object(obj) => {
+            let mut map = HashMap::new();
+            for (k, v) in obj {
+                map.insert(k.clone(), json_to_intent_value(v));
+            }
+            Value::Map(map)
+        }
+    }
+}
+
+/// Convert Intent Value to JSON value
+fn intent_value_to_json(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Unit => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
+        Value::Float(f) => {
+            serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null)
+        }
+        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(intent_value_to_json).collect())
+        }
+        Value::Map(map) => {
+            let obj: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), intent_value_to_json(v)))
+                .collect();
+            serde_json::Value::Object(obj)
+        }
+        Value::Struct { fields, .. } => {
+            let obj: serde_json::Map<String, serde_json::Value> = fields
+                .iter()
+                .map(|(k, v)| (k.clone(), intent_value_to_json(v)))
+                .collect();
+            serde_json::Value::Object(obj)
+        }
+        // For other types, convert to string representation
+        _ => serde_json::Value::String(value.to_string()),
+    }
+}
+
+/// Convert days since Unix epoch to year, month, day
+fn days_to_ymd(days: i64) -> (i64, i64, i64) {
+    // Algorithm adapted from Howard Hinnant's date algorithms
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m as i64, d as i64)
+}
+
 impl Interpreter {
     pub fn new() -> Self {
         let env = Rc::new(RefCell::new(Environment::new()));
@@ -886,6 +964,10 @@ impl Interpreter {
         self.init_std_math();
         self.init_std_collections();
         self.init_std_env();
+        self.init_std_fs();
+        self.init_std_path();
+        self.init_std_json();
+        self.init_std_time();
     }
     
     /// std/string module functions
@@ -1442,6 +1524,833 @@ impl Interpreter {
         });
         
         self.loaded_modules.insert("std/env".to_string(), env_module);
+    }
+    
+    /// std/fs module functions - File system operations
+    fn init_std_fs(&mut self) {
+        use std::fs;
+        
+        let mut fs_module: HashMap<String, Value> = HashMap::new();
+        
+        // read_file(path) -> Result<String, Error>
+        fs_module.insert("read_file".to_string(), Value::NativeFunction {
+            name: "read_file".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match fs::read_to_string(path) {
+                            Ok(content) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::String(content)],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("read_file() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // read_bytes(path) -> Result<[Int], Error>
+        fs_module.insert("read_bytes".to_string(), Value::NativeFunction {
+            name: "read_bytes".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match fs::read(path) {
+                            Ok(bytes) => {
+                                let arr: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
+                                Ok(Value::EnumValue {
+                                    enum_name: "Result".to_string(),
+                                    variant: "Ok".to_string(),
+                                    values: vec![Value::Array(arr)],
+                                })
+                            }
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("read_bytes() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // write_file(path, content) -> Result<Unit, Error>
+        fs_module.insert("write_file".to_string(), Value::NativeFunction {
+            name: "write_file".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::String(path), Value::String(content)) => {
+                        match fs::write(path, content) {
+                            Ok(()) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::Unit],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("write_file() requires path and content strings".to_string())),
+                }
+            },
+        });
+        
+        // append_file(path, content) -> Result<Unit, Error>
+        fs_module.insert("append_file".to_string(), Value::NativeFunction {
+            name: "append_file".to_string(),
+            arity: 2,
+            func: |args| {
+                use std::fs::OpenOptions;
+                use std::io::Write;
+                
+                match (&args[0], &args[1]) {
+                    (Value::String(path), Value::String(content)) => {
+                        let result = OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                            .and_then(|mut f| f.write_all(content.as_bytes()));
+                        
+                        match result {
+                            Ok(()) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::Unit],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("append_file() requires path and content strings".to_string())),
+                }
+            },
+        });
+        
+        // exists(path) -> Bool
+        fs_module.insert("exists".to_string(), Value::NativeFunction {
+            name: "exists".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).exists())),
+                    _ => Err(IntentError::TypeError("exists() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // is_file(path) -> Bool
+        fs_module.insert("is_file".to_string(), Value::NativeFunction {
+            name: "is_file".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).is_file())),
+                    _ => Err(IntentError::TypeError("is_file() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // is_dir(path) -> Bool
+        fs_module.insert("is_dir".to_string(), Value::NativeFunction {
+            name: "is_dir".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).is_dir())),
+                    _ => Err(IntentError::TypeError("is_dir() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // mkdir(path) -> Result<Unit, Error>
+        fs_module.insert("mkdir".to_string(), Value::NativeFunction {
+            name: "mkdir".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match fs::create_dir(path) {
+                            Ok(()) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::Unit],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("mkdir() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // mkdir_all(path) -> Result<Unit, Error> - Creates dir and all parents
+        fs_module.insert("mkdir_all".to_string(), Value::NativeFunction {
+            name: "mkdir_all".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match fs::create_dir_all(path) {
+                            Ok(()) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::Unit],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("mkdir_all() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // readdir(path) -> Result<[String], Error>
+        fs_module.insert("readdir".to_string(), Value::NativeFunction {
+            name: "readdir".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match fs::read_dir(path) {
+                            Ok(entries) => {
+                                let mut files: Vec<Value> = Vec::new();
+                                for entry in entries {
+                                    if let Ok(e) = entry {
+                                        files.push(Value::String(e.path().to_string_lossy().to_string()));
+                                    }
+                                }
+                                Ok(Value::EnumValue {
+                                    enum_name: "Result".to_string(),
+                                    variant: "Ok".to_string(),
+                                    values: vec![Value::Array(files)],
+                                })
+                            }
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("readdir() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // remove(path) -> Result<Unit, Error> - Removes file
+        fs_module.insert("remove".to_string(), Value::NativeFunction {
+            name: "remove".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match fs::remove_file(path) {
+                            Ok(()) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::Unit],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("remove() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // remove_dir(path) -> Result<Unit, Error> - Removes empty directory
+        fs_module.insert("remove_dir".to_string(), Value::NativeFunction {
+            name: "remove_dir".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match fs::remove_dir(path) {
+                            Ok(()) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::Unit],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("remove_dir() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // remove_dir_all(path) -> Result<Unit, Error> - Removes directory and contents
+        fs_module.insert("remove_dir_all".to_string(), Value::NativeFunction {
+            name: "remove_dir_all".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match fs::remove_dir_all(path) {
+                            Ok(()) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::Unit],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("remove_dir_all() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // rename(from, to) -> Result<Unit, Error>
+        fs_module.insert("rename".to_string(), Value::NativeFunction {
+            name: "rename".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::String(from), Value::String(to)) => {
+                        match fs::rename(from, to) {
+                            Ok(()) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::Unit],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("rename() requires two string paths".to_string())),
+                }
+            },
+        });
+        
+        // copy(from, to) -> Result<Int, Error> - Returns bytes copied
+        fs_module.insert("copy".to_string(), Value::NativeFunction {
+            name: "copy".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::String(from), Value::String(to)) => {
+                        match fs::copy(from, to) {
+                            Ok(bytes) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::Int(bytes as i64)],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("copy() requires two string paths".to_string())),
+                }
+            },
+        });
+        
+        // file_size(path) -> Result<Int, Error>
+        fs_module.insert("file_size".to_string(), Value::NativeFunction {
+            name: "file_size".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match fs::metadata(path) {
+                            Ok(meta) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::Int(meta.len() as i64)],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("file_size() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        self.loaded_modules.insert("std/fs".to_string(), fs_module);
+    }
+    
+    /// std/path module functions - Path manipulation utilities
+    fn init_std_path(&mut self) {
+        use std::path::{Path, PathBuf};
+        
+        let mut path_module: HashMap<String, Value> = HashMap::new();
+        
+        // join(parts...) -> String - Join path components (takes array)
+        path_module.insert("join".to_string(), Value::NativeFunction {
+            name: "join".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Array(parts) => {
+                        let mut path = PathBuf::new();
+                        for part in parts {
+                            match part {
+                                Value::String(s) => path.push(s),
+                                _ => return Err(IntentError::TypeError("join() requires array of strings".to_string())),
+                            }
+                        }
+                        Ok(Value::String(path.to_string_lossy().to_string()))
+                    }
+                    _ => Err(IntentError::TypeError("join() requires an array of path parts".to_string())),
+                }
+            },
+        });
+        
+        // dirname(path) -> Option<String>
+        path_module.insert("dirname".to_string(), Value::NativeFunction {
+            name: "dirname".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match Path::new(path).parent() {
+                            Some(p) => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "Some".to_string(),
+                                values: vec![Value::String(p.to_string_lossy().to_string())],
+                            }),
+                            None => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                values: vec![],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("dirname() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // basename(path) -> Option<String>
+        path_module.insert("basename".to_string(), Value::NativeFunction {
+            name: "basename".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match Path::new(path).file_name() {
+                            Some(name) => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "Some".to_string(),
+                                values: vec![Value::String(name.to_string_lossy().to_string())],
+                            }),
+                            None => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                values: vec![],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("basename() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // extension(path) -> Option<String>
+        path_module.insert("extension".to_string(), Value::NativeFunction {
+            name: "extension".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match Path::new(path).extension() {
+                            Some(ext) => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "Some".to_string(),
+                                values: vec![Value::String(ext.to_string_lossy().to_string())],
+                            }),
+                            None => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                values: vec![],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("extension() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // stem(path) -> Option<String> - Filename without extension
+        path_module.insert("stem".to_string(), Value::NativeFunction {
+            name: "stem".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match Path::new(path).file_stem() {
+                            Some(stem) => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "Some".to_string(),
+                                values: vec![Value::String(stem.to_string_lossy().to_string())],
+                            }),
+                            None => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                values: vec![],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("stem() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // resolve(path) -> Result<String, Error> - Absolute path
+        path_module.insert("resolve".to_string(), Value::NativeFunction {
+            name: "resolve".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        match std::fs::canonicalize(path) {
+                            Ok(abs) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::String(abs.to_string_lossy().to_string())],
+                            }),
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("resolve() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // is_absolute(path) -> Bool
+        path_module.insert("is_absolute".to_string(), Value::NativeFunction {
+            name: "is_absolute".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => Ok(Value::Bool(Path::new(path).is_absolute())),
+                    _ => Err(IntentError::TypeError("is_absolute() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // is_relative(path) -> Bool
+        path_module.insert("is_relative".to_string(), Value::NativeFunction {
+            name: "is_relative".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => Ok(Value::Bool(Path::new(path).is_relative())),
+                    _ => Err(IntentError::TypeError("is_relative() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        // with_extension(path, ext) -> String
+        path_module.insert("with_extension".to_string(), Value::NativeFunction {
+            name: "with_extension".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::String(path), Value::String(ext)) => {
+                        let new_path = Path::new(path).with_extension(ext);
+                        Ok(Value::String(new_path.to_string_lossy().to_string()))
+                    }
+                    _ => Err(IntentError::TypeError("with_extension() requires two strings".to_string())),
+                }
+            },
+        });
+        
+        // normalize(path) -> String - Cleans up .. and . components
+        path_module.insert("normalize".to_string(), Value::NativeFunction {
+            name: "normalize".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(path) => {
+                        let p = Path::new(path);
+                        let mut normalized = PathBuf::new();
+                        for component in p.components() {
+                            use std::path::Component;
+                            match component {
+                                Component::ParentDir => {
+                                    if !normalized.pop() {
+                                        normalized.push("..");
+                                    }
+                                }
+                                Component::CurDir => {}
+                                c => normalized.push(c.as_os_str()),
+                            }
+                        }
+                        Ok(Value::String(normalized.to_string_lossy().to_string()))
+                    }
+                    _ => Err(IntentError::TypeError("normalize() requires a string path".to_string())),
+                }
+            },
+        });
+        
+        self.loaded_modules.insert("std/path".to_string(), path_module);
+    }
+    
+    /// std/json module functions - JSON parsing and stringification
+    fn init_std_json(&mut self) {
+        let mut json_module: HashMap<String, Value> = HashMap::new();
+        
+        // parse(json_str) -> Result<Value, Error>
+        json_module.insert("parse".to_string(), Value::NativeFunction {
+            name: "parse".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(json_str) => {
+                        match serde_json::from_str::<serde_json::Value>(json_str) {
+                            Ok(json_val) => {
+                                let intent_val = json_to_intent_value(&json_val);
+                                Ok(Value::EnumValue {
+                                    enum_name: "Result".to_string(),
+                                    variant: "Ok".to_string(),
+                                    values: vec![intent_val],
+                                })
+                            }
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(e.to_string())],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("parse() requires a JSON string".to_string())),
+                }
+            },
+        });
+        
+        // stringify(value) -> String
+        json_module.insert("stringify".to_string(), Value::NativeFunction {
+            name: "stringify".to_string(),
+            arity: 1,
+            func: |args| {
+                let json_val = intent_value_to_json(&args[0]);
+                Ok(Value::String(json_val.to_string()))
+            },
+        });
+        
+        // stringify_pretty(value) -> String - With indentation
+        json_module.insert("stringify_pretty".to_string(), Value::NativeFunction {
+            name: "stringify_pretty".to_string(),
+            arity: 1,
+            func: |args| {
+                let json_val = intent_value_to_json(&args[0]);
+                match serde_json::to_string_pretty(&json_val) {
+                    Ok(s) => Ok(Value::String(s)),
+                    Err(e) => Ok(Value::String(format!("{{\"error\": \"{}\"}}", e))),
+                }
+            },
+        });
+        
+        self.loaded_modules.insert("std/json".to_string(), json_module);
+    }
+    
+    /// std/time module functions - Time and date operations
+    fn init_std_time(&mut self) {
+        use std::time::{SystemTime, Duration, UNIX_EPOCH};
+        
+        let mut time_module: HashMap<String, Value> = HashMap::new();
+        
+        // now() -> Int - Current Unix timestamp in seconds
+        time_module.insert("now".to_string(), Value::NativeFunction {
+            name: "now".to_string(),
+            arity: 0,
+            func: |_args| {
+                match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(duration) => Ok(Value::Int(duration.as_secs() as i64)),
+                    Err(_) => Err(IntentError::RuntimeError("System time before Unix epoch".to_string())),
+                }
+            },
+        });
+        
+        // now_millis() -> Int - Current Unix timestamp in milliseconds
+        time_module.insert("now_millis".to_string(), Value::NativeFunction {
+            name: "now_millis".to_string(),
+            arity: 0,
+            func: |_args| {
+                match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(duration) => Ok(Value::Int(duration.as_millis() as i64)),
+                    Err(_) => Err(IntentError::RuntimeError("System time before Unix epoch".to_string())),
+                }
+            },
+        });
+        
+        // now_nanos() -> Int - Current Unix timestamp in nanoseconds
+        time_module.insert("now_nanos".to_string(), Value::NativeFunction {
+            name: "now_nanos".to_string(),
+            arity: 0,
+            func: |_args| {
+                match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(duration) => Ok(Value::Int(duration.as_nanos() as i64)),
+                    Err(_) => Err(IntentError::RuntimeError("System time before Unix epoch".to_string())),
+                }
+            },
+        });
+        
+        // sleep(millis) -> Unit - Sleep for milliseconds
+        time_module.insert("sleep".to_string(), Value::NativeFunction {
+            name: "sleep".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Int(ms) => {
+                        if *ms < 0 {
+                            return Err(IntentError::RuntimeError("sleep() requires non-negative milliseconds".to_string()));
+                        }
+                        std::thread::sleep(Duration::from_millis(*ms as u64));
+                        Ok(Value::Unit)
+                    }
+                    _ => Err(IntentError::TypeError("sleep() requires an integer (milliseconds)".to_string())),
+                }
+            },
+        });
+        
+        // elapsed(start_millis) -> Int - Milliseconds since start
+        time_module.insert("elapsed".to_string(), Value::NativeFunction {
+            name: "elapsed".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Int(start) => {
+                        match SystemTime::now().duration_since(UNIX_EPOCH) {
+                            Ok(duration) => {
+                                let now = duration.as_millis() as i64;
+                                Ok(Value::Int(now - start))
+                            }
+                            Err(_) => Err(IntentError::RuntimeError("System time error".to_string())),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("elapsed() requires a start timestamp".to_string())),
+                }
+            },
+        });
+        
+        // format_timestamp(timestamp, format) -> String
+        // Simple format: %Y-%m-%d %H:%M:%S
+        time_module.insert("format_timestamp".to_string(), Value::NativeFunction {
+            name: "format_timestamp".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::Int(timestamp), Value::String(format)) => {
+                        // Convert Unix timestamp to broken-down time
+                        let ts = *timestamp;
+                        
+                        // Calculate date/time components (basic UTC conversion)
+                        let days_since_epoch = ts / 86400;
+                        let time_of_day = ts % 86400;
+                        
+                        let hours = time_of_day / 3600;
+                        let minutes = (time_of_day % 3600) / 60;
+                        let seconds = time_of_day % 60;
+                        
+                        // Calculate year, month, day from days since epoch
+                        // This is a simplified algorithm
+                        let (year, month, day) = days_to_ymd(days_since_epoch);
+                        
+                        let result = format
+                            .replace("%Y", &format!("{:04}", year))
+                            .replace("%m", &format!("{:02}", month))
+                            .replace("%d", &format!("{:02}", day))
+                            .replace("%H", &format!("{:02}", hours))
+                            .replace("%M", &format!("{:02}", minutes))
+                            .replace("%S", &format!("{:02}", seconds));
+                        
+                        Ok(Value::String(result))
+                    }
+                    _ => Err(IntentError::TypeError("format_timestamp() requires int and format string".to_string())),
+                }
+            },
+        });
+        
+        // duration_secs(seconds) -> Map { secs, millis, nanos }
+        time_module.insert("duration_secs".to_string(), Value::NativeFunction {
+            name: "duration_secs".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Int(secs) => {
+                        let mut map = HashMap::new();
+                        map.insert("secs".to_string(), Value::Int(*secs));
+                        map.insert("millis".to_string(), Value::Int(*secs * 1000));
+                        map.insert("nanos".to_string(), Value::Int(*secs * 1_000_000_000));
+                        Ok(Value::Map(map))
+                    }
+                    _ => Err(IntentError::TypeError("duration_secs() requires an integer".to_string())),
+                }
+            },
+        });
+        
+        // duration_millis(millis) -> Map { secs, millis, nanos }
+        time_module.insert("duration_millis".to_string(), Value::NativeFunction {
+            name: "duration_millis".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Int(ms) => {
+                        let mut map = HashMap::new();
+                        map.insert("secs".to_string(), Value::Int(*ms / 1000));
+                        map.insert("millis".to_string(), Value::Int(*ms));
+                        map.insert("nanos".to_string(), Value::Int(*ms * 1_000_000));
+                        Ok(Value::Map(map))
+                    }
+                    _ => Err(IntentError::TypeError("duration_millis() requires an integer".to_string())),
+                }
+            },
+        });
+        
+        self.loaded_modules.insert("std/time".to_string(), time_module);
     }
     
     /// Handle import statement
@@ -2055,6 +2964,11 @@ impl Interpreter {
                     Value::Struct { fields, .. } => {
                         fields.get(field).cloned().ok_or_else(|| {
                             IntentError::RuntimeError(format!("Unknown field: {}", field))
+                        })
+                    }
+                    Value::Map(map) => {
+                        map.get(field).cloned().ok_or_else(|| {
+                            IntentError::RuntimeError(format!("Unknown key: {}", field))
                         })
                     }
                     _ => Err(IntentError::TypeError(
@@ -4342,5 +5256,278 @@ mod tests {
         } else {
             panic!("Expected Int(42), got {:?}", result);
         }
+    }
+    
+    // ==================== std/fs tests ====================
+    
+    #[test]
+    fn test_std_fs_write_and_read_file() {
+        let result = eval(r#"
+            import { write_file, read_file, remove } from "std/fs"
+            
+            let path = "/tmp/intent_test_file.txt"
+            let content = "Hello, Intent!"
+            
+            // Write file
+            let write_result = write_file(path, content)
+            
+            // Read file
+            let read_result = read_file(path)
+            
+            // Cleanup
+            remove(path)
+            
+            // Return the read content (extracting from Result)
+            match read_result {
+                Ok(c) => c,
+                Err(e) => e,
+            }
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "Hello, Intent!");
+        } else {
+            panic!("Expected String, got {:?}", result);
+        }
+    }
+    
+    #[test]
+    fn test_std_fs_exists() {
+        let result = eval(r#"
+            import { exists } from "std/fs"
+            exists("/tmp")
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_fs_is_file_and_is_dir() {
+        let result = eval(r#"
+            import { is_dir, is_file } from "std/fs"
+            [is_dir("/tmp"), is_file("/tmp")]
+        "#).unwrap();
+        if let Value::Array(arr) = result {
+            assert!(matches!(&arr[0], Value::Bool(true)));
+            assert!(matches!(&arr[1], Value::Bool(false)));
+        } else {
+            panic!("Expected Array");
+        }
+    }
+    
+    #[test]
+    fn test_std_fs_mkdir_and_remove() {
+        // Use a unique test directory name
+        let result = eval(r#"
+            import { mkdir, remove_dir, exists } from "std/fs"
+            import { now_millis } from "std/time"
+            
+            let test_dir = "/tmp/intent_test_dir_mkdir"
+            
+            // Ensure clean state
+            if exists(test_dir) {
+                remove_dir(test_dir)
+            }
+            
+            mkdir(test_dir)
+            let existed = exists(test_dir)
+            remove_dir(test_dir)
+            let exists_after = exists(test_dir)
+            existed && !exists_after
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    // ==================== std/path tests ====================
+    
+    #[test]
+    fn test_std_path_join() {
+        let result = eval(r#"
+            import { join } from "std/path"
+            join(["home", "user", "documents"])
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert!(s.contains("home") && s.contains("user") && s.contains("documents"));
+        } else {
+            panic!("Expected String");
+        }
+    }
+    
+    #[test]
+    fn test_std_path_dirname_basename() {
+        // Test dirname
+        let result = eval(r#"
+            import { dirname } from "std/path"
+            match dirname("/home/user/file.txt") {
+                Some(d) => d,
+                None => "",
+            }
+        "#).unwrap();
+        if let Value::String(dir) = result {
+            assert_eq!(dir, "/home/user");
+        } else {
+            panic!("Expected String for dirname");
+        }
+        
+        // Test basename
+        let result2 = eval(r#"
+            import { basename } from "std/path"
+            match basename("/home/user/file.txt") {
+                Some(b) => b,
+                None => "",
+            }
+        "#).unwrap();
+        if let Value::String(base) = result2 {
+            assert_eq!(base, "file.txt");
+        } else {
+            panic!("Expected String for basename");
+        }
+    }
+    
+    #[test]
+    fn test_std_path_extension() {
+        let result = eval(r#"
+            import { extension } from "std/path"
+            match extension("/home/user/file.txt") {
+                Some(e) => e,
+                None => "",
+            }
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "txt");
+        } else {
+            panic!("Expected String");
+        }
+    }
+    
+    #[test]
+    fn test_std_path_is_absolute() {
+        let result = eval(r#"
+            import { is_absolute, is_relative } from "std/path"
+            [is_absolute("/home/user"), is_relative("./file.txt")]
+        "#).unwrap();
+        if let Value::Array(arr) = result {
+            assert!(matches!(&arr[0], Value::Bool(true)));
+            assert!(matches!(&arr[1], Value::Bool(true)));
+        } else {
+            panic!("Expected Array");
+        }
+    }
+    
+    // ==================== std/json tests ====================
+    
+    #[test]
+    fn test_std_json_parse_simple() {
+        // Test JSON parsing - use raw string for JSON
+        let result = eval(r##"
+            import { parse } from "std/json"
+            let json_str = r#"{"name": "Alice", "age": 30}"#
+            match parse(json_str) {
+                Ok(obj) => obj.name,
+                Err(e) => e,
+            }
+        "##).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "Alice");
+        } else {
+            panic!("Expected String, got {:?}", result);
+        }
+    }
+    
+    #[test]
+    fn test_std_json_parse_array() {
+        let result = eval(r#"
+            import { parse } from "std/json"
+            match parse("[1, 2, 3]") {
+                Ok(arr) => len(arr),
+                Err(e) => 0,
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(3)));
+    }
+    
+    #[test]
+    fn test_std_json_stringify() {
+        let result = eval(r#"
+            import { stringify } from "std/json"
+            let data = map { "name": "Bob", "score": 100 }
+            stringify(data)
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert!(s.contains("Bob") && s.contains("100"));
+        } else {
+            panic!("Expected String");
+        }
+    }
+    
+    #[test]
+    fn test_std_json_roundtrip() {
+        let result = eval(r#"
+            import { parse, stringify } from "std/json"
+            let original = map { "x": 1, "y": 2 }
+            let json_str = stringify(original)
+            match parse(json_str) {
+                Ok(parsed) => parsed.x,
+                Err(_) => -1,
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(1)));
+    }
+    
+    // ==================== std/time tests ====================
+    
+    #[test]
+    fn test_std_time_now() {
+        let result = eval(r#"
+            import { now } from "std/time"
+            let ts = now()
+            ts > 0
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_time_now_millis() {
+        let result = eval(r#"
+            import { now_millis } from "std/time"
+            let ts = now_millis()
+            ts > 1000000000000  // Should be after year 2001
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_time_elapsed() {
+        let result = eval(r#"
+            import { now_millis, elapsed, sleep } from "std/time"
+            let start = now_millis()
+            sleep(10)
+            let e = elapsed(start)
+            e >= 10
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_time_format_timestamp() {
+        let result = eval(r#"
+            import { format_timestamp } from "std/time"
+            // Unix timestamp for 2024-01-15 12:30:45 UTC
+            let ts = 1705322445
+            format_timestamp(ts, "%Y-%m-%d")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "2024-01-15");
+        } else {
+            panic!("Expected String, got {:?}", result);
+        }
+    }
+    
+    #[test]
+    fn test_std_time_duration() {
+        let result = eval(r#"
+            import { duration_secs } from "std/time"
+            let d = duration_secs(5)
+            d.millis
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(5000)));
     }
 }

@@ -26,7 +26,7 @@ Intent is a revolutionary programming language and ecosystem designed specifical
 - File-based modules with `import`/`export`
 - Module aliasing: `import "std/math" as math`
 - Selective imports: `import { split, join } from "std/string"`
-- Standard library: `std/string`, `std/math`, `std/collections`, `std/env`
+- Standard library: `std/string`, `std/math`, `std/collections`, `std/env`, `std/fs`, `std/path`, `std/json`, `std/time`
 
 **Phase 4: Traits & Essential Features** ✅ Complete
 
@@ -40,9 +40,16 @@ Intent is a revolutionary programming language and ecosystem designed specifical
 - String interpolation: `"Hello, {name}!"`
 - Raw strings: `r"no \n escapes"` and `r#"can use "quotes""#`
 
-**110 passing tests** | **Version 0.1.3**
+**Phase 5: File I/O & Utilities** 🚧 In Progress
 
-**Next Up**: IO &Tic-Tac-Toe Demo (Phase 5)
+- File system: `std/fs` (read_file, write_file, exists, mkdir, remove, etc.)
+- Path utilities: `std/path` (join, dirname, basename, extension, resolve)
+- JSON parsing: `std/json` (parse, stringify)
+- Time operations: `std/time` (now, sleep, format_timestamp)
+
+**127 passing tests** | **Version 0.1.3**
+
+**Next Up**: HTTP Server (Phase 5 continued)
 
 See [ROADMAP.md](ROADMAP.md) for the full 10-phase implementation plan.
 
@@ -539,6 +546,135 @@ match get_env("HOME") {
     Some(home) => print("Home: " + home),
     None => print("HOME not set")
 }
+```
+
+**std/fs** - File system operations
+
+```intent
+import { read_file, write_file, append_file, exists, is_file, is_dir } from "std/fs"
+import { mkdir, mkdir_all, remove, remove_dir, readdir, rename, copy } from "std/fs"
+import { file_size, read_bytes } from "std/fs"
+
+// Read and write files
+match write_file("/tmp/test.txt", "Hello, Intent!") {
+    Ok(_) => print("File written"),
+    Err(e) => print("Error: " + e)
+}
+
+match read_file("/tmp/test.txt") {
+    Ok(content) => print(content),
+    Err(e) => print("Error: " + e)
+}
+
+// Check paths
+if exists("/tmp") && is_dir("/tmp") {
+    print("/tmp exists and is a directory")
+}
+
+// Create directories
+mkdir_all("/tmp/intent/nested/dirs")
+
+// List directory contents
+match readdir("/tmp") {
+    Ok(files) => {
+        for file in files {
+            print(file)
+        }
+    },
+    Err(e) => print("Error: " + e)
+}
+```
+
+**std/path** - Path manipulation utilities
+
+```intent
+import { join, dirname, basename, extension, stem, resolve } from "std/path"
+import { is_absolute, is_relative, with_extension, normalize } from "std/path"
+
+let path = "/home/user/documents/report.pdf"
+
+// Decompose path
+match dirname(path) {
+    Some(d) => print(d),    // "/home/user/documents"
+    None => print("no dir")
+}
+
+match basename(path) {
+    Some(b) => print(b),    // "report.pdf"
+    None => print("no base")
+}
+
+match extension(path) {
+    Some(e) => print(e),    // "pdf"
+    None => print("no ext")
+}
+
+// Join paths
+let full = join(["home", "user", "file.txt"])  // "home/user/file.txt"
+
+// Change extension
+let txt_path = with_extension(path, "txt")     // "/home/user/documents/report.txt"
+
+// Check absolute/relative
+print(is_absolute("/usr/bin"))  // true
+print(is_relative("./file"))    // true
+
+// Normalize messy paths
+let clean = normalize("/home/user/../user/./docs")  // "/home/user/docs"
+```
+
+**std/json** - JSON parsing and stringification
+
+```intent
+import { parse, stringify, stringify_pretty } from "std/json"
+
+// Parse JSON string
+let json_str = r#"{"name": "Alice", "age": 30}"#
+match parse(json_str) {
+    Ok(data) => {
+        print(data.name)    // "Alice"
+        print(data.age)     // 30
+    },
+    Err(e) => print("Parse error: " + e)
+}
+
+// Stringify to JSON
+let user = map { "name": "Bob", "active": true }
+let json = stringify(user)           // {"active":true,"name":"Bob"}
+let pretty = stringify_pretty(user)  // Indented JSON output
+
+// Arrays
+match parse("[1, 2, 3]") {
+    Ok(arr) => print(len(arr)),  // 3
+    Err(e) => print("Error")
+}
+```
+
+**std/time** - Time and date operations
+
+```intent
+import { now, now_millis, now_nanos, sleep, elapsed } from "std/time"
+import { format_timestamp, duration_secs, duration_millis } from "std/time"
+
+// Get current timestamp
+let ts = now()              // Unix seconds
+let ts_ms = now_millis()    // Unix milliseconds
+let ts_ns = now_nanos()     // Unix nanoseconds
+
+// Format timestamps
+let formatted = format_timestamp(ts, "%Y-%m-%d %H:%M:%S")
+print(formatted)            // "2024-01-15 12:30:45"
+
+// Sleep and measure elapsed time
+let start = now_millis()
+sleep(100)                  // Sleep for 100ms
+let elapsed_ms = elapsed(start)
+print(elapsed_ms)           // ~100
+
+// Duration conversions
+let d = duration_secs(60)
+print(d.millis)             // 60000
+print(d.nanos)              // 60000000000
 ```
 
 ## Editor Support

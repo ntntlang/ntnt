@@ -1,0 +1,236 @@
+// Phase 5 Standard Library Demo
+// Demonstrates std/fs, std/path, std/json, and std/time modules
+
+// =============== std/time ===============
+print("=== Time Module ===")
+
+import { now, now_millis, sleep, format_timestamp, elapsed, duration_secs } from "std/time"
+
+// Current timestamp
+let timestamp = now()
+print("Current Unix timestamp: ")
+print(timestamp)
+
+let timestamp_ms = now_millis()
+print("Current timestamp (ms): ")
+print(timestamp_ms)
+
+// Format a timestamp
+let formatted = format_timestamp(timestamp, "%Y-%m-%d %H:%M:%S")
+print("Formatted time: ")
+print(formatted)
+
+// Duration conversion
+let duration = duration_secs(3600)
+print("1 hour in milliseconds: ")
+print(duration.millis)
+
+// Sleep and elapsed time
+print("Sleeping for 50ms...")
+let start = now_millis()
+sleep(50)
+let elapsed_time = elapsed(start)
+print("Elapsed time (ms): ")
+print(elapsed_time)
+
+// =============== std/path ===============
+print("")
+print("=== Path Module ===")
+
+import { join, dirname, basename, extension, stem, is_absolute, with_extension, normalize } from "std/path"
+
+let file_path = "/home/user/documents/report.pdf"
+
+let dir = match dirname(file_path) {
+    Some(d) => d,
+    None => "none",
+}
+print("Directory: ")
+print(dir)
+
+let base = match basename(file_path) {
+    Some(b) => b,
+    None => "none",
+}
+print("Basename: ")
+print(base)
+
+let ext = match extension(file_path) {
+    Some(e) => e,
+    None => "none",
+}
+print("Extension: ")
+print(ext)
+
+let file_stem = match stem(file_path) {
+    Some(s) => s,
+    None => "none",
+}
+print("File stem: ")
+print(file_stem)
+
+// Join paths
+let joined = join(["home", "user", "documents"])
+print("Joined path: ")
+print(joined)
+
+// Path checks
+print("Is absolute: ")
+print(is_absolute(file_path))
+
+print("Is relative ./file.txt: ")
+print(!is_absolute("./file.txt"))
+
+// Change extension
+let new_ext = with_extension(file_path, "txt")
+print("With .txt extension: ")
+print(new_ext)
+
+// Normalize path
+let messy_path = normalize("/home/user/../user/./documents")
+print("Normalized: ")
+print(messy_path)
+
+// =============== std/fs ===============
+print("")
+print("=== File System Module ===")
+
+import { read_file, write_file, append_file, exists, is_file, is_dir, mkdir, remove, remove_dir, file_size, readdir } from "std/fs"
+
+// Check if directory exists
+print("Does /tmp exist? ")
+print(exists("/tmp"))
+
+print("Is /tmp a directory? ")
+print(is_dir("/tmp"))
+
+// Create a test file
+let test_path = "/tmp/intent_demo_file.txt"
+let content = "Hello from Intent!\nThis is a test file."
+
+let write_result = write_file(test_path, content)
+match write_result {
+    Ok(_) => print("File written successfully"),
+    Err(e) => print("Write error"),
+}
+
+// Check file exists
+print("File exists: ")
+print(exists(test_path))
+
+// Get file size
+match file_size(test_path) {
+    Ok(size) => {
+        print("File size (bytes): ")
+        print(size)
+    },
+    Err(e) => print("Could not get file size"),
+}
+
+// Read file back
+match read_file(test_path) {
+    Ok(data) => {
+        print("File content:")
+        print(data)
+    },
+    Err(e) => print("Read error"),
+}
+
+// Append to file
+append_file(test_path, "\nAppended line!")
+
+// Read again to see appended content
+match read_file(test_path) {
+    Ok(data) => {
+        print("After append:")
+        print(data)
+    },
+    Err(e) => print("Read error"),
+}
+
+// Create a directory
+let test_dir = "/tmp/intent_demo_dir"
+mkdir(test_dir)
+print("Created directory: ")
+print(test_dir)
+
+// List directory contents (limit to /tmp to avoid too much output)
+print("Some files in /tmp:")
+match readdir("/tmp") {
+    Ok(files) => {
+        // Just show first 5 files
+        let count = 0
+        for file in files {
+            if count < 5 {
+                print(file)
+                count = count + 1
+            }
+        }
+    },
+    Err(e) => print("Could not read directory"),
+}
+
+// Cleanup
+remove(test_path)
+remove_dir(test_dir)
+print("Cleaned up test files")
+
+// =============== std/json ===============
+print("")
+print("=== JSON Module ===")
+
+import { parse, stringify, stringify_pretty } from "std/json"
+
+// Create a data structure
+let user_data = map {
+    "name": "Alice",
+    "age": 30,
+    "active": true
+}
+
+// Stringify to JSON
+let json_str = stringify(user_data)
+print("JSON string:")
+print(json_str)
+
+// Pretty print
+let pretty_json = stringify_pretty(user_data)
+print("Pretty JSON:")
+print(pretty_json)
+
+// Parse JSON string
+let json_to_parse = r#"{"city": "New York", "population": 8336817}"#
+match parse(json_to_parse) {
+    Ok(data) => {
+        print("Parsed city: ")
+        print(data.city)
+        print("Parsed population: ")
+        print(data.population)
+    },
+    Err(e) => print("Parse error"),
+}
+
+// Parse array
+match parse("[1, 2, 3, 4, 5]") {
+    Ok(arr) => {
+        print("Parsed array length: ")
+        print(len(arr))
+    },
+    Err(e) => print("Parse error"),
+}
+
+// Roundtrip test
+let original = map { "x": 100, "y": 200 }
+let serialized = stringify(original)
+match parse(serialized) {
+    Ok(restored) => {
+        print("Roundtrip x: ")
+        print(restored.x)
+        print("Roundtrip y: ")
+        print(restored.y)
+    },
+    Err(_) => print("Roundtrip failed"),
+}
+
+print("")
+print("=== Phase 5 Demo Complete ===")

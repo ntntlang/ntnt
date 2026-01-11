@@ -48,6 +48,15 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 - **Defer Stack**: LIFO execution of deferred expressions on scope exit
 - **Built-in Functions**: Math (`abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `sign`, `clamp`) and I/O (`print`, `len`)
 - **Built-in Types**: Arrays, Maps, Ranges, Option, Result
+- **Standard Library Modules**:
+  - `std/string`: String manipulation (split, join, trim, replace, contains, etc.)
+  - `std/math`: Trigonometry and logarithms (sin, cos, tan, log, exp, etc.) with PI, E constants
+  - `std/collections`: Array utilities (push, pop, first, last, reverse, slice, concat)
+  - `std/env`: Environment access (get_env, args, cwd)
+  - `std/fs`: File system operations (read_file, write_file, exists, mkdir, readdir, remove)
+  - `std/path`: Path manipulation (join, dirname, basename, extension, resolve, normalize)
+  - `std/json`: JSON parsing and stringification (parse, stringify, stringify_pretty)
+  - `std/time`: Time operations (now, sleep, elapsed, format_timestamp, duration_secs)
 
 ### Language Runtime (Planned)
 

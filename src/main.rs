@@ -13,7 +13,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "intent")]
 #[command(author = "Intent Language Team")]
-#[command(version = "0.1.3")]
+#[command(version = "0.1.4")]
 #[command(about = "Intent - A programming language for AI-driven development", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -82,7 +82,7 @@ fn main() {
 }
 
 fn run_repl() -> anyhow::Result<()> {
-    println!("{}", "Intent Programming Language v0.1.3".green().bold());
+    println!("{}", "Intent Programming Language v0.1.4".green().bold());
     println!("Type {} for help, {} to exit\n", ":help".cyan(), ":quit".cyan());
 
     let mut rl = DefaultEditor::new()?;
@@ -172,6 +172,10 @@ fn print_repl_help() {
     println!("  {}   - std/math: sin, cos, tan, log, exp, PI, E", "Math".cyan());
     println!("  {} - std/collections: push, pop, first, last, reverse, slice", "Collections".cyan());
     println!("  {}    - std/env: get_env, args, cwd", "Environment".cyan());
+    println!("  {}     - std/fs: read_file, write_file, exists, mkdir, remove", "Files".cyan());
+    println!("  {}     - std/path: join, dirname, basename, extension, resolve", "Paths".cyan());
+    println!("  {}      - std/json: parse, stringify, stringify_pretty", "JSON".cyan());
+    println!("  {}      - std/time: now, sleep, elapsed, format_timestamp", "Time".cyan());
     println!();
     println!("{}", "Basic Examples:".yellow().bold());
     println!("  {}           - Variable binding", "let x = 42;".cyan());
