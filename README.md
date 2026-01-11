@@ -28,11 +28,21 @@ Intent is a revolutionary programming language and ecosystem designed specifical
 - Selective imports: `import { split, join } from "std/string"`
 - Standard library: `std/string`, `std/math`, `std/collections`, `std/env`
 
-**85 passing tests** | **Version 0.1.2**
+**Phase 4: Traits & Essential Features** ✅ Complete
 
-**Next Up**: Traits & Interfaces (Phase 4)
+- Trait declarations with optional default implementations
+- `impl Trait for Type` syntax for trait implementations
+- `for...in` loops for iterating over arrays, ranges, strings, and maps
+- `defer` statement for cleanup code that runs on scope exit
+- Range expressions: `0..10` (exclusive) and `0..=10` (inclusive)
+- Map literals: `map { "key": value }`
+- String interpolation: `"Hello, {name}!"`
 
-See [ROADMAP.md](ROADMAP.md) for the full 13-phase implementation plan.
+**103 passing tests** | **Version 0.1.3**
+
+**Next Up**: IO &Tic-Tac-Toe Demo (Phase 5)
+
+See [ROADMAP.md](ROADMAP.md) for the full 10-phase implementation plan.
 
 ## Quick Start
 
@@ -211,6 +221,151 @@ struct Stack<T> {
 // Type aliases
 type UserId = Int;
 type StringMap<V> = Map<String, V>;
+```
+
+## Traits
+
+Traits define shared behavior that types can implement:
+
+```intent
+// Define a trait
+trait Display {
+    fn display(self) -> String;
+}
+
+trait Comparable {
+    fn compare(self, other) -> Int;
+    
+    // Default implementation
+    fn equals(self, other) -> Bool {
+        return self.compare(other) == 0;
+    }
+}
+
+// Implement trait for a type
+struct Point {
+    x: Int,
+    y: Int
+}
+
+impl Display for Point {
+    fn display(self) -> String {
+        return "({self.x}, {self.y})";
+    }
+}
+```
+
+## For-In Loops
+
+Iterate over collections with `for...in`:
+
+```intent
+// Iterate over arrays
+let numbers = [1, 2, 3, 4, 5];
+for n in numbers {
+    print(n);
+}
+
+// Iterate over ranges
+for i in 0..5 {
+    print(i);  // 0, 1, 2, 3, 4
+}
+
+for i in 0..=5 {
+    print(i);  // 0, 1, 2, 3, 4, 5 (inclusive)
+}
+
+// Iterate over strings (by character)
+for char in "hello" {
+    print(char);
+}
+
+// Iterate over map keys
+let scores = map { "alice": 100, "bob": 85 };
+for name in scores {
+    print(name);
+}
+```
+
+## Defer
+
+The `defer` statement schedules code to run when the current scope exits:
+
+```intent
+fn process_file(path: String) {
+    let file = open(path);
+    defer close(file);  // Always runs, even on error
+    
+    // ... process file ...
+    if error_condition {
+        return;  // defer still runs!
+    }
+    // ... more processing ...
+}  // close(file) runs here
+
+// Multiple defers run in reverse order (LIFO)
+fn example() {
+    defer print("first");
+    defer print("second");
+    defer print("third");
+}  // Prints: third, second, first
+```
+
+## Ranges
+
+Range expressions create iterable sequences:
+
+```intent
+// Exclusive range (end not included)
+let r1 = 0..10;    // 0, 1, 2, ..., 9
+
+// Inclusive range (end included)
+let r2 = 0..=10;   // 0, 1, 2, ..., 10
+
+// Use in for loops
+for i in 1..=5 {
+    print(i * i);  // 1, 4, 9, 16, 25
+}
+```
+
+## Maps
+
+Key-value collections with the `map` keyword:
+
+```intent
+// Create a map
+let scores = map {
+    "alice": 100,
+    "bob": 85,
+    "charlie": 92
+};
+
+// Iterate over keys
+for name in scores {
+    print(name);
+}
+```
+
+## String Interpolation
+
+Embed expressions directly in strings using `{}`:
+
+```intent
+let name = "Alice";
+let age = 30;
+
+// Basic interpolation
+print("Hello, {name}!");  // Hello, Alice!
+
+// Expressions in interpolation
+print("Next year: {age + 1}");  // Next year: 31
+
+// Complex expressions
+let items = ["apple", "banana"];
+print("Count: {len(items)}");  // Count: 2
+
+// Escape braces with backslash
+print("Use \{braces\} literally");  // Use {braces} literally
 ```
 
 ## Union Types

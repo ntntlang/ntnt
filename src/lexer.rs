@@ -5,6 +5,15 @@
 use std::iter::Peekable;
 use std::str::Chars;
 
+/// Part of an interpolated string
+#[derive(Debug, Clone, PartialEq)]
+pub enum StringPart {
+    /// Literal string portion
+    Literal(String),
+    /// Expression to be interpolated (stored as string, parsed later)
+    Interpolation(String),
+}
+
 /// Token types for the Intent language
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
@@ -40,6 +49,12 @@ pub enum TokenKind {
     Export,
     From,
     As,
+    Trait,
+    For,
+    In,
+    Defer,
+    Where,
+    Map,            // Map literal keyword
     
     // Contract keywords
     Contract,
@@ -111,6 +126,14 @@ pub enum TokenKind {
     Hash,           // #
     Ampersand,      // &
     Pipe,           // |
+    DotDot,         // ..
+    DotDotEqual,    // ..=
+    
+    // Raw strings
+    RawString(String),
+    
+    // Interpolated string parts
+    InterpolatedString(Vec<StringPart>),
     
     // Special
     Eof,
@@ -232,6 +255,8 @@ impl<'a> Lexer<'a> {
         self.current_lexeme.clear();
         
         let mut value = String::new();
+        let mut has_interpolation = false;
+        let mut parts: Vec<StringPart> = Vec::new();
         
         while let Some(&ch) = self.peek() {
             if ch == quote {
@@ -247,21 +272,64 @@ impl<'a> Lexer<'a> {
                     Some('\\') => value.push('\\'),
                     Some('"') => value.push('"'),
                     Some('\'') => value.push('\''),
+                    Some('{') => value.push('{'),  // Escape {
+                    Some('}') => value.push('}'),  // Escape }
                     Some(c) => value.push(c),
                     None => break,
                 }
+            } else if ch == '{' {
+                // Start of interpolation
+                has_interpolation = true;
+                if !value.is_empty() {
+                    parts.push(StringPart::Literal(value.clone()));
+                    value.clear();
+                }
+                self.advance(); // consume '{'
+                
+                // Read until matching '}'
+                let mut expr_str = String::new();
+                let mut brace_count = 1;
+                while let Some(&c) = self.peek() {
+                    if c == '{' {
+                        brace_count += 1;
+                        expr_str.push(c);
+                    } else if c == '}' {
+                        brace_count -= 1;
+                        if brace_count == 0 {
+                            break;
+                        }
+                        expr_str.push(c);
+                    } else {
+                        expr_str.push(c);
+                    }
+                    self.advance();
+                }
+                self.advance(); // consume '}'
+                parts.push(StringPart::Interpolation(expr_str));
             } else {
                 value.push(ch);
                 self.advance();
             }
         }
         
-        Token::new(
-            TokenKind::String(value.clone()),
-            start_line,
-            start_column,
-            format!("{}{}{}", quote, value, quote),
-        )
+        if has_interpolation {
+            if !value.is_empty() {
+                parts.push(StringPart::Literal(value));
+            }
+            Token::new(
+                TokenKind::InterpolatedString(parts),
+                start_line,
+                start_column,
+                self.current_lexeme.clone(),
+            )
+        } else {
+            Token::new(
+                TokenKind::String(value.clone()),
+                start_line,
+                start_column,
+                format!("{}{}{}", quote, value, quote),
+            )
+        }
     }
 
     fn scan_number(&mut self, first: char) -> Token {
@@ -434,6 +502,12 @@ impl<'a> Lexer<'a> {
             "export" => TokenKind::Export,
             "from" => TokenKind::From,
             "as" => TokenKind::As,
+            "trait" => TokenKind::Trait,
+            "for" => TokenKind::For,
+            "in" => TokenKind::In,
+            "defer" => TokenKind::Defer,
+            "where" => TokenKind::Where,
+            "map" => TokenKind::Map,
             
             // Contract keywords
             "contract" => TokenKind::Contract,
@@ -575,7 +649,17 @@ impl<'a> Lexer<'a> {
             
             // Punctuation
             ',' => Token::new(TokenKind::Comma, start_line, start_column, ",".into()),
-            '.' => Token::new(TokenKind::Dot, start_line, start_column, ".".into()),
+            '.' => {
+                if self.match_char('.') {
+                    if self.match_char('=') {
+                        Token::new(TokenKind::DotDotEqual, start_line, start_column, "..=".into())
+                    } else {
+                        Token::new(TokenKind::DotDot, start_line, start_column, "..".into())
+                    }
+                } else {
+                    Token::new(TokenKind::Dot, start_line, start_column, ".".into())
+                }
+            }
             ':' => {
                 if self.peek() == Some(&':') {
                     self.advance();

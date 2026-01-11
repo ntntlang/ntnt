@@ -1,0 +1,110 @@
+// Phase 4: Essential Features Demo (Simplified)
+// Tests for-in loops, ranges, maps, defer, and string interpolation
+
+// ===== For-In Loops =====
+
+// Iterate over an array
+fn sum_array(arr) {
+    let total = 0
+    for x in arr {
+        total = total + x
+    }
+    return total
+}
+
+// Iterate over a range (exclusive)
+fn factorial(n) {
+    let result = 1
+    for i in 1..n+1 {
+        result = result * i
+    }
+    return result
+}
+
+// ===== Range Expressions =====
+
+fn demonstrate_ranges() {
+    print("Exclusive range 1..5:")
+    for i in 1..5 {
+        print(i)
+    }
+    
+    print("Inclusive range 1..=5:")
+    for i in 1..=5 {
+        print(i)
+    }
+}
+
+// ===== Map Literals =====
+
+fn demonstrate_maps() {
+    // Create a map with string keys
+    let ages = map {
+        "Alice": 30,
+        "Bob": 25,
+        "Charlie": 35
+    }
+    
+    // Iterate over map keys
+    print("People in map:")
+    for name in ages {
+        print(name)
+    }
+    
+    return ages
+}
+
+// ===== String Interpolation =====
+
+fn greet_person(name, age) {
+    return "Hello, {name}! You are {age} years old."
+}
+
+fn math_result(a, b) {
+    return "The sum of {a} and {b} is {a + b}."
+}
+
+// ===== Defer =====
+
+fn process_with_cleanup() {
+    print("Starting process...")
+    defer print("Cleanup: Process ended")
+    
+    print("Doing work...")
+}
+
+// ===== Main Demo =====
+
+fn main() {
+    print("=== Phase 4 Features Demo ===")
+    print("")
+    
+    // For-in loops
+    print("Sum of [1,2,3,4,5]:")
+    print(sum_array([1, 2, 3, 4, 5]))
+    
+    print("5! =")
+    print(factorial(5))
+    print("")
+    
+    // Range expressions
+    demonstrate_ranges()
+    print("")
+    
+    // Maps
+    demonstrate_maps()
+    print("")
+    
+    // String interpolation
+    print(greet_person("Alice", 30))
+    print(math_result(5, 3))
+    print("")
+    
+    // Defer
+    process_with_cleanup()
+    print("")
+    
+    print("=== Demo Complete ===")
+}
+
+main()

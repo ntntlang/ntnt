@@ -65,8 +65,21 @@ pub enum Statement {
     /// Implementation block
     Impl {
         type_name: String,
+        /// Trait being implemented (if any): `impl Trait for Type`
+        trait_name: Option<String>,
         methods: Vec<Statement>,
         invariants: Vec<Expression>,
+    },
+    
+    /// Trait declaration
+    Trait {
+        name: String,
+        /// Generic type parameters: `trait Foo<T>`
+        type_params: Vec<String>,
+        /// Required methods (no body)
+        methods: Vec<TraitMethod>,
+        /// Parent traits (trait inheritance)
+        supertraits: Vec<String>,
     },
     
     /// Module declaration
@@ -117,6 +130,13 @@ pub enum Statement {
         body: Block,
     },
     
+    /// For-in loop: `for item in items { }`
+    ForIn {
+        variable: String,
+        iterable: Expression,
+        body: Block,
+    },
+    
     /// Infinite loop
     Loop {
         body: Block,
@@ -127,6 +147,9 @@ pub enum Statement {
     
     /// Continue statement
     Continue,
+    
+    /// Defer statement: `defer expr` - executes when scope exits
+    Defer(Expression),
     
     /// Protocol declaration for concurrency
     Protocol {
@@ -202,6 +225,19 @@ pub enum Expression {
     
     /// Array literal
     Array(Vec<Expression>),
+    
+    /// Map literal: `{ "key": value, ... }`
+    MapLiteral(Vec<(Expression, Expression)>),
+    
+    /// Range expression: `start..end` or `start..=end`
+    Range {
+        start: Box<Expression>,
+        end: Box<Expression>,
+        inclusive: bool,
+    },
+    
+    /// Interpolated string: `"Hello, {name}!"`
+    InterpolatedString(Vec<StringPart>),
     
     /// Struct literal
     StructLiteral {
@@ -297,6 +333,27 @@ pub struct ImportItem {
     pub alias: Option<String>,
 }
 
+/// Trait method declaration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraitMethod {
+    pub name: String,
+    pub params: Vec<Parameter>,
+    pub return_type: Option<TypeExpr>,
+    /// Optional contract for the method
+    pub contract: Option<Contract>,
+    /// Default implementation (None = required method)
+    pub default_body: Option<Block>,
+}
+
+/// String interpolation part
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StringPart {
+    /// Literal string segment
+    Literal(String),
+    /// Expression to interpolate
+    Expr(Expression),
+}
+
 /// Struct field
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Field {
@@ -320,6 +377,12 @@ pub enum TypeExpr {
     
     /// Array type `[T]`
     Array(Box<TypeExpr>),
+    
+    /// Map type `Map<K, V>`
+    Map {
+        key_type: Box<TypeExpr>,
+        value_type: Box<TypeExpr>,
+    },
     
     /// Tuple type `(T1, T2, ...)`
     Tuple(Vec<TypeExpr>),

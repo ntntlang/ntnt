@@ -4,7 +4,7 @@
 
 use crate::ast::*;
 use crate::error::{IntentError, Result};
-use crate::lexer::{Token, TokenKind};
+use crate::lexer::{Token, TokenKind, StringPart as LexerStringPart};
 
 /// Parser for Intent source code
 pub struct Parser {
@@ -60,6 +60,14 @@ impl Parser {
             false
         }
     }
+    
+    fn check_identifier(&self) -> bool {
+        if let Some(token) = self.peek() {
+            matches!(token.kind, TokenKind::Identifier(_))
+        } else {
+            false
+        }
+    }
 
     fn match_token(&mut self, kinds: &[TokenKind]) -> bool {
         for kind in kinds {
@@ -103,6 +111,8 @@ impl Parser {
             self.struct_declaration(attributes)
         } else if self.match_token(&[TokenKind::Enum]) {
             self.enum_declaration(attributes)
+        } else if self.match_token(&[TokenKind::Trait]) {
+            self.trait_declaration()
         } else if self.match_token(&[TokenKind::Impl]) {
             self.impl_declaration()
         } else if self.match_token(&[TokenKind::Mod]) {
@@ -438,8 +448,135 @@ impl Parser {
         })
     }
 
+    fn trait_declaration(&mut self) -> Result<Statement> {
+        let name = self.consume_identifier("Expected trait name")?;
+        
+        // Parse optional type parameters: trait Foo<T>
+        let type_params = if self.match_token(&[TokenKind::Less]) {
+            let mut params = Vec::new();
+            loop {
+                params.push(self.consume_identifier("Expected type parameter")?);
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+            self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
+            params
+        } else {
+            Vec::new()
+        };
+        
+        // Parse optional supertraits: trait Foo: Bar + Baz
+        let supertraits = if self.match_token(&[TokenKind::Colon]) {
+            let mut traits = Vec::new();
+            loop {
+                traits.push(self.consume_identifier("Expected trait name")?);
+                if !self.match_token(&[TokenKind::Plus]) {
+                    break;
+                }
+            }
+            traits
+        } else {
+            Vec::new()
+        };
+        
+        self.consume(&TokenKind::LeftBrace, "Expected '{' after trait declaration")?;
+        
+        let mut methods = Vec::new();
+        
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            if self.match_token(&[TokenKind::Fn]) {
+                methods.push(self.trait_method()?);
+            }
+        }
+        
+        self.consume(&TokenKind::RightBrace, "Expected '}' after trait body")?;
+        
+        Ok(Statement::Trait {
+            name,
+            type_params,
+            methods,
+            supertraits,
+        })
+    }
+    
+    fn trait_method(&mut self) -> Result<TraitMethod> {
+        let name = self.consume_identifier("Expected method name")?;
+        
+        self.consume(&TokenKind::LeftParen, "Expected '(' after method name")?;
+        
+        // Parse parameters
+        let mut params = Vec::new();
+        if !self.check(&TokenKind::RightParen) {
+            loop {
+                // Handle 'self' parameter
+                if self.check_identifier() {
+                    let param_name = self.consume_identifier("Expected parameter name")?;
+                    
+                    let type_annotation = if self.match_token(&[TokenKind::Colon]) {
+                        Some(self.parse_type()?)
+                    } else {
+                        None
+                    };
+                    
+                    params.push(Parameter {
+                        name: param_name,
+                        type_annotation,
+                        default: None,
+                    });
+                }
+                
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+        }
+        
+        self.consume(&TokenKind::RightParen, "Expected ')' after parameters")?;
+        
+        // Parse return type
+        let return_type = if self.match_token(&[TokenKind::Arrow]) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        
+        // Parse optional contract
+        let contract = self.parse_contract()?;
+        
+        // Parse optional default body or just semicolon
+        let default_body = if self.match_token(&[TokenKind::LeftBrace]) {
+            // Default implementation
+            let mut statements = Vec::new();
+            while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+                statements.push(self.declaration()?);
+            }
+            self.consume(&TokenKind::RightBrace, "Expected '}' after method body")?;
+            Some(Block { statements })
+        } else {
+            self.match_token(&[TokenKind::Semicolon]);
+            None
+        };
+        
+        Ok(TraitMethod {
+            name,
+            params,
+            return_type,
+            contract,
+            default_body,
+        })
+    }
+
     fn impl_declaration(&mut self) -> Result<Statement> {
-        let type_name = self.consume_identifier("Expected type name")?;
+        let first_name = self.consume_identifier("Expected type or trait name")?;
+        
+        // Check if this is `impl Trait for Type` or just `impl Type`
+        let (trait_name, type_name) = if self.match_token(&[TokenKind::For]) {
+            let type_name = self.consume_identifier("Expected type name after 'for'")?;
+            (Some(first_name), type_name)
+        } else {
+            (None, first_name)
+        };
         
         self.consume(&TokenKind::LeftBrace, "Expected '{' after type name")?;
         
@@ -462,6 +599,7 @@ impl Parser {
         
         Ok(Statement::Impl {
             type_name,
+            trait_name,
             methods,
             invariants,
         })
@@ -690,6 +828,10 @@ impl Parser {
             self.while_statement()
         } else if self.match_token(&[TokenKind::Loop]) {
             self.loop_statement()
+        } else if self.match_token(&[TokenKind::For]) {
+            self.for_in_statement()
+        } else if self.match_token(&[TokenKind::Defer]) {
+            self.defer_statement()
         } else if self.match_token(&[TokenKind::Break]) {
             self.match_token(&[TokenKind::Semicolon]);
             Ok(Statement::Break)
@@ -701,6 +843,29 @@ impl Parser {
             self.match_token(&[TokenKind::Semicolon]);
             Ok(Statement::Expression(expr))
         }
+    }
+    
+    fn for_in_statement(&mut self) -> Result<Statement> {
+        let variable = self.consume_identifier("Expected variable name after 'for'")?;
+        
+        self.consume(&TokenKind::In, "Expected 'in' after for variable")?;
+        
+        let iterable = self.expression()?;
+        
+        self.consume(&TokenKind::LeftBrace, "Expected '{' after for iterable")?;
+        let body = self.block()?;
+        
+        Ok(Statement::ForIn {
+            variable,
+            iterable,
+            body,
+        })
+    }
+    
+    fn defer_statement(&mut self) -> Result<Statement> {
+        let expr = self.expression()?;
+        self.match_token(&[TokenKind::Semicolon]);
+        Ok(Statement::Defer(expr))
     }
 
     fn if_statement(&mut self) -> Result<Statement> {
@@ -830,7 +995,7 @@ impl Parser {
     }
 
     fn comparison(&mut self) -> Result<Expression> {
-        let mut expr = self.term()?;
+        let mut expr = self.range()?;
         
         while self.match_token(&[
             TokenKind::Less,
@@ -845,12 +1010,35 @@ impl Parser {
                 Some(TokenKind::GreaterEqual) => BinaryOp::Ge,
                 _ => unreachable!(),
             };
-            let right = self.term()?;
+            let right = self.range()?;
             expr = Expression::Binary {
                 left: Box::new(expr),
                 operator,
                 right: Box::new(right),
             };
+        }
+        
+        Ok(expr)
+    }
+    
+    fn range(&mut self) -> Result<Expression> {
+        let expr = self.term()?;
+        
+        // Check for range operators: .. or ..=
+        if self.match_token(&[TokenKind::DotDot]) {
+            let end = self.term()?;
+            return Ok(Expression::Range {
+                start: Box::new(expr),
+                end: Box::new(end),
+                inclusive: false,
+            });
+        } else if self.match_token(&[TokenKind::DotDotEqual]) {
+            let end = self.term()?;
+            return Ok(Expression::Range {
+                start: Box::new(expr),
+                end: Box::new(end),
+                inclusive: true,
+            });
         }
         
         Ok(expr)
@@ -1065,6 +1253,15 @@ impl Parser {
                 return Ok(Expression::String(s));
             }
         }
+        
+        // Interpolated string literal
+        if let Some(token) = self.peek() {
+            if let TokenKind::InterpolatedString(ref parts) = token.kind {
+                let parts = parts.clone();
+                self.advance();
+                return self.parse_interpolated_string(&parts);
+            }
+        }
 
         // Boolean literal
         if let Some(token) = self.peek() {
@@ -1147,6 +1344,25 @@ impl Parser {
             self.consume(&TokenKind::RightBracket, "Expected ']' after array elements")?;
             return Ok(Expression::Array(elements));
         }
+        
+        // Map literal: map { key: value, ... }
+        if self.match_token(&[TokenKind::Map]) {
+            self.consume(&TokenKind::LeftBrace, "Expected '{' after 'map'")?;
+            let mut pairs = Vec::new();
+            if !self.check(&TokenKind::RightBrace) {
+                loop {
+                    let key = self.expression()?;
+                    self.consume(&TokenKind::Colon, "Expected ':' after map key")?;
+                    let value = self.expression()?;
+                    pairs.push((key, value));
+                    if !self.match_token(&[TokenKind::Comma]) {
+                        break;
+                    }
+                }
+            }
+            self.consume(&TokenKind::RightBrace, "Expected '}' after map entries")?;
+            return Ok(Expression::MapLiteral(pairs));
+        }
 
         // Block expression
         if self.match_token(&[TokenKind::LeftBrace]) {
@@ -1163,6 +1379,29 @@ impl Parser {
             line: self.current_line(),
             message: "Expected expression".to_string(),
         })
+    }
+    
+    /// Parse an interpolated string into StringParts
+    fn parse_interpolated_string(&mut self, parts: &[LexerStringPart]) -> Result<Expression> {
+        let mut ast_parts = Vec::new();
+        
+        for part in parts {
+            match part {
+                LexerStringPart::Literal(s) => {
+                    ast_parts.push(StringPart::Literal(s.clone()));
+                }
+                LexerStringPart::Interpolation(expr_str) => {
+                    // Parse the expression string
+                    let lexer = crate::lexer::Lexer::new(expr_str);
+                    let tokens: Vec<_> = lexer.collect();
+                    let mut parser = Parser::new(tokens);
+                    let expr = parser.expression()?;
+                    ast_parts.push(StringPart::Expr(expr));
+                }
+            }
+        }
+        
+        Ok(Expression::InterpolatedString(ast_parts))
     }
     
     /// Parse a match expression: match expr { pattern => body, ... }

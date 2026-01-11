@@ -13,7 +13,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "intent")]
 #[command(author = "Intent Language Team")]
-#[command(version = "0.1.2")]
+#[command(version = "0.1.3")]
 #[command(about = "Intent - A programming language for AI-driven development", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -82,7 +82,7 @@ fn main() {
 }
 
 fn run_repl() -> anyhow::Result<()> {
-    println!("{}", "Intent Programming Language v0.1.2".green().bold());
+    println!("{}", "Intent Programming Language v0.1.3".green().bold());
     println!("Type {} for help, {} to exit\n", ":help".cyan(), ":quit".cyan());
 
     let mut rl = DefaultEditor::new()?;
@@ -178,6 +178,26 @@ fn print_repl_help() {
     println!("  {}    - Arithmetic", "let y = x + 10;".cyan());
     println!("  {} - Function definition", "fn add(a, b) { a + b }".cyan());
     println!("  {}       - Function call", "add(1, 2)".cyan());
+    println!();
+    println!("{}", "Traits:".yellow().bold());
+    println!("  {} - Define a trait", "trait Display { fn show(self); }".cyan());
+    println!("  {} - Implement trait", "impl Display for Point { ... }".cyan());
+    println!();
+    println!("{}", "Loops & Iteration:".yellow().bold());
+    println!("  {}  - For-in loop", "for x in [1, 2, 3] { print(x); }".cyan());
+    println!("  {}    - Range (exclusive)", "for i in 0..5 { print(i); }".cyan());
+    println!("  {}   - Range (inclusive)", "for i in 0..=5 { print(i); }".cyan());
+    println!("  {} - Iterate strings", r#"for c in "hello" { print(c); }"#.cyan());
+    println!();
+    println!("{}", "Defer:".yellow().bold());
+    println!("  {} - Runs on scope exit", "defer print(\"cleanup\");".cyan());
+    println!();
+    println!("{}", "Maps:".yellow().bold());
+    println!("  {} - Map literal", r#"let m = map { "a": 1, "b": 2 };"#.cyan());
+    println!();
+    println!("{}", "String Interpolation:".yellow().bold());
+    println!("  {} - Embed expressions", r#""Hello, {name}!""#.cyan());
+    println!("  {} - With math", r#""Sum: {a + b}""#.cyan());
     println!();
     println!("{}", "Option & Result Types:".yellow().bold());
     println!("  {}     - Create Some value", "let x = Some(42);".cyan());

@@ -1,6 +1,6 @@
 [package]
 name = "intent"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["Intent Language Team"]
 description = "Intent - A programming language designed for AI-driven development"

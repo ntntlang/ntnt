@@ -21,22 +21,31 @@ src/
 
 ### Key Features Implemented
 
-- **Lexer**: Full tokenization including contracts keywords
-- **Parser**: Expressions, statements, functions, structs, contracts
-- **Interpreter**: Variable scoping, function calls, struct instances
+- **Lexer**: Full tokenization including contracts, traits, ranges, interpolated strings
+- **Parser**: Expressions, statements, functions, structs, contracts, traits, for-in loops
+- **Interpreter**: Variable scoping, function calls, struct instances, trait dispatch
 - **Contracts**: Runtime `requires`/`ensures` enforcement
 - **Invariants**: Automatic struct invariant checking
 - **Built-ins**: 10 math functions + I/O utilities
+- **Traits**: Trait declarations with default methods, `impl Trait for Type`
+- **Iteration**: For-in loops over arrays, ranges, strings, and maps
+- **Defer**: Scope-exit cleanup with LIFO execution order
+- **Ranges**: Exclusive (`..`) and inclusive (`..=`) range expressions
+- **Maps**: Key-value literals with `map { key: value }` syntax
+- **String Interpolation**: Embedded expressions with `"Hello, {name}!"`
 
-See [ROADMAP.md](ROADMAP.md) for the 13-phase plan toward production web applications.
+See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applications.
 
 ## Core Components
 
 ### Language Runtime (Current)
 
-- **Interpreter**: Tree-walking evaluator with contract enforcement
+- **Interpreter**: Tree-walking evaluator with contract enforcement and trait dispatch
 - **Contract Checker**: Runtime precondition/postcondition validation with `old()` capture
+- **Trait System**: Trait definitions, implementations, and method resolution
+- **Defer Stack**: LIFO execution of deferred expressions on scope exit
 - **Built-in Functions**: Math (`abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `sign`, `clamp`) and I/O (`print`, `len`)
+- **Built-in Types**: Arrays, Maps, Ranges, Option, Result
 
 ### Language Runtime (Planned)
 
@@ -52,7 +61,7 @@ See [ROADMAP.md](ROADMAP.md) for the 13-phase plan toward production web applica
 
 ### Tooling
 
-- **CLI**: `intent run <file>` and `intent repl` commands
+- **CLI**: `intent run <file>`, `intent repl`, `intent check`, `intent parse`, `intent lex` commands
 - **VS Code Extension**: Syntax highlighting for `.intent` and `.itn` files
 - **IDE Integration**: Language server protocol implementation (planned)
 - **Build System**: Integrated compilation, testing, and deployment (planned)
