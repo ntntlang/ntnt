@@ -21,18 +21,20 @@ src/
 
 ### Key Features Implemented
 
-- **Lexer**: Full tokenization including contracts, traits, ranges, interpolated strings
+- **Lexer**: Full tokenization including contracts, traits, ranges, interpolated strings, raw strings
 - **Parser**: Expressions, statements, functions, structs, contracts, traits, for-in loops
 - **Interpreter**: Variable scoping, function calls, struct instances, trait dispatch
 - **Contracts**: Runtime `requires`/`ensures` enforcement
 - **Invariants**: Automatic struct invariant checking
 - **Built-ins**: 10 math functions + I/O utilities
 - **Traits**: Trait declarations with default methods, `impl Trait for Type`
+- **Trait Bounds**: Constrain generics with `<T: Trait>` syntax
 - **Iteration**: For-in loops over arrays, ranges, strings, and maps
 - **Defer**: Scope-exit cleanup with LIFO execution order
 - **Ranges**: Exclusive (`..`) and inclusive (`..=`) range expressions
 - **Maps**: Key-value literals with `map { key: value }` syntax
 - **String Interpolation**: Embedded expressions with `"Hello, {name}!"`
+- **Raw Strings**: Escape-free strings with `r"..."` and `r#"..."#`
 
 See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applications.
 

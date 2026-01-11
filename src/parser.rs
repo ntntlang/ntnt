@@ -199,20 +199,8 @@ impl Parser {
     fn type_alias_declaration(&mut self) -> Result<Statement> {
         let name = self.consume_identifier("Expected type name")?;
         
-        // Optional type parameters: type Foo<T, U>
-        let type_params = if self.match_token(&[TokenKind::Less]) {
-            let mut params = Vec::new();
-            loop {
-                params.push(self.consume_identifier("Expected type parameter")?);
-                if !self.match_token(&[TokenKind::Comma]) {
-                    break;
-                }
-            }
-            self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
-            params
-        } else {
-            Vec::new()
-        };
+        // Optional type parameters with bounds: type Foo<T, U: Trait>
+        let type_params = self.parse_type_params()?;
         
         self.consume(&TokenKind::Assign, "Expected '=' after type name")?;
         let target = self.parse_type()?;
@@ -228,20 +216,8 @@ impl Parser {
     fn function_declaration(&mut self, attributes: Vec<Attribute>) -> Result<Statement> {
         let name = self.consume_identifier("Expected function name")?;
         
-        // Parse optional generic type parameters: fn foo<T, U>()
-        let type_params = if self.match_token(&[TokenKind::Less]) {
-            let mut params = Vec::new();
-            loop {
-                params.push(self.consume_identifier("Expected type parameter")?);
-                if !self.match_token(&[TokenKind::Comma]) {
-                    break;
-                }
-            }
-            self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
-            params
-        } else {
-            Vec::new()
-        };
+        // Parse optional generic type parameters with bounds: fn foo<T, U: Trait>()
+        let type_params = self.parse_type_params()?;
         
         self.consume(&TokenKind::LeftParen, "Expected '(' after function name")?;
         let params = self.parse_parameters()?;
@@ -343,20 +319,8 @@ impl Parser {
     fn struct_declaration(&mut self, attributes: Vec<Attribute>) -> Result<Statement> {
         let name = self.consume_identifier("Expected struct name")?;
         
-        // Parse optional generic type parameters: struct Foo<T, U>
-        let type_params = if self.match_token(&[TokenKind::Less]) {
-            let mut params = Vec::new();
-            loop {
-                params.push(self.consume_identifier("Expected type parameter")?);
-                if !self.match_token(&[TokenKind::Comma]) {
-                    break;
-                }
-            }
-            self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
-            params
-        } else {
-            Vec::new()
-        };
+        // Parse optional generic type parameters with bounds: struct Foo<T, U: Trait>
+        let type_params = self.parse_type_params()?;
         
         self.consume(&TokenKind::LeftBrace, "Expected '{' after struct name")?;
         
@@ -391,20 +355,8 @@ impl Parser {
     fn enum_declaration(&mut self, attributes: Vec<Attribute>) -> Result<Statement> {
         let name = self.consume_identifier("Expected enum name")?;
         
-        // Parse optional generic type parameters: enum Option<T>
-        let type_params = if self.match_token(&[TokenKind::Less]) {
-            let mut params = Vec::new();
-            loop {
-                params.push(self.consume_identifier("Expected type parameter")?);
-                if !self.match_token(&[TokenKind::Comma]) {
-                    break;
-                }
-            }
-            self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
-            params
-        } else {
-            Vec::new()
-        };
+        // Parse optional generic type parameters with bounds: enum Option<T: Clone>
+        let type_params = self.parse_type_params()?;
         
         self.consume(&TokenKind::LeftBrace, "Expected '{' after enum name")?;
         
@@ -451,20 +403,8 @@ impl Parser {
     fn trait_declaration(&mut self) -> Result<Statement> {
         let name = self.consume_identifier("Expected trait name")?;
         
-        // Parse optional type parameters: trait Foo<T>
-        let type_params = if self.match_token(&[TokenKind::Less]) {
-            let mut params = Vec::new();
-            loop {
-                params.push(self.consume_identifier("Expected type parameter")?);
-                if !self.match_token(&[TokenKind::Comma]) {
-                    break;
-                }
-            }
-            self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
-            params
-        } else {
-            Vec::new()
-        };
+        // Parse optional type parameters with bounds: trait Foo<T: Clone>
+        let type_params = self.parse_type_params()?;
         
         // Parse optional supertraits: trait Foo: Bar + Baz
         let supertraits = if self.match_token(&[TokenKind::Colon]) {
@@ -1262,6 +1202,15 @@ impl Parser {
                 return self.parse_interpolated_string(&parts);
             }
         }
+        
+        // Raw string literal (treated same as regular string)
+        if let Some(token) = self.peek() {
+            if let TokenKind::RawString(ref s) = token.kind {
+                let s = s.clone();
+                self.advance();
+                return Ok(Expression::String(s));
+            }
+        }
 
         // Boolean literal
         if let Some(token) = self.peek() {
@@ -1469,6 +1418,11 @@ impl Parser {
                     self.advance();
                     return Ok(Pattern::Literal(Expression::String(s)));
                 }
+                TokenKind::RawString(s) => {
+                    let s = s.clone();
+                    self.advance();
+                    return Ok(Pattern::Literal(Expression::String(s)));
+                }
                 TokenKind::Bool(b) => {
                     let b = *b;
                     self.advance();
@@ -1669,6 +1623,41 @@ impl Parser {
             line: self.current_line(),
             message: message.to_string(),
         })
+    }
+    
+    /// Parse type parameters with optional bounds: `<T, U: Trait, V: A + B>`
+    fn parse_type_params(&mut self) -> Result<Vec<TypeParam>> {
+        if !self.match_token(&[TokenKind::Less]) {
+            return Ok(Vec::new());
+        }
+        
+        let mut params = Vec::new();
+        loop {
+            let name = self.consume_identifier("Expected type parameter name")?;
+            
+            // Check for bounds: T: Trait or T: Trait1 + Trait2
+            let bounds = if self.match_token(&[TokenKind::Colon]) {
+                let mut bounds = Vec::new();
+                loop {
+                    bounds.push(self.consume_identifier("Expected trait name in bound")?);
+                    if !self.match_token(&[TokenKind::Plus]) {
+                        break;
+                    }
+                }
+                bounds
+            } else {
+                Vec::new()
+            };
+            
+            params.push(TypeParam { name, bounds });
+            
+            if !self.match_token(&[TokenKind::Comma]) {
+                break;
+            }
+        }
+        self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
+        
+        Ok(params)
     }
 }
 

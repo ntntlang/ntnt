@@ -10,6 +10,28 @@ pub struct Program {
     pub statements: Vec<Statement>,
 }
 
+/// A type parameter with optional trait bounds
+/// Examples: `T`, `T: Comparable`, `T: Serializable + Comparable`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeParam {
+    /// The name of the type parameter (e.g., "T")
+    pub name: String,
+    /// Trait bounds that the type parameter must satisfy (e.g., ["Comparable", "Serializable"])
+    pub bounds: Vec<String>,
+}
+
+impl TypeParam {
+    /// Create a type parameter with no bounds
+    pub fn simple(name: String) -> Self {
+        TypeParam { name, bounds: Vec::new() }
+    }
+    
+    /// Create a type parameter with bounds
+    pub fn with_bounds(name: String, bounds: Vec<String>) -> Self {
+        TypeParam { name, bounds }
+    }
+}
+
 /// Top-level statements
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Statement {
@@ -31,8 +53,8 @@ pub enum Statement {
         contract: Option<Contract>,
         body: Block,
         attributes: Vec<Attribute>,
-        /// Generic type parameters: `fn foo<T, U>()`
-        type_params: Vec<String>,
+        /// Generic type parameters: `fn foo<T, U>()` or `fn foo<T: Trait>()`
+        type_params: Vec<TypeParam>,
         /// Effect annotation: `fn foo() with io`
         effects: Vec<String>,
     },
@@ -40,7 +62,7 @@ pub enum Statement {
     /// Type alias declaration: `type Name = Type;`
     TypeAlias {
         name: String,
-        type_params: Vec<String>,
+        type_params: Vec<TypeParam>,
         target: TypeExpr,
     },
     
@@ -49,8 +71,8 @@ pub enum Statement {
         name: String,
         fields: Vec<Field>,
         attributes: Vec<Attribute>,
-        /// Generic type parameters: `struct Foo<T>`
-        type_params: Vec<String>,
+        /// Generic type parameters: `struct Foo<T>` or `struct Foo<T: Trait>`
+        type_params: Vec<TypeParam>,
     },
     
     /// Enum declaration
@@ -58,8 +80,8 @@ pub enum Statement {
         name: String,
         variants: Vec<EnumVariant>,
         attributes: Vec<Attribute>,
-        /// Generic type parameters: `enum Option<T>`
-        type_params: Vec<String>,
+        /// Generic type parameters: `enum Option<T>` or `enum Foo<T: Trait>`
+        type_params: Vec<TypeParam>,
     },
     
     /// Implementation block
@@ -74,8 +96,8 @@ pub enum Statement {
     /// Trait declaration
     Trait {
         name: String,
-        /// Generic type parameters: `trait Foo<T>`
-        type_params: Vec<String>,
+        /// Generic type parameters: `trait Foo<T>` or `trait Foo<T: Bound>`
+        type_params: Vec<TypeParam>,
         /// Required methods (no body)
         methods: Vec<TraitMethod>,
         /// Parent traits (trait inheritance)

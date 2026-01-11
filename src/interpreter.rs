@@ -76,7 +76,7 @@ pub enum Value {
         body: Block,
         closure: Rc<RefCell<Environment>>,
         contract: Option<FunctionContract>,
-        type_params: Vec<String>,
+        type_params: Vec<TypeParam>,
     },
     
     /// Native/built-in function
@@ -4244,6 +4244,103 @@ mod tests {
             assert_eq!(s, "ok");
         } else {
             panic!("Expected string");
+        }
+    }
+    
+    #[test]
+    fn test_raw_string_simple() {
+        let result = eval(r##"
+            r"hello world"
+        "##).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello world");
+        } else {
+            panic!("Expected string, got {:?}", result);
+        }
+    }
+    
+    #[test]
+    fn test_raw_string_with_escapes() {
+        // Raw strings don't process escape sequences
+        let result = eval(r##"
+            r"hello\nworld"
+        "##).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello\\nworld");
+        } else {
+            panic!("Expected string, got {:?}", result);
+        }
+    }
+    
+    #[test]
+    fn test_raw_string_with_hashes() {
+        let result = eval(r###"
+            r#"he said "hello""#
+        "###).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "he said \"hello\"");
+        } else {
+            panic!("Expected string, got {:?}", result);
+        }
+    }
+    
+    #[test]
+    fn test_raw_string_sql() {
+        let result = eval(r##"
+            r"SELECT * FROM users WHERE name = 'test'"
+        "##).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "SELECT * FROM users WHERE name = 'test'");
+        } else {
+            panic!("Expected string, got {:?}", result);
+        }
+    }
+    
+    #[test]
+    fn test_trait_bounds_parsing() {
+        // Test that trait bounds syntax is parsed correctly
+        let result = eval(r#"
+            fn identity<T: Clone>(x: T) -> T {
+                return x
+            }
+            identity(42)
+        "#).unwrap();
+        if let Value::Int(n) = result {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected Int(42), got {:?}", result);
+        }
+    }
+    
+    #[test]
+    fn test_multiple_trait_bounds() {
+        // Test multiple bounds with + syntax
+        let result = eval(r#"
+            fn process<T: Serializable + Comparable>(x: T) -> T {
+                return x
+            }
+            process("hello")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello");
+        } else {
+            panic!("Expected string");
+        }
+    }
+    
+    #[test]
+    fn test_struct_with_bounded_type_param() {
+        let result = eval(r#"
+            struct Container<T: Clone> {
+                value: T,
+            }
+            let c = Container { value: 42 }
+            c.value
+        "#).unwrap();
+        if let Value::Int(n) = result {
+            assert_eq!(n, 42);
+        } else {
+            panic!("Expected Int(42), got {:?}", result);
         }
     }
 }

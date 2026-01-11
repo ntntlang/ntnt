@@ -30,17 +30,22 @@ This document outlines the implementation plan for Intent, a programming languag
 - [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, etc.)
 - [x] CLI with REPL, run, parse, lex, check commands
 - [x] VS Code extension with syntax highlighting
-- [x] 85 unit tests passing
+- [x] 110 unit tests passing
 - [x] Dual file extensions: `.intent` and `.itn`
 - [x] Algebraic Data Types with enums
 - [x] Option<T> and Result<T, E> built-ins
 - [x] Pattern matching with match expressions
-- [x] Generic functions and types
+- [x] Generic functions and types with trait bounds
 - [x] Type aliases
 - [x] Union types
 - [x] Effect annotations foundation
 - [x] Module system with imports/exports
 - [x] Standard library: std/string, std/math, std/collections, std/env
+- [x] Traits with default implementations
+- [x] For-in loops and ranges
+- [x] Defer statement
+- [x] Map literals
+- [x] String interpolation and raw strings
 
 ---
 
@@ -129,7 +134,6 @@ This document outlines the implementation plan for Intent, a programming languag
 - [x] Trait declaration syntax
 - [x] Required methods
 - [x] Default method implementations
-- [ ] Associated types (deferred to future phase)
 
 ```intent
 trait Serializable {
@@ -151,44 +155,34 @@ trait Comparable {
 
 - [x] `impl Trait for Type` syntax
 - [x] Multiple trait implementations
-- [ ] Trait bounds in generics: `fn sort<T: Comparable>(arr: [T]) -> [T]` (deferred)
-- [ ] Where clauses for complex constraints (deferred)
+- [x] Trait bounds in generics: `fn sort<T: Comparable>(arr: [T]) -> [T]`
 
-### 4.3 Contract Inheritance
-
-- [ ] Contracts propagate to trait implementations (deferred)
-- [ ] Liskov Substitution Principle enforcement (deferred)
-- [ ] Contravariant preconditions, covariant postconditions (deferred)
-
-### 4.4 Essential Language Features ✅
+### 4.3 Essential Language Features ✅
 
 - [x] `defer` statement for cleanup (like Go)
 - [x] `Map<K, V>` built-in type with literal syntax `map { "key": value }`
 - [x] String interpolation: `"Hello, {name}!"`
-- [ ] Raw strings: `r#"SELECT * FROM users"#` (deferred)
+- [x] Raw strings: `r"SELECT * FROM users"` and `r#"..."#`
 - [x] Range syntax: `0..10`, `0..=10`
 - [x] For-in loops: `for item in items { }`
-- [ ] Error context/wrapping: `result.context("failed to load user")?` (deferred)
 
 ```intent
 fn process_file(path: String) -> Result<Data, Error> {
     let file = open(path)?
     defer file.close()  // Always runs, even on error
 
-    let data = parse(file.read()?)
-        .context("failed to parse {path}")?
-
+    let query = r"SELECT * FROM users WHERE name = 'test'"
     return Ok(data)
 }
 ```
 
 **Deliverables:**
 
-- Full trait system with contract inheritance
+- Full trait system with bounds
 - defer statement
 - Map type
-- String interpolation
-- Enhanced error handling
+- String interpolation and raw strings
+- Ranges and for-in loops
 
 ---
 
@@ -483,11 +477,21 @@ pub fn get_user(id: String) -> User {
 - [ ] Exhaustive type checking at compile time
 - [ ] Helpful error messages with suggestions
 
+### 8.5 Advanced Type System Features
+
+- [ ] Associated types in traits
+- [ ] Where clauses for complex constraints
+- [ ] Contract inheritance (contracts propagate to trait implementations)
+- [ ] Liskov Substitution Principle enforcement
+- [ ] Contravariant preconditions, covariant postconditions
+- [ ] Error context/wrapping: `result.context("message")?`
+
 **Deliverables:**
 
 - Bytecode compiler and VM
 - 10-50x performance improvement
 - Static type checker
+- Advanced type system
 - Optimized memory management
 
 ---

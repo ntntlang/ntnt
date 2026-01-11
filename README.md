@@ -32,13 +32,15 @@ Intent is a revolutionary programming language and ecosystem designed specifical
 
 - Trait declarations with optional default implementations
 - `impl Trait for Type` syntax for trait implementations
+- Trait bounds in generics: `fn sort<T: Comparable>(arr: [T])`
 - `for...in` loops for iterating over arrays, ranges, strings, and maps
 - `defer` statement for cleanup code that runs on scope exit
 - Range expressions: `0..10` (exclusive) and `0..=10` (inclusive)
 - Map literals: `map { "key": value }`
 - String interpolation: `"Hello, {name}!"`
+- Raw strings: `r"no \n escapes"` and `r#"can use "quotes""#`
 
-**103 passing tests** | **Version 0.1.3**
+**110 passing tests** | **Version 0.1.3**
 
 **Next Up**: IO &Tic-Tac-Toe Demo (Phase 5)
 
@@ -235,7 +237,7 @@ trait Display {
 
 trait Comparable {
     fn compare(self, other) -> Int;
-    
+
     // Default implementation
     fn equals(self, other) -> Bool {
         return self.compare(other) == 0;
@@ -295,7 +297,7 @@ The `defer` statement schedules code to run when the current scope exits:
 fn process_file(path: String) {
     let file = open(path);
     defer close(file);  // Always runs, even on error
-    
+
     // ... process file ...
     if error_condition {
         return;  // defer still runs!
@@ -366,6 +368,56 @@ print("Count: {len(items)}");  // Count: 2
 
 // Escape braces with backslash
 print("Use \{braces\} literally");  // Use {braces} literally
+```
+
+## Raw Strings
+
+Raw strings don't process escape sequences, perfect for regex, SQL, and paths:
+
+```intent
+// Simple raw string
+let path = r"C:\Users\name\file.txt";  // Backslashes preserved
+
+// Raw string with quotes (use # delimiters)
+let sql = r#"SELECT * FROM users WHERE name = "Alice""#;
+
+// Multiple # for strings containing #
+let code = r##"let x = r#"nested"#;"##;
+
+// Great for regex patterns
+let pattern = r"\d{3}-\d{4}";
+
+// Multi-line SQL
+let query = r#"
+    SELECT id, name, email
+    FROM users
+    WHERE active = true
+    ORDER BY name
+"#;
+```
+
+## Trait Bounds
+
+Constrain generic type parameters to types implementing specific traits:
+
+```intent
+// Single trait bound
+fn sort<T: Comparable>(arr: [T]) -> [T] {
+    // T must implement Comparable
+}
+
+// Multiple trait bounds with +
+fn serialize<T: Serializable + Comparable>(item: T) -> String {
+    return item.to_json();
+}
+
+// Struct with bounded type parameter
+struct Cache<K: Hashable, V: Clone> {
+    data: Map<K, V>,
+}
+
+// Works with any type implementing the required traits
+sort([3, 1, 4, 1, 5]);  // Int implements Comparable
 ```
 
 ## Union Types

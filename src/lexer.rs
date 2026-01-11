@@ -332,6 +332,52 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Scan a raw string literal: r"..." or r#"..."# (with any number of #)
+    fn scan_raw_string(&mut self, hash_count: usize) -> Token {
+        let start_line = self.line;
+        let start_column = self.column;
+        self.current_lexeme.clear();
+        
+        let mut value = String::new();
+        
+        // Look for closing quote followed by the same number of #
+        loop {
+            match self.peek() {
+                Some(&'"') => {
+                    self.advance();
+                    // Check if followed by correct number of #
+                    let mut closing_hashes = 0;
+                    while closing_hashes < hash_count && self.peek_is('#') {
+                        self.advance();
+                        closing_hashes += 1;
+                    }
+                    if closing_hashes == hash_count {
+                        // Found the end
+                        break;
+                    } else {
+                        // Not the end, add the quote and any hashes to the value
+                        value.push('"');
+                        for _ in 0..closing_hashes {
+                            value.push('#');
+                        }
+                    }
+                }
+                Some(&ch) => {
+                    value.push(ch);
+                    self.advance();
+                }
+                None => break, // Unterminated raw string
+            }
+        }
+        
+        Token::new(
+            TokenKind::RawString(value),
+            start_line,
+            start_column,
+            self.current_lexeme.clone(),
+        )
+    }
+
     fn scan_number(&mut self, first: char) -> Token {
         let start_line = self.line;
         let start_column = self.column - 1;
@@ -466,6 +512,36 @@ impl<'a> Lexer<'a> {
     fn scan_identifier(&mut self, first: char) -> Token {
         let start_line = self.line;
         let start_column = self.column - 1;
+        
+        // Check for raw string: r"..." or r#"..."#
+        if first == 'r' {
+            if self.peek_is('"') {
+                // r"..." - raw string with no hashes
+                self.advance(); // consume the opening "
+                return self.scan_raw_string(0);
+            } else if self.peek_is('#') {
+                // Count hashes and check for quote
+                let mut hash_count = 0;
+                let mut chars_to_consume = Vec::new();
+                
+                // Peek ahead to count # and find "
+                let mut temp_source = self.source.clone();
+                while temp_source.peek() == Some(&'#') {
+                    hash_count += 1;
+                    chars_to_consume.push(temp_source.next().unwrap());
+                }
+                
+                if temp_source.peek() == Some(&'"') {
+                    // It's a raw string! Consume the hashes and quote
+                    for _ in 0..hash_count {
+                        self.advance(); // consume #
+                    }
+                    self.advance(); // consume "
+                    return self.scan_raw_string(hash_count);
+                }
+                // Not a raw string, fall through to normal identifier
+            }
+        }
         
         let mut ident = String::from(first);
         

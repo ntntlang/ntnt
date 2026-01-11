@@ -199,6 +199,14 @@ fn print_repl_help() {
     println!("  {} - Embed expressions", r#""Hello, {name}!""#.cyan());
     println!("  {} - With math", r#""Sum: {a + b}""#.cyan());
     println!();
+    println!("{}", "Raw Strings:".yellow().bold());
+    println!("  {}   - No escape processing", r#"r"C:\path\to\file""#.cyan());
+    println!("  {} - With quotes inside", r##"r#"say "hi""#"##.cyan());
+    println!();
+    println!("{}", "Trait Bounds:".yellow().bold());
+    println!("  {} - Bounded generic", "fn sort<T: Comparable>(arr: [T])".cyan());
+    println!("  {} - Multiple bounds", "fn f<T: A + B>(x: T)".cyan());
+    println!();
     println!("{}", "Option & Result Types:".yellow().bold());
     println!("  {}     - Create Some value", "let x = Some(42);".cyan());
     println!("  {}          - Create None", "let y = None;".cyan());

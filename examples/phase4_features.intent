@@ -172,6 +172,52 @@ fn multiple_defers() {
     print("Main code")
 }
 
+// ===== Raw Strings =====
+
+fn demonstrate_raw_strings() {
+    // Simple raw string - backslashes are preserved
+    let path = r"C:\Users\name\Documents"
+    print("Path:")
+    print(path)
+    
+    // Raw string with quotes using # delimiters
+    let sql = r#"SELECT * FROM users WHERE name = "Alice""#
+    print("SQL:")
+    print(sql)
+    
+    // No escape processing
+    let literal = r"hello\nworld"
+    print("Literal (no escapes):")
+    print(literal)
+}
+
+// ===== Trait Bounds =====
+
+// Generic function with trait bound
+fn identity<T: Clone>(x: T) -> T {
+    return x
+}
+
+// Multiple trait bounds
+fn process<T: Serializable + Comparable>(x: T) -> T {
+    return x
+}
+
+// Struct with bounded type parameter
+struct Container<T: Clone> {
+    value: T
+}
+
+fn demonstrate_trait_bounds() {
+    // Trait bounds are parsed (runtime checking is future work)
+    let n = identity(42)
+    let s = identity("hello")
+    
+    let c = Container { value: 100 }
+    print("Container value:")
+    print(c.value)
+}
+
 // ===== Main Demo =====
 
 fn main() {
@@ -179,10 +225,14 @@ fn main() {
     print("")
     
     // For-in loops
-    print("Sum of [1,2,3,4,5]: {sum_array([1, 2, 3, 4, 5])}")
-    print("5! = {factorial(5)}")
-    print("Count 1..=10: {count_inclusive(1, 10)}")
-    print("Vowels in 'hello': {count_vowels(\"hello\")}")
+    print("Sum of [1,2,3,4,5]:")
+    print(sum_array([1, 2, 3, 4, 5]))
+    print("5! =")
+    print(factorial(5))
+    print("Count 1..=10:")
+    print(count_inclusive(1, 10))
+    print("Vowels in hello:")
+    print(count_vowels("hello"))
     print("")
     
     // Range expressions
@@ -200,6 +250,16 @@ fn main() {
     
     // Defer
     process_with_cleanup()
+    print("")
+    
+    // Raw strings
+    print("=== Raw Strings ===")
+    demonstrate_raw_strings()
+    print("")
+    
+    // Trait bounds
+    print("=== Trait Bounds ===")
+    demonstrate_trait_bounds()
     print("")
     
     print("=== Demo Complete ===")
