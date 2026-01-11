@@ -40,7 +40,7 @@ This document outlines the implementation plan for Intent, a programming languag
 - [x] Union types
 - [x] Effect annotations foundation
 - [x] Module system with imports/exports
-- [x] Standard library: std/string, std/math, std/collections, std/env, std/fs, std/path, std/json, std/time, std/crypto, std/url
+- [x] Standard library: std/string, std/math, std/collections, std/env, std/fs, std/path, std/json, std/time, std/crypto, std/url, std/http
 - [x] Traits with default implementations
 - [x] For-in loops and ranges
 - [x] Defer statement
@@ -246,12 +246,12 @@ let app = Server.new()
 app.listen(8080)
 ```
 
-### 5.4 HTTP Client
+### 5.4 HTTP Client ✅ COMPLETE
 
-- [ ] `std/http/client` for outbound requests
-- [ ] Async HTTP requests
-- [ ] Timeout and retry configuration
-- [ ] JSON request/response helpers
+- [x] `std/http` for HTTP requests (get, post, put, delete, patch, head)
+- [x] Full request control with `request()` (method, headers, body, timeout)
+- [x] JSON request/response helpers (get_json, post_json)
+- [ ] Async HTTP requests (deferred to async runtime)
 
 ### 5.5 Database Connectivity
 
@@ -280,12 +280,14 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] `std/time`: now, now_millis, now_nanos, sleep, elapsed, format_timestamp, duration_secs, duration_millis
 - [x] `std/crypto`: sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode
 - [x] `std/url`: parse, encode, encode_component, decode, build_query, join
+- [x] `std/http`: get, post, put, delete, patch, head, request, get_json, post_json
 
 **Deliverables:**
 
 - [ ] Async/await runtime
 - [x] File system operations
-- [ ] HTTP server and client
+- [x] HTTP client (blocking)
+- [ ] HTTP server
 - [ ] PostgreSQL database driver
 - [x] JSON, time, crypto, URL utilities
 

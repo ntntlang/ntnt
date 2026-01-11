@@ -178,6 +178,7 @@ fn print_repl_help() {
     println!("  {}      - std/time: now, sleep, elapsed, format_timestamp", "Time".cyan());
     println!("  {}    - std/crypto: sha256, hmac_sha256, uuid, random_bytes", "Crypto".cyan());
     println!("  {}       - std/url: parse, encode, decode, build_query, join", "URL".cyan());
+    println!("  {}      - std/http: get, post, put, delete, request, get_json", "HTTP".cyan());
     println!();
     println!("{}", "Basic Examples:".yellow().bold());
     println!("  {}           - Variable binding", "let x = 42;".cyan());

@@ -1,0 +1,114 @@
+// HTTP Client Example
+// Demonstrates std/http module for making HTTP requests
+
+import { get, post, get_json, post_json, request } from "std/http"
+import { stringify } from "std/json"
+
+print("=== HTTP Client Demo ===")
+print("")
+
+// ========== Basic GET Request ==========
+print("--- Basic GET Request ---")
+print("Fetching from httpbin.org/get...")
+
+match get("https://httpbin.org/get") {
+    Ok(response) => {
+        print("Status: ")
+        print(response.status)
+        print("OK: ")
+        print(response.ok)
+        print("Content-Type: ")
+        print(response.headers.content_type)
+        print("Body length: ")
+        print(len(response.body))
+    },
+    Err(e) => {
+        print("Error: ")
+        print(e)
+    },
+}
+
+print("")
+
+// ========== GET JSON ==========
+print("--- GET JSON ---")
+print("Fetching JSON data...")
+
+match get_json("https://httpbin.org/json") {
+    Ok(data) => {
+        print("Received JSON with slideshow:")
+        print(data.slideshow.title)
+        print("Author: ")
+        print(data.slideshow.author)
+    },
+    Err(e) => {
+        print("Error: ")
+        print(e)
+    },
+}
+
+print("")
+
+// ========== POST JSON ==========
+print("--- POST JSON ---")
+let payload = map {
+    "name": "Intent Language",
+    "version": "0.1.5",
+    "features": ["contracts", "traits", "http"]
+}
+
+print("Posting JSON data...")
+match post_json("https://httpbin.org/post", payload) {
+    Ok(response) => {
+        print("Server echoed our data:")
+        print(response.json.name)
+        print(response.json.version)
+    },
+    Err(e) => {
+        print("Error: ")
+        print(e)
+    },
+}
+
+print("")
+
+// ========== Custom Request with Headers ==========
+print("--- Custom Request with Headers ---")
+let opts = map {
+    "url": "https://httpbin.org/headers",
+    "method": "GET",
+    "headers": map {
+        "X-Custom-Header": "Intent-Lang",
+        "Accept": "application/json"
+    }
+}
+
+match request(opts) {
+    Ok(response) => {
+        print("Status: ")
+        print(response.status)
+        print("Custom headers were sent!")
+    },
+    Err(e) => {
+        print("Error: ")
+        print(e)
+    },
+}
+
+print("")
+
+// ========== POST with form data ==========
+print("--- POST Request ---")
+match post("https://httpbin.org/post", "key=value&name=intent") {
+    Ok(response) => {
+        print("POST successful, status: ")
+        print(response.status)
+    },
+    Err(e) => {
+        print("Error: ")
+        print(e)
+    },
+}
+
+print("")
+print("=== HTTP Client Demo Complete ===")
