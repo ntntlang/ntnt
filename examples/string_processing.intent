@@ -70,9 +70,9 @@ print("Path: " + unix_path)
 print("")
 print("=== Search and Replace ===")
 
-let template = "Hello, {name}! Welcome to {place}."
-let result = replace(template, "{name}", "Alice")
-let final_msg = replace(result, "{place}", "Intent")
+let template = "Hello, NAME! Welcome to PLACE."
+let result = replace(template, "NAME", "Alice")
+let final_msg = replace(result, "PLACE", "Intent")
 print(final_msg)
 
 // === Character Access ===
