@@ -1,0 +1,107 @@
+// Environment & Configuration Example
+// Demonstrates std/env for system interaction
+
+import { get_env, args, cwd } from "std/env"
+import { split, contains, starts_with } from "std/string"
+
+// === Current Directory ===
+print("=== Current Directory ===")
+
+let current_dir = cwd()
+print("Working directory: " + current_dir)
+
+// === Command Line Arguments ===
+print("")
+print("=== Command Line Arguments ===")
+
+let argv = args()
+print("Total arguments: " + str(len(argv)))
+
+if len(argv) > 0 {
+    print("Program: " + argv[0])
+}
+
+if len(argv) > 1 {
+    print("First arg: " + argv[1])
+}
+
+// === Environment Variables ===
+print("")
+print("=== Environment Variables ===")
+
+// Check HOME directory
+match get_env("HOME") {
+    Some(home) => print("HOME: " + home),
+    None => print("HOME not set")
+}
+
+// Check PATH
+match get_env("PATH") {
+    Some(path) => {
+        print("PATH is set")
+        let paths = split(path, ":")
+        print("Number of paths: " + str(len(paths)))
+        
+        // Show first few
+        if len(paths) > 0 {
+            print("First path: " + paths[0])
+        }
+    },
+    None => print("PATH not set")
+}
+
+// Check for common variables
+match get_env("USER") {
+    Some(user) => print("USER: " + user),
+    None => print("USER not set")
+}
+
+match get_env("SHELL") {
+    Some(shell) => print("SHELL: " + shell),
+    None => print("SHELL not set")
+}
+
+// === Configuration Pattern ===
+print("")
+print("=== Configuration Pattern ===")
+
+// Get config with defaults
+fn get_config(name, default_value) {
+    match get_env(name) {
+        Some(value) => value,
+        None => default_value
+    }
+}
+
+let debug_mode = get_config("DEBUG", "false")
+let log_level = get_config("LOG_LEVEL", "info")
+let port = get_config("PORT", "8080")
+
+print("DEBUG: " + debug_mode)
+print("LOG_LEVEL: " + log_level)
+print("PORT: " + port)
+
+// === Environment Check ===
+print("")
+print("=== Development Environment Detection ===")
+
+fn is_development() {
+    match get_env("NODE_ENV") {
+        Some(env) => env == "development",
+        None => {
+            match get_env("DEBUG") {
+                Some(_) => true,
+                None => false
+            }
+        }
+    }
+}
+
+if is_development() {
+    print("Running in development mode")
+} else {
+    print("Running in production mode")
+}
+
+print("")
+print("Environment demo complete!")

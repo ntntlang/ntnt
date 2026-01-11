@@ -75,9 +75,27 @@ pub enum Statement {
         body: Vec<Statement>,
     },
     
-    /// Use/import statement
+    /// Use/import statement (Rust-style): `use std::collections::HashMap`
     Use {
         path: Vec<String>,
+    },
+    
+    /// Import statement (JS-style): `import { a, b } from "module"`
+    Import {
+        /// Items to import (empty means import all / default)
+        items: Vec<ImportItem>,
+        /// Module path (relative or from std)
+        source: String,
+        /// Optional alias for entire module: `import http as web`
+        alias: Option<String>,
+    },
+    
+    /// Export statement: `export fn foo()` or `export { a, b }`
+    Export {
+        /// Items to export (if specified)
+        items: Vec<String>,
+        /// Statement being exported (e.g., function or struct definition)
+        statement: Option<Box<Statement>>,
     },
     
     /// Expression statement
@@ -270,6 +288,13 @@ pub struct Parameter {
     pub name: String,
     pub type_annotation: Option<TypeExpr>,
     pub default: Option<Expression>,
+}
+
+/// Import item for selective imports: `import { foo as bar } from "module"`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportItem {
+    pub name: String,
+    pub alias: Option<String>,
 }
 
 /// Struct field

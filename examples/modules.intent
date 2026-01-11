@@ -1,0 +1,77 @@
+// Module System Examples
+// Demonstrates the import/export functionality in Intent
+
+// Import specific functions from std/string
+import { split, join, trim, to_upper } from "std/string"
+
+// Import math module with alias
+import "std/math" as math
+
+// Import collection functions
+import { push, reverse, first, last } from "std/collections"
+
+// Import environment functions
+import { cwd } from "std/env"
+
+// --- String Module Demo ---
+print("=== String Module ===")
+
+let text = "  hello, world, intent  "
+let trimmed = trim(text)
+print("Original: '" + text + "'")
+print("Trimmed: '" + trimmed + "'")
+
+let parts = split(trimmed, ", ")
+print("Split result has " + str(len(parts)) + " parts")
+
+let rejoined = join(parts, " | ")
+print("Rejoined with ' | ': " + rejoined)
+
+let upper = to_upper("make me loud!")
+print("Uppercase: " + upper)
+
+// --- Math Module Demo ---
+print("")
+print("=== Math Module ===")
+
+print("PI = " + str(math.PI))
+print("E = " + str(math.E))
+print("sin(0) = " + str(math.sin(0.0)))
+print("cos(0) = " + str(math.cos(0.0)))
+print("log(E) = " + str(math.log(math.E)))
+print("exp(1) = " + str(math.exp(1.0)))
+
+// --- Collections Module Demo ---
+print("")
+print("=== Collections Module ===")
+
+let numbers = [1, 2, 3]
+print("Original array: " + str(numbers))
+
+let numbers2 = push(numbers, 4)
+print("After push(4): " + str(numbers2))
+
+let reversed = reverse(numbers2)
+print("Reversed: " + str(reversed))
+
+let f = first(reversed)
+match f {
+    Some(v) => print("First element: " + str(v)),
+    None => print("Array is empty")
+}
+
+let l = last(reversed)
+match l {
+    Some(v) => print("Last element: " + str(v)),
+    None => print("Array is empty")
+}
+
+// --- Environment Module Demo ---
+print("")
+print("=== Environment Module ===")
+
+let dir = cwd()
+print("Current directory: " + dir)
+
+print("")
+print("Module demo complete!")

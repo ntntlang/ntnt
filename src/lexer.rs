@@ -36,6 +36,10 @@ pub enum TokenKind {
     Mod,
     Use,
     Pub,
+    Import,
+    Export,
+    From,
+    As,
     
     // Contract keywords
     Contract,
@@ -426,6 +430,10 @@ impl<'a> Lexer<'a> {
             "mod" => TokenKind::Mod,
             "use" => TokenKind::Use,
             "pub" => TokenKind::Pub,
+            "import" => TokenKind::Import,
+            "export" => TokenKind::Export,
+            "from" => TokenKind::From,
+            "as" => TokenKind::As,
             
             // Contract keywords
             "contract" => TokenKind::Contract,

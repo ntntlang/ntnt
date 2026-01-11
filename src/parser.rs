@@ -109,6 +109,12 @@ impl Parser {
             self.module_declaration()
         } else if self.match_token(&[TokenKind::Use]) {
             self.use_declaration()
+        } else if self.match_token(&[TokenKind::Import]) {
+            self.import_declaration()
+        } else if self.match_token(&[TokenKind::Export]) {
+            self.export_declaration(attributes)
+        } else if self.match_token(&[TokenKind::Pub]) {
+            self.pub_declaration(attributes)
         } else if self.match_token(&[TokenKind::Protocol]) {
             self.protocol_declaration()
         } else {
@@ -489,6 +495,167 @@ impl Parser {
         self.match_token(&[TokenKind::Semicolon]);
         
         Ok(Statement::Use { path })
+    }
+    
+    /// Parse import declaration: `import { a, b as c } from "module"` or `import "module" as alias`
+    fn import_declaration(&mut self) -> Result<Statement> {
+        let mut items = Vec::new();
+        let mut alias = None;
+        
+        // Check for selective imports: import { a, b, c }
+        if self.match_token(&[TokenKind::LeftBrace]) {
+            loop {
+                let name = self.consume_identifier("Expected import name")?;
+                let item_alias = if self.match_token(&[TokenKind::As]) {
+                    Some(self.consume_identifier("Expected alias name")?)
+                } else {
+                    None
+                };
+                items.push(ImportItem { name, alias: item_alias });
+                
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+            self.consume(&TokenKind::RightBrace, "Expected '}' after import items")?;
+            
+            self.consume(&TokenKind::From, "Expected 'from' after import items")?;
+            
+            // Parse the module source (string literal)
+            let source = self.parse_module_source()?;
+            
+            self.match_token(&[TokenKind::Semicolon]);
+            
+            Ok(Statement::Import {
+                items,
+                source,
+                alias,
+            })
+        } else if let Some(token) = self.peek() {
+            // Check for string literal: import "module" as alias
+            if let TokenKind::String(ref s) = token.kind {
+                let source = s.clone();
+                self.advance();
+                
+                if self.match_token(&[TokenKind::As]) {
+                    alias = Some(self.consume_identifier("Expected alias name")?);
+                }
+                
+                self.match_token(&[TokenKind::Semicolon]);
+                
+                return Ok(Statement::Import {
+                    items: vec![],
+                    source,
+                    alias,
+                });
+            }
+            
+            // Import entire module by name: import http as web from "module"
+            let name = self.consume_identifier("Expected module name")?;
+            if self.match_token(&[TokenKind::As]) {
+                alias = Some(self.consume_identifier("Expected alias name")?);
+            }
+            
+            // If there's no 'from', the name itself is the source
+            if !self.check(&TokenKind::From) {
+                self.match_token(&[TokenKind::Semicolon]);
+                return Ok(Statement::Import {
+                    items: vec![],
+                    source: name,
+                    alias,
+                });
+            }
+            
+            // With 'from', name becomes an item
+            items.push(ImportItem { name: name.clone(), alias: None });
+            
+            self.consume(&TokenKind::From, "Expected 'from' after import items")?;
+            
+            // Parse the module source (string literal)
+            let source = self.parse_module_source()?;
+            
+            self.match_token(&[TokenKind::Semicolon]);
+            
+            Ok(Statement::Import {
+                items,
+                source,
+                alias: None,
+            })
+        } else {
+            Err(IntentError::ParserError {
+                line: self.current_line(),
+                message: "Expected import specifier".to_string(),
+            })
+        }
+    }
+    
+    fn parse_module_source(&mut self) -> Result<String> {
+        if let Some(token) = self.peek() {
+            if let TokenKind::String(ref s) = token.kind {
+                let s = s.clone();
+                self.advance();
+                return Ok(s);
+            } else if let TokenKind::Identifier(ref s) = token.kind {
+                // Allow bare identifiers for std modules: from std/http
+                let mut path = s.clone();
+                self.advance();
+                while self.match_token(&[TokenKind::Slash]) {
+                    path.push('/');
+                    path.push_str(&self.consume_identifier("Expected path segment")?);
+                }
+                return Ok(path);
+            }
+        }
+        Err(IntentError::ParserError {
+            line: self.current_line(),
+            message: "Expected module path string".to_string(),
+        })
+    }
+    
+    /// Parse export declaration: `export fn foo()` or `export { a, b }`
+    fn export_declaration(&mut self, attributes: Vec<Attribute>) -> Result<Statement> {
+        // Check for list export: export { a, b }
+        if self.match_token(&[TokenKind::LeftBrace]) {
+            let mut items = Vec::new();
+            loop {
+                items.push(self.consume_identifier("Expected export name")?);
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+            self.consume(&TokenKind::RightBrace, "Expected '}' after export items")?;
+            self.match_token(&[TokenKind::Semicolon]);
+            return Ok(Statement::Export { items, statement: None });
+        }
+        
+        // Export a declaration: export fn foo() or export struct Bar
+        let stmt = if self.match_token(&[TokenKind::Fn]) {
+            self.function_declaration(attributes)?
+        } else if self.match_token(&[TokenKind::Struct]) {
+            self.struct_declaration(attributes)?
+        } else if self.match_token(&[TokenKind::Enum]) {
+            self.enum_declaration(attributes)?
+        } else if self.match_token(&[TokenKind::Type]) {
+            self.type_alias_declaration()?
+        } else if self.match_token(&[TokenKind::Let]) {
+            self.let_declaration()?
+        } else {
+            return Err(IntentError::ParserError {
+                line: self.current_line(),
+                message: "Expected declaration after 'export'".to_string(),
+            });
+        };
+        
+        Ok(Statement::Export {
+            items: vec![],
+            statement: Some(Box::new(stmt)),
+        })
+    }
+    
+    /// Parse pub declaration: `pub fn foo()` - shorthand for export
+    fn pub_declaration(&mut self, attributes: Vec<Attribute>) -> Result<Statement> {
+        // pub is just syntactic sugar for export
+        self.export_declaration(attributes)
     }
 
     fn protocol_declaration(&mut self) -> Result<Statement> {

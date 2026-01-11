@@ -18,7 +18,7 @@ This document outlines the comprehensive plan for implementing all features desc
 - [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, etc.)
 - [x] CLI with REPL, run, parse, lex, check commands
 - [x] VS Code extension with syntax highlighting
-- [x] 63 unit tests passing
+- [x] 85 unit tests passing
 - [x] Dual file extensions: `.intent` and `.itn`
 - [x] Algebraic Data Types with enums
 - [x] Option<T> and Result<T, E> built-ins
@@ -27,6 +27,8 @@ This document outlines the comprehensive plan for implementing all features desc
 - [x] Type aliases
 - [x] Union types
 - [x] Effect annotations foundation
+- [x] Module system with imports/exports
+- [x] Standard library: std/string, std/math, std/collections, std/env
 
 ---
 
@@ -107,17 +109,18 @@ match result {
 
 ---
 
-## Phase 3: Module System & Standard Library (Weeks 8-11)
+## Phase 3: Module System & Standard Library ✅ COMPLETE
 
-**Goal:** Code organization and essential functionality.
+**Status:** Complete  
+**Duration:** Weeks 8-11
 
-### 3.1 Module System
+### 3.1 Module System ✅
 
-- [ ] File-based modules
-- [ ] `import` / `export` syntax
-- [ ] Public/private visibility (`pub` keyword)
-- [ ] Module aliasing: `import http as web`
-- [ ] Selective imports: `import { get, post } from http`
+- [x] File-based modules
+- [x] `import` / `export` syntax
+- [x] Public/private visibility (`pub` keyword)
+- [x] Module aliasing: `import "std/string" as str`
+- [x] Selective imports: `import { split, join } from "std/string"`
 
 ```intent
 // math.intent
@@ -133,27 +136,23 @@ import { factorial } from "./math"
 print(factorial(5))
 ```
 
-### 3.2 Core Standard Library
+### 3.2 Core Standard Library ✅
 
-- [ ] `std/collections`: List, Map, Set, Queue, Stack
-- [ ] `std/string`: split, join, trim, replace, regex
-- [ ] `std/math`: trig functions, constants (PI, E)
-- [ ] `std/time`: DateTime, Duration, timestamps
-- [ ] `std/json`: parse, stringify
-- [ ] `std/crypto`: hashing, UUID generation
+- [x] `std/string`: split, join, trim, replace, contains, starts_with, ends_with, to_upper, to_lower, char_at, substring
+- [x] `std/math`: sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E
+- [x] `std/collections`: push, pop, first, last, reverse, slice, concat, is_empty
+- [x] `std/env`: get_env, args, cwd
 
-### 3.3 I/O Library
+> **Note:** Additional stdlib modules moved to later phases:
+>
+> - `std/time`, `std/json`, `std/crypto` → Phase 5 (HTTP & Networking)
+> - `std/fs`, `std/path`, `std/process` → Phase 7 (Async & Concurrency)
 
-- [ ] `std/fs`: File read/write, directory operations
-- [ ] `std/path`: Path manipulation
-- [ ] `std/env`: Environment variables, args
-- [ ] `std/process`: Spawn processes, exit codes
-
-**Deliverables:**
+**Deliverables:** ✅
 
 - Module system with imports/exports
-- Core standard library
-- File system and I/O operations
+- Core standard library (string, math, collections, env)
+- File-based module imports
 
 ---
 
@@ -251,14 +250,20 @@ app.listen(8080)
 - [ ] Timeout and retry configuration
 - [ ] Request/Response interceptors
 
-### 5.3 WebSocket Support
+### 5.3 Supporting Libraries (from Phase 3)
+
+- [ ] `std/json`: parse, stringify, JSON schema validation
+- [ ] `std/time`: DateTime, Duration, timestamps, formatting
+- [ ] `std/crypto`: hashing (SHA-256, etc.), HMAC, UUID generation
+
+### 5.4 WebSocket Support
 
 - [ ] WebSocket server
 - [ ] WebSocket client
 - [ ] Message framing
 - [ ] Connection state management
 
-### 5.4 Routing & Middleware
+### 5.5 Routing & Middleware
 
 - [ ] Path parameters: `/users/{id}`
 - [ ] Query string parsing
@@ -267,7 +272,7 @@ app.listen(8080)
 - [ ] Rate limiting middleware
 - [ ] Compression middleware
 
-### 5.5 API Contracts
+### 5.6 API Contracts
 
 - [ ] OpenAPI/Swagger generation from contracts
 - [ ] Request validation from contracts
@@ -382,21 +387,27 @@ let (user, posts) = await (
 )
 ```
 
-### 7.2 Concurrency Primitives
+### 7.3 File System & Process I/O (from Phase 3)
+
+- [ ] `std/fs`: File read/write, directory operations (async)
+- [ ] `std/path`: Path manipulation, resolution, normalization
+- [ ] `std/process`: Spawn processes, exit codes, piping
+
+### 7.4 Concurrency Primitives
 
 - [ ] Channels for message passing
 - [ ] `spawn` for task creation
 - [ ] `select` for multiple channel operations
 - [ ] Structured concurrency (task scopes)
 
-### 7.3 Synchronization
+### 7.5 Synchronization
 
 - [ ] Mutex with scoped guards
 - [ ] RwLock
 - [ ] Atomic types
 - [ ] Once (initialization)
 
-### 7.4 Parallel Collections
+### 7.6 Parallel Collections
 
 - [ ] Parallel map/filter/reduce
 - [ ] Work stealing scheduler

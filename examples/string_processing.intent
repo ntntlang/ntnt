@@ -1,0 +1,89 @@
+// String Processing Example
+// Demonstrates the std/string module capabilities
+
+import { split, join, trim, replace, contains } from "std/string"
+import { starts_with, ends_with, to_upper, to_lower } from "std/string"
+import { char_at, substring } from "std/string"
+
+// === Text Cleaning ===
+print("=== Text Cleaning ===")
+
+let raw_input = "  Hello,   World!  "
+print("Raw input: '" + raw_input + "'")
+
+let cleaned = trim(raw_input)
+print("Trimmed: '" + cleaned + "'")
+
+// === String Analysis ===
+print("")
+print("=== String Analysis ===")
+
+let filename = "document.pdf"
+
+if ends_with(filename, ".pdf") {
+    print(filename + " is a PDF file")
+}
+
+if starts_with(filename, "doc") {
+    print(filename + " starts with 'doc'")
+}
+
+let email = "user@example.com"
+if contains(email, "@") {
+    print(email + " looks like an email address")
+}
+
+// === Case Conversion ===
+print("")
+print("=== Case Conversion ===")
+
+let name = "intent"
+print("Original: " + name)
+print("Uppercase: " + to_upper(name))
+print("Lowercase: " + to_lower("INTENT"))
+
+// === String Parsing ===
+print("")
+print("=== String Parsing ===")
+
+let csv_line = "Alice,30,Engineer"
+let fields = split(csv_line, ",")
+print("CSV fields: " + str(fields))
+print("Name: " + fields[0])
+print("Age: " + fields[1])
+print("Job: " + fields[2])
+
+// === String Building ===
+print("")
+print("=== String Building ===")
+
+let words = ["Intent", "is", "awesome"]
+let sentence = join(words, " ")
+print("Joined: " + sentence)
+
+// With different delimiters
+let path_parts = ["usr", "local", "bin"]
+let unix_path = "/" + join(path_parts, "/")
+print("Path: " + unix_path)
+
+// === Search and Replace ===
+print("")
+print("=== Search and Replace ===")
+
+let template = "Hello, {name}! Welcome to {place}."
+let result = replace(template, "{name}", "Alice")
+let final_msg = replace(result, "{place}", "Intent")
+print(final_msg)
+
+// === Character Access ===
+print("")
+print("=== Character Access ===")
+
+let word = "Intent"
+print("Word: " + word)
+print("First character: " + char_at(word, 0))
+print("Last character: " + char_at(word, 5))
+print("First 3 chars: " + substring(word, 0, 3))
+
+print("")
+print("String processing demo complete!")

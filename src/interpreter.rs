@@ -247,6 +247,10 @@ pub struct Interpreter {
     current_old_values: Option<OldValues>,
     /// Current function's result value (used in postconditions)
     current_result: Option<Value>,
+    /// Loaded modules cache
+    loaded_modules: HashMap<String, HashMap<String, Value>>,
+    /// Current file path (for relative imports)
+    current_file: Option<String>,
 }
 
 impl Interpreter {
@@ -261,10 +265,18 @@ impl Interpreter {
             struct_invariants: HashMap::new(),
             current_old_values: None,
             current_result: None,
+            loaded_modules: HashMap::new(),
+            current_file: None,
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
+        interpreter.define_stdlib();
         interpreter
+    }
+    
+    /// Set the current file path for relative imports
+    pub fn set_current_file(&mut self, path: &str) {
+        self.current_file = Some(path.to_string());
     }
 
     fn define_builtins(&mut self) {
@@ -814,6 +826,690 @@ impl Interpreter {
             },
         );
     }
+    
+    /// Define standard library functions that are always available
+    fn define_stdlib(&mut self) {
+        // Initialize standard library modules
+        self.init_std_string();
+        self.init_std_math();
+        self.init_std_collections();
+        self.init_std_env();
+    }
+    
+    /// std/string module functions
+    fn init_std_string(&mut self) {
+        let mut string_module: HashMap<String, Value> = HashMap::new();
+        
+        // split(str, delimiter) -> [String]
+        string_module.insert("split".to_string(), Value::NativeFunction {
+            name: "split".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(delim)) => {
+                        let parts: Vec<Value> = s.split(delim.as_str())
+                            .map(|p| Value::String(p.to_string()))
+                            .collect();
+                        Ok(Value::Array(parts))
+                    }
+                    _ => Err(IntentError::TypeError("split() requires two strings".to_string())),
+                }
+            },
+        });
+        
+        // join(arr, delimiter) -> String
+        string_module.insert("join".to_string(), Value::NativeFunction {
+            name: "join".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::Array(arr), Value::String(delim)) => {
+                        let parts: Vec<String> = arr.iter()
+                            .map(|v| v.to_string())
+                            .collect();
+                        Ok(Value::String(parts.join(delim)))
+                    }
+                    _ => Err(IntentError::TypeError("join() requires array and string".to_string())),
+                }
+            },
+        });
+        
+        // trim(str) -> String
+        string_module.insert("trim".to_string(), Value::NativeFunction {
+            name: "trim".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(s) => Ok(Value::String(s.trim().to_string())),
+                    _ => Err(IntentError::TypeError("trim() requires a string".to_string())),
+                }
+            },
+        });
+        
+        // replace(str, from, to) -> String
+        string_module.insert("replace".to_string(), Value::NativeFunction {
+            name: "replace".to_string(),
+            arity: 3,
+            func: |args| {
+                match (&args[0], &args[1], &args[2]) {
+                    (Value::String(s), Value::String(from), Value::String(to)) => {
+                        Ok(Value::String(s.replace(from.as_str(), to.as_str())))
+                    }
+                    _ => Err(IntentError::TypeError("replace() requires three strings".to_string())),
+                }
+            },
+        });
+        
+        // contains(str, substr) -> Bool
+        string_module.insert("contains".to_string(), Value::NativeFunction {
+            name: "contains".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(substr)) => {
+                        Ok(Value::Bool(s.contains(substr.as_str())))
+                    }
+                    _ => Err(IntentError::TypeError("contains() requires two strings".to_string())),
+                }
+            },
+        });
+        
+        // starts_with(str, prefix) -> Bool
+        string_module.insert("starts_with".to_string(), Value::NativeFunction {
+            name: "starts_with".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(prefix)) => {
+                        Ok(Value::Bool(s.starts_with(prefix.as_str())))
+                    }
+                    _ => Err(IntentError::TypeError("starts_with() requires two strings".to_string())),
+                }
+            },
+        });
+        
+        // ends_with(str, suffix) -> Bool
+        string_module.insert("ends_with".to_string(), Value::NativeFunction {
+            name: "ends_with".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::String(suffix)) => {
+                        Ok(Value::Bool(s.ends_with(suffix.as_str())))
+                    }
+                    _ => Err(IntentError::TypeError("ends_with() requires two strings".to_string())),
+                }
+            },
+        });
+        
+        // to_upper(str) -> String
+        string_module.insert("to_upper".to_string(), Value::NativeFunction {
+            name: "to_upper".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(s) => Ok(Value::String(s.to_uppercase())),
+                    _ => Err(IntentError::TypeError("to_upper() requires a string".to_string())),
+                }
+            },
+        });
+        
+        // to_lower(str) -> String
+        string_module.insert("to_lower".to_string(), Value::NativeFunction {
+            name: "to_lower".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(s) => Ok(Value::String(s.to_lowercase())),
+                    _ => Err(IntentError::TypeError("to_lower() requires a string".to_string())),
+                }
+            },
+        });
+        
+        // char_at(str, index) -> String
+        string_module.insert("char_at".to_string(), Value::NativeFunction {
+            name: "char_at".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::String(s), Value::Int(idx)) => {
+                        let idx = *idx as usize;
+                        s.chars().nth(idx)
+                            .map(|c| Value::String(c.to_string()))
+                            .ok_or_else(|| IntentError::RuntimeError(format!("Index {} out of bounds", idx)))
+                    }
+                    _ => Err(IntentError::TypeError("char_at() requires string and int".to_string())),
+                }
+            },
+        });
+        
+        // substring(str, start, end) -> String
+        string_module.insert("substring".to_string(), Value::NativeFunction {
+            name: "substring".to_string(),
+            arity: 3,
+            func: |args| {
+                match (&args[0], &args[1], &args[2]) {
+                    (Value::String(s), Value::Int(start), Value::Int(end)) => {
+                        let start = *start as usize;
+                        let end = *end as usize;
+                        let chars: Vec<char> = s.chars().collect();
+                        if start > chars.len() || end > chars.len() || start > end {
+                            return Err(IntentError::RuntimeError("Invalid substring range".to_string()));
+                        }
+                        Ok(Value::String(chars[start..end].iter().collect()))
+                    }
+                    _ => Err(IntentError::TypeError("substring() requires string, int, int".to_string())),
+                }
+            },
+        });
+        
+        self.loaded_modules.insert("std/string".to_string(), string_module);
+    }
+    
+    /// std/math module functions (additional trig functions beyond builtins)
+    fn init_std_math(&mut self) {
+        let mut math_module: HashMap<String, Value> = HashMap::new();
+        
+        // PI constant
+        math_module.insert("PI".to_string(), Value::Float(std::f64::consts::PI));
+        
+        // E constant
+        math_module.insert("E".to_string(), Value::Float(std::f64::consts::E));
+        
+        // sin(x) -> Float
+        math_module.insert("sin".to_string(), Value::NativeFunction {
+            name: "sin".to_string(),
+            arity: 1,
+            func: |args| {
+                let x = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err(IntentError::TypeError("sin() requires a number".to_string())),
+                };
+                Ok(Value::Float(x.sin()))
+            },
+        });
+        
+        // cos(x) -> Float
+        math_module.insert("cos".to_string(), Value::NativeFunction {
+            name: "cos".to_string(),
+            arity: 1,
+            func: |args| {
+                let x = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err(IntentError::TypeError("cos() requires a number".to_string())),
+                };
+                Ok(Value::Float(x.cos()))
+            },
+        });
+        
+        // tan(x) -> Float
+        math_module.insert("tan".to_string(), Value::NativeFunction {
+            name: "tan".to_string(),
+            arity: 1,
+            func: |args| {
+                let x = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err(IntentError::TypeError("tan() requires a number".to_string())),
+                };
+                Ok(Value::Float(x.tan()))
+            },
+        });
+        
+        // asin(x) -> Float
+        math_module.insert("asin".to_string(), Value::NativeFunction {
+            name: "asin".to_string(),
+            arity: 1,
+            func: |args| {
+                let x = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err(IntentError::TypeError("asin() requires a number".to_string())),
+                };
+                Ok(Value::Float(x.asin()))
+            },
+        });
+        
+        // acos(x) -> Float
+        math_module.insert("acos".to_string(), Value::NativeFunction {
+            name: "acos".to_string(),
+            arity: 1,
+            func: |args| {
+                let x = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err(IntentError::TypeError("acos() requires a number".to_string())),
+                };
+                Ok(Value::Float(x.acos()))
+            },
+        });
+        
+        // atan(x) -> Float
+        math_module.insert("atan".to_string(), Value::NativeFunction {
+            name: "atan".to_string(),
+            arity: 1,
+            func: |args| {
+                let x = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err(IntentError::TypeError("atan() requires a number".to_string())),
+                };
+                Ok(Value::Float(x.atan()))
+            },
+        });
+        
+        // atan2(y, x) -> Float
+        math_module.insert("atan2".to_string(), Value::NativeFunction {
+            name: "atan2".to_string(),
+            arity: 2,
+            func: |args| {
+                let y = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err(IntentError::TypeError("atan2() requires numbers".to_string())),
+                };
+                let x = match &args[1] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err(IntentError::TypeError("atan2() requires numbers".to_string())),
+                };
+                Ok(Value::Float(y.atan2(x)))
+            },
+        });
+        
+        // log(x) -> Float (natural log)
+        math_module.insert("log".to_string(), Value::NativeFunction {
+            name: "log".to_string(),
+            arity: 1,
+            func: |args| {
+                let x = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err(IntentError::TypeError("log() requires a number".to_string())),
+                };
+                if x <= 0.0 {
+                    return Err(IntentError::RuntimeError("log() requires positive number".to_string()));
+                }
+                Ok(Value::Float(x.ln()))
+            },
+        });
+        
+        // log10(x) -> Float
+        math_module.insert("log10".to_string(), Value::NativeFunction {
+            name: "log10".to_string(),
+            arity: 1,
+            func: |args| {
+                let x = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err(IntentError::TypeError("log10() requires a number".to_string())),
+                };
+                if x <= 0.0 {
+                    return Err(IntentError::RuntimeError("log10() requires positive number".to_string()));
+                }
+                Ok(Value::Float(x.log10()))
+            },
+        });
+        
+        // exp(x) -> Float (e^x)
+        math_module.insert("exp".to_string(), Value::NativeFunction {
+            name: "exp".to_string(),
+            arity: 1,
+            func: |args| {
+                let x = match &args[0] {
+                    Value::Float(f) => *f,
+                    Value::Int(i) => *i as f64,
+                    _ => return Err(IntentError::TypeError("exp() requires a number".to_string())),
+                };
+                Ok(Value::Float(x.exp()))
+            },
+        });
+        
+        self.loaded_modules.insert("std/math".to_string(), math_module);
+    }
+    
+    /// std/collections module functions
+    fn init_std_collections(&mut self) {
+        let mut collections_module: HashMap<String, Value> = HashMap::new();
+        
+        // push(arr, item) -> Array (returns new array with item added)
+        collections_module.insert("push".to_string(), Value::NativeFunction {
+            name: "push".to_string(),
+            arity: 2,
+            func: |args| {
+                match &args[0] {
+                    Value::Array(arr) => {
+                        let mut new_arr = arr.clone();
+                        new_arr.push(args[1].clone());
+                        Ok(Value::Array(new_arr))
+                    }
+                    _ => Err(IntentError::TypeError("push() requires an array".to_string())),
+                }
+            },
+        });
+        
+        // pop(arr) -> (Array, Option<Value>) - returns (new array without last, removed element)
+        collections_module.insert("pop".to_string(), Value::NativeFunction {
+            name: "pop".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Array(arr) => {
+                        let mut new_arr = arr.clone();
+                        let popped = new_arr.pop();
+                        let opt_val = match popped {
+                            Some(v) => Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "Some".to_string(),
+                                values: vec![v],
+                            },
+                            None => Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                values: vec![],
+                            },
+                        };
+                        // Return tuple of (new array, popped value)
+                        Ok(Value::Array(vec![Value::Array(new_arr), opt_val]))
+                    }
+                    _ => Err(IntentError::TypeError("pop() requires an array".to_string())),
+                }
+            },
+        });
+        
+        // first(arr) -> Option<Value>
+        collections_module.insert("first".to_string(), Value::NativeFunction {
+            name: "first".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Array(arr) => {
+                        match arr.first() {
+                            Some(v) => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "Some".to_string(),
+                                values: vec![v.clone()],
+                            }),
+                            None => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                values: vec![],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("first() requires an array".to_string())),
+                }
+            },
+        });
+        
+        // last(arr) -> Option<Value>
+        collections_module.insert("last".to_string(), Value::NativeFunction {
+            name: "last".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Array(arr) => {
+                        match arr.last() {
+                            Some(v) => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "Some".to_string(),
+                                values: vec![v.clone()],
+                            }),
+                            None => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                values: vec![],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("last() requires an array".to_string())),
+                }
+            },
+        });
+        
+        // reverse(arr) -> Array
+        collections_module.insert("reverse".to_string(), Value::NativeFunction {
+            name: "reverse".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Array(arr) => {
+                        let mut new_arr = arr.clone();
+                        new_arr.reverse();
+                        Ok(Value::Array(new_arr))
+                    }
+                    _ => Err(IntentError::TypeError("reverse() requires an array".to_string())),
+                }
+            },
+        });
+        
+        // slice(arr, start, end) -> Array
+        collections_module.insert("slice".to_string(), Value::NativeFunction {
+            name: "slice".to_string(),
+            arity: 3,
+            func: |args| {
+                match (&args[0], &args[1], &args[2]) {
+                    (Value::Array(arr), Value::Int(start), Value::Int(end)) => {
+                        let start = *start as usize;
+                        let end = (*end as usize).min(arr.len());
+                        if start > arr.len() || start > end {
+                            return Err(IntentError::RuntimeError("Invalid slice range".to_string()));
+                        }
+                        Ok(Value::Array(arr[start..end].to_vec()))
+                    }
+                    _ => Err(IntentError::TypeError("slice() requires array, int, int".to_string())),
+                }
+            },
+        });
+        
+        // concat(arr1, arr2) -> Array
+        collections_module.insert("concat".to_string(), Value::NativeFunction {
+            name: "concat".to_string(),
+            arity: 2,
+            func: |args| {
+                match (&args[0], &args[1]) {
+                    (Value::Array(arr1), Value::Array(arr2)) => {
+                        let mut new_arr = arr1.clone();
+                        new_arr.extend(arr2.clone());
+                        Ok(Value::Array(new_arr))
+                    }
+                    _ => Err(IntentError::TypeError("concat() requires two arrays".to_string())),
+                }
+            },
+        });
+        
+        // is_empty(arr) -> Bool
+        collections_module.insert("is_empty".to_string(), Value::NativeFunction {
+            name: "is_empty".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::Array(arr) => Ok(Value::Bool(arr.is_empty())),
+                    Value::String(s) => Ok(Value::Bool(s.is_empty())),
+                    _ => Err(IntentError::TypeError("is_empty() requires array or string".to_string())),
+                }
+            },
+        });
+        
+        self.loaded_modules.insert("std/collections".to_string(), collections_module);
+    }
+    
+    /// std/env module functions
+    fn init_std_env(&mut self) {
+        let mut env_module: HashMap<String, Value> = HashMap::new();
+        
+        // get_env(name) -> Option<String>
+        env_module.insert("get_env".to_string(), Value::NativeFunction {
+            name: "get_env".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(name) => {
+                        match std::env::var(name) {
+                            Ok(val) => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "Some".to_string(),
+                                values: vec![Value::String(val)],
+                            }),
+                            Err(_) => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                values: vec![],
+                            }),
+                        }
+                    }
+                    _ => Err(IntentError::TypeError("get_env() requires a string".to_string())),
+                }
+            },
+        });
+        
+        // args() -> [String] - command line arguments
+        env_module.insert("args".to_string(), Value::NativeFunction {
+            name: "args".to_string(),
+            arity: 0,
+            func: |_args| {
+                let args: Vec<Value> = std::env::args()
+                    .map(Value::String)
+                    .collect();
+                Ok(Value::Array(args))
+            },
+        });
+        
+        // cwd() -> String - current working directory
+        env_module.insert("cwd".to_string(), Value::NativeFunction {
+            name: "cwd".to_string(),
+            arity: 0,
+            func: |_args| {
+                match std::env::current_dir() {
+                    Ok(path) => Ok(Value::String(path.to_string_lossy().to_string())),
+                    Err(e) => Err(IntentError::RuntimeError(format!("Failed to get cwd: {}", e))),
+                }
+            },
+        });
+        
+        self.loaded_modules.insert("std/env".to_string(), env_module);
+    }
+    
+    /// Handle import statement
+    fn handle_import(&mut self, items: &[ImportItem], source: &str, alias: Option<&str>) -> Result<Value> {
+        // Check if it's a standard library module
+        if source.starts_with("std/") {
+            return self.import_std_module(items, source, alias);
+        }
+        
+        // Check if it's already loaded
+        if let Some(module) = self.loaded_modules.get(source).cloned() {
+            return self.bind_imports(items, &module, source, alias);
+        }
+        
+        // Try to load from file
+        self.import_file_module(items, source, alias)
+    }
+    
+    fn import_std_module(&mut self, items: &[ImportItem], source: &str, alias: Option<&str>) -> Result<Value> {
+        let module = self.loaded_modules.get(source).cloned()
+            .ok_or_else(|| IntentError::RuntimeError(format!("Unknown standard library module: {}", source)))?;
+        
+        self.bind_imports(items, &module, source, alias)
+    }
+    
+    fn bind_imports(&mut self, items: &[ImportItem], module: &HashMap<String, Value>, source: &str, alias: Option<&str>) -> Result<Value> {
+        if items.is_empty() {
+            // Import entire module
+            let module_name = alias.unwrap_or_else(|| {
+                source.rsplit('/').next().unwrap_or(source)
+            });
+            // Create a struct-like value for the module
+            let mut fields = HashMap::new();
+            for (name, value) in module {
+                fields.insert(name.clone(), value.clone());
+            }
+            self.environment.borrow_mut().define(
+                module_name.to_string(),
+                Value::Struct { name: format!("module:{}", source), fields },
+            );
+        } else {
+            // Import specific items
+            for item in items {
+                let value = module.get(&item.name)
+                    .ok_or_else(|| IntentError::RuntimeError(
+                        format!("'{}' is not exported from '{}'", item.name, source)
+                    ))?;
+                let bind_name = item.alias.as_ref().unwrap_or(&item.name);
+                self.environment.borrow_mut().define(bind_name.clone(), value.clone());
+            }
+        }
+        Ok(Value::Unit)
+    }
+    
+    fn import_file_module(&mut self, items: &[ImportItem], source: &str, alias: Option<&str>) -> Result<Value> {
+        use std::fs;
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        
+        // Resolve the file path
+        let file_path = if source.starts_with("./") || source.starts_with("../") {
+            // Relative import
+            if let Some(ref current) = self.current_file {
+                let current_dir = std::path::Path::new(current).parent().unwrap_or(std::path::Path::new("."));
+                current_dir.join(source)
+            } else {
+                std::path::PathBuf::from(source)
+            }
+        } else {
+            std::path::PathBuf::from(source)
+        };
+        
+        // Add .intent extension if not present
+        let file_path = if file_path.extension().is_none() {
+            file_path.with_extension("intent")
+        } else {
+            file_path
+        };
+        
+        // Read and parse the file
+        let source_code = fs::read_to_string(&file_path)
+            .map_err(|e| IntentError::RuntimeError(format!("Failed to read module '{}': {}", file_path.display(), e)))?;
+        
+        let lexer = Lexer::new(&source_code);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse()?;
+        
+        // Create a new environment for the module
+        let previous_env = Rc::clone(&self.environment);
+        let previous_file = self.current_file.clone();
+        
+        self.environment = Rc::new(RefCell::new(Environment::new()));
+        self.current_file = Some(file_path.to_string_lossy().to_string());
+        
+        // Evaluate the module
+        self.eval(&ast)?;
+        
+        // Collect exported items
+        let mut module_exports: HashMap<String, Value> = HashMap::new();
+        
+        // For now, export everything defined at module level
+        // In the future, we'd track explicit exports
+        let env = self.environment.borrow();
+        for (name, value) in env.values.iter() {
+            module_exports.insert(name.clone(), value.clone());
+        }
+        drop(env);
+        
+        // Restore environment
+        self.environment = previous_env;
+        self.current_file = previous_file;
+        
+        // Cache the module
+        let source_key = file_path.to_string_lossy().to_string();
+        self.loaded_modules.insert(source_key.clone(), module_exports.clone());
+        
+        // Bind imports
+        self.bind_imports(items, &module_exports, &source_key, alias)
+    }
 
     /// Evaluate a program
     pub fn eval(&mut self, program: &Program) -> Result<Value> {
@@ -1029,6 +1725,19 @@ impl Interpreter {
 
             Statement::Intent { description: _, target } => {
                 self.eval_statement(target)
+            }
+            
+            Statement::Import { items, source, alias } => {
+                self.handle_import(items, source, alias.as_deref())
+            }
+            
+            Statement::Export { items: _, statement } => {
+                // For now, just evaluate the exported statement
+                // The export metadata would be used by the module system
+                if let Some(stmt) = statement {
+                    self.eval_statement(stmt)?;
+                }
+                Ok(Value::Unit)
             }
         }
     }
@@ -1330,6 +2039,20 @@ impl Interpreter {
                 } else {
                     None
                 };
+                
+                // Check if this is a module call (struct with function field)
+                if let Value::Struct { name, fields } = &obj {
+                    if name.starts_with("module:") {
+                        // This is a module - look up method in its fields
+                        if let Some(func) = fields.get(method) {
+                            return self.call_function(func.clone(), args);
+                        } else {
+                            return Err(IntentError::RuntimeError(
+                                format!("Module '{}' has no function '{}'", name.strip_prefix("module:").unwrap_or(name), method)
+                            ));
+                        }
+                    }
+                }
                 
                 args.insert(0, obj);
                 
@@ -2766,5 +3489,259 @@ mod tests {
             }
         "#).unwrap();
         assert!(matches!(result, Value::Int(1)));
+    }
+
+    // Module System Tests
+
+    #[test]
+    fn test_import_std_string_split() {
+        let result = eval(r#"
+            import { split } from "std/string"
+            let parts = split("hello,world", ",")
+            len(parts)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(2)));
+    }
+
+    #[test]
+    fn test_import_std_string_join() {
+        let result = eval(r#"
+            import { join, split } from "std/string"
+            let parts = split("a-b-c", "-")
+            join(parts, "_")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "a_b_c");
+        } else {
+            panic!("Expected string");
+        }
+    }
+
+    #[test]
+    fn test_import_std_string_trim() {
+        let result = eval(r#"
+            import { trim } from "std/string"
+            trim("  hello world  ")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello world");
+        } else {
+            panic!("Expected string");
+        }
+    }
+
+    #[test]
+    fn test_import_std_string_replace() {
+        let result = eval(r#"
+            import { replace } from "std/string"
+            replace("hello world", "world", "rust")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello rust");
+        } else {
+            panic!("Expected string");
+        }
+    }
+
+    #[test]
+    fn test_import_std_string_contains() {
+        let result = eval(r#"
+            import { contains } from "std/string"
+            contains("hello world", "wor")
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_import_std_string_starts_ends_with() {
+        let result = eval(r#"
+            import { starts_with, ends_with } from "std/string"
+            let s = "hello.txt"
+            starts_with(s, "hello") && ends_with(s, ".txt")
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_import_std_string_case_conversion() {
+        let result = eval(r#"
+            import { to_upper, to_lower } from "std/string"
+            to_upper("hello") == "HELLO" && to_lower("WORLD") == "world"
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_import_std_string_char_at() {
+        let result = eval(r#"
+            import { char_at } from "std/string"
+            char_at("hello", 1)
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "e");
+        } else {
+            panic!("Expected string");
+        }
+    }
+
+    #[test]
+    fn test_import_std_string_substring() {
+        let result = eval(r#"
+            import { substring } from "std/string"
+            substring("hello world", 0, 5)
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello");
+        } else {
+            panic!("Expected string");
+        }
+    }
+
+    #[test]
+    fn test_import_std_math_constants() {
+        let result = eval(r#"
+            import { PI, E } from "std/math"
+            PI > 3.14 && PI < 3.15 && E > 2.71 && E < 2.72
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_import_std_math_trig() {
+        let result = eval(r#"
+            import { sin, cos, PI } from "std/math"
+            let s = sin(0.0)
+            let c = cos(0.0)
+            s < 0.001 && s > -0.001 && c > 0.999
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_import_std_math_log_exp() {
+        let result = eval(r#"
+            import { log, exp, E } from "std/math"
+            let log_e = log(E)
+            let exp_0 = exp(0.0)
+            log_e > 0.99 && log_e < 1.01 && exp_0 > 0.99 && exp_0 < 1.01
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_import_std_collections_push() {
+        let result = eval(r#"
+            import { push } from "std/collections"
+            let arr = [1, 2, 3]
+            let arr2 = push(arr, 4)
+            len(arr2)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(4)));
+    }
+
+    #[test]
+    fn test_import_std_collections_first_last() {
+        let result = eval(r#"
+            import { first, last } from "std/collections"
+            let arr = [10, 20, 30]
+            let f = first(arr)
+            let l = last(arr)
+            match f {
+                Some(v) => match l {
+                    Some(w) => v + w,
+                    None => -1
+                },
+                None => -1
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(40)));
+    }
+
+    #[test]
+    fn test_import_std_collections_reverse() {
+        let result = eval(r#"
+            import { reverse } from "std/collections"
+            let arr = [1, 2, 3]
+            let rev = reverse(arr)
+            rev[0]
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(3)));
+    }
+
+    #[test]
+    fn test_import_std_collections_slice() {
+        let result = eval(r#"
+            import { slice } from "std/collections"
+            let arr = [1, 2, 3, 4, 5]
+            let sub = slice(arr, 1, 4)
+            len(sub)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(3)));
+    }
+
+    #[test]
+    fn test_import_std_collections_concat() {
+        let result = eval(r#"
+            import { concat } from "std/collections"
+            let a = [1, 2]
+            let b = [3, 4]
+            let c = concat(a, b)
+            len(c)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(4)));
+    }
+
+    #[test]
+    fn test_import_std_collections_is_empty() {
+        let result = eval(r#"
+            import { is_empty } from "std/collections"
+            let empty = []
+            let full = [1]
+            is_empty(empty) && !is_empty(full)
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_import_std_env_cwd() {
+        let result = eval(r#"
+            import { cwd } from "std/env"
+            let dir = cwd()
+            len(dir) > 0
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_import_std_env_args() {
+        let result = eval(r#"
+            import { args } from "std/env"
+            let argv = args()
+            len(argv) >= 0
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_import_entire_module() {
+        let result = eval(r#"
+            import "std/string" as str
+            str.trim("  test  ")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "test");
+        } else {
+            panic!("Expected string");
+        }
+    }
+
+    #[test]
+    fn test_import_with_alias() {
+        let result = eval(r#"
+            import { split as divide } from "std/string"
+            let parts = divide("a:b:c", ":")
+            len(parts)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(3)));
     }
 }

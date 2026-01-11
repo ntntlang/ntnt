@@ -1,0 +1,91 @@
+// Math and Science Example
+// Demonstrates the std/math module for scientific computing
+
+import "std/math" as math
+
+// === Mathematical Constants ===
+print("=== Mathematical Constants ===")
+print("PI = " + str(math.PI))
+print("E  = " + str(math.E))
+
+// === Trigonometry ===
+print("")
+print("=== Trigonometry ===")
+
+// Common angle values
+let angle_0 = 0.0
+let angle_90 = math.PI / 2.0
+let angle_180 = math.PI
+let angle_45 = math.PI / 4.0
+
+print("sin(0°) = " + str(math.sin(angle_0)))
+print("sin(90°) = " + str(math.sin(angle_90)))
+print("cos(0°) = " + str(math.cos(angle_0)))
+print("cos(180°) = " + str(math.cos(angle_180)))
+print("tan(45°) = " + str(math.tan(angle_45)))
+
+// === Inverse Trigonometry ===
+print("")
+print("=== Inverse Trigonometry ===")
+
+let sin_val = 0.5
+print("asin(0.5) = " + str(math.asin(sin_val)) + " radians")
+
+let cos_val = 0.5
+print("acos(0.5) = " + str(math.acos(cos_val)) + " radians")
+
+// atan2 for angle from coordinates
+let y = 1.0
+let x = 1.0
+print("atan2(1, 1) = " + str(math.atan2(y, x)) + " radians (45°)")
+
+// === Logarithms and Exponentials ===
+print("")
+print("=== Logarithms and Exponentials ===")
+
+print("log(e) = " + str(math.log(math.E)) + " (natural log)")
+print("log(10) = " + str(math.log(10.0)))
+print("log10(100) = " + str(math.log10(100.0)))
+print("exp(1) = " + str(math.exp(1.0)) + " (e^1)")
+print("exp(2) = " + str(math.exp(2.0)) + " (e^2)")
+
+// === Practical Applications ===
+print("")
+print("=== Practical: Circle Calculations ===")
+
+let radius = 5.0
+let circumference = 2.0 * math.PI * radius
+let area = math.PI * radius * radius
+
+print("Circle with radius " + str(radius) + ":")
+print("  Circumference = " + str(circumference))
+print("  Area = " + str(area))
+
+// === Compound Interest ===
+print("")
+print("=== Practical: Compound Interest ===")
+
+let principal = 1000.0
+let rate = 0.05
+let years = 10.0
+
+// A = P * e^(rt) for continuous compounding
+let final_amount = principal * math.exp(rate * years)
+print("$" + str(principal) + " at 5% for 10 years (continuous):")
+print("  Final amount = $" + str(final_amount))
+
+// === Wave Function ===
+print("")
+print("=== Practical: Simple Harmonic Motion ===")
+
+let amplitude = 10.0
+let frequency = 2.0
+let time = 0.25
+
+// y = A * sin(2πft)
+let displacement = amplitude * math.sin(2.0 * math.PI * frequency * time)
+print("SHM at t=" + str(time) + "s:")
+print("  Displacement = " + str(displacement))
+
+print("")
+print("Math demo complete!")

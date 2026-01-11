@@ -1,0 +1,98 @@
+// Data Processing Example
+// Demonstrates combining std/collections with other modules
+
+import { push, reverse, first, last, slice, concat, is_empty } from "std/collections"
+import { split, join, trim, to_upper } from "std/string"
+
+// === Basic Array Operations ===
+print("=== Basic Array Operations ===")
+
+let numbers = [10, 20, 30, 40, 50]
+print("Original: " + str(numbers))
+
+// Non-mutating operations (return new arrays)
+let with_60 = push(numbers, 60)
+print("After push(60): " + str(with_60))
+print("Original unchanged: " + str(numbers))
+
+let reversed = reverse(numbers)
+print("Reversed: " + str(reversed))
+
+// === Safe Element Access ===
+print("")
+print("=== Safe Element Access ===")
+
+let items = ["apple", "banana", "cherry"]
+
+match first(items) {
+    Some(item) => print("First item: " + item),
+    None => print("Array is empty")
+}
+
+match last(items) {
+    Some(item) => print("Last item: " + item),
+    None => print("Array is empty")
+}
+
+// Empty array handling
+let empty = []
+match first(empty) {
+    Some(item) => print("First: " + item),
+    None => print("Empty array has no first element")
+}
+
+// === Slicing and Combining ===
+print("")
+print("=== Slicing and Combining ===")
+
+let all_numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+print("All numbers: " + str(all_numbers))
+
+let first_half = slice(all_numbers, 0, 5)
+let second_half = slice(all_numbers, 5, 10)
+print("First half: " + str(first_half))
+print("Second half: " + str(second_half))
+
+let recombined = concat(second_half, first_half)
+print("Swapped halves: " + str(recombined))
+
+// === Data Pipeline ===
+print("")
+print("=== Data Pipeline: Process CSV ===")
+
+let csv_data = "  alice,25,engineer  "
+let cleaned = trim(csv_data)
+let fields = split(cleaned, ",")
+
+print("Raw: '" + csv_data + "'")
+print("Fields: " + str(fields))
+print("Name: " + to_upper(fields[0]))
+print("Age: " + fields[1])
+print("Job: " + fields[2])
+
+// === Building Collections ===
+print("")
+print("=== Building a Collection ===")
+
+let result = []
+let result = push(result, "first")
+let result = push(result, "second")
+let result = push(result, "third")
+print("Built array: " + str(result))
+
+// Prepend by reversing
+let prepended = reverse(push(reverse(result), "zeroth"))
+print("After prepend: " + str(prepended))
+
+// === Checking State ===
+print("")
+print("=== Collection State ===")
+
+let full = [1, 2, 3]
+let empty_arr = []
+
+print("is_empty([1,2,3]): " + str(is_empty(full)))
+print("is_empty([]): " + str(is_empty(empty_arr)))
+
+print("")
+print("Data processing demo complete!")

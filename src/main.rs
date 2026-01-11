@@ -13,7 +13,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "intent")]
 #[command(author = "Intent Language Team")]
-#[command(version = "0.1.1")]
+#[command(version = "0.1.2")]
 #[command(about = "Intent - A programming language for AI-driven development", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -82,7 +82,7 @@ fn main() {
 }
 
 fn run_repl() -> anyhow::Result<()> {
-    println!("{}", "Intent Programming Language v0.1.1".green().bold());
+    println!("{}", "Intent Programming Language v0.1.2".green().bold());
     println!("Type {} for help, {} to exit\n", ":help".cyan(), ":quit".cyan());
 
     let mut rl = DefaultEditor::new()?;
@@ -163,6 +163,16 @@ fn print_repl_help() {
     println!("  {}   - Clear the environment", ":clear".cyan());
     println!("  {}     - Show current environment bindings", ":env".cyan());
     println!();
+    println!("{}", "Module System:".yellow().bold());
+    println!("  {} - Import specific functions", r#"import { split, join } from "std/string""#.cyan());
+    println!("  {}    - Import module with alias", r#"import "std/math" as math"#.cyan());
+    println!();
+    println!("{}", "Standard Library:".yellow().bold());
+    println!("  {} - std/string: split, join, trim, replace, to_upper, to_lower", "String".cyan());
+    println!("  {}   - std/math: sin, cos, tan, log, exp, PI, E", "Math".cyan());
+    println!("  {} - std/collections: push, pop, first, last, reverse, slice", "Collections".cyan());
+    println!("  {}    - std/env: get_env, args, cwd", "Environment".cyan());
+    println!();
     println!("{}", "Basic Examples:".yellow().bold());
     println!("  {}           - Variable binding", "let x = 42;".cyan());
     println!("  {}    - Arithmetic", "let y = x + 10;".cyan());
@@ -172,25 +182,16 @@ fn print_repl_help() {
     println!("{}", "Option & Result Types:".yellow().bold());
     println!("  {}     - Create Some value", "let x = Some(42);".cyan());
     println!("  {}          - Create None", "let y = None;".cyan());
-    println!("  {}        - Check if Some", "is_some(x)".cyan());
-    println!("  {}         - Unwrap value", "unwrap(x)".cyan());
     println!("  {} - Unwrap with default", "unwrap_or(y, 0)".cyan());
     println!("  {}  - Create Ok result", "let r = Ok(100);".cyan());
-    println!("  {} - Create Err result", "let e = Err(\"fail\");".cyan());
+    println!("  {} - Create Err result", r#"let e = Err("fail");"#.cyan());
     println!();
     println!("{}", "Pattern Matching:".yellow().bold());
-    println!("  {}", "match x {".cyan());
-    println!("  {}", "    Some(v) => v * 2,".cyan());
-    println!("  {}", "    None => 0".cyan());
-    println!("  {}", "}".cyan());
+    println!("  {}", "match x { Some(v) => v * 2, None => 0 }".cyan());
     println!();
-    println!("{}", "Enums:".yellow().bold());
+    println!("{}", "Enums & Generics:".yellow().bold());
     println!("  {}", "enum Color { Red, Green, Blue }".cyan());
-    println!("  {}     - Create variant", "let c = Color::Red;".cyan());
-    println!();
-    println!("{}", "Generics & Type Aliases:".yellow().bold());
     println!("  {} - Generic function", "fn id<T>(x: T) -> T { x }".cyan());
-    println!("  {}       - Type alias", "type UserId = Int;".cyan());
     println!();
     println!("{}", "Contracts:".yellow().bold());
     println!("  {} - Precondition", "fn div(a, b) requires b != 0 { a / b }".cyan());
