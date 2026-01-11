@@ -11,9 +11,18 @@ Intent is a revolutionary programming language and ecosystem designed specifical
 - `old()` function for pre-state capture  
 - `result` keyword in postconditions
 - Struct invariants with automatic enforcement
-- 34 passing tests
 
-**Next Up**: Type System & Pattern Matching (Phase 2)
+**Phase 2: Type System & Pattern Matching** ✅ Complete
+- Algebraic Data Types (enums with associated data)
+- `Option<T>` and `Result<T, E>` built-ins
+- Pattern matching with `match` expressions
+- Generic functions and types
+- Type aliases
+- Effect annotations foundation
+
+**61 passing tests**
+
+**Next Up**: Module System & Standard Library (Phase 3)
 
 See [ROADMAP.md](ROADMAP.md) for the full 13-phase implementation plan.
 
@@ -87,6 +96,130 @@ fn withdraw(account: BankAccount, amount: Int) -> Bool
 }
 ```
 
+## Option & Result Types
+
+Intent provides built-in `Option<T>` and `Result<T, E>` types for safe handling of nullable values and errors:
+
+```intent
+// Option type for nullable values
+let maybe_value = Some(42);
+let nothing = None;
+
+// Check and unwrap
+if is_some(maybe_value) {
+    print(unwrap(maybe_value));  // 42
+}
+
+// Safe default
+let value = unwrap_or(nothing, 0);  // 0
+
+// Result type for error handling
+let success = Ok(100);
+let failure = Err("something went wrong");
+
+if is_ok(success) {
+    print(unwrap(success));  // 100
+}
+```
+
+## Pattern Matching
+
+Use `match` expressions for powerful pattern matching:
+
+```intent
+fn describe_option(opt) {
+    match opt {
+        Some(v) => print("Got value: " + v),
+        None => print("No value")
+    }
+}
+
+// Match on literals
+fn describe_number(n) {
+    match n {
+        0 => "zero",
+        1 => "one",
+        _ => "many"
+    }
+}
+
+// Match on enums with data
+enum Shape {
+    Circle(Float),
+    Rectangle(Float, Float)
+}
+
+fn area(shape) {
+    match shape {
+        Shape::Circle(r) => 3.14159 * r * r,
+        Shape::Rectangle(w, h) => w * h
+    }
+}
+```
+
+## Enums
+
+Define custom enumerated types with optional associated data:
+
+```intent
+// Simple enum
+enum Status {
+    Pending,
+    Active,
+    Completed
+}
+
+let current = Status::Active;
+
+// Enum with data
+enum Message {
+    Text(String),
+    Number(Int),
+    Pair(Int, Int)
+}
+
+let msg = Message::Text("hello");
+```
+
+## Generics
+
+Generic functions and types enable reusable code:
+
+```intent
+// Generic function
+fn identity<T>(x: T) -> T {
+    return x;
+}
+
+identity(42);      // works with Int
+identity("hello"); // works with String
+
+// Generic struct
+struct Stack<T> {
+    items: [T]
+}
+
+// Type aliases
+type UserId = Int;
+type StringMap<V> = Map<String, V>;
+```
+
+## Effect Annotations
+
+Mark functions with their side effects:
+
+```intent
+// Function with IO effect
+fn read_config(path: String) -> String with io {
+    // ... performs file I/O
+}
+
+// Pure function (no side effects)
+fn add(a: Int, b: Int) -> Int pure {
+    return a + b;
+}
+```
+
 ## Editor Support
 
 ### VS Code
@@ -135,6 +268,20 @@ Intent bridges the gap between AI's speed and consistency with human judgment an
 | `pow(base, exp)` | Exponentiation | `pow(2, 3)` → `8` |
 | `sign(x)` | Sign of number (-1, 0, 1) | `sign(-5)` → `-1` |
 | `clamp(x, min, max)` | Clamp to range | `clamp(15, 0, 10)` → `10` |
+
+### Option & Result Functions
+| Function | Description | Example |
+|----------|-------------|---------|
+| `Some(value)` | Create Option with value | `Some(42)` → `Some(42)` |
+| `None` | Create empty Option | `None` → `None` |
+| `Ok(value)` | Create success Result | `Ok(100)` → `Ok(100)` |
+| `Err(error)` | Create error Result | `Err("fail")` → `Err("fail")` |
+| `is_some(opt)` | Check if Option has value | `is_some(Some(1))` → `true` |
+| `is_none(opt)` | Check if Option is empty | `is_none(None)` → `true` |
+| `is_ok(result)` | Check if Result is Ok | `is_ok(Ok(1))` → `true` |
+| `is_err(result)` | Check if Result is Err | `is_err(Err("x"))` → `true` |
+| `unwrap(opt)` | Get value (panics if None/Err) | `unwrap(Some(42))` → `42` |
+| `unwrap_or(opt, default)` | Get value or default | `unwrap_or(None, 0)` → `0` |
 
 ### I/O Functions
 | Function | Description |

@@ -97,6 +97,8 @@ impl Parser {
             self.let_declaration()
         } else if self.match_token(&[TokenKind::Fn]) {
             self.function_declaration(attributes)
+        } else if self.match_token(&[TokenKind::Type]) {
+            self.type_alias_declaration()
         } else if self.match_token(&[TokenKind::Struct]) {
             self.struct_declaration(attributes)
         } else if self.match_token(&[TokenKind::Enum]) {
@@ -145,7 +147,15 @@ impl Parser {
 
     fn let_declaration(&mut self) -> Result<Statement> {
         let mutable = self.match_token(&[TokenKind::Mut]);
-        let name = self.consume_identifier("Expected variable name")?;
+        
+        // Check for pattern destructuring: let (a, b) = ...
+        let (name, pattern) = if self.check(&TokenKind::LeftParen) || self.check(&TokenKind::LeftBracket) {
+            let pat = self.parse_pattern()?;
+            ("_destructure".to_string(), Some(pat))
+        } else {
+            let name = self.consume_identifier("Expected variable name")?;
+            (name, None)
+        };
         
         let type_annotation = if self.match_token(&[TokenKind::Colon]) {
             Some(self.parse_type()?)
@@ -166,11 +176,56 @@ impl Parser {
             mutable,
             type_annotation,
             value,
+            pattern,
+        })
+    }
+    
+    fn type_alias_declaration(&mut self) -> Result<Statement> {
+        let name = self.consume_identifier("Expected type name")?;
+        
+        // Optional type parameters: type Foo<T, U>
+        let type_params = if self.match_token(&[TokenKind::Less]) {
+            let mut params = Vec::new();
+            loop {
+                params.push(self.consume_identifier("Expected type parameter")?);
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+            self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
+            params
+        } else {
+            Vec::new()
+        };
+        
+        self.consume(&TokenKind::Assign, "Expected '=' after type name")?;
+        let target = self.parse_type()?;
+        self.match_token(&[TokenKind::Semicolon]);
+        
+        Ok(Statement::TypeAlias {
+            name,
+            type_params,
+            target,
         })
     }
 
     fn function_declaration(&mut self, attributes: Vec<Attribute>) -> Result<Statement> {
         let name = self.consume_identifier("Expected function name")?;
+        
+        // Parse optional generic type parameters: fn foo<T, U>()
+        let type_params = if self.match_token(&[TokenKind::Less]) {
+            let mut params = Vec::new();
+            loop {
+                params.push(self.consume_identifier("Expected type parameter")?);
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+            self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
+            params
+        } else {
+            Vec::new()
+        };
         
         self.consume(&TokenKind::LeftParen, "Expected '(' after function name")?;
         let params = self.parse_parameters()?;
@@ -180,6 +235,22 @@ impl Parser {
             Some(self.parse_type()?)
         } else {
             None
+        };
+        
+        // Parse optional effect annotation: `with io, async`
+        let effects = if self.match_token(&[TokenKind::With]) {
+            let mut effs = Vec::new();
+            loop {
+                effs.push(self.consume_identifier("Expected effect name")?);
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+            effs
+        } else if self.match_token(&[TokenKind::Pure]) {
+            vec!["pure".to_string()]
+        } else {
+            Vec::new()
         };
         
         // Parse contract (requires/ensures)
@@ -195,6 +266,8 @@ impl Parser {
             contract,
             body,
             attributes,
+            type_params,
+            effects,
         })
     }
 
@@ -254,6 +327,21 @@ impl Parser {
     fn struct_declaration(&mut self, attributes: Vec<Attribute>) -> Result<Statement> {
         let name = self.consume_identifier("Expected struct name")?;
         
+        // Parse optional generic type parameters: struct Foo<T, U>
+        let type_params = if self.match_token(&[TokenKind::Less]) {
+            let mut params = Vec::new();
+            loop {
+                params.push(self.consume_identifier("Expected type parameter")?);
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+            self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
+            params
+        } else {
+            Vec::new()
+        };
+        
         self.consume(&TokenKind::LeftBrace, "Expected '{' after struct name")?;
         
         let mut fields = Vec::new();
@@ -280,11 +368,27 @@ impl Parser {
             name,
             fields,
             attributes,
+            type_params,
         })
     }
 
     fn enum_declaration(&mut self, attributes: Vec<Attribute>) -> Result<Statement> {
         let name = self.consume_identifier("Expected enum name")?;
+        
+        // Parse optional generic type parameters: enum Option<T>
+        let type_params = if self.match_token(&[TokenKind::Less]) {
+            let mut params = Vec::new();
+            loop {
+                params.push(self.consume_identifier("Expected type parameter")?);
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+            self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
+            params
+        } else {
+            Vec::new()
+        };
         
         self.consume(&TokenKind::LeftBrace, "Expected '{' after enum name")?;
         
@@ -324,6 +428,7 @@ impl Parser {
             name,
             variants,
             attributes,
+            type_params,
         })
     }
 
@@ -802,11 +907,51 @@ impl Parser {
             }
         }
 
-        // Identifier
+        // Identifier (or EnumName::Variant)
         if let Some(token) = self.peek() {
             if let TokenKind::Identifier(ref name) = token.kind {
                 let name = name.clone();
                 self.advance();
+                
+                // Check for enum variant access: EnumName::Variant
+                if self.check(&TokenKind::ColonColon) {
+                    self.advance(); // consume ::
+                    if let Some(variant_token) = self.peek() {
+                        if let TokenKind::Identifier(ref variant_name) = variant_token.kind {
+                            let variant = variant_name.clone();
+                            self.advance();
+                            
+                            // Check for arguments: EnumName::Variant(args)
+                            let arguments = if self.check(&TokenKind::LeftParen) {
+                                self.advance();
+                                let mut args = Vec::new();
+                                if !self.check(&TokenKind::RightParen) {
+                                    loop {
+                                        args.push(self.expression()?);
+                                        if !self.match_token(&[TokenKind::Comma]) {
+                                            break;
+                                        }
+                                    }
+                                }
+                                self.consume(&TokenKind::RightParen, "Expected ')' after arguments")?;
+                                args
+                            } else {
+                                Vec::new()
+                            };
+                            
+                            return Ok(Expression::EnumVariant {
+                                enum_name: name,
+                                variant,
+                                arguments,
+                            });
+                        }
+                    }
+                    return Err(IntentError::ParserError {
+                        line: self.current_line(),
+                        message: "Expected variant name after '::'".to_string(),
+                    });
+                }
+                
                 return Ok(Expression::Identifier(name));
             }
         }
@@ -841,10 +986,216 @@ impl Parser {
             let block = self.block()?;
             return Ok(Expression::Block(block));
         }
+        
+        // Match expression
+        if self.match_token(&[TokenKind::Match]) {
+            return self.match_expression();
+        }
 
         Err(IntentError::ParserError {
             line: self.current_line(),
             message: "Expected expression".to_string(),
+        })
+    }
+    
+    /// Parse a match expression: match expr { pattern => body, ... }
+    fn match_expression(&mut self) -> Result<Expression> {
+        let scrutinee = self.expression()?;
+        
+        self.consume(&TokenKind::LeftBrace, "Expected '{' after match expression")?;
+        
+        let mut arms = Vec::new();
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            let pattern = self.parse_pattern()?;
+            
+            // Optional guard: `if condition`
+            let guard = if self.match_token(&[TokenKind::If]) {
+                Some(self.expression()?)
+            } else {
+                None
+            };
+            
+            self.consume(&TokenKind::FatArrow, "Expected '=>' after pattern")?;
+            
+            let body = self.expression()?;
+            
+            arms.push(MatchArm { pattern, guard, body });
+            
+            // Optional comma or newline between arms
+            self.match_token(&[TokenKind::Comma]);
+        }
+        
+        self.consume(&TokenKind::RightBrace, "Expected '}' after match arms")?;
+        
+        Ok(Expression::Match {
+            scrutinee: Box::new(scrutinee),
+            arms,
+        })
+    }
+    
+    /// Parse a pattern for match expressions
+    fn parse_pattern(&mut self) -> Result<Pattern> {
+        // Wildcard pattern: _
+        if let Some(token) = self.peek() {
+            if let TokenKind::Identifier(ref name) = token.kind {
+                if name == "_" {
+                    self.advance();
+                    return Ok(Pattern::Wildcard);
+                }
+            }
+        }
+        
+        // Literal patterns
+        if let Some(token) = self.peek() {
+            match &token.kind {
+                TokenKind::Integer(n) => {
+                    let n = *n;
+                    self.advance();
+                    return Ok(Pattern::Literal(Expression::Integer(n)));
+                }
+                TokenKind::Float(n) => {
+                    let n = *n;
+                    self.advance();
+                    return Ok(Pattern::Literal(Expression::Float(n)));
+                }
+                TokenKind::String(s) => {
+                    let s = s.clone();
+                    self.advance();
+                    return Ok(Pattern::Literal(Expression::String(s)));
+                }
+                TokenKind::Bool(b) => {
+                    let b = *b;
+                    self.advance();
+                    return Ok(Pattern::Literal(Expression::Bool(b)));
+                }
+                _ => {}
+            }
+        }
+        
+        // Array pattern: [pat1, pat2, ...]
+        if self.match_token(&[TokenKind::LeftBracket]) {
+            let mut patterns = Vec::new();
+            if !self.check(&TokenKind::RightBracket) {
+                loop {
+                    patterns.push(self.parse_pattern()?);
+                    if !self.match_token(&[TokenKind::Comma]) {
+                        break;
+                    }
+                }
+            }
+            self.consume(&TokenKind::RightBracket, "Expected ']' after array pattern")?;
+            return Ok(Pattern::Array(patterns));
+        }
+        
+        // Tuple pattern: (pat1, pat2, ...)
+        if self.match_token(&[TokenKind::LeftParen]) {
+            let mut patterns = Vec::new();
+            if !self.check(&TokenKind::RightParen) {
+                loop {
+                    patterns.push(self.parse_pattern()?);
+                    if !self.match_token(&[TokenKind::Comma]) {
+                        break;
+                    }
+                }
+            }
+            self.consume(&TokenKind::RightParen, "Expected ')' after tuple pattern")?;
+            return Ok(Pattern::Tuple(patterns));
+        }
+        
+        // Identifier-based patterns (variable binding, struct, or variant)
+        if let Some(token) = self.peek() {
+            if let TokenKind::Identifier(ref name) = token.kind {
+                let name = name.clone();
+                self.advance();
+                
+                // Check for qualified variant: EnumName::Variant or EnumName::Variant(fields)
+                if self.check(&TokenKind::ColonColon) {
+                    self.advance(); // consume ::
+                    let variant_name = self.consume_identifier("Expected variant name after '::'")?;
+                    
+                    // Check for fields
+                    let fields = if self.check(&TokenKind::LeftParen) {
+                        self.advance(); // consume (
+                        let mut field_patterns = Vec::new();
+                        if !self.check(&TokenKind::RightParen) {
+                            loop {
+                                field_patterns.push(self.parse_pattern()?);
+                                if !self.match_token(&[TokenKind::Comma]) {
+                                    break;
+                                }
+                            }
+                        }
+                        self.consume(&TokenKind::RightParen, "Expected ')' after variant fields")?;
+                        Some(field_patterns)
+                    } else {
+                        None
+                    };
+                    
+                    return Ok(Pattern::Variant {
+                        name, // Enum name is the qualifier
+                        variant: variant_name,
+                        fields,
+                    });
+                }
+                
+                // Check for variant pattern: Name(pattern) or Name::Variant(pattern)
+                if self.check(&TokenKind::LeftParen) {
+                    // Variant with fields: Some(x) or Ok(value)
+                    self.advance(); // consume (
+                    let mut fields = Vec::new();
+                    if !self.check(&TokenKind::RightParen) {
+                        loop {
+                            fields.push(self.parse_pattern()?);
+                            if !self.match_token(&[TokenKind::Comma]) {
+                                break;
+                            }
+                        }
+                    }
+                    self.consume(&TokenKind::RightParen, "Expected ')' after variant fields")?;
+                    return Ok(Pattern::Variant {
+                        name: String::new(), // No enum name qualifier
+                        variant: name,
+                        fields: Some(fields),
+                    });
+                }
+                
+                // Check for struct pattern: Name { field: pattern, ... }
+                if self.check(&TokenKind::LeftBrace) {
+                    self.advance(); // consume {
+                    let mut fields = Vec::new();
+                    if !self.check(&TokenKind::RightBrace) {
+                        loop {
+                            let field_name = self.consume_identifier("Expected field name")?;
+                            self.consume(&TokenKind::Colon, "Expected ':' after field name")?;
+                            let field_pattern = self.parse_pattern()?;
+                            fields.push((field_name, field_pattern));
+                            if !self.match_token(&[TokenKind::Comma]) {
+                                break;
+                            }
+                        }
+                    }
+                    self.consume(&TokenKind::RightBrace, "Expected '}' after struct pattern")?;
+                    return Ok(Pattern::Struct { name, fields });
+                }
+                
+                // Simple identifier - check if it looks like a unit variant (capitalized) or a variable binding
+                if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    // Capitalized - could be a unit variant like None
+                    return Ok(Pattern::Variant {
+                        name: String::new(),
+                        variant: name,
+                        fields: None,
+                    });
+                }
+                
+                // Variable binding pattern
+                return Ok(Pattern::Variable(name));
+            }
+        }
+        
+        Err(IntentError::ParserError {
+            line: self.current_line(),
+            message: "Expected pattern".to_string(),
         })
     }
 

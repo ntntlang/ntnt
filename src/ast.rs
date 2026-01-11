@@ -19,6 +19,8 @@ pub enum Statement {
         mutable: bool,
         type_annotation: Option<TypeExpr>,
         value: Option<Expression>,
+        /// Optional pattern for destructuring: `let (a, b) = expr;`
+        pattern: Option<Pattern>,
     },
     
     /// Function declaration
@@ -29,6 +31,17 @@ pub enum Statement {
         contract: Option<Contract>,
         body: Block,
         attributes: Vec<Attribute>,
+        /// Generic type parameters: `fn foo<T, U>()`
+        type_params: Vec<String>,
+        /// Effect annotation: `fn foo() with io`
+        effects: Vec<String>,
+    },
+    
+    /// Type alias declaration: `type Name = Type;`
+    TypeAlias {
+        name: String,
+        type_params: Vec<String>,
+        target: TypeExpr,
     },
     
     /// Struct declaration
@@ -36,6 +49,8 @@ pub enum Statement {
         name: String,
         fields: Vec<Field>,
         attributes: Vec<Attribute>,
+        /// Generic type parameters: `struct Foo<T>`
+        type_params: Vec<String>,
     },
     
     /// Enum declaration
@@ -43,6 +58,8 @@ pub enum Statement {
         name: String,
         variants: Vec<EnumVariant>,
         attributes: Vec<Attribute>,
+        /// Generic type parameters: `enum Option<T>`
+        type_params: Vec<String>,
     },
     
     /// Implementation block
@@ -172,6 +189,13 @@ pub enum Expression {
     StructLiteral {
         name: String,
         fields: Vec<(String, Expression)>,
+    },
+    
+    /// Enum variant access (EnumName::Variant or EnumName::Variant(args))
+    EnumVariant {
+        enum_name: String,
+        variant: String,
+        arguments: Vec<Expression>,
     },
     
     /// Lambda/closure

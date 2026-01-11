@@ -45,6 +45,20 @@ pub enum Value {
         fields: HashMap<String, Value>,
     },
     
+    /// Enum variant instance (for ADTs like Option, Result)
+    EnumValue {
+        enum_name: String,
+        variant: String,
+        values: Vec<Value>,
+    },
+    
+    /// Enum constructor (for creating enum values dynamically)
+    EnumConstructor {
+        enum_name: String,
+        variant: String,
+        arity: usize,
+    },
+    
     /// Function value with contract
     Function {
         name: String,
@@ -52,6 +66,7 @@ pub enum Value {
         body: Block,
         closure: Rc<RefCell<Environment>>,
         contract: Option<FunctionContract>,
+        type_params: Vec<String>,
     },
     
     /// Native/built-in function
@@ -102,6 +117,8 @@ impl Value {
             Value::String(_) => "String",
             Value::Array(_) => "Array",
             Value::Struct { name, .. } => name,
+            Value::EnumValue { enum_name, .. } => enum_name,
+            Value::EnumConstructor { .. } => "EnumConstructor",
             Value::Function { .. } => "Function",
             Value::NativeFunction { .. } => "NativeFunction",
             Value::Return(_) => "Return",
@@ -129,6 +146,17 @@ impl fmt::Display for Value {
                     .map(|(k, v)| format!("{}: {}", k, v))
                     .collect();
                 write!(f, "{} {{ {} }}", name, field_strs.join(", "))
+            }
+            Value::EnumValue { enum_name, variant, values } => {
+                if values.is_empty() {
+                    write!(f, "{}::{}", enum_name, variant)
+                } else {
+                    let vals: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+                    write!(f, "{}::{}({})", enum_name, variant, vals.join(", "))
+                }
+            }
+            Value::EnumConstructor { enum_name, variant, arity } => {
+                write!(f, "<constructor {}::{}({})>", enum_name, variant, arity)
             }
             Value::Function { name, .. } => write!(f, "<fn {}>", name),
             Value::NativeFunction { name, .. } => write!(f, "<native fn {}>", name),
@@ -209,6 +237,10 @@ pub struct Interpreter {
     contracts: ContractChecker,
     /// Struct type definitions
     structs: HashMap<String, Vec<Field>>,
+    /// Enum type definitions (name -> variants with their field types)
+    enums: HashMap<String, Vec<EnumVariant>>,
+    /// Type aliases (alias -> target type expression)
+    type_aliases: HashMap<String, TypeExpr>,
     /// Struct invariants
     struct_invariants: HashMap<String, Vec<Expression>>,
     /// Old values for current function call (used in postconditions)
@@ -224,11 +256,14 @@ impl Interpreter {
             environment: env,
             contracts: ContractChecker::new(),
             structs: HashMap::new(),
+            enums: HashMap::new(),
+            type_aliases: HashMap::new(),
             struct_invariants: HashMap::new(),
             current_old_values: None,
             current_result: None,
         };
         interpreter.define_builtins();
+        interpreter.define_builtin_types();
         interpreter
     }
 
@@ -567,6 +602,219 @@ impl Interpreter {
         );
     }
 
+    /// Define built-in types: Option<T>, Result<T, E>
+    fn define_builtin_types(&mut self) {
+        // Option<T> = Some(T) | None
+        self.enums.insert("Option".to_string(), vec![
+            EnumVariant {
+                name: "Some".to_string(),
+                fields: Some(vec![TypeExpr::Named("T".to_string())]),
+            },
+            EnumVariant {
+                name: "None".to_string(),
+                fields: None,
+            },
+        ]);
+        
+        // Result<T, E> = Ok(T) | Err(E)
+        self.enums.insert("Result".to_string(), vec![
+            EnumVariant {
+                name: "Ok".to_string(),
+                fields: Some(vec![TypeExpr::Named("T".to_string())]),
+            },
+            EnumVariant {
+                name: "Err".to_string(),
+                fields: Some(vec![TypeExpr::Named("E".to_string())]),
+            },
+        ]);
+        
+        // Define constructors for Option
+        self.environment.borrow_mut().define(
+            "Some".to_string(),
+            Value::NativeFunction {
+                name: "Some".to_string(),
+                arity: 1,
+                func: |args| {
+                    Ok(Value::EnumValue {
+                        enum_name: "Option".to_string(),
+                        variant: "Some".to_string(),
+                        values: args.to_vec(),
+                    })
+                },
+            },
+        );
+        
+        self.environment.borrow_mut().define(
+            "None".to_string(),
+            Value::EnumValue {
+                enum_name: "Option".to_string(),
+                variant: "None".to_string(),
+                values: vec![],
+            },
+        );
+        
+        // Define constructors for Result
+        self.environment.borrow_mut().define(
+            "Ok".to_string(),
+            Value::NativeFunction {
+                name: "Ok".to_string(),
+                arity: 1,
+                func: |args| {
+                    Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Ok".to_string(),
+                        values: args.to_vec(),
+                    })
+                },
+            },
+        );
+        
+        self.environment.borrow_mut().define(
+            "Err".to_string(),
+            Value::NativeFunction {
+                name: "Err".to_string(),
+                arity: 1,
+                func: |args| {
+                    Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Err".to_string(),
+                        values: args.to_vec(),
+                    })
+                },
+            },
+        );
+        
+        // is_some() helper for Option
+        self.environment.borrow_mut().define(
+            "is_some".to_string(),
+            Value::NativeFunction {
+                name: "is_some".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::EnumValue { enum_name, variant, .. } 
+                            if enum_name == "Option" => {
+                            Ok(Value::Bool(variant == "Some"))
+                        }
+                        _ => Err(IntentError::TypeError("is_some() requires an Option".to_string())),
+                    }
+                },
+            },
+        );
+        
+        // is_none() helper for Option
+        self.environment.borrow_mut().define(
+            "is_none".to_string(),
+            Value::NativeFunction {
+                name: "is_none".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::EnumValue { enum_name, variant, .. } 
+                            if enum_name == "Option" => {
+                            Ok(Value::Bool(variant == "None"))
+                        }
+                        _ => Err(IntentError::TypeError("is_none() requires an Option".to_string())),
+                    }
+                },
+            },
+        );
+        
+        // is_ok() helper for Result
+        self.environment.borrow_mut().define(
+            "is_ok".to_string(),
+            Value::NativeFunction {
+                name: "is_ok".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::EnumValue { enum_name, variant, .. } 
+                            if enum_name == "Result" => {
+                            Ok(Value::Bool(variant == "Ok"))
+                        }
+                        _ => Err(IntentError::TypeError("is_ok() requires a Result".to_string())),
+                    }
+                },
+            },
+        );
+        
+        // is_err() helper for Result
+        self.environment.borrow_mut().define(
+            "is_err".to_string(),
+            Value::NativeFunction {
+                name: "is_err".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::EnumValue { enum_name, variant, .. } 
+                            if enum_name == "Result" => {
+                            Ok(Value::Bool(variant == "Err"))
+                        }
+                        _ => Err(IntentError::TypeError("is_err() requires a Result".to_string())),
+                    }
+                },
+            },
+        );
+        
+        // unwrap() for Option and Result
+        self.environment.borrow_mut().define(
+            "unwrap".to_string(),
+            Value::NativeFunction {
+                name: "unwrap".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::EnumValue { enum_name, variant, values } => {
+                            match (enum_name.as_str(), variant.as_str()) {
+                                ("Option", "Some") | ("Result", "Ok") => {
+                                    values.first().cloned().ok_or_else(|| {
+                                        IntentError::RuntimeError("Empty variant".to_string())
+                                    })
+                                }
+                                ("Option", "None") => {
+                                    Err(IntentError::RuntimeError("Called unwrap() on None".to_string()))
+                                }
+                                ("Result", "Err") => {
+                                    let err_val = values.first().map(|v| v.to_string()).unwrap_or_default();
+                                    Err(IntentError::RuntimeError(format!("Called unwrap() on Err({})", err_val)))
+                                }
+                                _ => Err(IntentError::TypeError("unwrap() requires Option or Result".to_string())),
+                            }
+                        }
+                        _ => Err(IntentError::TypeError("unwrap() requires Option or Result".to_string())),
+                    }
+                },
+            },
+        );
+        
+        // unwrap_or() for Option and Result
+        self.environment.borrow_mut().define(
+            "unwrap_or".to_string(),
+            Value::NativeFunction {
+                name: "unwrap_or".to_string(),
+                arity: 2,
+                func: |args| {
+                    match &args[0] {
+                        Value::EnumValue { enum_name, variant, values } => {
+                            match (enum_name.as_str(), variant.as_str()) {
+                                ("Option", "Some") | ("Result", "Ok") => {
+                                    values.first().cloned().ok_or_else(|| {
+                                        IntentError::RuntimeError("Empty variant".to_string())
+                                    })
+                                }
+                                ("Option", "None") | ("Result", "Err") => {
+                                    Ok(args[1].clone())
+                                }
+                                _ => Err(IntentError::TypeError("unwrap_or() requires Option or Result".to_string())),
+                            }
+                        }
+                        _ => Err(IntentError::TypeError("unwrap_or() requires Option or Result".to_string())),
+                    }
+                },
+            },
+        );
+    }
+
     /// Evaluate a program
     pub fn eval(&mut self, program: &Program) -> Result<Value> {
         let mut result = Value::Unit;
@@ -587,13 +835,26 @@ impl Interpreter {
                 mutable: _,
                 type_annotation: _,
                 value,
+                pattern,
             } => {
                 let val = if let Some(expr) = value {
                     self.eval_expression(expr)?
                 } else {
                     Value::Unit
                 };
-                self.environment.borrow_mut().define(name.clone(), val);
+                
+                // Handle pattern destructuring
+                if let Some(pat) = pattern {
+                    self.bind_pattern(pat, &val)?;
+                } else {
+                    self.environment.borrow_mut().define(name.clone(), val);
+                }
+                Ok(Value::Unit)
+            }
+            
+            Statement::TypeAlias { name, type_params: _, target } => {
+                // Store type alias for later resolution
+                self.type_aliases.insert(name.clone(), target.clone());
                 Ok(Value::Unit)
             }
 
@@ -604,6 +865,8 @@ impl Interpreter {
                 contract,
                 body,
                 attributes: _,
+                type_params,
+                effects: _, // Effects are tracked but not enforced at runtime yet
             } => {
                 // Convert AST Contract to FunctionContract with expressions
                 let func_contract = contract.as_ref().map(|c| {
@@ -619,6 +882,7 @@ impl Interpreter {
                     body: body.clone(),
                     closure: Rc::clone(&self.environment),
                     contract: func_contract,
+                    type_params: type_params.clone(),
                 };
                 self.environment.borrow_mut().define(name.clone(), func);
                 Ok(Value::Unit)
@@ -628,6 +892,7 @@ impl Interpreter {
                 name,
                 fields,
                 attributes: _,
+                type_params: _, // TODO: Use for generic struct instantiation
             } => {
                 self.structs.insert(name.clone(), fields.clone());
                 Ok(Value::Unit)
@@ -720,8 +985,40 @@ impl Interpreter {
                 Ok(Value::Unit)
             }
 
-            Statement::Enum { .. } => {
-                // TODO: Implement enum support
+            Statement::Enum { name, variants, attributes: _, type_params: _ } => {
+                // Register the enum type
+                self.enums.insert(name.clone(), variants.clone());
+                
+                // Create constructors for each variant
+                for variant in variants {
+                    let variant_name = variant.name.clone();
+                    let enum_name = name.clone();
+                    let has_fields = variant.fields.is_some();
+                    let field_count = variant.fields.as_ref().map(|f| f.len()).unwrap_or(0);
+                    
+                    if has_fields {
+                        // Variant with data - create an enum constructor
+                        self.environment.borrow_mut().define(
+                            variant_name.clone(),
+                            Value::EnumConstructor {
+                                enum_name: enum_name.clone(),
+                                variant: variant_name,
+                                arity: field_count,
+                            },
+                        );
+                    } else {
+                        // Variant without data - create a constant value
+                        self.environment.borrow_mut().define(
+                            variant_name.clone(),
+                            Value::EnumValue {
+                                enum_name: enum_name.clone(),
+                                variant: variant_name,
+                                values: vec![],
+                            },
+                        );
+                    }
+                }
+                
                 Ok(Value::Unit)
             }
 
@@ -916,6 +1213,21 @@ impl Interpreter {
                 
                 Ok(struct_val)
             }
+            
+            Expression::EnumVariant { enum_name, variant, arguments } => {
+                // Evaluate any arguments
+                let mut arg_values = Vec::new();
+                for arg in arguments {
+                    arg_values.push(self.eval_expression(arg)?);
+                }
+                
+                // Create the enum value
+                Ok(Value::EnumValue {
+                    enum_name: enum_name.clone(),
+                    variant: variant.clone(),
+                    values: arg_values,
+                })
+            }
 
             Expression::Assign { target, value } => {
                 let val = self.eval_expression(value)?;
@@ -1000,6 +1312,7 @@ impl Interpreter {
                     },
                     closure: Rc::clone(&self.environment),
                     contract: None,
+                    type_params: vec![],
                 })
             }
 
@@ -1048,10 +1361,52 @@ impl Interpreter {
                 }
             }
 
-            Expression::Match { .. } => {
-                // TODO: Implement pattern matching
+            Expression::Match { scrutinee, arms } => {
+                let value = self.eval_expression(scrutinee)?;
+                
+                for arm in arms {
+                    if let Some(bindings) = self.match_pattern(&arm.pattern, &value)? {
+                        // Check guard if present
+                        if let Some(guard) = &arm.guard {
+                            // Create new scope with pattern bindings
+                            let previous = Rc::clone(&self.environment);
+                            self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+                            
+                            // Bind pattern variables
+                            for (name, val) in &bindings {
+                                self.environment.borrow_mut().define(name.clone(), val.clone());
+                            }
+                            
+                            let guard_result = self.eval_expression(guard)?;
+                            
+                            if !guard_result.is_truthy() {
+                                self.environment = previous;
+                                continue; // Guard failed, try next arm
+                            }
+                            
+                            // Guard passed, evaluate body
+                            let result = self.eval_expression(&arm.body)?;
+                            self.environment = previous;
+                            return Ok(result);
+                        } else {
+                            // No guard, create scope and evaluate body
+                            let previous = Rc::clone(&self.environment);
+                            self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+                            
+                            // Bind pattern variables
+                            for (name, val) in &bindings {
+                                self.environment.borrow_mut().define(name.clone(), val.clone());
+                            }
+                            
+                            let result = self.eval_expression(&arm.body)?;
+                            self.environment = previous;
+                            return Ok(result);
+                        }
+                    }
+                }
+                
                 Err(IntentError::RuntimeError(
-                    "Match expressions not yet implemented".to_string(),
+                    "No pattern matched in match expression".to_string()
                 ))
             }
 
@@ -1063,6 +1418,215 @@ impl Interpreter {
             }
         }
     }
+    
+    /// Try to match a pattern against a value, returning variable bindings if successful
+    fn match_pattern(&self, pattern: &Pattern, value: &Value) -> Result<Option<Vec<(String, Value)>>> {
+        match pattern {
+            Pattern::Wildcard => Ok(Some(vec![])),
+            
+            Pattern::Variable(name) => {
+                Ok(Some(vec![(name.clone(), value.clone())]))
+            }
+            
+            Pattern::Literal(expr) => {
+                // For literals, we need to check if the value matches
+                match expr {
+                    Expression::Integer(n) => {
+                        if let Value::Int(v) = value {
+                            if v == n {
+                                return Ok(Some(vec![]));
+                            }
+                        }
+                    }
+                    Expression::Float(n) => {
+                        if let Value::Float(v) = value {
+                            if (v - n).abs() < f64::EPSILON {
+                                return Ok(Some(vec![]));
+                            }
+                        }
+                    }
+                    Expression::String(s) => {
+                        if let Value::String(v) = value {
+                            if v == s {
+                                return Ok(Some(vec![]));
+                            }
+                        }
+                    }
+                    Expression::Bool(b) => {
+                        if let Value::Bool(v) = value {
+                            if v == b {
+                                return Ok(Some(vec![]));
+                            }
+                        }
+                    }
+                    Expression::Unit => {
+                        if matches!(value, Value::Unit) {
+                            return Ok(Some(vec![]));
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(None)
+            }
+            
+            Pattern::Tuple(patterns) => {
+                // For now, treat tuple patterns as array patterns
+                if let Value::Array(values) = value {
+                    if values.len() != patterns.len() {
+                        return Ok(None);
+                    }
+                    let mut bindings = vec![];
+                    for (pat, val) in patterns.iter().zip(values.iter()) {
+                        if let Some(b) = self.match_pattern(pat, val)? {
+                            bindings.extend(b);
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                    return Ok(Some(bindings));
+                }
+                Ok(None)
+            }
+            
+            Pattern::Array(patterns) => {
+                if let Value::Array(values) = value {
+                    if values.len() != patterns.len() {
+                        return Ok(None);
+                    }
+                    let mut bindings = vec![];
+                    for (pat, val) in patterns.iter().zip(values.iter()) {
+                        if let Some(b) = self.match_pattern(pat, val)? {
+                            bindings.extend(b);
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                    return Ok(Some(bindings));
+                }
+                Ok(None)
+            }
+            
+            Pattern::Struct { name, fields } => {
+                if let Value::Struct { name: struct_name, fields: struct_fields } = value {
+                    if name != struct_name {
+                        return Ok(None);
+                    }
+                    let mut bindings = vec![];
+                    for (field_name, field_pattern) in fields {
+                        if let Some(field_value) = struct_fields.get(field_name) {
+                            if let Some(b) = self.match_pattern(field_pattern, field_value)? {
+                                bindings.extend(b);
+                            } else {
+                                return Ok(None);
+                            }
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                    return Ok(Some(bindings));
+                }
+                Ok(None)
+            }
+            
+            Pattern::Variant { name, variant, fields } => {
+                if let Value::EnumValue { enum_name, variant: value_variant, values } = value {
+                    // Check if enum and variant match (handling qualified and unqualified names)
+                    let enum_matches = name.is_empty() || name == enum_name;
+                    let variant_matches = variant == value_variant;
+                    
+                    if !enum_matches || !variant_matches {
+                        return Ok(None);
+                    }
+                    
+                    // Match field patterns against values
+                    match fields {
+                        Some(patterns) => {
+                            if patterns.len() != values.len() {
+                                return Ok(None);
+                            }
+                            let mut bindings = vec![];
+                            for (pat, val) in patterns.iter().zip(values.iter()) {
+                                if let Some(b) = self.match_pattern(pat, val)? {
+                                    bindings.extend(b);
+                                } else {
+                                    return Ok(None);
+                                }
+                            }
+                            Ok(Some(bindings))
+                        }
+                        None => {
+                            if values.is_empty() {
+                                Ok(Some(vec![]))
+                            } else {
+                                Ok(None)
+                            }
+                        }
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+    
+    /// Bind variables from a pattern destructuring
+    fn bind_pattern(&mut self, pattern: &Pattern, value: &Value) -> Result<()> {
+        match self.match_pattern(pattern, value)? {
+            Some(bindings) => {
+                for (name, val) in bindings {
+                    self.environment.borrow_mut().define(name, val);
+                }
+                Ok(())
+            }
+            None => Err(IntentError::RuntimeError(
+                "Pattern destructuring failed: value does not match pattern".to_string()
+            )),
+        }
+    }
+    
+    /// Check exhaustiveness of match arms against an enum type
+    fn check_exhaustiveness(&self, enum_name: &str, arms: &[MatchArm]) -> Result<()> {
+        // Get the enum variants
+        let variants = match self.enums.get(enum_name) {
+            Some(v) => v,
+            None => return Ok(()), // Unknown enum, skip check
+        };
+        
+        let variant_names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        let mut covered = std::collections::HashSet::new();
+        let mut has_wildcard = false;
+        
+        for arm in arms {
+            match &arm.pattern {
+                Pattern::Wildcard => {
+                    has_wildcard = true;
+                }
+                Pattern::Variable(_) => {
+                    has_wildcard = true; // Variable captures all
+                }
+                Pattern::Variant { variant, .. } => {
+                    covered.insert(variant.as_str());
+                }
+                _ => {}
+            }
+        }
+        
+        if has_wildcard {
+            return Ok(()); // Wildcard covers everything
+        }
+        
+        let missing: Vec<&&str> = variant_names.iter()
+            .filter(|v| !covered.contains(*v))
+            .collect();
+        
+        if !missing.is_empty() {
+            return Err(IntentError::RuntimeError(format!(
+                "Non-exhaustive match: missing variants {:?}", missing
+            )));
+        }
+        
+        Ok(())
+    }
 
     fn call_function(&mut self, callee: Value, args: Vec<Value>) -> Result<Value> {
         match callee {
@@ -1072,6 +1636,7 @@ impl Interpreter {
                 body,
                 closure,
                 contract,
+                type_params: _, // Generic type params - for future type checking
             } => {
                 if args.len() != params.len() {
                     return Err(IntentError::ArityMismatch {
@@ -1162,6 +1727,20 @@ impl Interpreter {
                     });
                 }
                 func(&args)
+            }
+            
+            Value::EnumConstructor { enum_name, variant, arity } => {
+                if args.len() != arity {
+                    return Err(IntentError::ArityMismatch {
+                        expected: arity,
+                        got: args.len(),
+                    });
+                }
+                Ok(Value::EnumValue {
+                    enum_name,
+                    variant,
+                    values: args,
+                })
             }
 
             _ => Err(IntentError::TypeError(
@@ -1751,5 +2330,399 @@ mod tests {
         assert!(matches!(eval("clamp(5, 0, 10)").unwrap(), Value::Int(5)));
         assert!(matches!(eval("clamp(-5, 0, 10)").unwrap(), Value::Int(0)));
         assert!(matches!(eval("clamp(15, 0, 10)").unwrap(), Value::Int(10)));
+    }
+
+    // ============================================
+    // Phase 2: Type System & Pattern Matching Tests
+    // ============================================
+
+    #[test]
+    fn test_option_some() {
+        // Test Some constructor and is_some helper
+        let result = eval(r#"
+            let x = Some(42);
+            is_some(x)
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_option_none() {
+        // Test None constructor and is_none helper
+        let result = eval(r#"
+            let x = None;
+            is_none(x)
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_option_unwrap() {
+        // Test unwrap on Some
+        let result = eval(r#"
+            let x = Some(100);
+            unwrap(x)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(100)));
+    }
+
+    #[test]
+    fn test_option_unwrap_or() {
+        // Test unwrap_or on None
+        let result = eval(r#"
+            let x = None;
+            unwrap_or(x, 50)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(50)));
+
+        // Test unwrap_or on Some
+        let result = eval(r#"
+            let x = Some(100);
+            unwrap_or(x, 50)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(100)));
+    }
+
+    #[test]
+    fn test_result_ok() {
+        // Test Ok constructor and is_ok helper
+        let result = eval(r#"
+            let x = Ok(42);
+            is_ok(x)
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_result_err() {
+        // Test Err constructor and is_err helper
+        let result = eval(r#"
+            let x = Err("error message");
+            is_err(x)
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_match_option_some() {
+        // Match on Some variant
+        let result = eval(r#"
+            let x = Some(10);
+            match x {
+                Some(v) => v * 2,
+                None => 0
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(20)));
+    }
+
+    #[test]
+    fn test_match_option_none() {
+        // Match on None variant
+        let result = eval(r#"
+            let x = None;
+            match x {
+                Some(v) => v * 2,
+                None => -1
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(-1)));
+    }
+
+    #[test]
+    fn test_match_result_ok() {
+        // Match on Ok variant
+        let result = eval(r#"
+            let x = Ok(42);
+            match x {
+                Ok(v) => v + 1,
+                Err(e) => 0
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(43)));
+    }
+
+    #[test]
+    fn test_match_result_err() {
+        // Match on Err variant
+        let result = eval(r#"
+            let x = Err("failed");
+            match x {
+                Ok(v) => v,
+                Err(e) => -1
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(-1)));
+    }
+
+    #[test]
+    fn test_match_literal_int() {
+        // Match on literal integer patterns
+        let result = eval(r#"
+            let x = 2;
+            match x {
+                1 => 100,
+                2 => 200,
+                3 => 300,
+                _ => 0
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(200)));
+    }
+
+    #[test]
+    fn test_match_wildcard() {
+        // Match wildcard pattern
+        let result = eval(r#"
+            let x = 999;
+            match x {
+                1 => 100,
+                2 => 200,
+                _ => -1
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(-1)));
+    }
+
+    #[test]
+    fn test_match_binding() {
+        // Match with variable binding
+        let result = eval(r#"
+            let x = 42;
+            match x {
+                n => n + 8
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(50)));
+    }
+
+    #[test]
+    fn test_user_enum_definition() {
+        // User-defined enum
+        let result = eval(r#"
+            enum Color {
+                Red,
+                Green,
+                Blue
+            }
+            let c = Color::Red;
+            match c {
+                Color::Red => 1,
+                Color::Green => 2,
+                Color::Blue => 3
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(1)));
+    }
+
+    #[test]
+    fn test_user_enum_with_data() {
+        // User-defined enum with data
+        let result = eval(r#"
+            enum Shape {
+                Circle(Float),
+                Rectangle(Float, Float)
+            }
+            let s = Shape::Circle(5.0);
+            match s {
+                Shape::Circle(r) => r * 2.0,
+                Shape::Rectangle(w, h) => w * h
+            }
+        "#).unwrap();
+        if let Value::Float(f) = result {
+            assert!((f - 10.0).abs() < 0.001);
+        } else {
+            panic!("Expected float");
+        }
+    }
+
+    #[test]
+    fn test_user_enum_rectangle() {
+        // User-defined enum Rectangle variant
+        let result = eval(r#"
+            enum Shape {
+                Circle(Float),
+                Rectangle(Float, Float)
+            }
+            let s = Shape::Rectangle(3.0, 4.0);
+            match s {
+                Shape::Circle(r) => r * 2.0,
+                Shape::Rectangle(w, h) => w * h
+            }
+        "#).unwrap();
+        if let Value::Float(f) = result {
+            assert!((f - 12.0).abs() < 0.001);
+        } else {
+            panic!("Expected float");
+        }
+    }
+
+    #[test]
+    fn test_type_alias() {
+        // Type alias (currently just parses, doesn't enforce types)
+        let result = eval(r#"
+            type UserId = Int;
+            let id: UserId = 12345;
+            id
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(12345)));
+    }
+
+    #[test]
+    fn test_generic_function_declaration() {
+        // Generic function declaration (parses, generics not enforced at runtime)
+        let result = eval(r#"
+            fn identity<T>(x: T) -> T {
+                return x;
+            }
+            identity(42)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_generic_function_with_string() {
+        // Generic function with string
+        let result = eval(r#"
+            fn identity<T>(x: T) -> T {
+                return x;
+            }
+            identity("hello")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello");
+        } else {
+            panic!("Expected string");
+        }
+    }
+
+    #[test]
+    fn test_effects_annotation() {
+        // Function with effects annotation (parses, not enforced)
+        let result = eval(r#"
+            fn read_file(path: String) -> String with io {
+                return "file contents";
+            }
+            read_file("test.txt")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "file contents");
+        } else {
+            panic!("Expected string");
+        }
+    }
+
+    #[test]
+    fn test_pure_function() {
+        // Pure function annotation
+        let result = eval(r#"
+            fn add(a: Int, b: Int) -> Int pure {
+                return a + b;
+            }
+            add(3, 4)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(7)));
+    }
+
+    #[test]
+    fn test_nested_option() {
+        // Nested Option handling
+        let result = eval(r#"
+            let outer = Some(Some(42));
+            match outer {
+                Some(inner) => match inner {
+                    Some(v) => v,
+                    None => -1
+                },
+                None => -2
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_match_in_function() {
+        // Match expression inside a function
+        let result = eval(r#"
+            fn safe_div(a, b) {
+                if b == 0 {
+                    return None;
+                }
+                return Some(a / b);
+            }
+            
+            let result = safe_div(10, 2);
+            match result {
+                Some(v) => v,
+                None => -1
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(5)));
+    }
+
+    #[test]
+    fn test_match_division_by_zero() {
+        // Match on None from safe division
+        let result = eval(r#"
+            fn safe_div(a, b) {
+                if b == 0 {
+                    return None;
+                }
+                return Some(a / b);
+            }
+            
+            let result = safe_div(10, 0);
+            match result {
+                Some(v) => v,
+                None => -1
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(-1)));
+    }
+
+    #[test]
+    fn test_match_bool_pattern() {
+        // Match on boolean values
+        let result = eval(r#"
+            let flag = true;
+            match flag {
+                true => 1,
+                false => 0
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(1)));
+    }
+
+    #[test]
+    fn test_match_string_pattern() {
+        // Match on string values
+        let result = eval(r#"
+            let cmd = "start";
+            match cmd {
+                "start" => 1,
+                "stop" => 2,
+                _ => 0
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(1)));
+    }
+
+    #[test]
+    fn test_enum_unit_variants() {
+        // Enum with only unit variants
+        let result = eval(r#"
+            enum Status {
+                Pending,
+                Active,
+                Completed
+            }
+            let s = Status::Active;
+            match s {
+                Status::Pending => 0,
+                Status::Active => 1,
+                Status::Completed => 2
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(1)));
     }
 }

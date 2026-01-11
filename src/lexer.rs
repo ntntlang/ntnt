@@ -45,6 +45,8 @@ pub enum TokenKind {
     
     // Effect keywords
     Effect,
+    With,           // for effect annotations: fn foo() with io
+    Pure,           // pure function marker
     Try,
     Catch,
     
@@ -96,6 +98,7 @@ pub enum TokenKind {
     Comma,          // ,
     Dot,            // .
     Colon,          // :
+    ColonColon,     // ::
     Semicolon,      // ;
     Arrow,          // ->
     FatArrow,       // =>
@@ -432,6 +435,8 @@ impl<'a> Lexer<'a> {
             
             // Effect keywords
             "effect" => TokenKind::Effect,
+            "with" => TokenKind::With,
+            "pure" => TokenKind::Pure,
             "try" => TokenKind::Try,
             "catch" => TokenKind::Catch,
             
@@ -563,7 +568,14 @@ impl<'a> Lexer<'a> {
             // Punctuation
             ',' => Token::new(TokenKind::Comma, start_line, start_column, ",".into()),
             '.' => Token::new(TokenKind::Dot, start_line, start_column, ".".into()),
-            ':' => Token::new(TokenKind::Colon, start_line, start_column, ":".into()),
+            ':' => {
+                if self.peek() == Some(&':') {
+                    self.advance();
+                    Token::new(TokenKind::ColonColon, start_line, start_column, "::".into())
+                } else {
+                    Token::new(TokenKind::Colon, start_line, start_column, ":".into())
+                }
+            }
             ';' => Token::new(TokenKind::Semicolon, start_line, start_column, ";".into()),
             '?' => Token::new(TokenKind::Question, start_line, start_column, "?".into()),
             '@' => Token::new(TokenKind::At, start_line, start_column, "@".into()),

@@ -1,0 +1,225 @@
+// Pattern Matching Examples - Phase 2 Features
+// Demonstrates Option, Result, enums, and match expressions
+
+// ===========================================
+// Option Type
+// ===========================================
+
+print("=== Option Type ===");
+
+let some_value = Some(42);
+let no_value = None;
+
+print("some_value is_some: ");
+print(is_some(some_value));
+
+print("no_value is_none: ");
+print(is_none(no_value));
+
+print("unwrap some_value: ");
+print(unwrap(some_value));
+
+print("unwrap_or no_value with default 0: ");
+print(unwrap_or(no_value, 0));
+
+// ===========================================
+// Result Type
+// ===========================================
+
+print("");
+print("=== Result Type ===");
+
+let success = Ok(100);
+let failure = Err("something went wrong");
+
+print("success is_ok: ");
+print(is_ok(success));
+
+print("failure is_err: ");
+print(is_err(failure));
+
+print("unwrap success: ");
+print(unwrap(success));
+
+// ===========================================
+// Match Expressions with Option
+// ===========================================
+
+print("");
+print("=== Match with Option ===");
+
+fn describe_option(opt) {
+    match opt {
+        Some(v) => v * 2,
+        None => 0
+    }
+}
+
+print("describe_option(Some(21)): ");
+print(describe_option(Some(21)));
+
+print("describe_option(None): ");
+print(describe_option(None));
+
+// ===========================================
+// Match Expressions with Result
+// ===========================================
+
+print("");
+print("=== Match with Result ===");
+
+fn handle_result(r) {
+    match r {
+        Ok(v) => v + 1,
+        Err(e) => -1
+    }
+}
+
+print("handle_result(Ok(99)): ");
+print(handle_result(Ok(99)));
+
+print("handle_result(Err(\"error\")): ");
+print(handle_result(Err("error")));
+
+// ===========================================
+// Match on Literals
+// ===========================================
+
+print("");
+print("=== Match on Literals ===");
+
+fn day_name(n) {
+    match n {
+        1 => "Monday",
+        2 => "Tuesday", 
+        3 => "Wednesday",
+        4 => "Thursday",
+        5 => "Friday",
+        6 => "Saturday",
+        7 => "Sunday",
+        _ => "Invalid day"
+    }
+}
+
+print("day_name(3): ");
+print(day_name(3));
+
+print("day_name(7): ");
+print(day_name(7));
+
+print("day_name(10): ");
+print(day_name(10));
+
+// ===========================================
+// User-Defined Enums
+// ===========================================
+
+print("");
+print("=== User-Defined Enums ===");
+
+enum Color {
+    Red,
+    Green,
+    Blue
+}
+
+fn color_code(c) {
+    match c {
+        Color::Red => "#FF0000",
+        Color::Green => "#00FF00",
+        Color::Blue => "#0000FF"
+    }
+}
+
+let my_color = Color::Green;
+print("color_code(Color::Green): ");
+print(color_code(my_color));
+
+// ===========================================
+// Enums with Data
+// ===========================================
+
+print("");
+print("=== Enums with Data ===");
+
+enum Shape {
+    Circle(Float),
+    Rectangle(Float, Float)
+}
+
+fn area(shape) {
+    match shape {
+        Shape::Circle(r) => 3.14159 * r * r,
+        Shape::Rectangle(w, h) => w * h
+    }
+}
+
+let circle = Shape::Circle(5.0);
+let rect = Shape::Rectangle(4.0, 6.0);
+
+print("area(Circle(5.0)): ");
+print(area(circle));
+
+print("area(Rectangle(4.0, 6.0)): ");
+print(area(rect));
+
+// ===========================================
+// Safe Division with Option
+// ===========================================
+
+print("");
+print("=== Safe Division ===");
+
+fn safe_divide(a, b) {
+    if b == 0 {
+        return None;
+    }
+    return Some(a / b);
+}
+
+fn divide_and_describe(a, b) {
+    let result = safe_divide(a, b);
+    match result {
+        Some(v) => v,
+        None => -999
+    }
+}
+
+print("divide_and_describe(10, 2): ");
+print(divide_and_describe(10, 2));
+
+print("divide_and_describe(10, 0): ");
+print(divide_and_describe(10, 0));
+
+// ===========================================
+// Generic Functions
+// ===========================================
+
+print("");
+print("=== Generic Functions ===");
+
+fn identity<T>(x: T) -> T {
+    return x;
+}
+
+print("identity(42): ");
+print(identity(42));
+
+print("identity(\"hello\"): ");
+print(identity("hello"));
+
+// ===========================================
+// Type Aliases
+// ===========================================
+
+print("");
+print("=== Type Aliases ===");
+
+type UserId = Int;
+
+let user_id: UserId = 12345;
+print("user_id: ");
+print(user_id);
+
+print("");
+print("=== All Pattern Matching Examples Complete! ===");
