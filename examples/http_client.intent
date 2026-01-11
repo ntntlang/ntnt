@@ -19,6 +19,8 @@ match get("https://httpbin.org/get") {
         print(response.status_text)
         print("OK: ")
         print(response.ok)
+        print("Content-Type: ")
+        print(response.headers["content-type"])
         print("Body length: ")
         print(len(response.body))
     },

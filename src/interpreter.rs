@@ -3967,6 +3967,18 @@ impl Interpreter {
                                 length: s.len(),
                             })
                     }
+                    // Map access with string key: map["key"]
+                    (Value::Map(map), Value::String(key)) => {
+                        map.get(&key).cloned().ok_or_else(|| {
+                            IntentError::RuntimeError(format!("Unknown key: {}", key))
+                        })
+                    }
+                    // Struct access with string key: struct["field"]
+                    (Value::Struct { fields, .. }, Value::String(key)) => {
+                        fields.get(&key).cloned().ok_or_else(|| {
+                            IntentError::RuntimeError(format!("Unknown field: {}", key))
+                        })
+                    }
                     _ => Err(IntentError::TypeError("Invalid index operation".to_string())),
                 }
             }
@@ -6076,6 +6088,29 @@ mod tests {
             }
             _ => panic!("Expected Map value"),
         }
+    }
+    
+    #[test]
+    fn test_map_bracket_access() {
+        // Test bracket notation for map keys (including hyphenated keys)
+        let result = eval(r#"
+            let headers = map { "content-type": "application/json", "x-custom-header": "value" }
+            headers["content-type"]
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "application/json");
+        } else {
+            panic!("Expected String");
+        }
+    }
+    
+    #[test]
+    fn test_map_bracket_hyphenated_key() {
+        let result = eval(r#"
+            let m = map { "my-key": 42 }
+            m["my-key"]
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(42)));
     }
     
     #[test]
