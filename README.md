@@ -49,7 +49,7 @@ Intent is a revolutionary programming language and ecosystem designed specifical
 - Cryptography: `std/crypto` (sha256, hmac_sha256, uuid, random_bytes)
 - URL utilities: `std/url` (parse, encode, decode, build_query)
 
-**140 passing tests** | **Version 0.1.4**
+**146 passing tests** | **Version 0.1.5**
 
 **Next Up**: HTTP Server (Phase 5 continued)
 
