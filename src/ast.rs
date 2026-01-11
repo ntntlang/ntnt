@@ -314,6 +314,9 @@ pub enum TypeExpr {
     /// Optional type `T?`
     Optional(Box<TypeExpr>),
     
+    /// Union type `T | U`
+    Union(Vec<TypeExpr>),
+    
     /// Result type with effect `T / E`
     WithEffect {
         value_type: Box<TypeExpr>,

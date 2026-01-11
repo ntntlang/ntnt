@@ -1200,6 +1200,21 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> Result<TypeExpr> {
+        let first_type = self.parse_single_type()?;
+        
+        // Check for union type: T | U | V ...
+        if self.check(&TokenKind::Pipe) {
+            let mut types = vec![first_type];
+            while self.match_token(&[TokenKind::Pipe]) {
+                types.push(self.parse_single_type()?);
+            }
+            return Ok(TypeExpr::Union(types));
+        }
+        
+        Ok(first_type)
+    }
+    
+    fn parse_single_type(&mut self) -> Result<TypeExpr> {
         let name = self.consume_identifier("Expected type name")?;
         
         // Check for generic parameters
@@ -1212,6 +1227,11 @@ impl Parser {
                 }
             }
             self.consume(&TokenKind::Greater, "Expected '>' after type parameters")?;
+            
+            // Check for optional after generic
+            if self.match_token(&[TokenKind::Question]) {
+                return Ok(TypeExpr::Optional(Box::new(TypeExpr::Generic { name, args })));
+            }
             return Ok(TypeExpr::Generic { name, args });
         }
         

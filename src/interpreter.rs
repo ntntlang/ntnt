@@ -1364,6 +1364,11 @@ impl Interpreter {
             Expression::Match { scrutinee, arms } => {
                 let value = self.eval_expression(scrutinee)?;
                 
+                // Check exhaustiveness for enum values
+                if let Value::EnumValue { enum_name, .. } = &value {
+                    self.check_exhaustiveness(enum_name, arms)?;
+                }
+                
                 for arm in arms {
                     if let Some(bindings) = self.match_pattern(&arm.pattern, &value)? {
                         // Check guard if present
@@ -2566,6 +2571,43 @@ mod tests {
             id
         "#).unwrap();
         assert!(matches!(result, Value::Int(12345)));
+    }
+
+    #[test]
+    fn test_union_type() {
+        // Union type annotation (parses, runtime is dynamically typed)
+        let result = eval(r#"
+            fn accepts_either(x: String | Int) {
+                return x;
+            }
+            accepts_either(42)
+        "#).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+        
+        // Also works with strings
+        let result = eval(r#"
+            fn accepts_either(x: String | Int) {
+                return x;
+            }
+            accepts_either("hello")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello");
+        } else {
+            panic!("Expected string");
+        }
+    }
+
+    #[test]
+    fn test_union_type_multiple() {
+        // Union with multiple types
+        let result = eval(r#"
+            fn flexible(x: Int | Float | String | Bool) {
+                return x;
+            }
+            flexible(true)
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]

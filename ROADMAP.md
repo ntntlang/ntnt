@@ -7,6 +7,7 @@ This document outlines the comprehensive plan for implementing all features desc
 ## Current Status
 
 ### Completed ✅
+
 - [x] Lexer with full token support
 - [x] Recursive descent parser
 - [x] Complete AST definitions
@@ -17,13 +18,14 @@ This document outlines the comprehensive plan for implementing all features desc
 - [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, etc.)
 - [x] CLI with REPL, run, parse, lex, check commands
 - [x] VS Code extension with syntax highlighting
-- [x] 61 unit tests passing
+- [x] 63 unit tests passing
 - [x] Dual file extensions: `.intent` and `.itn`
 - [x] Algebraic Data Types with enums
 - [x] Option<T> and Result<T, E> built-ins
 - [x] Pattern matching with match expressions
 - [x] Generic functions and types
 - [x] Type aliases
+- [x] Union types
 - [x] Effect annotations foundation
 
 ---
@@ -34,6 +36,7 @@ This document outlines the comprehensive plan for implementing all features desc
 **Duration:** Weeks 1-3
 
 ### 1.1 Runtime Contract Enforcement ✅
+
 - [x] Precondition (`requires`) evaluation before function execution
 - [x] Postcondition (`ensures`) evaluation after function execution
 - [x] Access to `old()` values in postconditions
@@ -41,6 +44,7 @@ This document outlines the comprehensive plan for implementing all features desc
 - [x] Contract violation error handling with clear messages
 
 ### 1.2 Class/Struct Invariants ✅
+
 - [x] `invariant` clause support in impl blocks
 - [x] Invariant checking on struct construction
 - [x] Invariant checking after method calls
@@ -55,6 +59,7 @@ This document outlines the comprehensive plan for implementing all features desc
 **Duration:** Weeks 4-7
 
 ### 2.1 Algebraic Data Types ✅
+
 - [x] Enum types with associated data
 - [x] `Option<T>` and `Result<T, E>` as built-ins
 - [x] Pattern matching with `match` expressions
@@ -74,24 +79,27 @@ match result {
 ```
 
 ### 2.2 Generics ✅
+
 - [x] Generic functions: `fn map<T, U>(arr: [T], f: fn(T) -> U) -> [U]`
 - [x] Generic types: `struct Stack<T> { items: [T] }`
-- [ ] Type constraints: `fn sort<T: Comparable>(arr: [T]) -> [T]` (future)
-- [ ] Type inference for generics (future - runtime doesn't enforce yet)
+- Type constraints moved to Phase 4 (requires traits)
+- Type inference moved to Phase 9 (requires static analysis)
 
 ### 2.3 Type System Improvements ✅
+
 - [x] Type aliases: `type UserId = String`
-- [ ] Union types: `String | Int` (future)
+- [x] Union types: `String | Int`
 - [x] Nullable types: `String?` (sugar for `Option<String>`)
 - [x] Never type for functions that don't return
 
 ### 2.4 Effects System (Foundation) ✅
+
 - [x] Effect annotations: `fn read_file(path: String) -> String with io`
-- [ ] Effect tracking through call chains (future)
 - [x] Pure function marking
-- [ ] Built-in effects: `io`, `async`, `throws` (future)
+- Effect tracking and built-in effects moved to Phase 7 (requires async runtime)
 
 **Deliverables:** ✅
+
 - ADTs with pattern matching
 - Generic functions and types
 - Enhanced type inference
@@ -104,6 +112,7 @@ match result {
 **Goal:** Code organization and essential functionality.
 
 ### 3.1 Module System
+
 - [ ] File-based modules
 - [ ] `import` / `export` syntax
 - [ ] Public/private visibility (`pub` keyword)
@@ -125,6 +134,7 @@ print(factorial(5))
 ```
 
 ### 3.2 Core Standard Library
+
 - [ ] `std/collections`: List, Map, Set, Queue, Stack
 - [ ] `std/string`: split, join, trim, replace, regex
 - [ ] `std/math`: trig functions, constants (PI, E)
@@ -133,12 +143,14 @@ print(factorial(5))
 - [ ] `std/crypto`: hashing, UUID generation
 
 ### 3.3 I/O Library
+
 - [ ] `std/fs`: File read/write, directory operations
 - [ ] `std/path`: Path manipulation
 - [ ] `std/env`: Environment variables, args
 - [ ] `std/process`: Spawn processes, exit codes
 
 **Deliverables:**
+
 - Module system with imports/exports
 - Core standard library
 - File system and I/O operations
@@ -150,6 +162,7 @@ print(factorial(5))
 **Goal:** Polymorphism and code reuse.
 
 ### 4.1 Trait Definitions
+
 - [ ] Trait declaration syntax
 - [ ] Required methods
 - [ ] Default method implementations
@@ -163,7 +176,7 @@ trait Serializable {
 
 trait Comparable {
     fn compare(self, other: Self) -> Int
-    
+
     // Default implementations
     fn less_than(self, other: Self) -> Bool {
         return self.compare(other) < 0
@@ -172,17 +185,26 @@ trait Comparable {
 ```
 
 ### 4.2 Trait Implementations
+
 - [ ] `impl Trait for Type` syntax
 - [ ] Multiple trait implementations
 - [ ] Trait bounds in generics
 - [ ] Orphan rules for coherence
 
-### 4.3 Contract Inheritance (Moved from Phase 1.3)
+### 4.3 Type Constraints (from Phase 2)
+
+- [ ] Type constraints: `fn sort<T: Comparable>(arr: [T]) -> [T]`
+- [ ] Where clauses for complex constraints
+- [ ] Multiple trait bounds: `T: Comparable + Serializable`
+
+### 4.4 Contract Inheritance (Moved from Phase 1.3)
+
 - [ ] Contracts propagate to trait implementations
 - [ ] Liskov Substitution Principle enforcement
 - [ ] Contravariant preconditions, covariant postconditions
 
 **Deliverables:**
+
 - Full trait system
 - Contract inheritance
 - Polymorphic dispatch
@@ -194,6 +216,7 @@ trait Comparable {
 **Goal:** First-class web application support.
 
 ### 5.1 HTTP Server
+
 - [ ] Built-in HTTP server: `std/http/server`
 - [ ] Request/Response types with contracts
 - [ ] Routing DSL or decorator-based routing
@@ -222,18 +245,21 @@ app.listen(8080)
 ```
 
 ### 5.2 HTTP Client
+
 - [ ] `std/http/client` for outbound requests
 - [ ] Async HTTP with connection pooling
 - [ ] Timeout and retry configuration
 - [ ] Request/Response interceptors
 
 ### 5.3 WebSocket Support
+
 - [ ] WebSocket server
 - [ ] WebSocket client
 - [ ] Message framing
 - [ ] Connection state management
 
 ### 5.4 Routing & Middleware
+
 - [ ] Path parameters: `/users/{id}`
 - [ ] Query string parsing
 - [ ] Request body parsing (JSON, form data)
@@ -242,6 +268,7 @@ app.listen(8080)
 - [ ] Compression middleware
 
 ### 5.5 API Contracts
+
 - [ ] OpenAPI/Swagger generation from contracts
 - [ ] Request validation from contracts
 - [ ] Response validation
@@ -258,6 +285,7 @@ fn get_user(id: String) -> Response<User>
 ```
 
 **Deliverables:**
+
 - Production HTTP server
 - HTTP client
 - WebSocket support
@@ -270,6 +298,7 @@ fn get_user(id: String) -> Response<User>
 **Goal:** Type-safe database access.
 
 ### 6.1 Database Abstraction
+
 - [ ] Connection pooling
 - [ ] Transaction support with contracts
 - [ ] Query builder
@@ -291,24 +320,28 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 ```
 
 ### 6.2 Database Drivers
+
 - [ ] PostgreSQL driver
 - [ ] MySQL driver
 - [ ] SQLite driver
 - [ ] Connection string configuration
 
 ### 6.3 ORM Layer (Optional)
+
 - [ ] Model definitions
 - [ ] Automatic migrations
 - [ ] Relationship mapping
 - [ ] Query generation
 
 ### 6.4 Caching
+
 - [ ] `std/cache` abstraction
 - [ ] In-memory cache
 - [ ] Redis client
 - [ ] Cache invalidation patterns
 
 **Deliverables:**
+
 - Database connection management
 - PostgreSQL, MySQL, SQLite drivers
 - Transaction support
@@ -321,10 +354,18 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 **Goal:** Scalable async I/O and safe concurrency.
 
 ### 7.1 Async Runtime
+
 - [ ] `async`/`await` syntax
 - [ ] Future/Promise type
 - [ ] Async function contracts
 - [ ] Executor/runtime (Tokio-based)
+
+### 7.2 Effects System (from Phase 2)
+
+- [ ] Effect tracking through call chains
+- [ ] Built-in effects: `io`, `async`, `throws`
+- [ ] Effect polymorphism
+- [ ] Effect handlers
 
 ```intent
 async fn fetch_user(id: String) -> Result<User, HttpError>
@@ -342,23 +383,27 @@ let (user, posts) = await (
 ```
 
 ### 7.2 Concurrency Primitives
+
 - [ ] Channels for message passing
 - [ ] `spawn` for task creation
 - [ ] `select` for multiple channel operations
 - [ ] Structured concurrency (task scopes)
 
 ### 7.3 Synchronization
+
 - [ ] Mutex with scoped guards
 - [ ] RwLock
 - [ ] Atomic types
 - [ ] Once (initialization)
 
 ### 7.4 Parallel Collections
+
 - [ ] Parallel map/filter/reduce
 - [ ] Work stealing scheduler
 - [ ] Parallel iterators
 
 **Deliverables:**
+
 - Async/await runtime
 - Channel-based concurrency
 - Synchronization primitives
@@ -371,6 +416,7 @@ let (user, posts) = await (
 **Goal:** Comprehensive testing support.
 
 ### 8.1 Test Runner
+
 - [ ] `#[test]` attribute for test functions
 - [ ] Test discovery
 - [ ] Parallel test execution
@@ -392,24 +438,28 @@ fn test_invalid_email() {
 ```
 
 ### 8.2 Contract-Based Testing (Moved from Phase 1.4)
+
 - [ ] Auto-generate test cases from contracts
 - [ ] Property-based testing with contracts
 - [ ] Contract coverage metrics
 - [ ] Mutation testing
 
 ### 8.3 Mocking Framework
+
 - [ ] Mock trait implementations
 - [ ] Spy functions
 - [ ] Stub responses
 - [ ] Verification assertions
 
 ### 8.4 Integration Testing
+
 - [ ] Test fixtures
 - [ ] Database test utilities
 - [ ] HTTP test client
 - [ ] Test containers
 
 **Deliverables:**
+
 - Test runner with discovery
 - Contract-based test generation
 - Mocking framework
@@ -422,37 +472,51 @@ fn test_invalid_email() {
 **Goal:** Production performance through compilation.
 
 ### 9.1 Bytecode Compiler
+
 - [ ] Intent bytecode format (IBC)
 - [ ] Bytecode interpreter (faster than tree-walking)
 - [ ] Bytecode serialization/loading
 - [ ] Debug info in bytecode
 
 ### 9.2 JIT Compilation (Optional)
+
 - [ ] Hot path detection
 - [ ] Native code generation for hot paths
 - [ ] Profile-guided optimization
 
 ### 9.3 Native Compilation
+
 - [ ] LLVM backend (or Cranelift)
 - [ ] Ahead-of-time compilation
 - [ ] Static binary generation
 - [ ] Cross-compilation support
 
-### 9.4 Performance Features
+### 9.4 Static Type System (from Phase 2)
+
+- [ ] Type inference for generics
+- [ ] Flow-sensitive typing
+- [ ] Exhaustive type checking
+- [ ] Type error messages with suggestions
+
+### 9.5 Performance Features
+
 - [ ] Escape analysis
 - [ ] Inline caching
 - [ ] Dead code elimination
 - [ ] Constant folding
 
-### 9.5 Memory Management
+### 9.6 Memory Management
+
 - [ ] Reference counting with cycle detection
 - [ ] Optional tracing GC
 - [ ] Memory pools for hot paths
 - [ ] Arena allocators
 
 **Deliverables:**
+
 - Bytecode compiler and VM
 - Native compilation option
+- Static type system with inference
 - 10-100x interpreter performance improvement
 
 ---
@@ -462,6 +526,7 @@ fn test_invalid_email() {
 **Goal:** World-class developer experience.
 
 ### 10.1 Language Server (LSP)
+
 - [ ] Full LSP implementation
 - [ ] Go to definition
 - [ ] Find references
@@ -471,6 +536,7 @@ fn test_invalid_email() {
 - [ ] Code actions (quick fixes)
 
 ### 10.2 Package Manager
+
 - [ ] Package registry
 - [ ] Dependency resolution
 - [ ] Lock files
@@ -485,12 +551,14 @@ intent pkg publish
 ```
 
 ### 10.3 Build System
+
 - [ ] Project configuration (`intent.toml`)
 - [ ] Build caching
 - [ ] Incremental compilation
 - [ ] Build profiles (dev, release, test)
 
 ### 10.4 Debugging
+
 - [ ] Breakpoints
 - [ ] Step debugging
 - [ ] Variable inspection
@@ -498,6 +566,7 @@ intent pkg publish
 - [ ] DAP (Debug Adapter Protocol) support
 
 ### 10.5 Documentation Generator
+
 - [ ] Doc comments (`///`)
 - [ ] Automatic API documentation
 - [ ] Contract documentation
@@ -505,6 +574,7 @@ intent pkg publish
 - [ ] Markdown support
 
 **Deliverables:**
+
 - Full LSP server
 - Package manager with registry
 - Build system
@@ -517,18 +587,21 @@ intent pkg publish
 **Goal:** Production deployment support.
 
 ### 11.1 Container Support
+
 - [ ] Dockerfile generation
 - [ ] Minimal base images
 - [ ] Multi-stage builds
 - [ ] Health check endpoints
 
 ### 11.2 Configuration Management
+
 - [ ] Environment-based config
 - [ ] Config file support (TOML, YAML, JSON)
 - [ ] Secrets management
 - [ ] Feature flags
 
 ### 11.3 Observability
+
 - [ ] Structured logging (`std/log`)
 - [ ] Metrics collection (Prometheus format)
 - [ ] Distributed tracing (OpenTelemetry)
@@ -548,12 +621,14 @@ fn handle_request(req: Request) -> Response {
 ```
 
 ### 11.4 Graceful Shutdown
+
 - [ ] Signal handling
 - [ ] Connection draining
 - [ ] Shutdown hooks
 - [ ] Timeout configuration
 
 **Deliverables:**
+
 - Container deployment support
 - Configuration management
 - Logging, metrics, tracing
@@ -566,6 +641,7 @@ fn handle_request(req: Request) -> Response {
 **Goal:** First-class AI development support.
 
 ### 12.1 Intent Annotations
+
 - [ ] `intent` blocks linking natural language to code
 - [ ] Intent registry and tracking
 - [ ] Intent coverage reports
@@ -582,24 +658,28 @@ intent "Calculate shipping cost based on weight and destination" {
 ```
 
 ### 12.2 AI Agent SDK
+
 - [ ] Agent communication protocol
 - [ ] Context provision API
 - [ ] Suggestion acceptance/rejection tracking
 - [ ] Learning from corrections
 
 ### 12.3 Semantic Versioning Enforcement
+
 - [ ] API signature tracking
 - [ ] Breaking change detection
 - [ ] Automatic semver suggestions
 - [ ] `@since` and `@deprecated` annotations
 
 ### 12.4 Structured Edits
+
 - [ ] AST-based diff format
 - [ ] Semantic-preserving transformations
 - [ ] Refactoring operations
 - [ ] Machine-readable edit format
 
 **Deliverables:**
+
 - Intent annotation system
 - AI agent SDK
 - Semantic versioning tools
@@ -612,21 +692,25 @@ intent "Calculate shipping cost based on weight and destination" {
 **Goal:** Cutting-edge language capabilities.
 
 ### 13.1 Session Types
+
 - [ ] Protocol definitions
 - [ ] Type-checked message sequences
 - [ ] Deadlock prevention
 
 ### 13.2 Human Approval Mechanisms
+
 - [ ] `@requires_approval` annotations
 - [ ] Approval workflows
 - [ ] Audit trails
 
 ### 13.3 UI DSL (Optional)
+
 - [ ] Declarative UI components
 - [ ] Accessibility constraints
 - [ ] Design system integration
 
 ### 13.4 Workflow Primitives
+
 - [ ] Pull request types
 - [ ] CI pipeline DSL
 - [ ] Agent collaboration
@@ -664,12 +748,14 @@ Intent is designed to build production web applications. Here's the target archi
 ```
 
 ### Performance Targets
+
 - **Throughput:** 50,000+ requests/second per instance
 - **Latency:** <5ms p99 for simple endpoints
 - **Memory:** <100MB base footprint
 - **Startup:** <500ms cold start
 
 ### Deployment Options
+
 1. **Standalone binary** - Single executable, no runtime needed
 2. **Container** - Minimal Docker images (~20MB)
 3. **Serverless** - AWS Lambda, Cloudflare Workers (future)
@@ -678,45 +764,49 @@ Intent is designed to build production web applications. Here's the target archi
 
 ## Implementation Priority Matrix
 
-| Phase | Complexity | Business Value | Web App Critical? |
-|-------|------------|----------------|-------------------|
-| 1. Contracts ✅ | Medium | Very High | Yes |
-| 2. Type System | High | Very High | Yes |
-| 3. Modules & Stdlib | Medium | Very High | Yes |
-| 4. Traits | Medium | High | Yes |
-| 5. HTTP & Web | High | **Critical** | **Yes** |
-| 6. Database | High | **Critical** | **Yes** |
-| 7. Async | High | **Critical** | **Yes** |
-| 8. Testing | Medium | High | Yes |
-| 9. Compilation | Very High | High | For performance |
-| 10. Tooling | High | Very High | For adoption |
-| 11. Deployment | Medium | High | Yes |
-| 12. AI Integration | Medium | High | Differentiator |
-| 13. Advanced | High | Medium | Future |
+| Phase               | Complexity | Business Value | Web App Critical? |
+| ------------------- | ---------- | -------------- | ----------------- |
+| 1. Contracts ✅     | Medium     | Very High      | Yes               |
+| 2. Type System      | High       | Very High      | Yes               |
+| 3. Modules & Stdlib | Medium     | Very High      | Yes               |
+| 4. Traits           | Medium     | High           | Yes               |
+| 5. HTTP & Web       | High       | **Critical**   | **Yes**           |
+| 6. Database         | High       | **Critical**   | **Yes**           |
+| 7. Async            | High       | **Critical**   | **Yes**           |
+| 8. Testing          | Medium     | High           | Yes               |
+| 9. Compilation      | Very High  | High           | For performance   |
+| 10. Tooling         | High       | Very High      | For adoption      |
+| 11. Deployment      | Medium     | High           | Yes               |
+| 12. AI Integration  | Medium     | High           | Differentiator    |
+| 13. Advanced        | High       | Medium         | Future            |
 
 ---
 
 ## Milestones
 
-### M1: Developer Preview (Week 14) 
+### M1: Developer Preview (Week 14)
+
 - Type system with generics
 - Module system
 - Trait system
 - Basic standard library
 
 ### M2: Web Alpha (Week 26)
+
 - HTTP server/client
 - Database connectivity
 - Async/await
 - Basic testing
 
 ### M3: Production Beta (Week 38)
+
 - Performance compilation
 - Full tooling (LSP, package manager)
 - Observability
 - Documentation
 
 ### M4: 1.0 Release (Week 48)
+
 - Battle-tested web framework
 - Complete standard library
 - AI integration
