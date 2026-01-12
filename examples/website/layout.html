@@ -30,7 +30,7 @@
         text-decoration: none;
       }
       nav .logo span {
-        color: #4ecdc4;
+        color: #fbba4f;
       }
       nav ul {
         list-style: none;
@@ -73,15 +73,32 @@
       }
       .hero {
         text-align: center;
-        padding: 4rem 2rem;
+        padding: 0;
         background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
         color: white;
         margin: -2rem -2rem 2rem -2rem;
+        position: relative;
+        overflow: hidden;
+      }
+      .hero-content {
+        position: relative;
+        z-index: 2;
+        padding: 3rem 2rem;
+      }
+      .hero-logo {
+        max-width: 300px;
+        width: 100%;
+        height: auto;
+        margin: 0 auto 2rem;
+        display: block;
+        filter: drop-shadow(0 10px 30px rgba(0, 0, 0, 0.3));
       }
       .hero h1 {
-        font-size: 3rem;
+        font-size: 3.5rem;
         color: white;
-        margin-bottom: 0.5rem;
+        margin-bottom: 1rem;
+        font-weight: 700;
+        letter-spacing: -1px;
       }
       .hero .tagline {
         font-size: 1.25rem;
@@ -89,8 +106,11 @@
         margin-bottom: 2rem;
       }
       .hero .subtitle {
-        color: #aaa;
-        font-size: 1.1rem;
+        color: #cbd5e0;
+        font-size: 1.2rem;
+        max-width: 700px;
+        margin: 0 auto;
+        line-height: 1.8;
       }
       .features {
         display: grid;

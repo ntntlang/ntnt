@@ -25,6 +25,7 @@ import { parse } from "std/json"
 // Paths relative to where ntnt is run from (project root)
 let PAGES_DIR = "examples/website/pages"
 let LAYOUT_FILE = "examples/website/layout.html"
+let ASSETS_DIR = "examples/website/assets"
 
 // ============================================================================
 // Template Engine
@@ -173,6 +174,9 @@ get("/examples", examples_page)
 get("/fetch", fetch_page)
 get("/api/status", api_status)
 get("/api/cat-fact", api_cat_fact)
+
+// Serve static assets (images, CSS, JS, etc.)
+serve_static("/assets", ASSETS_DIR)
 
 // ============================================================================
 // Start Server
