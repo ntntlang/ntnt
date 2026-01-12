@@ -858,6 +858,7 @@ listen(8080)
 ```
 
 Middleware can:
+
 - Return `()` to continue to the next middleware/handler
 - Return a response map (`{ status: 401, ... }`) to stop and send immediately
 - Return a modified request map to pass to the next handler
@@ -899,7 +900,7 @@ listen(8080)
 ```
 
 Contract behavior:
+
 - **Precondition failure** returns HTTP **400 Bad Request** with error details
 - **Postcondition failure** returns HTTP **500 Internal Server Error**
 - Error messages include function name and failed condition
-

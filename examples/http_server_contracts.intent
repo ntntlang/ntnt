@@ -73,24 +73,20 @@ requires req.body != ""
 // Validates inputs and prevents division by zero
 // ============================================
 fn divide(req) {
-    let a_str = req.query_params.a
-    let b_str = req.query_params.b
-    
-    if a_str == "" {
+    // Check if query string contains our params
+    let query = req.query
+    if query == "" {
         return map {
             "status": 400,
-            "body": "Missing required parameter: a",
+            "body": "Missing required parameters: a and b (use ?a=X&b=Y)",
             "content_type": "text/plain"
         }
     }
     
-    if b_str == "" {
-        return map {
-            "status": 400,
-            "body": "Missing required parameter: b",
-            "content_type": "text/plain"
-        }
-    }
+    // Parse query params - they exist in the map now
+    let params = req.query_params
+    let a_str = params["a"]
+    let b_str = params["b"]
     
     if b_str == "0" {
         return map {
@@ -124,16 +120,19 @@ ensures result * b <= a
 }
 
 fn calc_divide(req) {
-    let a_str = req.query_params.a
-    let b_str = req.query_params.b
-    
-    if a_str == "" || b_str == "" {
+    // Check if query string contains params
+    let query = req.query
+    if query == "" {
         return map {
             "status": 400,
-            "body": "Missing required parameters: a and b",
+            "body": "Missing required parameters: a and b (use ?a=X&b=Y)",
             "content_type": "text/plain"
         }
     }
+    
+    let params = req.query_params
+    let a_str = params["a"]
+    let b_str = params["b"]
     
     let a = int(a_str)
     let b = int(b_str)
