@@ -142,8 +142,17 @@ fn api_status(req) {
 fn api_cat_fact(req) {
     match get("https://meowfacts.herokuapp.com/") {
         Ok(response) => {
-            // Pass through the API response
-            return json(parse(response.body))
+            match parse(response.body) {
+                Ok(data) => {
+                    return json(data)
+                },
+                Err(e) => {
+                    return json(map {
+                        "error": "Failed to parse JSON",
+                        "message": e
+                    })
+                }
+            }
         },
         Err(e) => {
             return json(map {
