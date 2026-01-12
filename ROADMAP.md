@@ -256,7 +256,82 @@ listen(8080)  // Start server
 - [x] JSON request/response helpers (get_json, post_json)
 - [ ] Async HTTP requests (deferred to async runtime)
 
-### 5.5 Database Connectivity
+### 5.5 File-Based Routing & Hot Reload
+
+**Goal:** Enable modular, hot-reloadable applications where the filesystem defines the routing structure. This is critical for AI agents—adding a route means creating a single file, no wiring required.
+
+**Architecture:**
+```
+app/
+├── app.tnt           # Config, middleware, listen()
+├── routes/
+│   ├── index.tnt     # GET /
+│   ├── about.tnt     # GET /about
+│   ├── users/
+│   │   ├── index.tnt # GET /users
+│   │   ├── [id].tnt  # GET /users/:id (dynamic segment)
+│   │   └── create.tnt
+│   └── api/
+│       └── status.tnt
+```
+
+**Features:**
+- [ ] `routes/` directory convention: file path = URL path
+- [ ] Dynamic segments via `[param].tnt` naming (e.g., `[id].tnt` → `/users/:id`)
+- [ ] HTTP method exports: `export fn get(req)`, `export fn post(req)`, etc.
+- [ ] Hot-reload: file changes detected, module re-parsed on next request
+- [ ] Nested routes via subdirectories
+- [ ] `index.tnt` as directory root handler
+- [ ] Shared layouts/middleware per directory (optional `_layout.tnt`, `_middleware.tnt`)
+
+**Example Route File:**
+```ntnt
+// routes/users/[id].tnt
+// Automatically handles GET /users/:id and DELETE /users/:id
+
+import { json, status } from "std/http/server"
+import { find_user, delete_user } from "../../models/user"
+
+export fn get(req) {
+    let user = find_user(req.params.id)
+    return json(user)
+}
+
+export fn delete(req)
+    requires req.user.is_admin
+{
+    delete_user(req.params.id)
+    return status(204)
+}
+```
+
+**App Entry Point:**
+```ntnt
+// app.tnt
+import { use_middleware, listen } from "std/http/server"
+import { logger, auth } from "./middleware"
+
+// Apply global middleware
+use_middleware(logger)
+use_middleware(auth)
+
+// Auto-discover and register all routes from routes/ directory
+// Routes are hot-reloaded when files change
+routes("routes/")
+
+listen(3000)
+```
+
+**Why File-Based Routing:**
+| Benefit | Description |
+|---------|-------------|
+| **AI-Friendly** | "Create `/api/orders`" → Agent creates `routes/api/orders.tnt`. Done. |
+| **Locality** | All logic for a route lives in one file |
+| **Zero Wiring** | No router configuration to maintain |
+| **Hot Reload** | Change a file, refresh browser, see changes |
+| **Discoverability** | URL structure mirrors filesystem |
+
+### 5.6 Database Connectivity
 
 - [ ] Connection management
 - [ ] Parameterized queries (prevent SQL injection)
@@ -277,7 +352,7 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 }
 ```
 
-### 5.6 Supporting Libraries ✅ COMPLETE
+### 5.7 Supporting Libraries ✅ COMPLETE
 
 - [x] `std/json`: parse, stringify, stringify_pretty
 - [x] `std/time`: now, now_millis, now_nanos, sleep, elapsed, format_timestamp, duration_secs, duration_millis
@@ -291,6 +366,7 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] File system operations
 - [x] HTTP client (blocking)
 - [x] HTTP server with routing
+- [ ] File-based routing with hot-reload (`routes/` directory convention)
 - [ ] PostgreSQL database driver
 - [x] JSON, time, crypto, URL utilities
 

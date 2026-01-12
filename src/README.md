@@ -14,38 +14,44 @@ NTNT follows a standard compiler front-end pipeline, but executes the resulting 
 
 ## File Map
 
-| File | Purpose |
-| :--- | :--- |
-| [main.rs](main.rs) | CLI entry point and argument parsing via `clap`. |
-| [lib.rs](lib.rs) | Library root; exports core types for testing and embedding. |
-| [ast.rs](ast.rs) | Data structures for the Abstract Syntax Tree. |
-| [lexer.rs](lexer.rs) | Tokenizer and scanner logic. |
-| [parser.rs](parser.rs) | Recursive descent parser. |
-| [interpreter.rs](interpreter.rs) | Tree-walking execution engine. |
-| [types.rs](types.rs) | Internal representation of types and generics. |
-| [contracts.rs](contracts.rs) | Runtime contract validation logic. |
-| [error.rs](error.rs) | Unified error handling for all phases. |
+| File                             | Purpose                                                     |
+| :------------------------------- | :---------------------------------------------------------- |
+| [main.rs](main.rs)               | CLI entry point and argument parsing via `clap`.            |
+| [lib.rs](lib.rs)                 | Library root; exports core types for testing and embedding. |
+| [ast.rs](ast.rs)                 | Data structures for the Abstract Syntax Tree.               |
+| [lexer.rs](lexer.rs)             | Tokenizer and scanner logic.                                |
+| [parser.rs](parser.rs)           | Recursive descent parser.                                   |
+| [interpreter.rs](interpreter.rs) | Tree-walking execution engine.                              |
+| [types.rs](types.rs)             | Internal representation of types and generics.              |
+| [contracts.rs](contracts.rs)     | Runtime contract validation logic.                          |
+| [error.rs](error.rs)             | Unified error handling for all phases.                      |
 
 ## Development
 
 ### Building
+
 ```bash
 cargo build
 ```
 
 ### Running Tests
+
 The project maintains high test coverage for both implementation and language behavior.
+
 ```bash
 cargo test
 ```
 
 ### Running a Script
+
 ```bash
 cargo run -- run examples/hello.tnt
 ```
 
 ### Inspector Tools
+
 You can inspect the internal representation of any `.tnt` file:
+
 ```bash
 # See tokens
 cargo run -- tokens examples/hello.tnt

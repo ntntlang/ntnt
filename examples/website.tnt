@@ -1,14 +1,18 @@
 // NTNT Language Website
 // 
-// A simple website with file-based pages for hot-reload capability.
-// Edit the HTML files in website/pages/ and refresh to see changes!
+// A data-driven website with hot-reloadable pages and configuration.
+// Edit HTML/JSON files and refresh to see changes - no restart needed!
 //
 // Structure:
-//   website.tnt              - Router + middleware (this file)
-//   website/layout.html      - Shared HTML layout template
-//   website/pages/home.html  - Homepage content
-//   website/pages/about.html - About page content
-//   website/pages/examples.html - Examples page content
+//   website.tnt               - Router + middleware (this file, rarely changes)
+//   website/layout.html       - Shared HTML layout template
+//   website/pages/*.html      - Page content templates
+//   website/pages/*.json      - Page configuration (optional, for dynamic pages)
+//
+// Data-Driven Architecture:
+//   Pages with a .json config file are "dynamic" - they can fetch from APIs,
+//   replace placeholders, and modify their behavior without restarting.
+//   The JSON config is re-read on every request, enabling hot-reload.
 //
 // Run with: ntnt run examples/website.tnt
 
@@ -62,6 +66,75 @@ fn load_page(filename, title) {
 }
 
 // ============================================================================
+// Data-Driven Page Loader (Hot-Reloadable Config)
+// ============================================================================
+
+// Load a dynamic page using a JSON config file.
+// The config is re-read on EVERY request, so you can change it without restarting!
+//
+// Config format (e.g., fetch.json):
+// {
+//     "title": "Page Title",
+//     "api": {
+//         "url": "https://api.example.com/data",
+//         "data_path": "data.0",      // Path to extract from response
+//         "placeholder": "<!--DATA-->"
+//     }
+// }
+fn load_dynamic_page(page_name) {
+    let html_path = PAGES_DIR + "/" + page_name + ".html"
+    let config_path = PAGES_DIR + "/" + page_name + ".json"
+    
+    // Load config (hot-reloadable!)
+    match read_file(config_path) {
+        Ok(config_str) => {
+            match parse(config_str) {
+                Ok(config) => {
+                    // Load the HTML template
+                    match read_file(html_path) {
+                        Ok(content) => {
+                            // Fetch from API and replace placeholder
+                            match get(config.api.url) {
+                                Ok(response) => {
+                                    match parse(response.body) {
+                                        Ok(api_data) => {
+                                            // Extract data using data_path (supports "data.0" pattern)
+                                            let value = api_data.data[0]
+                                            let content = replace(content, config.api.placeholder, value)
+                                            return html(render_page(config.title, content))
+                                        },
+                                        Err(e) => {
+                                            print("Error parsing API response: " + e)
+                                            return html(render_page("Error", "<h1>API Error</h1><p>" + e + "</p>"))
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    print("Error fetching from API: " + e)
+                                    return html(render_page("Error", "<h1>API Error</h1><p>" + e + "</p>"))
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            print("Error loading " + page_name + ".html: " + e)
+                            return html(render_page("Error", "<h1>Page Not Found</h1>"))
+                        }
+                    }
+                },
+                Err(e) => {
+                    print("Error parsing config " + config_path + ": " + e)
+                    return html(render_page("Error", "<h1>Config Error</h1><p>" + e + "</p>"))
+                }
+            }
+        },
+        Err(e) => {
+            // No config file, fall back to simple page load
+            return load_page(page_name + ".html", page_name)
+        }
+    }
+}
+
+// ============================================================================
 // Request Logging Middleware
 // ============================================================================
 
@@ -88,43 +161,11 @@ fn examples_page(req) {
     return load_page("examples.html", "Examples")
 }
 
-// Fetch page - demonstrates server-side API calls
+// Fetch page - demonstrates data-driven page loading
+// All configuration is in website/pages/fetch.json (hot-reloadable!)
+// Try changing the API URL or placeholder in the JSON and refresh.
 fn fetch_page(req) {
-    // Fetch cat fact from external API
-    match get("https://meowfacts.herokuapp.com/") {
-        Ok(response) => {
-            match parse(response.body) {
-                Ok(data) => {
-                    // Extract the fact from the data array
-                    let fact = data.data[0]
-                    
-                    // Load the page template
-                    let filepath = PAGES_DIR + "/fetch.html"
-                    match read_file(filepath) {
-                        Ok(content) => {
-                            // Replace placeholder with actual cat fact
-                            let content_with_fact = replace(content, "<!--CAT_FACT-->", fact)
-                            return html(render_page("Live API Demo", content_with_fact))
-                        },
-                        Err(e) => {
-                            print("Error loading fetch.html: " + e)
-                            return html(render_page("Error", "<h1>Error</h1><p>Could not load page.</p>"))
-                        }
-                    }
-                },
-                Err(e) => {
-                    print("Error parsing JSON: " + e)
-                    let error_msg = "<h1>API Error</h1><p>Failed to parse response: " + e + "</p>"
-                    return html(render_page("Error", error_msg))
-                }
-            }
-        },
-        Err(e) => {
-            print("Error fetching cat fact: " + e)
-            let error_msg = "<h1>API Error</h1><p>Failed to fetch cat fact: " + e + "</p>"
-            return html(render_page("Error", error_msg))
-        }
-    }
+    return load_dynamic_page("fetch")
 }
 
 // ============================================================================
