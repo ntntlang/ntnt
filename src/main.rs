@@ -37,6 +37,49 @@ enum Commands {
         #[arg(value_name = "FILE")]
         file: PathBuf,
     },
+    /// Test an HTTP server by running it and making requests
+    /// 
+    /// Starts the server, makes the specified HTTP request(s), prints responses,
+    /// then shuts down. Perfect for AI agents and CI/CD testing.
+    /// 
+    /// Examples:
+    ///   intent test server.intent --get /api/status
+    ///   intent test server.intent --get "/divide?a=10&b=2"
+    ///   intent test server.intent --post /users --body '{"name":"test"}'
+    ///   intent test server.intent --get /health --get /api/status
+    Test {
+        /// The source file containing the HTTP server
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        
+        /// Make a GET request to the specified path
+        #[arg(long = "get", value_name = "PATH")]
+        get_requests: Vec<String>,
+        
+        /// Make a POST request to the specified path
+        #[arg(long = "post", value_name = "PATH")]
+        post_requests: Vec<String>,
+        
+        /// Make a PUT request to the specified path
+        #[arg(long = "put", value_name = "PATH")]
+        put_requests: Vec<String>,
+        
+        /// Make a DELETE request to the specified path
+        #[arg(long = "delete", value_name = "PATH")]
+        delete_requests: Vec<String>,
+        
+        /// Request body for POST/PUT requests (applies to the preceding request)
+        #[arg(long = "body", value_name = "JSON")]
+        body: Option<String>,
+        
+        /// Port to run the test server on (default: 18080)
+        #[arg(long = "port", default_value = "18080")]
+        port: u16,
+        
+        /// Show verbose output including headers
+        #[arg(long = "verbose", short = 'v')]
+        verbose: bool,
+    },
     /// Parse and display the AST
     Parse {
         /// The source file to parse
@@ -66,6 +109,16 @@ fn main() {
     let result = match cli.command {
         Some(Commands::Repl) => run_repl(),
         Some(Commands::Run { file }) => run_file(&file),
+        Some(Commands::Test { 
+            file, 
+            get_requests, 
+            post_requests, 
+            put_requests, 
+            delete_requests, 
+            body, 
+            port, 
+            verbose 
+        }) => test_http_server(&file, get_requests, post_requests, put_requests, delete_requests, body, port, verbose),
         Some(Commands::Parse { file, json }) => parse_file(&file, json),
         Some(Commands::Lex { file }) => lex_file(&file),
         Some(Commands::Check { file }) => check_file(&file),
@@ -259,6 +312,225 @@ fn run_file(path: &PathBuf) -> anyhow::Result<()> {
     let ast = parser.parse()?;
     
     interpreter.eval(&ast)?;
+    Ok(())
+}
+
+/// Test mode: runs an HTTP server, makes requests, then exits
+fn test_http_server(
+    path: &PathBuf,
+    get_requests: Vec<String>,
+    post_requests: Vec<String>,
+    put_requests: Vec<String>,
+    delete_requests: Vec<String>,
+    body: Option<String>,
+    port: u16,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+    
+    // Build list of requests to make
+    let mut requests: Vec<(String, String, Option<String>)> = Vec::new();
+    
+    for path in get_requests {
+        requests.push(("GET".to_string(), path, None));
+    }
+    for path in post_requests {
+        requests.push(("POST".to_string(), path, body.clone()));
+    }
+    for path in put_requests {
+        requests.push(("PUT".to_string(), path, body.clone()));
+    }
+    for path in delete_requests {
+        requests.push(("DELETE".to_string(), path, None));
+    }
+    
+    if requests.is_empty() {
+        anyhow::bail!("No requests specified. Use --get, --post, --put, or --delete to specify requests.");
+    }
+    
+    println!("{}", "=== Intent HTTP Test Mode ===".green().bold());
+    println!();
+    
+    // Counters for tracking
+    let requests_to_make = requests.len();
+    let requests_completed = Arc::new(AtomicUsize::new(0));
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    
+    // Prepare results storage
+    let results: Arc<std::sync::Mutex<Vec<(String, String, u16, String)>>> = 
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    
+    // Clone for request thread
+    let requests_completed_clone = requests_completed.clone();
+    let shutdown_flag_clone = shutdown_flag.clone();
+    let results_clone = results.clone();
+    
+    // Spawn thread to make HTTP requests after a short delay
+    let request_handle = thread::spawn(move || {
+        // Wait for server to start
+        thread::sleep(Duration::from_millis(200));
+        
+        for (method, req_path, req_body) in requests {
+            let path_with_slash = if req_path.starts_with('/') { 
+                req_path.clone() 
+            } else { 
+                format!("/{}", req_path) 
+            };
+            
+            let body_content = req_body.unwrap_or_default();
+            let request = if body_content.is_empty() {
+                format!(
+                    "{} {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+                    method, path_with_slash, port
+                )
+            } else {
+                format!(
+                    "{} {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    method, path_with_slash, port, body_content.len(), body_content
+                )
+            };
+            
+            // Try to connect with retries
+            let mut attempts = 0;
+            let max_attempts = 10;
+            let mut response_data = None;
+            
+            while attempts < max_attempts {
+                match TcpStream::connect(format!("127.0.0.1:{}", port)) {
+                    Ok(mut stream) => {
+                        stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                        stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
+                        
+                        if stream.write_all(request.as_bytes()).is_ok() {
+                            let mut response = Vec::new();
+                            let _ = stream.read_to_end(&mut response);
+                            
+                            if !response.is_empty() {
+                                let response_str = String::from_utf8_lossy(&response).to_string();
+                                let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
+                                let headers = parts.get(0).unwrap_or(&"");
+                                let body = parts.get(1).unwrap_or(&"").to_string();
+                                
+                                let status_code = headers
+                                    .lines()
+                                    .next()
+                                    .unwrap_or("")
+                                    .split_whitespace()
+                                    .nth(1)
+                                    .unwrap_or("0")
+                                    .parse::<u16>()
+                                    .unwrap_or(0);
+                                
+                                response_data = Some((method.clone(), req_path.clone(), status_code, body));
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => {}
+                }
+                attempts += 1;
+                thread::sleep(Duration::from_millis(100));
+            }
+            
+            if let Some(data) = response_data {
+                results_clone.lock().unwrap().push(data);
+            } else {
+                results_clone.lock().unwrap().push((
+                    method.clone(),
+                    req_path.clone(),
+                    0,
+                    "Connection failed".to_string(),
+                ));
+            }
+            
+            requests_completed_clone.fetch_add(1, Ordering::SeqCst);
+        }
+        
+        // Signal shutdown after all requests complete
+        shutdown_flag_clone.store(true, Ordering::SeqCst);
+    });
+    
+    // Parse and run the server in main thread
+    let source = fs::read_to_string(path)?;
+    let mut interpreter = Interpreter::new();
+    interpreter.set_test_mode(port, requests_to_make, shutdown_flag.clone());
+    
+    let lexer = Lexer::new(&source);
+    let tokens: Vec<_> = lexer.collect();
+    
+    let mut parser = IntentParser::new(tokens);
+    let ast = parser.parse()?;
+    
+    // Run the server (will exit when shutdown_flag is set)
+    let _ = interpreter.eval(&ast);
+    
+    // Wait for request thread to finish
+    request_handle.join().ok();
+    
+    // Print results
+    println!();
+    let results_vec = results.lock().unwrap();
+    let mut passed = 0;
+    let mut failed = 0;
+    
+    for (i, (method, path, status, body)) in results_vec.iter().enumerate() {
+        let req_num = i + 1;
+        println!("{}", format!("[REQUEST {}] {} {}", req_num, method, path).cyan().bold());
+        
+        let is_success = *status >= 200 && *status < 400;
+        
+        if verbose {
+            println!("{}", format!("[STATUS] {}", status).yellow());
+        }
+        
+        let status_display = if is_success {
+            format!("[RESPONSE] {} ({})", status, "OK".green())
+        } else if *status == 0 {
+            format!("[RESPONSE] {} ({})", "FAILED", "Connection Error".red())
+        } else {
+            format!("[RESPONSE] {} ({})", status, "ERROR".red())
+        };
+        println!("{}", status_display);
+        
+        // Pretty print JSON if possible
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+            println!("{}", serde_json::to_string_pretty(&json).unwrap_or_else(|_| body.to_string()));
+        } else {
+            println!("{}", body);
+        }
+        
+        if is_success {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
+        
+        println!();
+    }
+    
+    // Summary
+    let total = results_vec.len();
+    let summary = format!(
+        "=== {} requests, {} passed, {} failed ===",
+        total, passed, failed
+    );
+    if failed == 0 {
+        println!("{}", summary.green().bold());
+    } else {
+        println!("{}", summary.red().bold());
+    }
+    
+    println!("Server shutdown.");
+    
+    if failed > 0 {
+        std::process::exit(1);
+    }
+    
     Ok(())
 }
 

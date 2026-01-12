@@ -285,6 +285,8 @@ pub struct Interpreter {
     current_file: Option<String>,
     /// HTTP server state for routing
     server_state: crate::stdlib::http_server::ServerState,
+    /// Test mode: if Some, contains (port, max_requests, shutdown_flag)
+    test_mode: Option<(u16, usize, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
 }
 
 /// Information about a trait definition
@@ -322,11 +324,17 @@ impl Interpreter {
             loaded_modules: HashMap::new(),
             current_file: None,
             server_state: crate::stdlib::http_server::ServerState::new(),
+            test_mode: None,
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
         interpreter.define_stdlib();
         interpreter
+    }
+    
+    /// Enable test mode - server will handle limited requests then exit
+    pub fn set_test_mode(&mut self, port: u16, max_requests: usize, shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.test_mode = Some((port, max_requests, shutdown_flag));
     }
     
     /// Set the current file path for relative imports
@@ -2285,6 +2293,14 @@ impl Interpreter {
     /// Run the HTTP server on the specified port
     fn run_http_server(&mut self, port: u16) -> Result<Value> {
         use crate::stdlib::http_server;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+        
+        // Check if we're in test mode
+        let (actual_port, is_test_mode, shutdown_flag) = match &self.test_mode {
+            Some((test_port, _max_req, flag)) => (*test_port, true, Some(flag.clone())),
+            None => (port, false, None),
+        };
         
         // Check if any routes or static dirs are registered
         let has_routes = self.server_state.route_count() > 0;
@@ -2296,27 +2312,65 @@ impl Interpreter {
             ));
         }
         
-        println!("Starting server on http://0.0.0.0:{}", port);
+        // Print startup message
+        if is_test_mode {
+            println!("Starting test server on http://127.0.0.1:{}", actual_port);
+        } else {
+            println!("Starting server on http://0.0.0.0:{}", actual_port);
+        }
+        
         if has_routes {
             println!("Routes registered: {}", self.server_state.route_count());
         }
         if has_static {
             println!("Static directories: {}", self.server_state.static_dirs.len());
-            for (prefix, dir) in &self.server_state.static_dirs {
-                println!("  {} -> {}", prefix, dir);
+            if !is_test_mode {
+                for (prefix, dir) in &self.server_state.static_dirs {
+                    println!("  {} -> {}", prefix, dir);
+                }
             }
         }
         let middleware_count = self.server_state.middleware.len();
         if middleware_count > 0 {
             println!("Middleware: {}", middleware_count);
         }
-        println!("Press Ctrl+C to stop");
+        
+        if !is_test_mode {
+            println!("Press Ctrl+C to stop");
+        }
+        println!();
         
         // Start the server
-        let server = http_server::start_server(port)?;
+        let server = if is_test_mode {
+            http_server::start_server_with_timeout(actual_port, Duration::from_secs(60))?
+        } else {
+            http_server::start_server(actual_port)?
+        };
         
         // Handle requests in a loop
-        for request in server.incoming_requests() {
+        // In test mode, use recv_timeout and check shutdown flag
+        loop {
+            // Check shutdown flag in test mode
+            if let Some(ref flag) = shutdown_flag {
+                if flag.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            
+            // Get next request (with timeout in test mode)
+            let request = if is_test_mode {
+                match server.recv_timeout(Duration::from_millis(50)) {
+                    Ok(Some(req)) => req,
+                    Ok(None) => continue,  // Timeout, check shutdown flag
+                    Err(_) => break,  // Server error
+                }
+            } else {
+                match server.recv() {
+                    Ok(req) => req,
+                    Err(_) => break,
+                }
+            };
+            
             let method = request.method().to_string();
             let url = request.url().to_string();
             let path = url.split('?').next().unwrap_or(&url).to_string();
@@ -2423,7 +2477,7 @@ impl Interpreter {
         
         Ok(Value::Unit)
     }
-
+    
     /// Capture old values from expressions in postconditions
     fn capture_old_values(&mut self, ensures: &[Expression]) -> Result<OldValues> {
         let mut old_values = OldValues::new();

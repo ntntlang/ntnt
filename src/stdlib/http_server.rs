@@ -415,6 +415,14 @@ pub fn start_server(port: u16) -> Result<tiny_http::Server> {
         .map_err(|e| IntentError::RuntimeError(format!("Failed to start server: {}", e)))
 }
 
+/// Start the HTTP server with timeout support (for test mode)
+/// Binds to 127.0.0.1 only for security in test mode
+pub fn start_server_with_timeout(port: u16, _timeout: std::time::Duration) -> Result<tiny_http::Server> {
+    let addr = format!("127.0.0.1:{}", port);
+    tiny_http::Server::http(&addr)
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to start test server: {}", e)))
+}
+
 /// Read request body and create request Value
 pub fn process_request(
     mut request: tiny_http::Request,

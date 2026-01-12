@@ -904,3 +904,59 @@ Contract behavior:
 - **Precondition failure** returns HTTP **400 Bad Request** with error details
 - **Postcondition failure** returns HTTP **500 Internal Server Error**
 - Error messages include function name and failed condition
+### HTTP Test Mode
+
+Test HTTP servers without manual curl commands using `intent test`:
+
+```bash
+# Single GET request
+intent test server.intent --get /api/status
+
+# Multiple requests
+intent test server.intent --get /health --get /api/users
+
+# With query parameters
+intent test server.intent --get "/divide?a=10&b=2"
+
+# POST with body
+intent test server.intent --post /users --body '{"name":"Alice"}'
+
+# Verbose output (shows headers)
+intent test server.intent --get /api/status --verbose
+
+# Custom port (default: 18080)
+intent test server.intent --get /health --port 9000
+```
+
+**Example output:**
+
+```
+=== Intent HTTP Test Mode ===
+
+Starting test server on http://127.0.0.1:18080
+Routes registered: 7
+
+[REQUEST 1] GET /health
+[RESPONSE] 200 (OK)
+{
+  "status": "healthy",
+  "version": "0.1.6"
+}
+
+[REQUEST 2] GET /divide?a=20&b=4
+[RESPONSE] 200 (OK)
+{
+  "a": 20,
+  "b": 4,
+  "result": 5
+}
+
+=== 2 requests, 2 passed, 0 failed ===
+Server shutdown.
+```
+
+This is perfect for:
+
+- **AI agents**: Single atomic command instead of start/curl/kill
+- **CI/CD pipelines**: Quick smoke tests with exit codes
+- **Development**: Rapid iteration without browser
