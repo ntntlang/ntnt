@@ -283,6 +283,8 @@ pub struct Interpreter {
     loaded_modules: HashMap<String, HashMap<String, Value>>,
     /// Current file path (for relative imports)
     current_file: Option<String>,
+    /// HTTP server state for routing
+    server_state: crate::stdlib::http_server::ServerState,
 }
 
 /// Information about a trait definition
@@ -319,6 +321,7 @@ impl Interpreter {
             current_result: None,
             loaded_modules: HashMap::new(),
             current_file: None,
+            server_state: crate::stdlib::http_server::ServerState::new(),
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
@@ -874,6 +877,56 @@ impl Interpreter {
                         }
                         _ => Err(IntentError::TypeError("unwrap_or() requires Option or Result".to_string())),
                     }
+                },
+            },
+        );
+        
+        // listen(port) - Start HTTP server on given port
+        // This is a special built-in because it needs to call Intent handler functions
+        self.environment.borrow_mut().define(
+            "listen".to_string(),
+            Value::NativeFunction {
+                name: "listen".to_string(),
+                arity: 1,
+                func: |_args| {
+                    // This is a placeholder - actual implementation is in eval_call
+                    // because we need access to the interpreter to call handlers
+                    Err(IntentError::RuntimeError(
+                        "listen() must be called directly, not stored in a variable".to_string()
+                    ))
+                },
+            },
+        );
+        
+        // HTTP routing functions - these need special handling in eval_call
+        // because they need to store handlers in the interpreter's server_state
+        for method in &["get", "post", "put", "delete", "patch"] {
+            let method_name = method.to_string();
+            self.environment.borrow_mut().define(
+                method_name.clone(),
+                Value::NativeFunction {
+                    name: method_name,
+                    arity: 2,
+                    func: |_args| {
+                        Err(IntentError::RuntimeError(
+                            "HTTP route functions must be called directly".to_string()
+                        ))
+                    },
+                },
+            );
+        }
+        
+        // new_server() - create a new server (resets routes)
+        self.environment.borrow_mut().define(
+            "new_server".to_string(),
+            Value::NativeFunction {
+                name: "new_server".to_string(),
+                arity: 0,
+                func: |_args| {
+                    // Placeholder - actual implementation clears server_state
+                    Err(IntentError::RuntimeError(
+                        "new_server() must be called directly".to_string()
+                    ))
                 },
             },
         );
@@ -1437,6 +1490,41 @@ impl Interpreter {
                         }
                         // If not in postcondition context, just evaluate normally
                         return self.eval_expression(&arguments[0]);
+                    }
+                    
+                    // Special handling for listen() - starts HTTP server
+                    if name == "listen" && arguments.len() == 1 {
+                        let port = self.eval_expression(&arguments[0])?;
+                        if let Value::Int(port_num) = port {
+                            return self.run_http_server(port_num as u16);
+                        } else {
+                            return Err(IntentError::TypeError("listen() requires an integer port".to_string()));
+                        }
+                    }
+                    
+                    // Special handling for new_server() - resets routes
+                    if name == "new_server" && arguments.is_empty() {
+                        self.server_state.clear();
+                        let mut server = HashMap::new();
+                        server.insert("_type".to_string(), Value::String("Server".to_string()));
+                        return Ok(Value::Map(server));
+                    }
+                    
+                    // Special handling for HTTP route registration
+                    let http_methods = ["get", "post", "put", "delete", "patch"];
+                    if http_methods.contains(&name.as_str()) && arguments.len() == 2 {
+                        let pattern = self.eval_expression(&arguments[0])?;
+                        let handler = self.eval_expression(&arguments[1])?;
+                        
+                        if let Value::String(pattern_str) = pattern {
+                            let method = name.to_uppercase();
+                            self.server_state.add_route(&method, &pattern_str, handler);
+                            return Ok(Value::Unit);
+                        } else {
+                            return Err(IntentError::TypeError(
+                                format!("{}() requires a string pattern as first argument", name)
+                            ));
+                        }
                     }
                 }
                 
@@ -2159,6 +2247,73 @@ impl Interpreter {
                 "Can only call functions".to_string(),
             )),
         }
+    }
+    
+    /// Run the HTTP server on the specified port
+    fn run_http_server(&mut self, port: u16) -> Result<Value> {
+        use crate::stdlib::http_server;
+        
+        // Check if any routes are registered
+        if self.server_state.route_count() == 0 {
+            return Err(IntentError::RuntimeError(
+                "No routes registered. Use get(), post(), etc. to register routes before calling listen()".to_string()
+            ));
+        }
+        
+        println!("Starting server on http://0.0.0.0:{}", port);
+        println!("Routes registered: {}", self.server_state.route_count());
+        println!("Press Ctrl+C to stop");
+        
+        // Start the server
+        let server = http_server::start_server(port)?;
+        
+        // Handle requests in a loop
+        for request in server.incoming_requests() {
+            let method = request.method().to_string();
+            let url = request.url().to_string();
+            let path = url.split('?').next().unwrap_or(&url).to_string();
+            
+            // Find matching route from our server state
+            match self.server_state.find_route(&method, &path) {
+                Some((handler, route_params)) => {
+                    // Process request to get request Value
+                    match http_server::process_request(request, route_params) {
+                        Ok((req_value, http_request)) => {
+                            // Call the handler
+                            match self.call_function(handler, vec![req_value]) {
+                                Ok(response) => {
+                                    if let Err(e) = http_server::send_response(http_request, &response) {
+                                        eprintln!("Error sending response: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Handler error: {}", e);
+                                    // Send 500 error
+                                    let error_response = http_server::create_error_response(500, &e.to_string());
+                                    let _ = http_server::send_response(http_request, &error_response);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Error processing request: {}", e);
+                        }
+                    }
+                }
+                None => {
+                    // No matching route - send 404
+                    let path_clone = path.clone();
+                    match http_server::process_request(request, HashMap::new()) {
+                        Ok((_, http_request)) => {
+                            let not_found = http_server::create_error_response(404, &format!("Not Found: {} {}", method, path_clone));
+                            let _ = http_server::send_response(http_request, &not_found);
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        
+        Ok(Value::Unit)
     }
 
     /// Capture old values from expressions in postconditions

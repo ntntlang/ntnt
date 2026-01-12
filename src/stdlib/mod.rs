@@ -17,6 +17,7 @@ pub mod time;
 pub mod crypto;
 pub mod url;
 pub mod http;
+pub mod http_server;
 
 use std::collections::HashMap;
 use crate::interpreter::Value;
@@ -39,6 +40,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/crypto".to_string(), crypto::init());
     modules.insert("std/url".to_string(), url::init());
     modules.insert("std/http".to_string(), http::init());
+    modules.insert("std/http/server".to_string(), http_server::init());
     
     modules
 }

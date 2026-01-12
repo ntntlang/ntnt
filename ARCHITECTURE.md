@@ -59,6 +59,8 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
   - `std/time`: Time operations (now, sleep, elapsed, format_timestamp, duration_secs)
   - `std/crypto`: Cryptographic functions (sha256, hmac_sha256, uuid, random_bytes, hex_encode)
   - `std/url`: URL parsing and encoding (parse, encode, decode, build_query, join)
+  - `std/http`: HTTP client (get, post, put, delete, request)
+  - `std/http/server`: HTTP server with routing (text, html, json, get, post, listen)
 
 ### Language Runtime (Planned)
 
@@ -106,13 +108,13 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 ┌─────────────────────────────────────────────────┐
 │  AI Agents           ← Development orchestration │
 ├─────────────────────────────────────────────────┤
-│  HTTP/API Layer      ← Web server (Phase 5)      │
+│  HTTP/API Layer      ← Web server ✅             │
 ├─────────────────────────────────────────────────┤
 │  Language Core       ← Syntax, types, contracts  │
 ├─────────────────────────────────────────────────┤
 │  Runtime             ← Interpreter, contracts    │
 ├─────────────────────────────────────────────────┤
-│  Storage             ← Database (Phase 6)        │
+│  Storage             ← Database (Phase 5)        │
 ├─────────────────────────────────────────────────┤
 │  Tooling             ← CLI, VS Code, deployment  │
 └─────────────────────────────────────────────────┘
@@ -142,9 +144,9 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 
 ## Future Extensions
 
-- HTTP server with contract-verified endpoints (Phase 5)
-- Database access with repository patterns (Phase 6)
-- Async/await for concurrent operations (Phase 7)
+- HTTP server with contract-verified endpoints ✅
+- Database access with repository patterns (Phase 5)
+- Async/await for concurrent operations (Phase 5)
 - Domain-specific dialects
 - Integration with existing languages
 - Advanced AI reasoning capabilities

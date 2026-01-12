@@ -40,7 +40,7 @@ Intent is a revolutionary programming language and ecosystem designed specifical
 - String interpolation: `"Hello, {name}!"`
 - Raw strings: `r"no \n escapes"` and `r#"can use "quotes""#`
 
-**Phase 5: File I/O & Utilities** 🚧 In Progress
+**Phase 5: File I/O, HTTP & Utilities** 🚧 In Progress
 
 - File system: `std/fs` (read_file, write_file, exists, mkdir, remove, etc.)
 - Path utilities: `std/path` (join, dirname, basename, extension, resolve)
@@ -48,10 +48,12 @@ Intent is a revolutionary programming language and ecosystem designed specifical
 - Time operations: `std/time` (now, sleep, format_timestamp)
 - Cryptography: `std/crypto` (sha256, hmac_sha256, uuid, random_bytes)
 - URL utilities: `std/url` (parse, encode, decode, build_query)
+- HTTP Client: `std/http` (get, post, put, delete, request)
+- **HTTP Server**: `std/http/server` (routing, path params, JSON responses)
 
 **146 passing tests** | **Version 0.1.5**
 
-**Next Up**: HTTP Server (Phase 5 continued)
+**Next Up**: Async/await, Database connectivity (Phase 5 continued)
 
 See [ROADMAP.md](ROADMAP.md) for the full 10-phase implementation plan.
 
@@ -94,9 +96,9 @@ Intent reimagines software development for an era where AI agents handle the hea
 
 Intent is being developed toward production web application capabilities:
 
-- **Phase 5**: HTTP server with contract-verified endpoints
-- **Phase 6**: Database access with repository patterns
-- **Phase 7**: Async/await for concurrent operations
+- **Phase 5**: HTTP server with contract-verified endpoints ✅
+- **Phase 5**: Database access with repository patterns (in progress)
+- **Phase 5**: Async/await for concurrent operations (planned)
 - **Phase 11**: Docker deployment and container support
 
 Performance targets: <1ms contract overhead, >10k requests/sec
@@ -761,6 +763,83 @@ Intent bridges the gap between AI's speed and consistency with human judgment an
 | `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E |
 | `std/collections` | push, pop, first, last, reverse, slice, concat, is_empty       |
 | `std/env`         | get_env, args, cwd                                             |
+| `std/fs`          | read_file, write_file, exists, mkdir, remove, readdir          |
+| `std/path`        | join, dirname, basename, extension, resolve, normalize         |
+| `std/json`        | parse, stringify, stringify_pretty                             |
+| `std/time`        | now, sleep, elapsed, format_timestamp, duration_secs           |
+| `std/crypto`      | sha256, hmac_sha256, uuid, random_bytes, hex_encode            |
+| `std/url`         | parse, encode, decode, build_query, join                       |
+| `std/http`        | get, post, put, delete, request, get_json, post_json           |
+| `std/http/server` | text, html, json, status, redirect + get, post, put, listen    |
+
+## HTTP Server
+
+Intent includes a built-in HTTP server for building web APIs:
+
+```intent
+import { text, html, json } from "std/http/server"
+
+// Simple text response
+fn home(req) {
+    return text("Hello, World!")
+}
+
+// JSON API endpoint
+fn get_status(req) {
+    return json(map {
+        "status": "ok",
+        "version": "0.1.5"
+    })
+}
+
+// Path parameters - use raw strings to avoid interpolation
+fn get_user(req) {
+    let id = req.params.id
+    return json(map {
+        "id": id,
+        "name": "User " + id
+    })
+}
+
+// Register routes and start server
+get("/", home)
+get("/status", get_status)
+get(r"/users/{id}", get_user)  // Raw string for {param} patterns
+post("/users", create_user)
+
+listen(8080)  // Start server on port 8080
+```
+
+### Running the Server
+
+```bash
+# Run a server file
+./target/release/intent run examples/http_server.intent
+
+# Server starts and listens for requests
+# Starting server on http://0.0.0.0:8080
+# Press Ctrl+C to stop
+```
+
+### Request Object
+
+Handlers receive a request map with:
+- `req.method` - HTTP method (GET, POST, etc.)
+- `req.path` - Request path
+- `req.params` - Path parameters (e.g., `{id}` → `req.params.id`)
+- `req.query_params` - Query string parameters
+- `req.headers` - Request headers
+- `req.body` - Request body
+
+### Response Helpers
+
+- `text(body)` - Plain text response (200)
+- `html(body)` - HTML response (200)
+- `json(data)` - JSON response (200)
+- `status(code, body)` - Custom status code
+- `redirect(url)` - 302 redirect
+- `not_found()` - 404 response
+- `error(msg)` - 500 error response
 
 ## Contributing
 

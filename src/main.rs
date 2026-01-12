@@ -29,6 +29,9 @@ enum Commands {
     /// Start the interactive REPL
     Repl,
     /// Run an Intent source file
+    /// 
+    /// For HTTP servers, the program runs until Ctrl+C:
+    ///   intent run examples/http_server.intent
     Run {
         /// The source file to run
         #[arg(value_name = "FILE")]
