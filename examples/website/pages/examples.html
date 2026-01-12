@@ -1,131 +1,141 @@
-<h1>Examples</h1>
-
-<p>Explore these examples to learn NTNT. All examples are available in the <code>examples/</code> directory of the repository.</p>
-
-<h2>Getting Started</h2>
-<div class="features">
-  <div class="feature">
-    <h3>📝 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/hello.tnt">hello.tnt</a></h3>
-    <p>Basic syntax, variables, functions, and control flow. Perfect starting point.</p>
-  </div>
-  <div class="feature">
-    <h3>🎯 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/demo.tnt">demo.tnt</a></h3>
-    <p>Interactive demo showcasing core language features and capabilities.</p>
+<div class="hero" style="min-height: 40vh">
+  <div class="hero-pattern"></div>
+  <div class="hero-content" style="padding: 4rem 2rem">
+    <h1>Code Examples</h1>
+    <p class="subtitle">Explore a collection of NTNT programs ranging from basic syntax to advanced verified web servers.</p>
   </div>
 </div>
 
-<h2>Language Features</h2>
-<div class="features">
-  <div class="feature">
-    <h3>📋 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/contracts.tnt">contracts.tnt</a></h3>
-    <p>Design-by-contract with <code>requires</code> and <code>ensures</code> clauses.</p>
+<div style="max-width: 1000px; margin: 0 auto">
+  <h2>Getting Started</h2>
+  <div class="features">
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24">
+          <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+          <polyline points="13 2 13 9 20 9"></polyline>
+        </svg>
+      </div>
+      <h3><a href="https://github.com/joshcramer/ntnt/blob/main/examples/hello.tnt" style="text-decoration: none; color: inherit">hello.tnt</a></h3>
+      <p>Basic syntax, variables, functions, and control flow. Perfect starting point for newcomers.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24">
+          <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+          <polyline points="2 17 12 22 22 17"></polyline>
+          <polyline points="2 12 12 17 22 12"></polyline>
+        </svg>
+      </div>
+      <h3><a href="https://github.com/joshcramer/ntnt/blob/main/examples/demo.tnt" style="text-decoration: none; color: inherit">demo.tnt</a></h3>
+      <p>Interactive demo showcasing core language features and verifiable logic capabilities.</p>
+    </div>
   </div>
-  <div class="feature">
-    <h3>📝 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/contracts_full.tnt">contracts_full.tnt</a></h3>
-    <p>Complete contract system demonstration with complex examples.</p>
-  </div>
-  <div class="feature">
-    <h3>🛡️ <a href="https://github.com/joshcramer/ntnt/blob/main/examples/invariants.tnt">invariants.tnt</a></h3>
-    <p>Struct invariants that are automatically enforced at runtime.</p>
-  </div>
-  <div class="feature">
-    <h3>📊 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/invariants_full.tnt">invariants_full.tnt</a></h3>
-    <p>Advanced invariant examples with complex data structures.</p>
-  </div>
-  <div class="feature">
-    <h3>🔀 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/pattern_matching.tnt">pattern_matching.tnt</a></h3>
-    <p>Pattern matching with <code>match</code>, <code>Option</code>, <code>Result</code>, and enums.</p>
-  </div>
-  <div class="feature">
-    <h3>📦 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/modules.tnt">modules.tnt</a></h3>
-    <p>Module system with imports, exports, and namespacing.</p>
-  </div>
-</div>
 
-<h2>Standard Library</h2>
-<div class="features">
-  <div class="feature">
-    <h3>📚 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/phase5_stdlib.tnt">phase5_stdlib.tnt</a></h3>
-    <p>Complete standard library tour: file I/O, JSON, time, crypto, URLs.</p>
+  <h2>Safety & Contracts</h2>
+  <div class="features">
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+      </div>
+      <h3><a href="https://github.com/joshcramer/ntnt/blob/main/examples/contracts.tnt" style="text-decoration: none; color: inherit">contracts.tnt</a></h3>
+      <p>Implementation of design-by-contract using <code>requires</code> and <code>ensures</code> clauses.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+      </div>
+      <h3><a href="https://github.com/joshcramer/ntnt/blob/main/examples/invariants.tnt" style="text-decoration: none; color: inherit">invariants.tnt</a></h3>
+      <p>Example of struct invariants that are automatically validated on data transformation.</p>
+    </div>
   </div>
-  <div class="feature">
-    <h3>🔤 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/string_processing.tnt">string_processing.tnt</a></h3>
-    <p>String manipulation, searching, replacement, and formatting.</p>
-  </div>
-  <div class="feature">
-    <h3>🧮 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/math_science.tnt">math_science.tnt</a></h3>
-    <p>Mathematical functions, scientific computing, and algorithms.</p>
-  </div>
-  <div class="feature">
-    <h3>🔄 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/data_processing.tnt">data_processing.tnt</a></h3>
-    <p>Data transformation, filtering, mapping, and collection utilities.</p>
-  </div>
-  <div class="feature">
-    <h3>🌍 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/environment.tnt">environment.tnt</a></h3>
-    <p>Environment variables, command-line arguments, and system interaction.</p>
-  </div>
-</div>
 
-<h2>Web Development</h2>
-<div class="features">
-  <div class="feature">
-    <h3>🌐 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/http_server.tnt">http_server.tnt</a></h3>
-    <p>Basic HTTP server with routing, JSON APIs, and request handling.</p>
-  </div>
-  <div class="feature">
-    <h3>⚡ <a href="https://github.com/joshcramer/ntnt/blob/main/examples/http_server_advanced.tnt">http_server_advanced.tnt</a></h3>
-    <p>Advanced HTTP features: middleware, static files, CORS headers.</p>
-  </div>
-  <div class="feature">
-    <h3>✅ <a href="https://github.com/joshcramer/ntnt/blob/main/examples/http_server_contracts.tnt">http_server_contracts.tnt</a></h3>
-    <p>Contract-verified HTTP endpoints with automatic validation.</p>
-  </div>
-  <div class="feature">
-    <h3>📡 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/http_client.tnt">http_client.tnt</a></h3>
-    <p>HTTP client requests, API consumption, and response handling.</p>
-  </div>
-  <div class="feature">
-    <h3>🎨 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/website.tnt">website.tnt</a></h3>
-    <p>Complete website with file-based pages and hot-reload support.</p>
-  </div>
-</div>
-
-<h2>Algorithms & Math</h2>
-<div class="features">
-  <div class="feature">
-    <h3>🔢 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/fibonacci.tnt">fibonacci.tnt</a></h3>
-    <p>Fibonacci sequence with recursive, iterative, and memoized approaches.</p>
+  <h2>Web & Networking</h2>
+  <div class="features">
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="2" y1="12" x2="22" y2="12"></line>
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+        </svg>
+      </div>
+      <h3><a href="https://github.com/joshcramer/ntnt/blob/main/examples/http_server.tnt" style="text-decoration: none; color: inherit">http_server.tnt</a></h3>
+      <p>Setup a high-performance web server with routing and JSON request handling.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+      </div>
+      <h3><a href="https://github.com/joshcramer/ntnt/blob/main/examples/http_server_contracts.tnt" style="text-decoration: none; color: inherit">http_server_contracts.tnt</a></h3>
+      <p>Verified HTTP endpoints that automatically enforce contracts at the edge.</p>
+    </div>
   </div>
 </div>
 
 <h2>Testing & Validation</h2>
 <div class="features">
   <div class="feature">
-    <h3>❌ <a href="https://github.com/joshcramer/ntnt/blob/main/examples/contract_violation_test.tnt">contract_violation_test.tnt</a></h3>
-    <p>Examples of contract violations and error handling.</p>
+    <div class="feature-icon">
+      <svg viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="15" y1="9" x2="9" y2="15"></line>
+        <line x1="9" y1="9" x2="15" y2="15"></line>
+      </svg>
+    </div>
+    <h3><a href="https://github.com/joshcramer/ntnt/blob/main/examples/contract_violation_test.tnt" style="text-decoration: none; color: inherit">contract_violation_test.tnt</a></h3>
+    <p>Intentional contract violations to demonstrate the robustness of the runtime error handling.</p>
   </div>
   <div class="feature">
-    <h3>⚠️ <a href="https://github.com/joshcramer/ntnt/blob/main/examples/invariant_violation_test.tnt">invariant_violation_test.tnt</a></h3>
-    <p>Invariant violation examples and runtime error behaviors.</p>
+    <div class="feature-icon">
+      <svg viewBox="0 0 24 24">
+        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+        <line x1="12" y1="9" x2="12" y2="13"></line>
+        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+      </svg>
+    </div>
+    <h3><a href="https://github.com/joshcramer/ntnt/blob/main/examples/invariant_violation_test.tnt" style="text-decoration: none; color: inherit">invariant_violation_test.tnt</a></h3>
+    <p>Demonstrations of state corruption prevention via structural invariant checks.</p>
   </div>
 </div>
 
 <h2>Advanced Features</h2>
 <div class="features">
   <div class="feature">
-    <h3>🚀 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/phase4_features.tnt">phase4_features.tnt</a></h3>
-    <p>Advanced language features: generics, traits, and type systems.</p>
+    <div class="feature-icon">
+      <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+    </div>
+    <h3><a href="https://github.com/joshcramer/ntnt/blob/main/examples/phase4_features.tnt" style="text-decoration: none; color: inherit">phase4_features.tnt</a></h3>
+    <p>Diving deep into generics, module namespacing, and advanced type transformations.</p>
   </div>
   <div class="feature">
-    <h3>📝 <a href="https://github.com/joshcramer/ntnt/blob/main/examples/phase4_simple.tnt">phase4_simple.tnt</a></h3>
-    <p>Simplified examples of advanced features for easier learning.</p>
+    <div class="feature-icon">
+      <svg viewBox="0 0 24 24">
+        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+      </svg>
+    </div>
+    <h3><a href="https://github.com/joshcramer/ntnt/blob/main/examples/phase4_simple.tnt" style="text-decoration: none; color: inherit">phase4_simple.tnt</a></h3>
+    <p>A concise guide to mastering the advanced NTNT features with minimal boilerplate.</p>
   </div>
 </div>
 
 <h2>Quick Start Code</h2>
 
 <h3>Hello World</h3>
-<pre><code>// hello.tnt
+<div class="code-window">
+  <div class="window-header">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+  </div>
+  <pre><code>// hello.tnt
 let greeting = "Hello, World!"
 print(greeting)
 
@@ -134,17 +144,31 @@ fn greet(name) {
 }
 
 print(greet("NTNT"))</code></pre>
+</div>
 
 <h3>Contracts</h3>
-<pre><code>fn divide(a: Int, b: Int) -> Int
+<div class="code-window">
+  <div class="window-header">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+  </div>
+  <pre><code>fn divide(a: Int, b: Int) -> Int
     requires b != 0  // Precondition
     ensures result * b == a  // Postcondition
 {
     return a / b
 }</code></pre>
+</div>
 
 <h3>HTTP Server</h3>
-<pre><code>import { json } from "std/http/server"
+<div class="code-window">
+  <div class="window-header">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+  </div>
+  <pre><code>import { json } from "std/http/server"
 
 fn get_status(req) {
     return json(map {
@@ -155,11 +179,55 @@ fn get_status(req) {
 
 get("/api/status", get_status)
 listen(3000)</code></pre>
+</div>
 
 <h2>Running Examples</h2>
-<p>To run any example:</p>
-<pre><code>ntnt run examples/hello.tnt
+<p>To run any example, use the <code>ntnt</code> CLI directly. It is fast, lightweight, and handles dependencies automatically.</p>
+
+<div class="step-list">
+  <div class="step-item">
+    <div class="step-number">1</div>
+    <div class="step-content">
+      <strong>Select an Example</strong>
+      <p>Choose any <code>.tnt</code> file from the <code>examples/</code> directory of the repository.</p>
+    </div>
+  </div>
+  <div class="step-item">
+    <div class="step-number">2</div>
+    <div class="step-content">
+      <strong>Run the Command</strong>
+      <p>Use <code>ntnt run</code> for scripts or servers, or <code>ntnt test</code> for verifying API endpoints.</p>
+    </div>
+  </div>
+  <div class="step-item">
+    <div class="step-number">3</div>
+    <div class="step-content">
+      <strong>Observe Results</strong>
+      <p>The NTNT runtime will execute the code and automatically validate all contracts and invariants.</p>
+    </div>
+  </div>
+</div>
+
+<div class="code-window">
+  <div class="window-header">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+  </div>
+  <pre><code># Run a script
+ntnt run examples/hello.tnt
+
+# Run a server
 ntnt run examples/http_server.tnt
-ntnt test examples/http_server.tnt --get /api/status</code></pre>
+
+# Test an endpoint
+ntnt test examples/http_server.tnt --get /api/status
+
+# Test an endpoint with a JSON payload
+ntnt test examples/http_server.tnt --post /users --body '{"name":"Alice"}'
+
+# Verbose output (shows headers)
+ntnt test examples/http_server.tnt --get /api/status --verbose</code></pre>
+</div>
 
 <p>Find the complete collection in the <a href="https://github.com/joshcramer/ntnt/tree/main/examples">GitHub repository</a>.</p>

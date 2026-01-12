@@ -1,34 +1,66 @@
 <div class="hero">
+  <div class="hero-pattern"></div>
   <div class="hero-content">
-    <img src="/assets/ntnt-logo.png" alt="NTNT Logo" class="hero-logo" />
+    <div class="hero-logo-container">
+      <img src="/assets/ntnt-logo.png" alt="NTNT Logo" class="hero-logo" />
+    </div>
     <h1>NTNT</h1>
-    <p class="subtitle">A programming language designed for AI-driven development</p>
+    <p class="subtitle">NTNT (/ɪnˈtɛnt/) is an experimental programming language that empowers AI agents to write safe, verifiable code while maintaining deep human oversight.</p>
+
+    <div class="hero-buttons">
+      <a href="#get-started" class="btn btn-primary">Get Started</a>
+      <a href="https://github.com/joshcramer/ntnt" class="btn btn-secondary" target="_blank">View on GitHub</a>
+    </div>
   </div>
 </div>
-
-<p>NTNT (/ɪnˈtɛnt/) is an experimental programming language that empowers AI agents as primary software creators while maintaining deep human oversight. Unlike traditional languages built for human developers, NTNT features first-class contracts, runtime safety, and built-in support for AI collaboration.</p>
 
 <div class="features">
   <div class="feature">
-    <h3>🔒 Design by Contract</h3>
-    <p>Built-in <code>requires</code> and <code>ensures</code> clauses guarantee function correctness at runtime.</p>
+    <div class="feature-icon">
+      <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+    </div>
+    <h3>Design by Contract</h3>
+    <p>Built-in <code>requires</code> and <code>ensures</code> clauses guarantee function correctness at runtime, preventing bugs before they happen.</p>
   </div>
   <div class="feature">
-    <h3>🛡️ Runtime Safety</h3>
-    <p>Struct invariants are automatically enforced, preventing invalid state.</p>
+    <div class="feature-icon">
+      <svg viewBox="0 0 24 24">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+      </svg>
+    </div>
+    <h3>Runtime Safety</h3>
+    <p>Struct invariants are automatically enforced on every mutation, creating a pit of success for valid state management.</p>
   </div>
   <div class="feature">
-    <h3>🌐 HTTP Server</h3>
-    <p>Built-in web server with routing, middleware, and contract-verified endpoints.</p>
+    <div class="feature-icon">
+      <svg viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+    </div>
+    <h3>Web Native</h3>
+    <p>Production-ready web server built-in with routing, middleware, and contract-verified endpoints out of the box.</p>
   </div>
   <div class="feature">
-    <h3>🤖 AI-First</h3>
-    <p>Designed for AI agents to write, test, and deploy code reliably.</p>
+    <div class="feature-icon">
+      <svg viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="10"></circle>
+        <path d="M12 8v4l2 2"></path>
+      </svg>
+    </div>
+    <h3>AI-First Design</h3>
+    <p>Unambiguous syntax and deterministic parsing make NTNT the ideal target language for LLM code generation.</p>
   </div>
 </div>
 
-<h2>Quick Example</h2>
-<pre><code>fn withdraw(account: BankAccount, amount: Int) -> Bool
+<h2>Correct by Construction</h2>
+<p>In NTNT, you don't just write code; you specify behavior. Adding contracts to your functions ensures they always behave as intended.</p>
+
+<div class="code-window">
+  <div class="window-header">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+  </div>
+  <pre><code>fn withdraw(account: BankAccount, amount: Int) -> Bool
     requires amount > 0
     ensures result == true implies account.balance >= 0
 {
@@ -38,11 +70,31 @@
     }
     return false
 }</code></pre>
+</div>
 
-<h2>Get Started</h2>
-<pre><code>git clone https://github.com/joshcramer/ntnt.git
+<h2 id="get-started">Get Started in Seconds</h2>
+<p>Get up and running with a single command. The NTNT compiler is fast, lightweight, and has zero dependencies.</p>
+
+<div class="code-window">
+  <div class="window-header">
+    <div class="dot red"></div>
+    <div class="dot yellow"></div>
+    <div class="dot green"></div>
+  </div>
+  <pre><code># Clone the repository
+git clone https://github.com/joshcramer/ntnt.git
 cd ntnt
+
+# Build and run your first program
 cargo build --release
 ./target/release/ntnt run examples/hello.tnt</code></pre>
+</div>
 
-<a href="/about" class="cta">Learn More →</a>
+<div class="cta-section">
+  <h2>Ready to explore?</h2>
+  <p>Dive into the documentation, check out more examples, or contribute to the project on GitHub.</p>
+  <div class="hero-buttons">
+    <a href="/examples" class="btn btn-primary">Browse Examples</a>
+    <a href="/about" class="btn btn-secondary">Learn More</a>
+  </div>
+</div>

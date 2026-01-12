@@ -1,59 +1,93 @@
-<h1>Live API Data Demo</h1>
-
-<p>This page demonstrates server-side API fetching in NTNT. Each time you refresh, the server fetches a new random cat fact from the <a href="https://meowfacts.herokuapp.com/" target="_blank">Meow Facts API</a> and renders it directly into the HTML.</p>
-
-<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 2rem; border-radius: 12px; margin: 2rem 0; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1)">
-  <h2 style="color: white; margin-top: 0">🐱 Random Cat Fact</h2>
-  <p style="font-size: 1.2rem; line-height: 1.6; margin-bottom: 0"><!--CAT_FACT--></p>
+<div class="hero" style="min-height: 40vh">
+  <div class="hero-pattern"></div>
+  <div class="hero-content" style="padding: 4rem 2rem">
+    <h1>Live Data Demo</h1>
+    <p class="subtitle">Real-time server-side API fetching powered by the NTNT standard library.</p>
+  </div>
 </div>
 
-<div style="background: #f8f9fa; padding: 1.5rem; border-left: 4px solid #4ecdc4; margin: 2rem 0">
-  <h3 style="margin-top: 0">How it works:</h3>
-  <ol>
-    <li><strong>Request arrives</strong> - User visits <code>/fetch</code></li>
-    <li><strong>Server fetches data</strong> - NTNT makes HTTP GET request to external API</li>
-    <li><strong>Parse JSON response</strong> - Extract the cat fact from the response</li>
-    <li><strong>Inject into template</strong> - Replace placeholder with actual data</li>
-    <li><strong>Return HTML</strong> - Send complete page to browser</li>
-  </ol>
-</div>
+<div style="max-width: 800px; margin: 0 auto">
+  <div style="background: linear-gradient(135deg, #6366f1 0%, #a855f7 50%, #ec4899 100%); color: white; padding: 4rem 2rem; border-radius: 24px; margin: 3rem 0; box-shadow: 0 20px 50px rgba(99, 102, 241, 0.3); text-align: center; position: relative; overflow: hidden; border: 1px solid rgba(255, 255, 255, 0.1)">
+    <div style="position: absolute; top: -50px; right: -50px; width: 200px; height: 200px; background: rgba(255, 255, 255, 0.1); border-radius: 50%; blur: 50px"></div>
+    <div style="font-size: 4rem; margin-bottom: 1.5rem; filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.2))">🐱</div>
+    <h2 style="color: white; margin-top: 0; font-size: 2rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 1rem">Daily Cat Insight</h2>
+    <div style="width: 40px; height: 4px; background: rgba(255, 255, 255, 0.4); margin: 0 auto 2rem; border-radius: 2px"></div>
+    <p style="font-size: 1.6rem; line-height: 1.5; margin-bottom: 0; font-weight: 700; color: #ffffff; text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3); font-family: 'Inter', sans-serif"><!--CAT_FACT--></p>
+  </div>
 
-<h2>The Code</h2>
+  <div class="features">
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+      </div>
+      <h3>Real-time Fetch</h3>
+      <p>Data is fetched from an external API during the request cycle.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-icon">
+        <svg viewBox="0 0 24 24">
+          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+          <polyline points="22 4 12 14.01 9 11.01"></polyline>
+        </svg>
+      </div>
+      <h3>Pre-rendered</h3>
+      <p>HTML is returned fully loaded with data, no client-side JS needed.</p>
+    </div>
+  </div>
 
-<h3>Route Handler (website.tnt)</h3>
-<pre><code>import { get } from "std/http"
+  <h2>How it works</h2>
+  <div class="step-list">
+    <div class="step-item">
+      <div class="step-number">1</div>
+      <div class="step-content">
+        <strong>Request arrives</strong>
+        <p>User visits <code>/fetch</code> and the NTNT server routes the request to the high-level handler.</p>
+      </div>
+    </div>
+    <div class="step-item">
+      <div class="step-number">2</div>
+      <div class="step-content">
+        <strong>Server fetches data</strong>
+        <p>NTNT makes an asynchronous HTTP GET request to the Meow Facts external API.</p>
+      </div>
+    </div>
+    <div class="step-item">
+      <div class="step-number">3</div>
+      <div class="step-content">
+        <strong>Parse JSON</strong>
+        <p>The response body is parsed into a first-class NTNT map structure for easy access.</p>
+      </div>
+    </div>
+    <div class="step-item">
+      <div class="step-number">4</div>
+      <div class="step-content">
+        <strong>Inject & Render</strong>
+        <p>The placeholder is replaced with data, and the final HTML is streamed back to the browser.</p>
+      </div>
+    </div>
+  </div>
 
-fn fetch_page(req) {
-    // Fetch data from external API
+  <h2>Implementation</h2>
+  <div class="code-window">
+    <div class="window-header">
+      <div class="dot red"></div>
+      <div class="dot yellow"></div>
+      <div class="dot green"></div>
+    </div>
+    <pre><code>fn fetch_page(req) {
     match get("https://meowfacts.herokuapp.com/") {
         Ok(response) => {
-            // Parse JSON and extract fact
-            match parse(response.body) {
-                Ok(data) => {
-                    let fact = data.data[0]
-                    // Load template and inject data
-                    return load_page_with_data("fetch.html", "Fetch", fact)
-                },
-                Err(e) => return error_page("Failed to parse: " + e)
-            }
+            let data = parse(response.body)
+            let fact = data.data[0]
+            return load_page_with_data("fetch.html", "Fetch", fact)
         },
         Err(e) => return error_page("API error: " + e)
     }
 }</code></pre>
+  </div>
 
-<h3>Benefits of Server-Side Rendering</h3>
-<ul>
-  <li>✅ <strong>No JavaScript required</strong> - Works with any browser</li>
-  <li>✅ <strong>Fast initial load</strong> - Content arrives pre-rendered</li>
-  <li>✅ <strong>SEO friendly</strong> - Search engines see actual content</li>
-  <li>✅ <strong>API keys stay secure</strong> - Never exposed to client</li>
-  <li>✅ <strong>Simple architecture</strong> - One language, one runtime</li>
-</ul>
-
-<p>
-  <a href="/fetch" class="cta" style="margin-right: 1rem">🔄 Refresh for New Fact</a>
-  <a href="/api/cat-fact" class="cta" style="background: #667eea">📡 View Raw JSON</a>
-</p>
-
-<h2>Try It Yourself</h2>
-<p>Refresh this page to see a new cat fact fetched in real-time from the API!</p>
+  <div class="hero-buttons" style="margin: 4rem 0">
+    <a href="/fetch" class="btn btn-primary">Refresh Fact</a>
+    <a href="/api/cat-fact" class="btn btn-dark" target="_blank">Raw JSON API</a>
+  </div>
+</div>
