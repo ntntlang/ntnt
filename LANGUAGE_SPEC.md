@@ -161,25 +161,25 @@ NTNT provides built-in functions available without imports.
 
 ### I/O Functions
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `print` | `(...args) -> Unit` | Print values to stdout |
-| `len` | `(collection) -> Int` | Length of string or array |
+| Function | Signature             | Description               |
+| -------- | --------------------- | ------------------------- |
+| `print`  | `(...args) -> Unit`   | Print values to stdout    |
+| `len`    | `(collection) -> Int` | Length of string or array |
 
 ### Math Functions
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `abs` | `(x: Number) -> Number` | Absolute value |
-| `min` | `(a: Number, b: Number) -> Number` | Minimum of two values |
-| `max` | `(a: Number, b: Number) -> Number` | Maximum of two values |
-| `round` | `(x: Float) -> Int` | Round to nearest integer |
-| `floor` | `(x: Float) -> Int` | Round down to integer |
-| `ceil` | `(x: Float) -> Int` | Round up to integer |
-| `sqrt` | `(x: Number) -> Float` | Square root |
-| `pow` | `(base: Number, exp: Number) -> Number` | Exponentiation |
-| `sign` | `(x: Number) -> Int` | Sign (-1, 0, or 1) |
-| `clamp` | `(x: Number, min: Number, max: Number) -> Number` | Clamp to range |
+| Function | Signature                                         | Description              |
+| -------- | ------------------------------------------------- | ------------------------ |
+| `abs`    | `(x: Number) -> Number`                           | Absolute value           |
+| `min`    | `(a: Number, b: Number) -> Number`                | Minimum of two values    |
+| `max`    | `(a: Number, b: Number) -> Number`                | Maximum of two values    |
+| `round`  | `(x: Float) -> Int`                               | Round to nearest integer |
+| `floor`  | `(x: Float) -> Int`                               | Round down to integer    |
+| `ceil`   | `(x: Float) -> Int`                               | Round up to integer      |
+| `sqrt`   | `(x: Number) -> Float`                            | Square root              |
+| `pow`    | `(base: Number, exp: Number) -> Number`           | Exponentiation           |
+| `sign`   | `(x: Number) -> Int`                              | Sign (-1, 0, or 1)       |
+| `clamp`  | `(x: Number, min: Number, max: Number) -> Number` | Clamp to range           |
 
 ### Examples
 

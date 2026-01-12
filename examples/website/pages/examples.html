@@ -1,0 +1,46 @@
+<h1>Examples</h1>
+
+<p>Explore these examples to learn NTNT:</p>
+
+<h2>Hello World</h2>
+<pre><code>// hello.tnt
+let greeting = "Hello, World!"
+print(greeting)
+
+fn greet(name) {
+    return "Hello, " + name + "!"
+}
+
+print(greet("NTNT"))</code></pre>
+
+<h2>Pattern Matching</h2>
+<pre><code>fn describe(opt) {
+    match opt {
+        Some(v) => print("Got: " + v),
+        None => print("Nothing")
+    }
+}
+
+let result = Some(42)
+describe(result)  // "Got: 42"</code></pre>
+
+<h2>HTTP API</h2>
+<pre><code>import { json, text } from "std/http/server"
+
+fn get_status(req) {
+    return json(map {
+        "status": "ok",
+        "version": "0.1.6"
+    })
+}
+
+fn get_user(req) {
+    let id = req.params.id
+    return json(map { "id": id })
+}
+
+get("/status", get_status)
+get("/users/{id}", get_user)
+listen(3000)</code></pre>
+
+<p>Find more examples in the <a href="https://github.com/joshcramer/ntnt/tree/main/examples">GitHub repository</a>.</p>

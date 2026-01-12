@@ -1,0 +1,54 @@
+<h1>About NTNT</h1>
+
+<p>NTNT (/ɪnˈtɛnt/) reimagines software development for an era where AI agents handle the heavy lifting of coding, testing, and deployment.</p>
+
+<h2>Why NTNT?</h2>
+<p>Traditional programming languages were designed for human developers. They include complexities that matter to humans but create friction when AI agents write code. NTNT bridges this gap with:</p>
+
+<ul>
+  <li><strong>Unambiguous syntax</strong> - Deterministic parsing for reliable AI code generation</li>
+  <li><strong>Formal contracts</strong> - Explicit preconditions and postconditions as first-class features</li>
+  <li><strong>Structured edits</strong> - AST-based code manipulation for safe refactoring</li>
+  <li><strong>Human oversight</strong> - Built-in approval gates for critical decisions</li>
+</ul>
+
+<h2>Core Features</h2>
+
+<h3>Contracts</h3>
+<p>Every function can specify what it requires and what it ensures:</p>
+<pre><code>fn divide(a: Int, b: Int) -> Int
+    requires b != 0  // Precondition
+    ensures result * b == a  // Postcondition
+{
+    return a / b
+}</code></pre>
+
+<h3>Struct Invariants</h3>
+<p>Structs can declare invariants that are checked automatically:</p>
+<pre><code>struct BankAccount {
+    balance: Int,
+    owner: String
+}
+
+impl BankAccount {
+    invariant self.balance >= 0
+}</code></pre>
+
+<h3>HTTP Server</h3>
+<p>Build web APIs with contract-verified endpoints:</p>
+<pre><code>fn create_user(req)
+    requires req.body != ""  // Returns 400 if violated
+{
+    return json(map { "created": true })
+}
+
+get("/users", list_users)
+post("/users", create_user)
+listen(3000)</code></pre>
+
+<h2>Current Status</h2>
+<p>NTNT is actively developed with 209+ tests passing. Current version: <strong>0.1.6</strong></p>
+
+<p>
+  <a href="https://github.com/joshcramer/ntnt" class="cta">View on GitHub</a>
+</p>

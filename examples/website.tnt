@@ -1,0 +1,130 @@
+// NTNT Language Website
+// 
+// A simple website with file-based pages for hot-reload capability.
+// Edit the HTML files in website/pages/ and refresh to see changes!
+//
+// Structure:
+//   website.tnt              - Router + middleware (this file)
+//   website/layout.html      - Shared HTML layout template
+//   website/pages/home.html  - Homepage content
+//   website/pages/about.html - About page content
+//   website/pages/examples.html - Examples page content
+//
+// Run with: ntnt run examples/website.tnt
+
+import { html, text, json, not_found } from "std/http/server"
+import { read_file, exists } from "std/fs"
+import { replace } from "std/string"
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+// Paths relative to where ntnt is run from (project root)
+let PAGES_DIR = "examples/website/pages"
+let LAYOUT_FILE = "examples/website/layout.html"
+
+// ============================================================================
+// Template Engine
+// ============================================================================
+
+// Load the layout template and inject title + content
+fn render_page(title, content) {
+    match read_file(LAYOUT_FILE) {
+        Ok(layout) => {
+            let result = replace(layout, "<!--TITLE-->", title)
+            let result = replace(result, "<!--CONTENT-->", content)
+            return result
+        },
+        Err(e) => {
+            print("Error loading layout: " + e)
+            return "<html><body><h1>Error</h1><p>Could not load layout template.</p></body></html>"
+        }
+    }
+}
+
+// Load a page file and render it with the layout
+fn load_page(filename, title) {
+    let filepath = PAGES_DIR + "/" + filename
+    
+    match read_file(filepath) {
+        Ok(content) => {
+            return html(render_page(title, content))
+        },
+        Err(e) => {
+            print("Error loading page " + filename + ": " + e)
+            return html(render_page("Error", "<h1>Page Not Found</h1><p>Could not load: " + filename + "</p>"))
+        }
+    }
+}
+
+// ============================================================================
+// Request Logging Middleware
+// ============================================================================
+
+fn logger(req) {
+    print("[" + req.method + "] " + req.path)
+    return ()  // Continue to next handler
+}
+
+use_middleware(logger)
+
+// ============================================================================
+// Page Routes
+// ============================================================================
+
+fn home_page(req) {
+    return load_page("home.html", "Home")
+}
+
+fn about_page(req) {
+    return load_page("about.html", "About")
+}
+
+fn examples_page(req) {
+    return load_page("examples.html", "Examples")
+}
+
+// ============================================================================
+// API Routes (for demonstration)
+// ============================================================================
+
+fn api_status(req) {
+    return json(map {
+        "status": "ok",
+        "version": "0.1.6",
+        "pages_dir": PAGES_DIR
+    })
+}
+
+// ============================================================================
+// Routes
+// ============================================================================
+
+get("/", home_page)
+get("/about", about_page)
+get("/examples", examples_page)
+get("/api/status", api_status)
+
+// ============================================================================
+// Start Server
+// ============================================================================
+
+print("=== NTNT Language Website ===")
+print("")
+print("Pages directory: " + PAGES_DIR)
+print("")
+print("Edit these files and refresh to see changes:")
+print("  website/pages/home.html")
+print("  website/pages/about.html")
+print("  website/pages/examples.html")
+print("  website/layout.html")
+print("")
+print("Routes:")
+print("  GET /         -> home.html")
+print("  GET /about    -> about.html")
+print("  GET /examples -> examples.html")
+print("  GET /api/status")
+print("")
+
+listen(3000)

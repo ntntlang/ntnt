@@ -1,0 +1,46 @@
+<div class="hero">
+  <h1>NTNT</h1>
+  <p class="tagline">Pronounced "Intent"</p>
+  <p class="subtitle">A programming language designed for AI-driven development</p>
+</div>
+
+<p>NTNT is a revolutionary programming language that empowers AI agents as primary software creators while maintaining deep human oversight. Unlike traditional languages built for human developers, NTNT features first-class contracts, runtime safety, and built-in support for AI collaboration.</p>
+
+<div class="features">
+  <div class="feature">
+    <h3>🔒 Design by Contract</h3>
+    <p>Built-in <code>requires</code> and <code>ensures</code> clauses guarantee function correctness at runtime.</p>
+  </div>
+  <div class="feature">
+    <h3>🛡️ Runtime Safety</h3>
+    <p>Struct invariants are automatically enforced, preventing invalid state.</p>
+  </div>
+  <div class="feature">
+    <h3>🌐 HTTP Server</h3>
+    <p>Built-in web server with routing, middleware, and contract-verified endpoints.</p>
+  </div>
+  <div class="feature">
+    <h3>🤖 AI-First</h3>
+    <p>Designed for AI agents to write, test, and deploy code reliably.</p>
+  </div>
+</div>
+
+<h2>Quick Example</h2>
+<pre><code>fn withdraw(account: BankAccount, amount: Int) -> Bool
+    requires amount > 0
+    ensures result == true implies account.balance >= 0
+{
+    if account.balance >= amount {
+        account.balance = account.balance - amount
+        return true
+    }
+    return false
+}</code></pre>
+
+<h2>Get Started</h2>
+<pre><code>git clone https://github.com/joshcramer/ntnt.git
+cd ntnt
+cargo build --release
+./target/release/ntnt run examples/hello.tnt</code></pre>
+
+<a href="/about" class="cta">Learn More →</a>
