@@ -1,8 +1,8 @@
-# Intent Language Specification
+# NTNT Language Specification
 
 ## Version 0.1 (Draft)
 
-This document specifies the syntax, semantics, and core features of the Intent programming language.
+This document specifies the syntax, semantics, and core features of the NTNT programming language.
 
 ## Table of Contents
 
@@ -60,21 +60,21 @@ type, struct, enum, impl, use, mod, pub
 
 ### Type Annotations
 
-```intent
+```ntnt
 let x: Int = 42;
-let name: String = "Intent";
+let name: String = "NTNT";
 ```
 
 ## Contracts
 
-Contracts specify behavioral requirements for code. Intent enforces contracts at runtime with detailed error messages.
+Contracts specify behavioral requirements for code. NTNT enforces contracts at runtime with detailed error messages.
 
 ### Function Contracts
 
 The `requires` clause specifies preconditions that must be true when a function is called.
 The `ensures` clause specifies postconditions that must be true when a function returns.
 
-```intent
+```ntnt
 fn transfer_funds(amount: Int, from: Account, to: Account) -> Result<(), Error>
 requires amount > 0 && from.balance >= amount
 ensures to.balance == old(to.balance) + amount
@@ -87,7 +87,7 @@ ensures to.balance == old(to.balance) + amount
 
 The `old()` function captures the value of an expression at function entry, allowing postconditions to compare pre-state and post-state:
 
-```intent
+```ntnt
 fn increment(counter: Counter)
 ensures counter.value == old(counter.value) + 1
 {
@@ -99,7 +99,7 @@ ensures counter.value == old(counter.value) + 1
 
 In postconditions, `result` refers to the return value of the function:
 
-```intent
+```ntnt
 fn double(x: Int) -> Int
 ensures result == x * 2
 {
@@ -111,7 +111,7 @@ ensures result == x * 2
 
 Use `implies` for conditional guarantees:
 
-```intent
+```ntnt
 fn safe_divide(a: Int, b: Int) -> Int
 requires b != 0
 ensures b > 0 implies result >= 0
@@ -124,7 +124,7 @@ ensures b > 0 implies result >= 0
 
 Invariants are automatically checked after construction and after any method call or field assignment:
 
-```intent
+```ntnt
 struct Account {
     balance: Int,
     owner: String
@@ -139,7 +139,7 @@ impl Account {
 
 ### Function Definition
 
-```intent
+```ntnt
 fn add(x: Int, y: Int) -> Int {
     return x + y;
 }
@@ -147,7 +147,7 @@ fn add(x: Int, y: Int) -> Int {
 
 ### Methods
 
-```intent
+```ntnt
 impl Point {
     fn distance(&self, other: &Point) -> Float {
         // implementation
@@ -157,7 +157,7 @@ impl Point {
 
 ## Built-in Functions
 
-Intent provides built-in functions available without imports.
+NTNT provides built-in functions available without imports.
 
 ### I/O Functions
 
@@ -183,7 +183,7 @@ Intent provides built-in functions available without imports.
 
 ### Examples
 
-```intent
+```ntnt
 // Math operations
 let x = abs(-42)           // 42
 let smaller = min(10, 20)  // 10
@@ -200,13 +200,13 @@ Effects track side effects and error conditions.
 
 ### Effect Types
 
-```intent
+```ntnt
 fn read_file(path: String) -> Result<String, IOError> / {IO, Error}
 ```
 
 ### Effect Handlers
 
-```intent
+```ntnt
 try {
     let content = read_file("data.txt")?;
     process(content);
@@ -219,7 +219,7 @@ try {
 
 ### Protocols
 
-```intent
+```ntnt
 protocol Handshake {
     send Hello(String) -> receive HelloAck(String) -> end
 }
@@ -227,7 +227,7 @@ protocol Handshake {
 
 ### Async Operations
 
-```intent
+```ntnt
 async fn fetch_data(url: String) -> Result<Data, NetworkError> {
     // implementation
 }
@@ -237,7 +237,7 @@ async fn fetch_data(url: String) -> Result<Data, NetworkError> {
 
 ### Module Declaration
 
-```intent
+```ntnt
 mod math {
     pub fn add(a: Int, b: Int) -> Int {
         a + b
@@ -247,7 +247,7 @@ mod math {
 
 ### Imports
 
-```intent
+```ntnt
 use math::add;
 use std::collections::HashMap;
 ```
@@ -256,7 +256,7 @@ use std::collections::HashMap;
 
 Code modifications are represented as typed operations:
 
-```intent
+```ntnt
 edit AddParameter {
     target: "fn process_data",
     param: "config: Config"
@@ -265,7 +265,7 @@ edit AddParameter {
 
 ## Intent Annotations
 
-```intent
+```ntnt
 /// intent: "Implements Dijkstra's shortest path algorithm for routing"
 fn shortest_path(graph: Graph, start: Node) -> Map<Node, Distance> {
     // implementation
@@ -276,7 +276,7 @@ fn shortest_path(graph: Graph, start: Node) -> Map<Node, Distance> {
 
 Built-in logging of AI decisions:
 
-```intent
+```ntnt
 #[observe]
 fn optimize_query(query: Query) -> OptimizedQuery {
     // AI reasoning logged automatically
@@ -285,7 +285,7 @@ fn optimize_query(query: Query) -> OptimizedQuery {
 
 ## Human Approval
 
-```intent
+```ntnt
 #[requires_approval("UI changes")]
 fn update_ui(component: Component) {
     // implementation

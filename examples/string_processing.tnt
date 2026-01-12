@@ -37,10 +37,10 @@ if contains(email, "@") {
 print("")
 print("=== Case Conversion ===")
 
-let name = "intent"
+let name = "ntnt"
 print("Original: " + name)
 print("Uppercase: " + to_upper(name))
-print("Lowercase: " + to_lower("INTENT"))
+print("Lowercase: " + to_lower("NTNT"))
 
 // === String Parsing ===
 print("")
@@ -57,7 +57,7 @@ print("Job: " + fields[2])
 print("")
 print("=== String Building ===")
 
-let words = ["Intent", "is", "awesome"]
+let words = ["NTNT", "is", "awesome"]
 let sentence = join(words, " ")
 print("Joined: " + sentence)
 
@@ -72,14 +72,14 @@ print("=== Search and Replace ===")
 
 let template = "Hello, NAME! Welcome to PLACE."
 let result = replace(template, "NAME", "Alice")
-let final_msg = replace(result, "PLACE", "Intent")
+let final_msg = replace(result, "PLACE", "NTNT")
 print(final_msg)
 
 // === Character Access ===
 print("")
 print("=== Character Access ===")
 
-let word = "Intent"
+let word = "NTNT"
 print("Word: " + word)
 print("First character: " + char_at(word, 0))
 print("Last character: " + char_at(word, 5))

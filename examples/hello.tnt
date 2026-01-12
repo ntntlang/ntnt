@@ -1,5 +1,5 @@
-// Hello World in Intent
-// This demonstrates basic Intent language features
+// Hello World in NTNT
+// This demonstrates basic NTNT language features
 
 // Variable declaration
 let greeting = "Hello, World!";
@@ -11,7 +11,7 @@ fn greet(name) {
 }
 
 // Function call
-let message = greet("Intent");
+let message = greet("NTNT");
 print(message);
 
 // Arithmetic

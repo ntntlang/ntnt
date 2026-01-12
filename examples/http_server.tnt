@@ -1,7 +1,7 @@
-// HTTP Server Example for Intent
+// HTTP Server Example for NTNT
 // Demonstrates building a simple REST API with routing and JSON responses
 //
-// Run with: intent run examples/http_server.intent
+// Run with: ntnt run examples/http_server.tnt
 // Then visit: http://localhost:8080/
 //
 // Note: Route patterns use {param} syntax which conflicts with string interpolation.
@@ -14,7 +14,7 @@ import { text, html, json, status, redirect, not_found, error } from "std/http/s
 // ============================================
 fn home(req) {
     print("Request: GET /")
-    return text("Welcome to the Intent HTTP Server!")
+    return text("Welcome to the NTNT HTTP Server!")
 }
 
 // ============================================
@@ -22,7 +22,7 @@ fn home(req) {
 // ============================================
 fn about(req) {
     print("Request: GET /about")
-    return html("<h1>About Intent</h1><p>A language with contracts and effects.</p>")
+    return html("<h1>About NTNT</h1><p>A language with contracts and effects.</p>")
 }
 
 // ============================================
@@ -143,7 +143,7 @@ fn custom_redirect(req) {
 // ============================================
 // Register routes
 // ============================================
-print("=== Intent HTTP Server Example ===")
+print("=== NTNT HTTP Server Example ===")
 print("")
 
 // Basic routes (no parameters - regular strings work fine)

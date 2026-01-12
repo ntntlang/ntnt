@@ -1,7 +1,7 @@
 // HTTP Server Example with Static Files and Middleware
 // Demonstrates the full HTTP server capabilities
 //
-// Run with: intent run examples/http_server_advanced.intent
+// Run with: ntnt run examples/http_server_advanced.tnt
 // Then visit: http://localhost:8080/
 //
 // Static files are served from: examples/static/
@@ -65,7 +65,7 @@ fn create_user(req) {
 // ============================================
 // Setup Server
 // ============================================
-print("=== Intent HTTP Server (Advanced) ===")
+print("=== NTNT HTTP Server (Advanced) ===")
 print("")
 
 // Register middleware (runs in order for each request)

@@ -54,7 +54,7 @@ print("")
 // ========== POST JSON ==========
 print("--- POST JSON ---")
 let payload = map {
-    "name": "Intent Language",
+    "name": "NTNT Language",
     "version": "0.1.6",
     "features": ["contracts", "traits", "http"]
 }
@@ -80,7 +80,7 @@ let opts = map {
     "url": "https://httpbin.org/headers",
     "method": "GET",
     "headers": map {
-        "X-Custom-Header": "Intent-Lang",
+        "X-Custom-Header": "NTNT-Lang",
         "Accept": "application/json"
     }
 }
@@ -101,7 +101,7 @@ print("")
 
 // ========== POST with form data ==========
 print("--- POST Request ---")
-match post("https://httpbin.org/post", "key=value&name=intent") {
+match post("https://httpbin.org/post", "key=value&name=ntnt") {
     Ok(response) => {
         print("POST successful, status: ")
         print(response.status)

@@ -663,27 +663,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "intent"
-version = "0.1.6"
-dependencies = [
- "anyhow",
- "clap",
- "colored",
- "hex",
- "hmac",
- "pretty_assertions",
- "rand",
- "reqwest",
- "rustyline",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tiny_http",
- "uuid",
-]
-
-[[package]]
 name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -799,6 +778,27 @@ dependencies = [
  "bitflags 2.10.0",
  "cfg-if",
  "libc",
+]
+
+[[package]]
+name = "ntnt"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+ "clap",
+ "colored",
+ "hex",
+ "hmac",
+ "pretty_assertions",
+ "rand",
+ "reqwest",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tiny_http",
+ "uuid",
 ]
 
 [[package]]

@@ -105,8 +105,8 @@ print("Is /tmp a directory? ")
 print(is_dir("/tmp"))
 
 // Create a test file
-let test_path = "/tmp/intent_demo_file.txt"
-let content = "Hello from Intent!\nThis is a test file."
+let test_path = "/tmp/ntnt_demo_file.txt"
+let content = "Hello from NTNT!\nThis is a test file."
 
 let write_result = write_file(test_path, content)
 match write_result {
@@ -149,7 +149,7 @@ match read_file(test_path) {
 }
 
 // Create a directory
-let test_dir = "/tmp/intent_demo_dir"
+let test_dir = "/tmp/ntnt_demo_dir"
 mkdir(test_dir)
 print("Created directory: ")
 print(test_dir)
@@ -242,8 +242,8 @@ print("=== Crypto Module ===")
 import { sha256, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode } from "std/crypto"
 
 // SHA-256 hashing
-let hash = sha256("Hello, Intent!")
-print("SHA-256 of 'Hello, Intent!': ")
+let hash = sha256("Hello, NTNT!")
+print("SHA-256 of 'Hello, NTNT!': ")
 print(hash)
 
 // Hash of known value for verification
@@ -275,9 +275,9 @@ print("16 random bytes as hex: ")
 print(random_h)
 
 // Hex encode/decode roundtrip
-let original_text = "Intent Lang"
+let original_text = "NTNT Lang"
 let encoded = hex_encode(original_text)
-print("Hex encoded 'Intent Lang': ")
+print("Hex encoded 'NTNT Lang': ")
 print(encoded)
 
 match hex_decode(encoded) {
@@ -334,7 +334,7 @@ match decode(encoded_url) {
 }
 
 // Build query string from map
-let query_params = map { "search": "intent lang", "page": "1", "limit": "10" }
+let query_params = map { "search": "ntnt lang", "page": "1", "limit": "10" }
 let query_string = build_query(query_params)
 print("Built query string: ")
 print(query_string)

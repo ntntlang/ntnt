@@ -1,13 +1,22 @@
 # Change Log
 
-All notable changes to the Intent Language extension will be documented in this file.
+All notable changes to the NTNT Language extension will be documented in this file.
+
+## [0.1.1] - 2025-01-07
+
+### Changed
+
+- Renamed from "Intent Language" to "NTNT Language"
+- Single file extension: `.tnt` (replacing `.intent` and `.itn`)
+- Updated language ID from `intent` to `ntnt`
+- Updated repository URL to github.com/joshcramer/ntnt
 
 ## [0.1.0] - 2026-01-05
 
 ### Added
 
 - Initial release
-- Syntax highlighting for `.intent` and `.itn` files
+- Syntax highlighting for `.tnt` files
 - Language configuration (comments, brackets, folding)
 - Code snippets for common patterns:
   - Functions with and without contracts

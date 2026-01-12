@@ -1,5 +1,5 @@
 // Module System Examples
-// Demonstrates the import/export functionality in Intent
+// Demonstrates the import/export functionality in NTNT
 
 // Import specific functions from std/string
 import { split, join, trim, to_upper } from "std/string"
@@ -16,7 +16,7 @@ import { cwd } from "std/env"
 // --- String Module Demo ---
 print("=== String Module ===")
 
-let text = "  hello, world, intent  "
+let text = "  hello, world, ntnt  "
 let trimmed = trim(text)
 print("Original: '" + text + "'")
 print("Trimmed: '" + trimmed + "'")

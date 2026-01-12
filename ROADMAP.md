@@ -1,12 +1,12 @@
-# Intent Language Implementation Roadmap
+# NTNT Language Implementation Roadmap
 
-This document outlines the implementation plan for Intent, a programming language designed for AI-driven development. The roadmap prioritizes getting to a working web application quickly while focusing on Intent's unique differentiators: contracts, AI integration, and intent encoding.
+This document outlines the implementation plan for NTNT, a programming language designed for AI-driven development. The roadmap prioritizes getting to a working web application quickly while focusing on NTNT's unique differentiators: contracts, AI integration, and intent encoding.
 
 ---
 
 ## Design Principles
 
-1. **Self-Contained**: Intent has no runtime dependencies on other languages. The interpreter/compiler is written in Rust, but Intent programs are pure Intent.
+1. **Self-Contained**: NTNT has no runtime dependencies on other languages. The interpreter/compiler is written in Rust, but NTNT programs are pure Intent.
 
 2. **AI-First**: Features that enable AI development (contracts, intent annotations, structured edits) are core, not afterthoughts.
 
@@ -31,7 +31,7 @@ This document outlines the implementation plan for Intent, a programming languag
 - [x] CLI with REPL, run, parse, lex, check commands
 - [x] VS Code extension with syntax highlighting
 - [x] 140 unit tests passing
-- [x] Dual file extensions: `.intent` and `.itn`
+- [x] File extension: `.tnt`
 - [x] Algebraic Data Types with enums
 - [x] Option<T> and Result<T, E> built-ins
 - [x] Pattern matching with match expressions
@@ -135,7 +135,7 @@ This document outlines the implementation plan for Intent, a programming languag
 - [x] Required methods
 - [x] Default method implementations
 
-```intent
+```ntnt
 trait Serializable {
     fn to_json(self) -> String
     fn from_json(json: String) -> Self
@@ -166,7 +166,7 @@ trait Comparable {
 - [x] Range syntax: `0..10`, `0..=10`
 - [x] For-in loops: `for item in items { }`
 
-```intent
+```ntnt
 fn process_file(path: String) -> Result<Data, Error> {
     let file = open(path)?
     defer file.close()  // Always runs, even on error
@@ -197,7 +197,7 @@ fn process_file(path: String) -> Result<Data, Error> {
 - [ ] Async function contracts
 - [ ] Task executor
 
-```intent
+```ntnt
 async fn fetch_user(id: String) -> Result<User, HttpError>
     requires id.len() > 0
 {
@@ -226,7 +226,7 @@ let (user, posts) = await all(
 - [x] Static file serving with MIME type detection
 - [x] Contract-verified endpoints (preconditions return 400, postconditions return 500)
 
-```intent
+```ntnt
 import { text, html, json, status, redirect } from "std/http/server"
 
 fn home(req) {
@@ -263,7 +263,7 @@ listen(8080)  // Start server
 - [ ] Transaction support with contracts
 - [ ] PostgreSQL driver (built-in)
 
-```intent
+```ntnt
 import { Database } from "std/db/postgres"
 
 fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), DbError>
@@ -308,7 +308,7 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [ ] `assert`, `assert_eq`, `assert_ne` macros
 - [ ] `#[should_panic]` for expected failures
 
-```intent
+```ntnt
 #[test]
 fn test_user_creation() {
     let user = User.new("Alice", "alice@example.com")
@@ -344,7 +344,7 @@ fn test_invalid_email() {
 - [ ] Intent coverage reports
 - [ ] AI verification of intent-implementation alignment
 
-```intent
+```ntnt
 intent "Calculate shipping cost based on weight and destination" {
     fn calculate_shipping(weight: Float, dest: String) -> Float
         requires weight > 0
@@ -389,18 +389,18 @@ intent "Users must have valid email addresses" {
 
 ### 7.2 Package Manager
 
-- [ ] `intent.toml` project configuration
+- [ ] `ntnt.toml` project configuration
 - [ ] Package registry
 - [ ] Dependency resolution with lock files
 - [ ] Semantic versioning enforcement
-- [ ] `intent new`, `intent add`, `intent publish`
+- [ ] `ntnt new`, `ntnt add`, `ntnt publish`
 
 ```bash
-intent new my-app
-intent add http
-intent add db/postgres --version "^1.0"
-intent test
-intent build --release
+ntnt new my-app
+ntnt add http
+ntnt add db/postgres --version "^1.0"
+ntnt test
+ntnt build --release
 ```
 
 ### 7.3 Documentation Generator
@@ -409,7 +409,7 @@ intent build --release
 - [ ] Automatic API documentation
 - [ ] Contract documentation
 - [ ] Example extraction and testing
-- [ ] Intent documentation
+- [ ] NTNT documentation
 
 ### 7.4 Human Approval Mechanisms (From Whitepaper)
 
@@ -418,7 +418,7 @@ intent build --release
 - [ ] Audit trails for approved changes
 - [ ] Configurable approval policies
 
-```intent
+```ntnt
 @requires_approval("security")
 fn delete_all_users(db: Database) -> Result<Int, DbError> {
     db.execute("DELETE FROM users")
@@ -455,7 +455,7 @@ pub fn get_user(id: String) -> User {
 
 ### 8.1 Bytecode Compiler
 
-- [ ] Intent bytecode format (IBC)
+- [ ] NTNT bytecode format (NBC)
 - [ ] Bytecode interpreter (10-50x faster than tree-walking)
 - [ ] Bytecode serialization/loading
 - [ ] Debug info preservation
@@ -502,7 +502,7 @@ pub fn get_user(id: String) -> User {
 
 ## Phase 9: AI Integration & Structured Edits
 
-**Goal:** First-class AI development support—Intent's key differentiator.
+**Goal:** First-class AI development support—NTNT's key differentiator.
 
 ### 9.1 Structured Edits (From Whitepaper)
 
@@ -511,7 +511,7 @@ pub fn get_user(id: String) -> User {
 - [ ] Edit operations: AddFunction, ModifyContract, RenameSymbol, etc.
 - [ ] Machine-readable edit format for AI agents
 
-```intent
+```ntnt
 // Instead of text diffs, edits are structured:
 Edit {
     type: "ModifyContract",
@@ -535,7 +535,7 @@ Edit {
 - [ ] Semver suggestions based on changes
 - [ ] `@since` and `@deprecated` annotations
 
-```intent
+```ntnt
 @since("1.2.0")
 @deprecated("2.0.0", "Use get_user_by_id instead")
 fn get_user(id: String) -> User { }
@@ -583,7 +583,7 @@ fn get_user(id: String) -> User { }
 - [ ] Health check endpoints
 - [ ] Contract violation reporting
 
-```intent
+```ntnt
 import { Logger, Metrics } from "std/observe"
 
 let log = Logger.new("api")
@@ -705,8 +705,8 @@ These features are valuable but not essential for the initial release:
 
 ## Example: Complete Web Application
 
-```intent
-// main.intent - A complete Intent web application
+```ntnt
+// main.tnt - A complete NTNT web application
 
 import { Server, Request, Response } from "std/http"
 import { Database } from "std/db/postgres"

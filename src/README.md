@@ -1,6 +1,6 @@
-# Intent Language Source Code
+# NTNT Language Source Code
 
-This directory contains the implementation of the Intent programming language.
+This directory contains the implementation of the NTNT programming language.
 
 ## Structure
 

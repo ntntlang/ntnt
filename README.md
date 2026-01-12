@@ -1,6 +1,6 @@
-# Intent Programming Language
+# NTNT Programming Language
 
-Intent is a revolutionary programming language and ecosystem designed specifically for AI-driven development. Unlike traditional languages built for human developers, Intent empowers AI agents as primary software creators while maintaining deep human oversight and collaboration.
+NTNT (pronounced "Intent") is a revolutionary programming language and ecosystem designed specifically for AI-driven development. Unlike traditional languages built for human developers, NTNT empowers AI agents as primary software creators while maintaining deep human oversight and collaboration.
 
 **Goal: Build production-ready web applications and APIs with AI-powered development and runtime safety guarantees.**
 
@@ -61,27 +61,26 @@ See [ROADMAP.md](ROADMAP.md) for the full 10-phase implementation plan.
 
 ```bash
 # Clone and build
-git clone https://github.com/joshcramer/intent.git
-cd intent
+git clone https://github.com/joshcramer/ntnt.git
+cd ntnt
 cargo build --release
 
 # Run a program
-./target/release/intent examples/contracts_full.intent
+./target/release/ntnt examples/contracts_full.tnt
 
 # Start the REPL
-./target/release/intent repl
+./target/release/ntnt repl
 ```
 
-## File Extensions
+## File Extension
 
-Intent supports two file extensions:
+NTNT uses a single file extension:
 
-- `.intent` - Standard Intent source files
-- `.itn` - Short form (convenient for quick scripts)
+- `.tnt` - NTNT source files
 
 ## Overview
 
-Intent reimagines software development for an era where AI agents handle the heavy lifting of coding, testing, and deployment. The language features:
+NTNT reimagines software development for an era where AI agents handle the heavy lifting of coding, testing, and deployment. The language features:
 
 - **First-Class Contracts**: Design-by-contract principles built into the syntax for guaranteed correctness
 - **Runtime Safety**: Struct invariants and pre/post conditions enforced at runtime
@@ -94,7 +93,7 @@ Intent reimagines software development for an era where AI agents handle the hea
 
 ### Production Roadmap
 
-Intent is being developed toward production web application capabilities:
+NTNT is being developed toward production web application capabilities:
 
 - **Phase 5**: HTTP server with contract-verified endpoints ✅
 - **Phase 5**: Database access with repository patterns (in progress)
@@ -105,7 +104,7 @@ Performance targets: <1ms contract overhead, >10k requests/sec
 
 ## Example
 
-```intent
+```ntnt
 struct BankAccount {
     balance: Int,
     owner: String
@@ -130,9 +129,9 @@ fn withdraw(account: BankAccount, amount: Int) -> Bool
 
 ## Option & Result Types
 
-Intent provides built-in `Option<T>` and `Result<T, E>` types for safe handling of nullable values and errors:
+NTNT provides built-in `Option<T>` and `Result<T, E>` types for safe handling of nullable values and errors:
 
-```intent
+```ntnt
 // Option type for nullable values
 let maybe_value = Some(42);
 let nothing = None;
@@ -158,7 +157,7 @@ if is_ok(success) {
 
 Use `match` expressions for powerful pattern matching:
 
-```intent
+```ntnt
 fn describe_option(opt) {
     match opt {
         Some(v) => print("Got value: " + v),
@@ -193,7 +192,7 @@ fn area(shape) {
 
 Define custom enumerated types with optional associated data:
 
-```intent
+```ntnt
 // Simple enum
 enum Status {
     Pending,
@@ -217,7 +216,7 @@ let msg = Message::Text("hello");
 
 Generic functions and types enable reusable code:
 
-```intent
+```ntnt
 // Generic function
 fn identity<T>(x: T) -> T {
     return x;
@@ -240,7 +239,7 @@ type StringMap<V> = Map<String, V>;
 
 Traits define shared behavior that types can implement:
 
-```intent
+```ntnt
 // Define a trait
 trait Display {
     fn display(self) -> String;
@@ -272,7 +271,7 @@ impl Display for Point {
 
 Iterate over collections with `for...in`:
 
-```intent
+```ntnt
 // Iterate over arrays
 let numbers = [1, 2, 3, 4, 5];
 for n in numbers {
@@ -304,7 +303,7 @@ for name in scores {
 
 The `defer` statement schedules code to run when the current scope exits:
 
-```intent
+```ntnt
 fn process_file(path: String) {
     let file = open(path);
     defer close(file);  // Always runs, even on error
@@ -328,7 +327,7 @@ fn example() {
 
 Range expressions create iterable sequences:
 
-```intent
+```ntnt
 // Exclusive range (end not included)
 let r1 = 0..10;    // 0, 1, 2, ..., 9
 
@@ -345,7 +344,7 @@ for i in 1..=5 {
 
 Key-value collections with the `map` keyword:
 
-```intent
+```ntnt
 // Create a map
 let scores = map {
     "alice": 100,
@@ -363,7 +362,7 @@ for name in scores {
 
 Embed expressions directly in strings using `{}`:
 
-```intent
+```ntnt
 let name = "Alice";
 let age = 30;
 
@@ -385,7 +384,7 @@ print("Use \{braces\} literally");  // Use {braces} literally
 
 Raw strings don't process escape sequences, perfect for regex, SQL, and paths:
 
-```intent
+```ntnt
 // Simple raw string
 let path = r"C:\Users\name\file.txt";  // Backslashes preserved
 
@@ -411,7 +410,7 @@ let query = r#"
 
 Constrain generic type parameters to types implementing specific traits:
 
-```intent
+```ntnt
 // Single trait bound
 fn sort<T: Comparable>(arr: [T]) -> [T] {
     // T must implement Comparable
@@ -435,7 +434,7 @@ sort([3, 1, 4, 1, 5]);  // Int implements Comparable
 
 Union types allow a value to be one of several types:
 
-```intent
+```ntnt
 // Function accepting multiple types
 fn stringify(value: String | Int | Bool) -> String {
     return value;  // Will be converted to string
@@ -455,7 +454,7 @@ fn process(input: String | [String]) {
 
 Mark functions with their side effects:
 
-```intent
+```ntnt
 // Function with IO effect
 fn read_config(path: String) -> String with io {
     // ... performs file I/O
@@ -469,9 +468,9 @@ fn add(a: Int, b: Int) -> Int pure {
 
 ## Module System
 
-Intent features a powerful module system for organizing code:
+NTNT features a powerful module system for organizing code:
 
-```intent
+```ntnt
 // Import specific functions
 import { split, join, trim } from "std/string"
 
@@ -490,7 +489,7 @@ import { helper } from "./utils"
 
 **std/string** - String manipulation
 
-```intent
+```ntnt
 import { split, join, trim, replace, contains } from "std/string"
 import { starts_with, ends_with, to_upper, to_lower } from "std/string"
 import { char_at, substring } from "std/string"
@@ -504,7 +503,7 @@ let has_hello = contains(text, "Hello") // true
 
 **std/math** - Mathematical functions and constants
 
-```intent
+```ntnt
 import "std/math" as math
 
 // Constants
@@ -524,7 +523,7 @@ math.exp(x)    // e^x
 
 **std/collections** - Array utilities
 
-```intent
+```ntnt
 import { push, pop, first, last, reverse, slice, concat, is_empty } from "std/collections"
 
 let arr = [1, 2, 3]
@@ -540,7 +539,7 @@ match first(arr) {
 
 **std/env** - Environment access
 
-```intent
+```ntnt
 import { get_env, args, cwd } from "std/env"
 
 let path = cwd()               // Current working directory
@@ -554,13 +553,13 @@ match get_env("HOME") {
 
 **std/fs** - File system operations
 
-```intent
+```ntnt
 import { read_file, write_file, append_file, exists, is_file, is_dir } from "std/fs"
 import { mkdir, mkdir_all, remove, remove_dir, readdir, rename, copy } from "std/fs"
 import { file_size, read_bytes } from "std/fs"
 
 // Read and write files
-match write_file("/tmp/test.txt", "Hello, Intent!") {
+match write_file("/tmp/test.txt", "Hello, NTNT!") {
     Ok(_) => print("File written"),
     Err(e) => print("Error: " + e)
 }
@@ -576,7 +575,7 @@ if exists("/tmp") && is_dir("/tmp") {
 }
 
 // Create directories
-mkdir_all("/tmp/intent/nested/dirs")
+mkdir_all("/tmp/ntnt/nested/dirs")
 
 // List directory contents
 match readdir("/tmp") {
@@ -591,7 +590,7 @@ match readdir("/tmp") {
 
 **std/path** - Path manipulation utilities
 
-```intent
+```ntnt
 import { join, dirname, basename, extension, stem, resolve } from "std/path"
 import { is_absolute, is_relative, with_extension, normalize } from "std/path"
 
@@ -629,7 +628,7 @@ let clean = normalize("/home/user/../user/./docs")  // "/home/user/docs"
 
 **std/json** - JSON parsing and stringification
 
-```intent
+```ntnt
 import { parse, stringify, stringify_pretty } from "std/json"
 
 // Parse JSON string
@@ -656,7 +655,7 @@ match parse("[1, 2, 3]") {
 
 **std/time** - Time and date operations
 
-```intent
+```ntnt
 import { now, now_millis, now_nanos, sleep, elapsed } from "std/time"
 import { format_timestamp, duration_secs, duration_millis } from "std/time"
 
@@ -685,7 +684,7 @@ print(d.nanos)              // 60000000000
 
 ### VS Code
 
-Install the Intent Language extension for syntax highlighting:
+Install the NTNT Language extension for syntax highlighting:
 
 ```bash
 cp -r editors/vscode/intent-lang ~/.vscode/extensions/
@@ -693,19 +692,19 @@ cp -r editors/vscode/intent-lang ~/.vscode/extensions/
 
 Then restart VS Code. The extension provides:
 
-- Syntax highlighting for `.intent` and `.itn` files
+- Syntax highlighting for `.tnt` files
 - Code snippets for common patterns
 - Bracket matching and auto-closing
 
 ## Vision
 
-Intent bridges the gap between AI's speed and consistency with human judgment and design sense. The ecosystem includes:
+NTNT bridges the gap between AI's speed and consistency with human judgment and design sense. The ecosystem includes:
 
 - Integrated development workflows (CI/CD, reviews, pull requests)
 - Rich observability and explainability features
 - Formal concurrency protocols
 - UI/UX constraint declarations
-- Intent encoding for self-documenting code
+- NTNT encoding for self-documenting code
 
 ## Documentation
 
@@ -774,9 +773,9 @@ Intent bridges the gap between AI's speed and consistency with human judgment an
 
 ## HTTP Server
 
-Intent includes a built-in HTTP server for building web APIs:
+NTNT includes a built-in HTTP server for building web APIs:
 
-```intent
+```ntnt
 import { text, html, json } from "std/http/server"
 
 // Simple text response
@@ -814,7 +813,7 @@ listen(8080)  // Start server on port 8080
 
 Serve static files (HTML, CSS, JS, images) from a directory:
 
-```intent
+```ntnt
 // Serve files from ./public at /static URL prefix
 serve_static("/static", "./public")
 
@@ -832,7 +831,7 @@ Supported MIME types include: HTML, CSS, JavaScript, JSON, PNG, JPEG, GIF, SVG, 
 
 Add middleware functions that run before route handlers:
 
-```intent
+```ntnt
 // Logger middleware - runs for every request
 fn logger(req) {
     print(req.method + " " + req.path)
@@ -865,9 +864,9 @@ Middleware can:
 
 ### Contract-Verified Endpoints
 
-Use Intent's design-by-contract to validate API inputs and outputs:
+Use NTNT's design-by-contract to validate API inputs and outputs:
 
-```intent
+```ntnt
 // Handler with contract - validates request body
 fn create_user(req)
 requires req.body != ""  // Body must not be empty
@@ -904,34 +903,35 @@ Contract behavior:
 - **Precondition failure** returns HTTP **400 Bad Request** with error details
 - **Postcondition failure** returns HTTP **500 Internal Server Error**
 - Error messages include function name and failed condition
+
 ### HTTP Test Mode
 
-Test HTTP servers without manual curl commands using `intent test`:
+Test HTTP servers without manual curl commands using `ntnt test`:
 
 ```bash
 # Single GET request
-intent test server.intent --get /api/status
+ntnt test server.tnt --get /api/status
 
 # Multiple requests
-intent test server.intent --get /health --get /api/users
+ntnt test server.tnt --get /health --get /api/users
 
 # With query parameters
-intent test server.intent --get "/divide?a=10&b=2"
+ntnt test server.tnt --get "/divide?a=10&b=2"
 
 # POST with body
-intent test server.intent --post /users --body '{"name":"Alice"}'
+ntnt test server.tnt --post /users --body '{"name":"Alice"}'
 
 # Verbose output (shows headers)
-intent test server.intent --get /api/status --verbose
+ntnt test server.tnt --get /api/status --verbose
 
 # Custom port (default: 18080)
-intent test server.intent --get /health --port 9000
+ntnt test server.tnt --get /health --port 9000
 ```
 
 **Example output:**
 
 ```
-=== Intent HTTP Test Mode ===
+=== NTNT HTTP Test Mode ===
 
 Starting test server on http://127.0.0.1:18080
 Routes registered: 7

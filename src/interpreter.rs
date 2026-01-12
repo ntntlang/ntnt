@@ -1020,9 +1020,9 @@ impl Interpreter {
             std::path::PathBuf::from(source)
         };
         
-        // Add .intent extension if not present
+        // Add .tnt extension if not present
         let file_path = if file_path.extension().is_none() {
-            file_path.with_extension("intent")
+            file_path.with_extension("tnt")
         } else {
             file_path
         };

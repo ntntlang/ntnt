@@ -1,4 +1,4 @@
-// Intent Language - Full Contract System Example
+// NTNT Language - Full Contract System Example
 // ===============================================
 // This example demonstrates the complete design-by-contract system
 // with preconditions (requires), postconditions (ensures), old() values,
@@ -235,7 +235,7 @@ print("Attempting safe_divide(10, 0)...");
 
 // Summary
 // -------
-// Intent's contract system provides:
+// NTNT's contract system provides:
 // 
 // 1. PRECONDITIONS (requires):
 //    - Checked BEFORE function execution

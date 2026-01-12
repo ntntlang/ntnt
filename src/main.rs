@@ -1,20 +1,20 @@
-//! Intent Language CLI
+//! NTNT Language CLI
 //!
-//! Command-line interface for the Intent programming language.
+//! Command-line interface for the NTNT (Intent) programming language.
 
 use clap::{Parser, Subcommand};
 use colored::*;
-use intent::{interpreter::Interpreter, lexer::Lexer, parser::Parser as IntentParser};
+use ntnt::{interpreter::Interpreter, lexer::Lexer, parser::Parser as IntentParser};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::fs;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "intent")]
-#[command(author = "Intent Language Team")]
+#[command(name = "ntnt")]
+#[command(author = "NTNT Language Team")]
 #[command(version = "0.1.6")]
-#[command(about = "Intent - A programming language for AI-driven development", long_about = None)]
+#[command(about = "NTNT (Intent) - A programming language for AI-driven development", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -28,10 +28,10 @@ struct Cli {
 enum Commands {
     /// Start the interactive REPL
     Repl,
-    /// Run an Intent source file
+    /// Run an NTNT source file
     /// 
     /// For HTTP servers, the program runs until Ctrl+C:
-    ///   intent run examples/http_server.intent
+    ///   ntnt run examples/http_server.tnt
     Run {
         /// The source file to run
         #[arg(value_name = "FILE")]
@@ -43,10 +43,10 @@ enum Commands {
     /// then shuts down. Perfect for AI agents and CI/CD testing.
     /// 
     /// Examples:
-    ///   intent test server.intent --get /api/status
-    ///   intent test server.intent --get "/divide?a=10&b=2"
-    ///   intent test server.intent --post /users --body '{"name":"test"}'
-    ///   intent test server.intent --get /health --get /api/status
+    ///   ntnt test server.tnt --get /api/status
+    ///   ntnt test server.tnt --get "/divide?a=10&b=2"
+    ///   ntnt test server.tnt --post /users --body '{"name":"test"}'
+    ///   ntnt test server.tnt --get /health --get /api/status
     Test {
         /// The source file containing the HTTP server
         #[arg(value_name = "FILE")]
@@ -138,14 +138,14 @@ fn main() {
 }
 
 fn run_repl() -> anyhow::Result<()> {
-    println!("{}", "Intent Programming Language v0.1.6".green().bold());
+    println!("{}", "NTNT (Intent) Programming Language v0.1.6".green().bold());
     println!("Type {} for help, {} to exit\n", ":help".cyan(), ":quit".cyan());
 
     let mut rl = DefaultEditor::new()?;
     let mut interpreter = Interpreter::new();
 
     loop {
-        let readline = rl.readline(&format!("{} ", "intent>".blue().bold()));
+        let readline = rl.readline(&format!("{} ", "ntnt>".blue().bold()));
         match readline {
             Ok(line) => {
                 let line = line.trim();
@@ -353,7 +353,7 @@ fn test_http_server(
         anyhow::bail!("No requests specified. Use --get, --post, --put, or --delete to specify requests.");
     }
     
-    println!("{}", "=== Intent HTTP Test Mode ===".green().bold());
+    println!("{}", "=== NTNT HTTP Test Mode ===".green().bold());
     println!();
     
     // Counters for tracking

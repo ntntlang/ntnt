@@ -1,9 +1,9 @@
-//! HTTP Server module for Intent
+//! HTTP Server module for NTNT
 //! 
 //! Provides a simple HTTP server with routing support for building web applications.
 //! 
 //! Example usage:
-//! ```intent
+//! ```ntnt
 //! use "std/http/server"
 //! 
 //! fn home(req) {

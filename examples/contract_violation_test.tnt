@@ -1,4 +1,4 @@
-// Intent Language - Contract Violation Examples
+// NTNT Language - Contract Violation Examples
 // ==============================================
 // This file demonstrates what happens when contracts are violated.
 // Each example will fail at runtime with a clear error message.

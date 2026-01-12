@@ -1,10 +1,10 @@
-# Intent Language for VS Code
+# NTNT Language for VS Code
 
-Syntax highlighting and language support for the [Intent programming language](https://github.com/joshcramer/intent).
+Syntax highlighting and language support for the [NTNT programming language](https://github.com/joshcramer/ntnt) (pronounced "Intent").
 
 ## Features
 
-- **Syntax Highlighting** for `.intent` and `.itn` files
+- **Syntax Highlighting** for `.tnt` files
 - **Code Snippets** for common patterns
 - **Bracket Matching** and auto-closing
 - **Comment Toggling** (line and block)
@@ -12,8 +12,7 @@ Syntax highlighting and language support for the [Intent programming language](h
 
 ## Supported File Extensions
 
-- `.intent` - Standard Intent source files
-- `.itn` - Short form Intent source files
+- `.tnt` - NTNT source files
 
 ## Highlighting
 
@@ -56,7 +55,7 @@ The extension provides semantic highlighting for:
 
 ## Example
 
-```intent
+```ntnt
 struct BankAccount {
     balance: Int,
     owner: String
@@ -89,7 +88,7 @@ impl BankAccount {
 
 ### From VS Code Marketplace
 
-Search for "Intent Language" in the VS Code Extensions view.
+Search for "NTNT Language" in the VS Code Extensions view.
 
 ### Manual Installation
 
@@ -108,13 +107,13 @@ cd editors/vscode/intent-lang
 npx vsce package
 
 # Install locally
-code --install-extension intent-lang-0.1.0.vsix
+code --install-extension ntnt-lang-0.1.0.vsix
 ```
 
 ## Contributing
 
-Contributions are welcome! Please see the [main Intent repository](https://github.com/joshcramer/intent) for guidelines.
+Contributions are welcome! Please see the [main NTNT repository](https://github.com/joshcramer/ntnt) for guidelines.
 
 ## License
 
-MIT License - see the Intent project for details.
+MIT License - see the NTNT project for details.

@@ -1,17 +1,17 @@
 {
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
-  "name": "Intent",
-  "scopeName": "source.intent",
+  "name": "NTNT",
+  "scopeName": "source.ntnt",
   "patterns": [{ "include": "#comments" }, { "include": "#strings" }, { "include": "#numbers" }, { "include": "#keywords" }, { "include": "#contracts" }, { "include": "#types" }, { "include": "#functions" }, { "include": "#operators" }, { "include": "#punctuation" }, { "include": "#variables" }],
   "repository": {
     "comments": {
       "patterns": [
         {
-          "name": "comment.line.double-slash.intent",
+          "name": "comment.line.double-slash.ntnt",
           "match": "//.*$"
         },
         {
-          "name": "comment.block.intent",
+          "name": "comment.block.ntnt",
           "begin": "/\\*",
           "end": "\\*/",
           "patterns": [
@@ -21,7 +21,7 @@
           ]
         },
         {
-          "name": "comment.block.documentation.intent",
+          "name": "comment.block.documentation.ntnt",
           "begin": "///",
           "end": "$"
         }
@@ -30,42 +30,42 @@
     "strings": {
       "patterns": [
         {
-          "name": "string.quoted.double.intent",
+          "name": "string.quoted.double.ntnt",
           "begin": "\"",
           "end": "\"",
           "patterns": [
             {
-              "name": "constant.character.escape.intent",
+              "name": "constant.character.escape.ntnt",
               "match": "\\\\."
             },
             {
-              "name": "variable.interpolation.intent",
+              "name": "variable.interpolation.ntnt",
               "match": "\\$\\{[^}]+\\}"
             }
           ]
         },
         {
-          "name": "string.quoted.single.intent",
+          "name": "string.quoted.single.ntnt",
           "begin": "'",
           "end": "'",
           "patterns": [
             {
-              "name": "constant.character.escape.intent",
+              "name": "constant.character.escape.ntnt",
               "match": "\\\\."
             }
           ]
         },
         {
-          "name": "string.quoted.template.intent",
+          "name": "string.quoted.template.ntnt",
           "begin": "`",
           "end": "`",
           "patterns": [
             {
-              "name": "constant.character.escape.intent",
+              "name": "constant.character.escape.ntnt",
               "match": "\\\\."
             },
             {
-              "name": "variable.interpolation.intent",
+              "name": "variable.interpolation.ntnt",
               "match": "\\$\\{[^}]+\\}"
             }
           ]
@@ -75,23 +75,23 @@
     "numbers": {
       "patterns": [
         {
-          "name": "constant.numeric.float.intent",
+          "name": "constant.numeric.float.ntnt",
           "match": "\\b[0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?\\b"
         },
         {
-          "name": "constant.numeric.hex.intent",
+          "name": "constant.numeric.hex.ntnt",
           "match": "\\b0[xX][0-9a-fA-F]+\\b"
         },
         {
-          "name": "constant.numeric.binary.intent",
+          "name": "constant.numeric.binary.ntnt",
           "match": "\\b0[bB][01]+\\b"
         },
         {
-          "name": "constant.numeric.octal.intent",
+          "name": "constant.numeric.octal.ntnt",
           "match": "\\b0[oO][0-7]+\\b"
         },
         {
-          "name": "constant.numeric.integer.intent",
+          "name": "constant.numeric.integer.ntnt",
           "match": "\\b[0-9]+\\b"
         }
       ]
@@ -99,23 +99,23 @@
     "keywords": {
       "patterns": [
         {
-          "name": "keyword.control.intent",
+          "name": "keyword.control.ntnt",
           "match": "\\b(if|else|while|for|in|loop|break|continue|return|match|when|try|catch|finally|throw|async|await|yield)\\b"
         },
         {
-          "name": "keyword.declaration.intent",
+          "name": "keyword.declaration.ntnt",
           "match": "\\b(fn|let|const|mut|struct|enum|impl|trait|type|module|import|export|use|pub|priv|static)\\b"
         },
         {
-          "name": "keyword.other.intent",
+          "name": "keyword.other.ntnt",
           "match": "\\b(as|is|in|with|where|self|Self|super)\\b"
         },
         {
-          "name": "constant.language.boolean.intent",
+          "name": "constant.language.boolean.ntnt",
           "match": "\\b(true|false)\\b"
         },
         {
-          "name": "constant.language.null.intent",
+          "name": "constant.language.null.ntnt",
           "match": "\\b(null|nil|none|None)\\b"
         }
       ]
@@ -123,15 +123,15 @@
     "contracts": {
       "patterns": [
         {
-          "name": "keyword.contract.intent",
+          "name": "keyword.contract.ntnt",
           "match": "\\b(requires|ensures|invariant|assume|assert|verify)\\b"
         },
         {
-          "name": "support.function.contract.intent",
+          "name": "support.function.contract.ntnt",
           "match": "\\b(old|result|forall|exists)\\b"
         },
         {
-          "name": "keyword.effect.intent",
+          "name": "keyword.effect.ntnt",
           "match": "\\b(pure|io|network|database|random|time|throws)\\b"
         }
       ]
@@ -139,15 +139,15 @@
     "types": {
       "patterns": [
         {
-          "name": "storage.type.primitive.intent",
+          "name": "storage.type.primitive.ntnt",
           "match": "\\b(Int|Float|String|Bool|Char|Unit|Never|Any)\\b"
         },
         {
-          "name": "storage.type.collection.intent",
+          "name": "storage.type.collection.ntnt",
           "match": "\\b(Array|List|Map|Set|Dict|Option|Result|Future|Stream)\\b"
         },
         {
-          "name": "entity.name.type.intent",
+          "name": "entity.name.type.ntnt",
           "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
         }
       ]
@@ -155,15 +155,15 @@
     "functions": {
       "patterns": [
         {
-          "name": "entity.name.function.intent",
+          "name": "entity.name.function.ntnt",
           "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(?=\\()"
         },
         {
-          "name": "entity.name.function.definition.intent",
+          "name": "entity.name.function.definition.ntnt",
           "match": "(?<=\\bfn\\s+)([a-z_][a-zA-Z0-9_]*)"
         },
         {
-          "name": "support.function.builtin.intent",
+          "name": "support.function.builtin.ntnt",
           "match": "\\b(print|println|debug|len|push|pop|map|filter|reduce|fold|zip|enumerate|range|type_of|assert|panic)\\b"
         }
       ]
@@ -171,31 +171,31 @@
     "operators": {
       "patterns": [
         {
-          "name": "keyword.operator.comparison.intent",
+          "name": "keyword.operator.comparison.ntnt",
           "match": "(==|!=|<=|>=|<|>)"
         },
         {
-          "name": "keyword.operator.arithmetic.intent",
+          "name": "keyword.operator.arithmetic.ntnt",
           "match": "(\\+|-|\\*|/|%|\\^)"
         },
         {
-          "name": "keyword.operator.logical.intent",
+          "name": "keyword.operator.logical.ntnt",
           "match": "(&&|\\|\\||!|and|or|not)"
         },
         {
-          "name": "keyword.operator.assignment.intent",
+          "name": "keyword.operator.assignment.ntnt",
           "match": "(=|\\+=|-=|\\*=|/=|%=)"
         },
         {
-          "name": "keyword.operator.arrow.intent",
+          "name": "keyword.operator.arrow.ntnt",
           "match": "(->|=>|\\|>)"
         },
         {
-          "name": "keyword.operator.range.intent",
+          "name": "keyword.operator.range.ntnt",
           "match": "(\\.\\.|\\.\\.=)"
         },
         {
-          "name": "keyword.operator.optional.intent",
+          "name": "keyword.operator.optional.ntnt",
           "match": "(\\?|\\?\\.)"
         }
       ]
@@ -203,27 +203,27 @@
     "punctuation": {
       "patterns": [
         {
-          "name": "punctuation.separator.intent",
+          "name": "punctuation.separator.ntnt",
           "match": "[,;]"
         },
         {
-          "name": "punctuation.accessor.intent",
+          "name": "punctuation.accessor.ntnt",
           "match": "\\."
         },
         {
-          "name": "punctuation.definition.block.intent",
+          "name": "punctuation.definition.block.ntnt",
           "match": "[{}]"
         },
         {
-          "name": "punctuation.definition.parameters.intent",
+          "name": "punctuation.definition.parameters.ntnt",
           "match": "[()]"
         },
         {
-          "name": "punctuation.definition.array.intent",
+          "name": "punctuation.definition.array.ntnt",
           "match": "[\\[\\]]"
         },
         {
-          "name": "punctuation.colon.intent",
+          "name": "punctuation.colon.ntnt",
           "match": ":"
         }
       ]
@@ -231,15 +231,15 @@
     "variables": {
       "patterns": [
         {
-          "name": "variable.language.self.intent",
+          "name": "variable.language.self.ntnt",
           "match": "\\bself\\b"
         },
         {
-          "name": "variable.parameter.intent",
+          "name": "variable.parameter.ntnt",
           "match": "(?<=\\()\\s*([a-z_][a-zA-Z0-9_]*)\\s*(?=:)"
         },
         {
-          "name": "variable.other.intent",
+          "name": "variable.other.ntnt",
           "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
         }
       ]

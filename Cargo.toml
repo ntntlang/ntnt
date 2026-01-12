@@ -1,11 +1,11 @@
 [package]
-name = "intent"
+name = "ntnt"
 version = "0.1.6"
 edition = "2021"
-authors = ["Intent Language Team"]
-description = "Intent - A programming language designed for AI-driven development"
+authors = ["NTNT Language Team"]
+description = "NTNT (Intent) - A programming language designed for AI-driven development"
 license = "MIT"
-repository = "https://github.com/joshcramer/intent"
+repository = "https://github.com/joshcramer/ntnt"
 
 [dependencies]
 # Core utilities
@@ -42,7 +42,7 @@ tiny_http = "0.12"
 pretty_assertions = "1.4"
 
 [[bin]]
-name = "intent"
+name = "ntnt"
 path = "src/main.rs"
 
 [profile.release]

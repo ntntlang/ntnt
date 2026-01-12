@@ -1,12 +1,12 @@
 {
-  "name": "intent-lang",
-  "displayName": "Intent Language",
-  "description": "Syntax highlighting and language support for the Intent programming language",
+  "name": "ntnt-lang",
+  "displayName": "NTNT Language (Intent)",
+  "description": "Syntax highlighting and language support for the NTNT (Intent) programming language",
   "version": "0.1.0",
-  "publisher": "intent-lang",
+  "publisher": "ntnt-lang",
   "repository": {
     "type": "git",
-    "url": "https://github.com/joshcramer/intent"
+    "url": "https://github.com/joshcramer/ntnt"
   },
   "engines": {
     "vscode": "^1.75.0"
@@ -15,6 +15,7 @@
     "Programming Languages"
   ],
   "keywords": [
+    "ntnt",
     "intent",
     "programming language",
     "contracts",
@@ -24,14 +25,14 @@
   "contributes": {
     "languages": [
       {
-        "id": "intent",
+        "id": "ntnt",
         "aliases": [
+          "NTNT",
           "Intent",
-          "intent"
+          "ntnt"
         ],
         "extensions": [
-          ".intent",
-          ".itn"
+          ".tnt"
         ],
         "configuration": "./language-configuration.json",
         "icon": {
@@ -42,15 +43,15 @@
     ],
     "grammars": [
       {
-        "language": "intent",
-        "scopeName": "source.intent",
-        "path": "./syntaxes/intent.tmLanguage.json"
+        "language": "ntnt",
+        "scopeName": "source.ntnt",
+        "path": "./syntaxes/ntnt.tmLanguage.json"
       }
     ],
     "snippets": [
       {
-        "language": "intent",
-        "path": "./snippets/intent.json"
+        "language": "ntnt",
+        "path": "./snippets/ntnt.json"
       }
     ]
   },

@@ -1,8 +1,8 @@
-# Intent Language Architecture
+# NTNT Language Architecture
 
 ## Overview
 
-The Intent programming language ecosystem is designed as a comprehensive platform for AI-driven software development. This document outlines the high-level architecture, components, and design principles.
+The NTNT programming language ecosystem is designed as a comprehensive platform for AI-driven software development. This document outlines the high-level architecture, components, and design principles.
 
 ## Current Implementation
 
@@ -11,7 +11,7 @@ The current implementation is a tree-walking interpreter written in Rust:
 ```
 src/
 ├── main.rs          # CLI entry point (run, repl commands)
-├── lexer.rs         # Tokenizer for Intent source code
+├── lexer.rs         # Tokenizer for NTNT source code
 ├── parser.rs        # Recursive descent parser → AST
 ├── ast.rs           # Abstract syntax tree definitions
 ├── interpreter.rs   # Tree-walking evaluator with contracts
@@ -64,8 +64,8 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 
 ### Language Runtime (Planned)
 
-- **Compiler**: Transforms Intent source code into executable bytecode or native code
-- **Virtual Machine**: Executes Intent programs with built-in observability
+- **Compiler**: Transforms NTNT source code into executable bytecode or native code
+- **Virtual Machine**: Executes NTNT programs with built-in observability
 - **Standard Library**: Core types, data structures, and utilities optimized for AI development
 
 ### Development Ecosystem
@@ -76,8 +76,8 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 
 ### Tooling
 
-- **CLI**: `intent run <file>`, `intent repl`, `intent check`, `intent parse`, `intent lex` commands
-- **VS Code Extension**: Syntax highlighting for `.intent` and `.itn` files
+- **CLI**: `ntnt run <file>`, `ntnt repl`, `ntnt check`, `ntnt parse`, `ntnt lex`, `ntnt test` commands
+- **VS Code Extension**: Syntax highlighting for `.tnt` files
 - **IDE Integration**: Language server protocol implementation (planned)
 - **Build System**: Integrated compilation, testing, and deployment (planned)
 - **Package Manager**: Dependency resolution with semantic versioning (planned)

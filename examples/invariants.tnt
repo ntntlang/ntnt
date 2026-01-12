@@ -1,4 +1,4 @@
-// Intent Language - Struct Invariants Example
+// NTNT Language - Struct Invariants Example
 // ============================================
 // This example demonstrates invariant checking on struct types.
 // Invariants are conditions that must always hold for a type.

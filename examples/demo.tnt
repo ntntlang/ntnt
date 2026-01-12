@@ -1,5 +1,5 @@
-// Test file for .itn extension and syntax highlighting
-// This file demonstrates Intent language features
+// Test file for .tnt extension and syntax highlighting
+// This file demonstrates NTNT language features
 
 // ============================================
 // Struct with invariant
@@ -35,7 +35,7 @@ let integer = 42
 let float_num = 3.14159
 let hex = 0xFF
 let binary = 0b1010
-let text = "Hello, Intent!"
+let text = "Hello, NTNT!"
 let flag = true
 
 // ============================================
