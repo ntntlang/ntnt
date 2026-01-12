@@ -60,6 +60,7 @@ See [ROADMAP.md](ROADMAP.md) for the full 10-phase implementation plan.
 ## Quick Start
 
 ### Installation
+
 The easiest way to install NTNT is via Cargo. This will build the binary and add it to your global PATH.
 
 ```bash
@@ -72,6 +73,7 @@ cargo install --path .
 ```
 
 ### Usage
+
 Once installed, you can run NTNT from any directory:
 
 ```bash
