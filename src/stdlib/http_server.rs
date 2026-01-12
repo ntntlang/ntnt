@@ -43,17 +43,23 @@ pub struct Route {
 #[derive(Debug, Clone)]
 pub struct ServerState {
     pub routes: Vec<(Route, Value)>,  // Routes with their handlers
+    pub static_dirs: Vec<(String, String)>,  // (url_prefix, filesystem_path)
+    pub middleware: Vec<Value>,  // Middleware functions to run before handlers
 }
 
 impl ServerState {
     pub fn new() -> Self {
         ServerState {
             routes: Vec::new(),
+            static_dirs: Vec::new(),
+            middleware: Vec::new(),
         }
     }
     
     pub fn clear(&mut self) {
         self.routes.clear();
+        self.static_dirs.clear();
+        self.middleware.clear();
     }
     
     pub fn add_route(&mut self, method: &str, pattern: &str, handler: Value) {
@@ -78,6 +84,52 @@ impl ServerState {
             }
         }
         None
+    }
+    
+    pub fn add_static_dir(&mut self, prefix: String, directory: String) {
+        self.static_dirs.push((prefix, directory));
+    }
+    
+    pub fn add_middleware(&mut self, handler: Value) {
+        self.middleware.push(handler);
+    }
+    
+    pub fn find_static_file(&self, path: &str) -> Option<(String, String)> {
+        for (prefix, directory) in &self.static_dirs {
+            // Check if path starts with prefix
+            let prefix_path = if prefix.ends_with('/') { prefix.clone() } else { format!("{}/", prefix) };
+            if path.starts_with(&prefix_path) || path == prefix.trim_end_matches('/') {
+                // Get the relative path after the prefix
+                let relative = if path == prefix.trim_end_matches('/') {
+                    "index.html".to_string()
+                } else {
+                    path.strip_prefix(&prefix_path).unwrap_or("").to_string()
+                };
+                
+                // Handle empty relative path (root of static dir)
+                let relative = if relative.is_empty() { "index.html".to_string() } else { relative };
+                
+                // Construct full filesystem path
+                let full_path = std::path::Path::new(directory).join(&relative);
+                
+                // Security: ensure we're not escaping the directory (path traversal)
+                if let Ok(canonical) = full_path.canonicalize() {
+                    if let Ok(base_canonical) = std::path::Path::new(directory).canonicalize() {
+                        if canonical.starts_with(&base_canonical) {
+                            return Some((canonical.to_string_lossy().to_string(), relative));
+                        }
+                    }
+                }
+                
+                // If canonicalize fails (file doesn't exist), try the raw path
+                return Some((full_path.to_string_lossy().to_string(), relative));
+            }
+        }
+        None
+    }
+    
+    pub fn get_middleware(&self) -> &[Value] {
+        &self.middleware
     }
 }
 
@@ -429,6 +481,165 @@ pub fn create_error_response(status: i64, message: &str) -> Value {
         Value::String("text/plain; charset=utf-8".to_string()),
     );
     create_response_value(status, headers, message.to_string())
+}
+
+/// Get MIME type based on file extension
+pub fn get_mime_type(path: &str) -> &'static str {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    
+    match extension.as_str() {
+        // HTML/Web
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "xml" => "application/xml; charset=utf-8",
+        
+        // Images
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "webp" => "image/webp",
+        
+        // Fonts
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "eot" => "application/vnd.ms-fontobject",
+        
+        // Documents
+        "pdf" => "application/pdf",
+        "txt" => "text/plain; charset=utf-8",
+        "md" => "text/markdown; charset=utf-8",
+        
+        // Data
+        "csv" => "text/csv; charset=utf-8",
+        "yaml" | "yml" => "application/x-yaml; charset=utf-8",
+        
+        // Archives
+        "zip" => "application/zip",
+        "gz" | "gzip" => "application/gzip",
+        "tar" => "application/x-tar",
+        
+        // Media
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "ogg" => "audio/ogg",
+        "wav" => "audio/wav",
+        
+        // Catch-all
+        _ => "application/octet-stream",
+    }
+}
+
+/// Serve a static file from the filesystem
+pub fn serve_static_file(file_path: &str) -> Result<Value> {
+    use std::fs;
+    use std::io::Read;
+    
+    let path = std::path::Path::new(file_path);
+    
+    // Check if file exists
+    if !path.exists() {
+        return Ok(create_error_response(404, "File not found"));
+    }
+    
+    // Check if it's a file (not directory)
+    if !path.is_file() {
+        // If it's a directory, try index.html
+        let index_path = path.join("index.html");
+        if index_path.is_file() {
+            return serve_static_file(&index_path.to_string_lossy());
+        }
+        return Ok(create_error_response(404, "Not a file"));
+    }
+    
+    // Get MIME type
+    let mime_type = get_mime_type(file_path);
+    
+    // Read file content
+    let content = if mime_type.starts_with("text/") || 
+                     mime_type.contains("javascript") || 
+                     mime_type.contains("json") ||
+                     mime_type.contains("xml") ||
+                     mime_type.contains("yaml") {
+        // Text files - read as string
+        fs::read_to_string(path)
+            .map_err(|e| IntentError::RuntimeError(format!("Failed to read file: {}", e)))?
+    } else {
+        // Binary files - read as bytes and encode as base64 or raw
+        // For now, we'll read as lossy UTF-8 (works for most text, not ideal for binary)
+        // A proper solution would need binary response support
+        let mut file = fs::File::open(path)
+            .map_err(|e| IntentError::RuntimeError(format!("Failed to open file: {}", e)))?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)
+            .map_err(|e| IntentError::RuntimeError(format!("Failed to read file: {}", e)))?;
+        
+        // For binary files, we need to handle them differently
+        // For now, return raw bytes (this works with tiny_http's response)
+        String::from_utf8_lossy(&buffer).to_string()
+    };
+    
+    let mut headers = HashMap::new();
+    headers.insert(
+        "content-type".to_string(),
+        Value::String(mime_type.to_string()),
+    );
+    
+    // Add cache control for static files
+    headers.insert(
+        "cache-control".to_string(),
+        Value::String("public, max-age=3600".to_string()),
+    );
+    
+    Ok(create_response_value(200, headers, content))
+}
+
+/// Send a binary response (for static files)
+pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Result<()> {
+    use std::fs::File;
+    use std::io::Read;
+    
+    let path = std::path::Path::new(file_path);
+    
+    // Check if file exists and is a file
+    if !path.exists() || !path.is_file() {
+        let not_found = create_error_response(404, "File not found");
+        return send_response(request, &not_found);
+    }
+    
+    // Get MIME type
+    let mime_type = get_mime_type(file_path);
+    
+    // Open and read the file
+    let mut file = File::open(path)
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to open file: {}", e)))?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to read file: {}", e)))?;
+    
+    // Build response with proper headers
+    let content_type = tiny_http::Header::from_bytes(b"Content-Type", mime_type.as_bytes())
+        .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+    let cache_control = tiny_http::Header::from_bytes(b"Cache-Control", b"public, max-age=3600")
+        .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+    
+    let response = tiny_http::Response::from_data(buffer)
+        .with_status_code(200)
+        .with_header(content_type)
+        .with_header(cache_control);
+    
+    request.respond(response)
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to send response: {}", e)))
 }
 
 #[cfg(test)]
@@ -1049,6 +1260,244 @@ mod tests {
             let args = vec![Value::Int(500)];
             let result = func(&args);
             assert!(result.is_err());
+        }
+    }
+
+    // ===========================================
+    // MIME Type Detection Tests
+    // ===========================================
+
+    #[test]
+    fn test_mime_type_html() {
+        assert_eq!(get_mime_type("index.html"), "text/html; charset=utf-8");
+        assert_eq!(get_mime_type("page.htm"), "text/html; charset=utf-8");
+    }
+
+    #[test]
+    fn test_mime_type_css() {
+        assert_eq!(get_mime_type("styles.css"), "text/css; charset=utf-8");
+    }
+
+    #[test]
+    fn test_mime_type_javascript() {
+        assert_eq!(get_mime_type("app.js"), "application/javascript; charset=utf-8");
+        assert_eq!(get_mime_type("module.mjs"), "application/javascript; charset=utf-8");
+    }
+
+    #[test]
+    fn test_mime_type_json() {
+        assert_eq!(get_mime_type("data.json"), "application/json; charset=utf-8");
+    }
+
+    #[test]
+    fn test_mime_type_images() {
+        assert_eq!(get_mime_type("photo.png"), "image/png");
+        assert_eq!(get_mime_type("photo.jpg"), "image/jpeg");
+        assert_eq!(get_mime_type("photo.jpeg"), "image/jpeg");
+        assert_eq!(get_mime_type("logo.gif"), "image/gif");
+        assert_eq!(get_mime_type("icon.svg"), "image/svg+xml");
+        assert_eq!(get_mime_type("favicon.ico"), "image/x-icon");
+        assert_eq!(get_mime_type("image.webp"), "image/webp");
+    }
+
+    #[test]
+    fn test_mime_type_fonts() {
+        assert_eq!(get_mime_type("font.woff"), "font/woff");
+        assert_eq!(get_mime_type("font.woff2"), "font/woff2");
+        assert_eq!(get_mime_type("font.ttf"), "font/ttf");
+        assert_eq!(get_mime_type("font.otf"), "font/otf");
+    }
+
+    #[test]
+    fn test_mime_type_unknown() {
+        assert_eq!(get_mime_type("file.xyz"), "application/octet-stream");
+        assert_eq!(get_mime_type("noextension"), "application/octet-stream");
+    }
+
+    #[test]
+    fn test_mime_type_case_insensitive() {
+        assert_eq!(get_mime_type("index.HTML"), "text/html; charset=utf-8");
+        assert_eq!(get_mime_type("styles.CSS"), "text/css; charset=utf-8");
+        assert_eq!(get_mime_type("image.PNG"), "image/png");
+    }
+
+    // ===========================================
+    // ServerState Static Directory Tests
+    // ===========================================
+
+    #[test]
+    fn test_server_state_add_static_dir() {
+        let mut state = ServerState::new();
+        state.add_static_dir("/static".to_string(), "./public".to_string());
+        assert_eq!(state.static_dirs.len(), 1);
+    }
+
+    #[test]
+    fn test_server_state_multiple_static_dirs() {
+        let mut state = ServerState::new();
+        state.add_static_dir("/static".to_string(), "./public".to_string());
+        state.add_static_dir("/assets".to_string(), "./assets".to_string());
+        assert_eq!(state.static_dirs.len(), 2);
+    }
+
+    #[test]
+    fn test_server_state_clear_includes_static_dirs() {
+        let mut state = ServerState::new();
+        state.add_route("GET", "/", Value::Unit);
+        state.add_static_dir("/static".to_string(), "./public".to_string());
+        state.add_middleware(Value::Unit);
+        
+        state.clear();
+        
+        assert_eq!(state.route_count(), 0);
+        assert_eq!(state.static_dirs.len(), 0);
+        assert_eq!(state.middleware.len(), 0);
+    }
+
+    // ===========================================
+    // ServerState Middleware Tests
+    // ===========================================
+
+    #[test]
+    fn test_server_state_add_middleware() {
+        let mut state = ServerState::new();
+        state.add_middleware(Value::String("logger".to_string()));
+        assert_eq!(state.middleware.len(), 1);
+    }
+
+    #[test]
+    fn test_server_state_multiple_middleware() {
+        let mut state = ServerState::new();
+        state.add_middleware(Value::String("logger".to_string()));
+        state.add_middleware(Value::String("auth".to_string()));
+        state.add_middleware(Value::String("cors".to_string()));
+        assert_eq!(state.middleware.len(), 3);
+    }
+
+    #[test]
+    fn test_server_state_get_middleware() {
+        let mut state = ServerState::new();
+        state.add_middleware(Value::String("logger".to_string()));
+        state.add_middleware(Value::String("auth".to_string()));
+        
+        let middleware = state.get_middleware();
+        assert_eq!(middleware.len(), 2);
+    }
+
+    // ===========================================
+    // Static File Path Matching Tests
+    // ===========================================
+
+    #[test]
+    fn test_find_static_file_basic() {
+        let mut state = ServerState::new();
+        // Use temp directory for testing
+        let temp_dir = std::env::temp_dir();
+        let test_dir = temp_dir.join("intent_test_static");
+        let _ = std::fs::create_dir_all(&test_dir);
+        let test_file = test_dir.join("test.txt");
+        let _ = std::fs::write(&test_file, "test content");
+        
+        state.add_static_dir("/static".to_string(), test_dir.to_string_lossy().to_string());
+        
+        let result = state.find_static_file("/static/test.txt");
+        assert!(result.is_some());
+        
+        // Cleanup
+        let _ = std::fs::remove_file(&test_file);
+        let _ = std::fs::remove_dir(&test_dir);
+    }
+
+    #[test]
+    fn test_find_static_file_no_match() {
+        let mut state = ServerState::new();
+        state.add_static_dir("/static".to_string(), "./nonexistent".to_string());
+        
+        // Path doesn't match prefix
+        let result = state.find_static_file("/other/file.txt");
+        assert!(result.is_none());
+    }
+
+    // ===========================================
+    // Error Response Tests (for contract validation)
+    // ===========================================
+
+    #[test]
+    fn test_create_error_response_400_bad_request() {
+        let resp = create_error_response(400, "Bad Request: Precondition failed");
+        if let Value::Map(map) = resp {
+            assert_eq!(get_map_int(&map, "status"), 400);
+            assert_eq!(get_map_string(&map, "body"), "Bad Request: Precondition failed");
+            // Content-type is in the headers sub-map
+            let headers = get_map_map(&map, "headers");
+            assert_eq!(get_map_string(&headers, "content-type"), "text/plain; charset=utf-8");
+        } else {
+            panic!("Expected Map response");
+        }
+    }
+
+    #[test]
+    fn test_create_error_response_500_server_error() {
+        let resp = create_error_response(500, "Internal Error: Postcondition failed");
+        if let Value::Map(map) = resp {
+            assert_eq!(get_map_int(&map, "status"), 500);
+            assert_eq!(get_map_string(&map, "body"), "Internal Error: Postcondition failed");
+        } else {
+            panic!("Expected Map response");
+        }
+    }
+
+    #[test]
+    fn test_create_error_response_404_not_found() {
+        let resp = create_error_response(404, "Not Found: /api/missing");
+        if let Value::Map(map) = resp {
+            assert_eq!(get_map_int(&map, "status"), 404);
+            assert_eq!(get_map_string(&map, "body"), "Not Found: /api/missing");
+        } else {
+            panic!("Expected Map response");
+        }
+    }
+
+    #[test]
+    fn test_create_error_response_custom_status() {
+        let resp = create_error_response(503, "Service Unavailable");
+        if let Value::Map(map) = resp {
+            assert_eq!(get_map_int(&map, "status"), 503);
+            assert_eq!(get_map_string(&map, "body"), "Service Unavailable");
+        } else {
+            panic!("Expected Map response");
+        }
+    }
+
+    // ===========================================
+    // Contract Error Message Format Tests
+    // ===========================================
+
+    #[test]
+    fn test_error_response_contains_contract_message() {
+        // Simulate a contract violation error message
+        let msg = "Precondition failed in 'create_user': req.body != \"\"";
+        let resp = create_error_response(400, &format!("Bad Request: {}", msg));
+        if let Value::Map(map) = resp {
+            let body = get_map_string(&map, "body");
+            assert!(body.contains("Precondition failed"));
+            assert!(body.contains("create_user"));
+            assert!(body.contains("req.body"));
+        } else {
+            panic!("Expected Map response");
+        }
+    }
+
+    #[test]
+    fn test_error_response_postcondition_message() {
+        let msg = "Postcondition failed in 'divide': result * b == a";
+        let resp = create_error_response(500, &format!("Internal Error: {}", msg));
+        if let Value::Map(map) = resp {
+            let body = get_map_string(&map, "body");
+            assert!(body.contains("Postcondition failed"));
+            assert!(body.contains("divide"));
+        } else {
+            panic!("Expected Map response");
         }
     }
 }

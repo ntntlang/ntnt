@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intent Static File Demo</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Welcome to Intent</h1>
+        <p>This page is being served from a static directory.</p>
+        
+        <div class="features">
+            <h2>HTTP Server Features</h2>
+            <ul>
+                <li>Route handlers with path parameters</li>
+                <li>Static file serving</li>
+                <li>Middleware support</li>
+                <li>JSON responses</li>
+                <li>HTML responses</li>
+            </ul>
+        </div>
+        
+        <div class="api">
+            <h2>Try the API</h2>
+            <ul>
+                <li><a href="/api/status">GET /api/status</a> - JSON status</li>
+                <li><a href="/api/users/42">GET /api/users/42</a> - User by ID</li>
+            </ul>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

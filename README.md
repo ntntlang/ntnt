@@ -49,9 +49,9 @@ Intent is a revolutionary programming language and ecosystem designed specifical
 - Cryptography: `std/crypto` (sha256, hmac_sha256, uuid, random_bytes)
 - URL utilities: `std/url` (parse, encode, decode, build_query)
 - HTTP Client: `std/http` (get, post, put, delete, request)
-- **HTTP Server**: `std/http/server` (routing, path params, JSON responses)
+- **HTTP Server**: `std/http/server` (routing, middleware, static files, contract-verified endpoints)
 
-**146 passing tests** | **Version 0.1.5**
+**209 passing tests** | **Version 0.1.6**
 
 **Next Up**: Async/await, Database connectivity (Phase 5 continued)
 
@@ -788,7 +788,7 @@ fn home(req) {
 fn get_status(req) {
     return json(map {
         "status": "ok",
-        "version": "0.1.5"
+        "version": "0.1.6"
     })
 }
 
@@ -810,45 +810,96 @@ post("/users", create_user)
 listen(8080)  // Start server on port 8080
 ```
 
-### Running the Server
+### Static File Serving
 
-```bash
-# Run a server file
-./target/release/intent run examples/http_server.intent
+Serve static files (HTML, CSS, JS, images) from a directory:
 
-# Server starts and listens for requests
-# Starting server on http://0.0.0.0:8080
-# Press Ctrl+C to stop
+```intent
+// Serve files from ./public at /static URL prefix
+serve_static("/static", "./public")
+
+// Serve files at root (for index.html)
+serve_static("/", "./public")
+
+// Now /static/styles.css serves ./public/styles.css
+// And / serves ./public/index.html
+listen(8080)
 ```
 
-### Request Object
+Supported MIME types include: HTML, CSS, JavaScript, JSON, PNG, JPEG, GIF, SVG, WebP, WOFF/WOFF2 fonts, PDF, and more.
 
-Handlers receive a request map with:
-- `req.method` - HTTP method (GET, POST, etc.)
-- `req.path` - Request path
-- `req.params` - Path parameters (e.g., `{id}` → `req.params.id`)
-- `req.query_params` - Query string parameters
-- `req.headers` - Request headers
-- `req.body` - Request body
+### Middleware
 
-### Response Helpers
+Add middleware functions that run before route handlers:
 
-- `text(body)` - Plain text response (200)
-- `html(body)` - HTML response (200)
-- `json(data)` - JSON response (200)
-- `status(code, body)` - Custom status code
-- `redirect(url)` - 302 redirect
-- `not_found()` - 404 response
-- `error(msg)` - 500 error response
+```intent
+// Logger middleware - runs for every request
+fn logger(req) {
+    print(req.method + " " + req.path)
+    return ()  // Continue to next middleware/handler
+}
 
-## Contributing
+// Auth middleware - can block requests
+fn auth_check(req) {
+    let token = req.headers["authorization"]
+    if token == "" {
+        return status(401, "Unauthorized")  // Early return stops chain
+    }
+    return ()  // Continue if authorized
+}
 
-Intent is an open-source project welcoming contributions from developers, language designers, and AI researchers. See our contributing guidelines for details.
+// Register middleware (order matters!)
+use_middleware(logger)
+use_middleware(auth_check)
 
-## License
+// Routes are called after all middleware passes
+get("/api/data", get_data)
+listen(8080)
+```
 
-MIT
+Middleware can:
+- Return `()` to continue to the next middleware/handler
+- Return a response map (`{ status: 401, ... }`) to stop and send immediately
+- Return a modified request map to pass to the next handler
 
-## Contact
+### Contract-Verified Endpoints
 
-For questions or discussions, please open an issue on this repository.
+Use Intent's design-by-contract to validate API inputs and outputs:
+
+```intent
+// Handler with contract - validates request body
+fn create_user(req)
+requires req.body != ""  // Body must not be empty
+{
+    print("Creating user: " + req.body)
+    return map {
+        "status": 201,
+        "body": "User created"
+    }
+}
+
+// Contract-verified calculation
+fn safe_divide(a, b)
+requires b != 0  // Precondition: no division by zero
+ensures result * b <= a  // Postcondition: verify result
+{
+    return a / b
+}
+
+fn calc_endpoint(req) {
+    let a = int(req.query_params.a)
+    let b = int(req.query_params.b)
+    let result = safe_divide(a, b)  // Contract violation = 400
+    return json(map { "result": result })
+}
+
+post("/users", create_user)
+get("/calc", calc_endpoint)
+listen(8080)
+```
+
+Contract behavior:
+- **Precondition failure** returns HTTP **400 Bad Request** with error details
+- **Postcondition failure** returns HTTP **500 Internal Server Error**
+- Error messages include function name and failed condition
+

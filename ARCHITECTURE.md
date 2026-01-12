@@ -60,7 +60,7 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
   - `std/crypto`: Cryptographic functions (sha256, hmac_sha256, uuid, random_bytes, hex_encode)
   - `std/url`: URL parsing and encoding (parse, encode, decode, build_query, join)
   - `std/http`: HTTP client (get, post, put, delete, request)
-  - `std/http/server`: HTTP server with routing (text, html, json, get, post, listen)
+  - `std/http/server`: HTTP server with routing, middleware, static files, and contract-verified endpoints
 
 ### Language Runtime (Planned)
 

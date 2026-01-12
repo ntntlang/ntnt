@@ -1510,6 +1510,39 @@ impl Interpreter {
                         return Ok(Value::Map(server));
                     }
                     
+                    // Special handling for serve_static(url_prefix, directory)
+                    if name == "serve_static" && arguments.len() == 2 {
+                        let prefix = self.eval_expression(&arguments[0])?;
+                        let directory = self.eval_expression(&arguments[1])?;
+                        
+                        match (&prefix, &directory) {
+                            (Value::String(prefix_str), Value::String(dir_str)) => {
+                                // Resolve relative paths
+                                let resolved_dir = if std::path::Path::new(dir_str).is_relative() {
+                                    std::env::current_dir()
+                                        .map(|cwd| cwd.join(dir_str).to_string_lossy().to_string())
+                                        .unwrap_or_else(|_| dir_str.clone())
+                                } else {
+                                    dir_str.clone()
+                                };
+                                self.server_state.add_static_dir(prefix_str.clone(), resolved_dir);
+                                return Ok(Value::Unit);
+                            }
+                            _ => {
+                                return Err(IntentError::TypeError(
+                                    "serve_static() requires two string arguments: (url_prefix, directory)".to_string()
+                                ));
+                            }
+                        }
+                    }
+                    
+                    // Special handling for use_middleware(handler_fn)
+                    if name == "use_middleware" && arguments.len() == 1 {
+                        let handler = self.eval_expression(&arguments[0])?;
+                        self.server_state.add_middleware(handler);
+                        return Ok(Value::Unit);
+                    }
+                    
                     // Special handling for HTTP route registration
                     let http_methods = ["get", "post", "put", "delete", "patch"];
                     if http_methods.contains(&name.as_str()) && arguments.len() == 2 {
@@ -2253,15 +2286,30 @@ impl Interpreter {
     fn run_http_server(&mut self, port: u16) -> Result<Value> {
         use crate::stdlib::http_server;
         
-        // Check if any routes are registered
-        if self.server_state.route_count() == 0 {
+        // Check if any routes or static dirs are registered
+        let has_routes = self.server_state.route_count() > 0;
+        let has_static = !self.server_state.static_dirs.is_empty();
+        
+        if !has_routes && !has_static {
             return Err(IntentError::RuntimeError(
-                "No routes registered. Use get(), post(), etc. to register routes before calling listen()".to_string()
+                "No routes or static directories registered. Use get(), post(), serve_static(), etc. before calling listen()".to_string()
             ));
         }
         
         println!("Starting server on http://0.0.0.0:{}", port);
-        println!("Routes registered: {}", self.server_state.route_count());
+        if has_routes {
+            println!("Routes registered: {}", self.server_state.route_count());
+        }
+        if has_static {
+            println!("Static directories: {}", self.server_state.static_dirs.len());
+            for (prefix, dir) in &self.server_state.static_dirs {
+                println!("  {} -> {}", prefix, dir);
+            }
+        }
+        let middleware_count = self.server_state.middleware.len();
+        if middleware_count > 0 {
+            println!("Middleware: {}", middleware_count);
+        }
         println!("Press Ctrl+C to stop");
         
         // Start the server
@@ -2273,43 +2321,103 @@ impl Interpreter {
             let url = request.url().to_string();
             let path = url.split('?').next().unwrap_or(&url).to_string();
             
-            // Find matching route from our server state
-            match self.server_state.find_route(&method, &path) {
-                Some((handler, route_params)) => {
-                    // Process request to get request Value
-                    match http_server::process_request(request, route_params) {
-                        Ok((req_value, http_request)) => {
-                            // Call the handler
-                            match self.call_function(handler, vec![req_value]) {
-                                Ok(response) => {
-                                    if let Err(e) = http_server::send_response(http_request, &response) {
-                                        eprintln!("Error sending response: {}", e);
+            // First, try to find a matching route
+            if let Some((handler, route_params)) = self.server_state.find_route(&method, &path) {
+                // Process request to get request Value
+                match http_server::process_request(request, route_params) {
+                    Ok((mut req_value, http_request)) => {
+                        // Run middleware chain and determine final response
+                        let middleware_handlers: Vec<Value> = self.server_state.get_middleware().to_vec();
+                        let mut early_response: Option<Value> = None;
+                        
+                        for mw in middleware_handlers {
+                            match self.call_function(mw.clone(), vec![req_value.clone()]) {
+                                Ok(result) => {
+                                    // Check if middleware returned a response (early exit) or modified request
+                                    match &result {
+                                        Value::Map(map) if map.contains_key("status") => {
+                                            // Middleware returned a response - use it and stop
+                                            early_response = Some(result);
+                                            break;
+                                        }
+                                        Value::Map(_) => {
+                                            // Middleware returned modified request - continue with it
+                                            req_value = result;
+                                        }
+                                        Value::Unit => {
+                                            // Middleware returned unit - continue with original request
+                                        }
+                                        _ => {
+                                            // Other return - continue with original request
+                                        }
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("Handler error: {}", e);
-                                    // Send 500 error
-                                    let error_response = http_server::create_error_response(500, &e.to_string());
-                                    let _ = http_server::send_response(http_request, &error_response);
+                                    eprintln!("Middleware error: {}", e);
+                                    early_response = Some(http_server::create_error_response(500, &e.to_string()));
+                                    break;
                                 }
                             }
                         }
-                        Err(e) => {
-                            eprintln!("Error processing request: {}", e);
+                        
+                        // Determine final response
+                        let final_response = if let Some(resp) = early_response {
+                            resp
+                        } else {
+                            // Call the route handler
+                            match self.call_function(handler, vec![req_value]) {
+                                Ok(response) => response,
+                                Err(e) => {
+                                    eprintln!("Handler error: {}", e);
+                                    // Check for contract violations and return appropriate HTTP status
+                                    if let IntentError::ContractViolation(msg) = &e {
+                                        if msg.contains("Precondition failed") {
+                                            // Precondition = bad request from client
+                                            http_server::create_error_response(400, &format!("Bad Request: {}", msg))
+                                        } else if msg.contains("Postcondition failed") {
+                                            // Postcondition = server logic error
+                                            http_server::create_error_response(500, &format!("Internal Error: {}", msg))
+                                        } else {
+                                            http_server::create_error_response(500, &e.to_string())
+                                        }
+                                    } else {
+                                        http_server::create_error_response(500, &e.to_string())
+                                    }
+                                }
+                            }
+                        };
+                        
+                        // Send the response (only once)
+                        if let Err(e) = http_server::send_response(http_request, &final_response) {
+                            eprintln!("Error sending response: {}", e);
                         }
                     }
-                }
-                None => {
-                    // No matching route - send 404
-                    let path_clone = path.clone();
-                    match http_server::process_request(request, HashMap::new()) {
-                        Ok((_, http_request)) => {
-                            let not_found = http_server::create_error_response(404, &format!("Not Found: {} {}", method, path_clone));
-                            let _ = http_server::send_response(http_request, &not_found);
-                        }
-                        Err(_) => {}
+                    Err(e) => {
+                        eprintln!("Error processing request: {}", e);
                     }
                 }
+                continue;
+            }
+            
+            // No matching route - check static files (only for GET requests)
+            if method == "GET" {
+                if let Some((file_path, _relative)) = self.server_state.find_static_file(&path) {
+                    // Serve static file
+                    if let Err(e) = http_server::send_static_response(request, &file_path) {
+                        eprintln!("Error serving static file: {}", e);
+                    }
+                    continue;
+                }
+            }
+            
+            // No matching route or static file - send 404
+            let path_clone = path.clone();
+            match http_server::process_request(request, HashMap::new()) {
+                Ok((_, http_request)) => {
+                    let not_found = http_server::create_error_response(404, &format!("Not Found: {} {}", method, path_clone));
+                    let _ = http_server::send_response(http_request, &not_found);
+                }
+                Err(_) => {}
             }
         }
         

@@ -222,9 +222,9 @@ let (user, posts) = await all(
 - [x] Built-in HTTP server (using tiny_http)
 - [x] Request/Response types
 - [x] Router with path parameters
-- [ ] Middleware support (planned)
-- [ ] Static file serving (planned)
-- [ ] Contract-verified endpoints (planned)
+- [x] Middleware support
+- [x] Static file serving with MIME type detection
+- [x] Contract-verified endpoints (preconditions return 400, postconditions return 500)
 
 ```intent
 import { text, html, json, status, redirect } from "std/http/server"

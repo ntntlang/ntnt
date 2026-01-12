@@ -13,7 +13,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "intent")]
 #[command(author = "Intent Language Team")]
-#[command(version = "0.1.5")]
+#[command(version = "0.1.6")]
 #[command(about = "Intent - A programming language for AI-driven development", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -85,7 +85,7 @@ fn main() {
 }
 
 fn run_repl() -> anyhow::Result<()> {
-    println!("{}", "Intent Programming Language v0.1.5".green().bold());
+    println!("{}", "Intent Programming Language v0.1.6".green().bold());
     println!("Type {} for help, {} to exit\n", ":help".cyan(), ":quit".cyan());
 
     let mut rl = DefaultEditor::new()?;

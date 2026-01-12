@@ -32,7 +32,7 @@ fn api_status(req) {
     print("Request: GET /api/status")
     return json(map {
         "status": "ok",
-        "version": "0.1.5",
+        "version": "0.1.6",
         "uptime": "running"
     })
 }

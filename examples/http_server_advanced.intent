@@ -1,0 +1,101 @@
+// HTTP Server Example with Static Files and Middleware
+// Demonstrates the full HTTP server capabilities
+//
+// Run with: intent run examples/http_server_advanced.intent
+// Then visit: http://localhost:8080/
+//
+// Static files are served from: examples/static/
+
+import { text, html, json, status, redirect } from "std/http/server"
+
+// ============================================
+// Middleware: Request Logger
+// ============================================
+fn logger_middleware(req) {
+    let method = req.method
+    let path = req.path
+    let timestamp = "2026-01-11"  // Would use std/time in real code
+    print("[" + timestamp + "] " + method + " " + path)
+    
+    // Return unit to continue to next middleware/handler
+    return ()
+}
+
+// ============================================
+// Middleware: Add custom headers
+// ============================================
+fn cors_middleware(req) {
+    // This middleware doesn't modify the request
+    // In a real implementation, we'd add CORS headers to response
+    // For now, just pass through
+    return ()
+}
+
+// ============================================
+// API Endpoints
+// ============================================
+fn api_status(req) {
+    return json(map {
+        "status": "ok",
+        "version": "0.1.6",
+        "features": [
+            "routes",
+            "static_files",
+            "middleware"
+        ]
+    })
+}
+
+fn get_user(req) {
+    let id = req.params.id
+    return json(map {
+        "id": id,
+        "name": "User " + id,
+        "email": "user" + id + "@example.com"
+    })
+}
+
+fn create_user(req) {
+    return json(map {
+        "message": "User created",
+        "body": req.body
+    })
+}
+
+// ============================================
+// Setup Server
+// ============================================
+print("=== Intent HTTP Server (Advanced) ===")
+print("")
+
+// Register middleware (runs in order for each request)
+use_middleware(logger_middleware)
+use_middleware(cors_middleware)
+
+// Register API routes
+get("/api/status", api_status)
+get(r"/api/users/{id}", get_user)
+post("/api/users", create_user)
+
+// Serve static files from the examples/static directory
+// Any request to /static/* will serve files from ./examples/static/
+serve_static("/static", "./examples/static")
+
+// Also serve static files at root (for index.html)
+serve_static("/", "./examples/static")
+
+print("Configuration:")
+print("  Middleware: 2 (logger, cors)")
+print("  API Routes: 3")
+print("  Static directories: 2")
+print("")
+print("Endpoints:")
+print("  GET  /                - Static index.html")
+print("  GET  /static/*        - Static files")
+print("  GET  /api/status      - JSON status")
+print(r"  GET  /api/users/{id}  - Get user")
+print("  POST /api/users       - Create user")
+print("")
+
+// Start server
+listen(8080)

@@ -55,7 +55,7 @@ print("")
 print("--- POST JSON ---")
 let payload = map {
     "name": "Intent Language",
-    "version": "0.1.5",
+    "version": "0.1.6",
     "features": ["contracts", "traits", "http"]
 }
 
