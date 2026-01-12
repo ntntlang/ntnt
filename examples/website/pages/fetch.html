@@ -1,0 +1,59 @@
+<h1>Live API Data Demo</h1>
+
+<p>This page demonstrates server-side API fetching in NTNT. Each time you refresh, the server fetches a new random cat fact from the <a href="https://meowfacts.herokuapp.com/" target="_blank">Meow Facts API</a> and renders it directly into the HTML.</p>
+
+<div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 2rem; border-radius: 12px; margin: 2rem 0; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+    <h2 style="color: white; margin-top: 0;">🐱 Random Cat Fact</h2>
+    <p style="font-size: 1.2rem; line-height: 1.6; margin-bottom: 0;"><!--CAT_FACT--></p>
+</div>
+
+<div style="background: #f8f9fa; padding: 1.5rem; border-left: 4px solid #4ecdc4; margin: 2rem 0;">
+    <h3 style="margin-top: 0;">How it works:</h3>
+    <ol>
+        <li><strong>Request arrives</strong> - User visits <code>/fetch</code></li>
+        <li><strong>Server fetches data</strong> - NTNT makes HTTP GET request to external API</li>
+        <li><strong>Parse JSON response</strong> - Extract the cat fact from the response</li>
+        <li><strong>Inject into template</strong> - Replace placeholder with actual data</li>
+        <li><strong>Return HTML</strong> - Send complete page to browser</li>
+    </ol>
+</div>
+
+<h2>The Code</h2>
+
+<h3>Route Handler (website.tnt)</h3>
+<pre><code>import { get } from "std/http"
+
+fn fetch_page(req) {
+    // Fetch data from external API
+    match get("https://meowfacts.herokuapp.com/") {
+        Ok(response) => {
+            // Parse JSON and extract fact
+            match parse(response.body) {
+                Ok(data) => {
+                    let fact = data.data[0]
+                    // Load template and inject data
+                    return load_page_with_data("fetch.html", "Fetch", fact)
+                },
+                Err(e) => return error_page("Failed to parse: " + e)
+            }
+        },
+        Err(e) => return error_page("API error: " + e)
+    }
+}</code></pre>
+
+<h3>Benefits of Server-Side Rendering</h3>
+<ul>
+    <li>✅ <strong>No JavaScript required</strong> - Works with any browser</li>
+    <li>✅ <strong>Fast initial load</strong> - Content arrives pre-rendered</li>
+    <li>✅ <strong>SEO friendly</strong> - Search engines see actual content</li>
+    <li>✅ <strong>API keys stay secure</strong> - Never exposed to client</li>
+    <li>✅ <strong>Simple architecture</strong> - One language, one runtime</li>
+</ul>
+
+<p>
+    <a href="/fetch" class="cta" style="margin-right: 1rem;">🔄 Refresh for New Fact</a>
+    <a href="/api/cat-fact" class="cta" style="background: #667eea;">📡 View Raw JSON</a>
+</p>
+
+<h2>Try It Yourself</h2>
+<p>Refresh this page to see a new cat fact fetched in real-time from the API!</p>
