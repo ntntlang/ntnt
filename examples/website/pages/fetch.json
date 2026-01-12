@@ -1,8 +1,0 @@
-{
-    "title": "Live API Demo",
-    "api": {
-        "url": "https://meowfacts.herokuapp.com/",
-        "data_path": "data.0",
-        "placeholder": "<!--CAT_FACT-->"
-    }
-}

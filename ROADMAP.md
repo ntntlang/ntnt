@@ -261,6 +261,7 @@ listen(8080)  // Start server
 **Goal:** Enable modular, hot-reloadable applications where the filesystem defines the routing structure. This is critical for AI agents—adding a route means creating a single file, no wiring required.
 
 **Architecture:**
+
 ```
 app/
 ├── app.tnt           # Config, middleware, listen()
@@ -276,6 +277,7 @@ app/
 ```
 
 **Features:**
+
 - [ ] `routes/` directory convention: file path = URL path
 - [ ] Dynamic segments via `[param].tnt` naming (e.g., `[id].tnt` → `/users/:id`)
 - [ ] HTTP method exports: `export fn get(req)`, `export fn post(req)`, etc.
@@ -285,6 +287,7 @@ app/
 - [ ] Shared layouts/middleware per directory (optional `_layout.tnt`, `_middleware.tnt`)
 
 **Example Route File:**
+
 ```ntnt
 // routes/users/[id].tnt
 // Automatically handles GET /users/:id and DELETE /users/:id
@@ -306,6 +309,7 @@ export fn delete(req)
 ```
 
 **App Entry Point:**
+
 ```ntnt
 // app.tnt
 import { use_middleware, listen } from "std/http/server"
