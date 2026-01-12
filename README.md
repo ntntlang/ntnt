@@ -1,6 +1,6 @@
 # NTNT Programming Language
 
-NTNT (pronounced "Intent") is a revolutionary programming language and ecosystem designed specifically for AI-driven development. Unlike traditional languages built for human developers, NTNT empowers AI agents as primary software creators while maintaining deep human oversight and collaboration.
+NTNT (pronounced "Intent") is an experimental programming language and ecosystem designed specifically for AI-driven development. Unlike traditional languages built for human developers, NTNT empowers AI agents as primary software creators while maintaining deep human oversight and collaboration.
 
 **Goal: Build production-ready web applications and APIs with AI-powered development and runtime safety guarantees.**
 
@@ -59,17 +59,31 @@ See [ROADMAP.md](ROADMAP.md) for the full 10-phase implementation plan.
 
 ## Quick Start
 
+### Installation
+The easiest way to install NTNT is via Cargo. This will build the binary and add it to your global PATH.
+
 ```bash
-# Clone and build
+# Clone the repository
 git clone https://github.com/joshcramer/ntnt.git
 cd ntnt
-cargo build --release
 
+# Install globally
+cargo install --path .
+```
+
+### Usage
+Once installed, you can run NTNT from any directory:
+
+```bash
 # Run a program
-./target/release/ntnt examples/contracts_full.tnt
+ntnt run examples/contracts_full.tnt
 
 # Start the REPL
-./target/release/ntnt repl
+ntnt repl
+
+# Run a Web Application
+ntnt run examples/website.tnt
+# Browse to http://localhost:3000
 ```
 
 ## File Extension
