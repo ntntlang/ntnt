@@ -40,24 +40,24 @@ NTNT (pronounced "Intent") is an experimental programming language and ecosystem
 - String interpolation: `"Hello, {name}!"`
 - Raw strings: `r"no \n escapes"` and `r#"can use "quotes""#`
 
-**Phase 5: File I/O, HTTP & Utilities** 🚧 In Progress
+**Phase 5: Concurrency, I/O & Web** ✅ Complete
 
+- **Concurrency**: `std/concurrent` (channels, send/recv, try_recv, recv_timeout for Go-style concurrency)
 - File system: `std/fs` (read_file, write_file, exists, mkdir, remove, etc.)
 - Path utilities: `std/path` (join, dirname, basename, extension, resolve)
 - JSON parsing: `std/json` (parse, stringify)
 - Time operations: `std/time` (now, sleep, format_timestamp)
 - Cryptography: `std/crypto` (sha256, hmac_sha256, uuid, random_bytes)
 - URL utilities: `std/url` (parse, encode, decode, build_query)
-- HTTP Client: `std/http` (get, post, put, delete, request)
+- HTTP Client: `std/http` (get, post, put, delete, request with headers/auth)
 - **HTTP Server**: `std/http/server` (routing, middleware, static files, contract-verified endpoints)
 - **File-Based Routing**: `routes()` for convention-over-configuration (routes/, lib/, middleware/ auto-discovery)
 - **Agent Tooling**: `ntnt inspect` (JSON introspection), `ntnt validate` (pre-run error checking)
 - **PostgreSQL**: `std/db/postgres` (connect, query, execute, transactions)
-- **Concurrency**: `std/concurrent` (channels, send/recv, timeouts for Go-style concurrency)
 
-**240 passing tests** | **Version 0.1.8**
+**241 passing tests** | **Version 0.1.8**
 
-**Next Up**: Redis driver, caching layer (Phase 5 continued)
+**Next Up**: Phase 6 - Testing framework, contract-based test generation, intent annotations
 
 See [ROADMAP.md](ROADMAP.md) for the full 10-phase implementation plan.
 
@@ -127,9 +127,9 @@ NTNT reimagines software development for an era where AI agents handle the heavy
 
 NTNT is being developed toward production web application capabilities:
 
-- **Phase 5**: HTTP server with contract-verified endpoints ✅
-- **Phase 5**: Database access with repository patterns (in progress)
-- **Phase 5**: Async/await for concurrent operations (planned)
+- **Phases 1-5**: Core language, contracts, types, traits, web ✅ Complete
+- **Phase 6**: Testing framework with contract-based test generation
+- **Phase 7**: LSP, package manager, debugger
 - **Phase 11**: Docker deployment and container support
 
 Performance targets: <1ms contract overhead, >10k requests/sec

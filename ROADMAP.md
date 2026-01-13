@@ -30,7 +30,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, etc.)
 - [x] CLI with REPL, run, parse, lex, check commands
 - [x] VS Code extension with syntax highlighting
-- [x] 140 unit tests passing
+- [x] 241 unit tests passing
 - [x] File extension: `.tnt`
 - [x] Algebraic Data Types with enums
 - [x] Option<T> and Result<T, E> built-ins
@@ -186,7 +186,9 @@ fn process_file(path: String) -> Result<Data, Error> {
 
 ---
 
-## Phase 5: Concurrency, I/O & Web
+## Phase 5: Concurrency, I/O & Web ✅ COMPLETE
+
+**Status:** Complete
 
 **Goal:** Everything needed to build a web application.
 
@@ -804,8 +806,8 @@ These features are valuable but not essential for the initial release:
 | Phase  | Focus               | Business Value     | Effort   |
 | ------ | ------------------- | ------------------ | -------- |
 | 1-3 ✅ | Core Language       | Foundation         | Complete |
-| 4      | Traits + Essentials | High               | Medium   |
-| 5      | Async + Web         | **Critical**       | High     |
+| 4 ✅   | Traits + Essentials | High               | Complete |
+| 5 ✅   | Concurrency + Web   | **Critical**       | Complete |
 | 6      | Testing + Intents   | High               | Medium   |
 | 7      | Tooling             | Very High          | High     |
 | 8      | Performance         | High               | Medium   |
@@ -816,13 +818,13 @@ These features are valuable but not essential for the initial release:
 
 ## Milestones
 
-### M1: Language Complete (End of Phase 4)
+### M1: Language Complete (End of Phase 4) ✅
 
 - Traits and polymorphism
 - All essential language features
 - Comprehensive type system
 
-### M2: Web Ready (End of Phase 5)
+### M2: Web Ready (End of Phase 5) ✅
 
 - HTTP server running
 - Database connectivity
@@ -923,4 +925,4 @@ pub fn main() {
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: January 2026 (v0.1.2)_
+_Last updated: January 2026 (v0.1.8)_
