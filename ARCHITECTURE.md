@@ -170,6 +170,7 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 ## Future Extensions
 
 **Completed (Phases 1-5):**
+
 - HTTP server with contract-verified endpoints ✅
 - PostgreSQL database with transactions ✅
 - Go-style concurrency with channels ✅
@@ -177,6 +178,7 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 - Agent introspection (`ntnt inspect`) ✅
 
 **Planned:**
+
 - Testing framework with contract-based test generation (Phase 6)
 - LSP server for IDE integration (Phase 7)
 - Package manager with registry (Phase 7)

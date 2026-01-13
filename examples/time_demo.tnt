@@ -1,0 +1,135 @@
+// Comprehensive Time Module Demo
+// Demonstrates Go-like time handling in NTNT
+
+import { 
+    now, now_millis, to_iso, format, format_in,
+    year, month, month_name, day, hour, minute, second,
+    weekday, weekday_name, day_of_year, is_leap_year,
+    to_timezone, to_utc,
+    make_date, make_time, parse, parse_iso,
+    add_days, add_weeks, add_months, add_years, add_hours, add_seconds,
+    diff, before, after,
+    list_timezones,
+    SECOND, MINUTE, HOUR, DAY, WEEK
+} from "std/time"
+
+print("=== NTNT Time Module Demo ===\n")
+
+// Current time
+let ts = now()
+print("Current timestamp (UTC): " + str(ts))
+
+// ISO 8601 format
+print("ISO 8601: " + to_iso(ts))
+
+// Custom formatting
+print("Custom format: " + format(ts, "%Y-%m-%d %H:%M:%S"))
+print("Human readable: " + format(ts, "%A, %B %d, %Y"))
+
+// Date components
+print("\n--- Date Components ---")
+print("Year: " + str(year(ts)))
+print("Month: " + str(month(ts)) + " (" + month_name(ts) + ")")
+print("Day: " + str(day(ts)))
+print("Hour: " + str(hour(ts)))
+print("Minute: " + str(minute(ts)))
+print("Second: " + str(second(ts)))
+print("Day of week: " + str(weekday(ts)) + " (" + weekday_name(ts) + ")")
+print("Day of year: " + str(day_of_year(ts)))
+print("Leap year: " + str(is_leap_year(ts)))
+
+// Timezone conversion
+print("\n--- Timezone Support ---")
+let tz_map = to_timezone(ts, "America/New_York")
+print("New York: " + str(tz_map["hour"]) + ":" + str(tz_map["minute"]) + " (" + tz_map["offset"] + ")")
+
+let la = to_timezone(ts, "America/Los_Angeles")
+print("Los Angeles: " + str(la["hour"]) + ":" + str(la["minute"]) + " (" + la["offset"] + ")")
+
+let tokyo = to_timezone(ts, "Asia/Tokyo")
+print("Tokyo: " + str(tokyo["hour"]) + ":" + str(tokyo["minute"]) + " (" + tokyo["offset"] + ")")
+
+let london = to_timezone(ts, "Europe/London")
+print("London: " + str(london["hour"]) + ":" + str(london["minute"]) + " (" + london["offset"] + ")")
+
+// Format in timezone
+print("\nFormatted in timezone:")
+print("  NYC: " + format_in(ts, "America/New_York", "%Y-%m-%d %H:%M:%S %Z"))
+print("  Tokyo: " + format_in(ts, "Asia/Tokyo", "%Y-%m-%d %H:%M:%S %Z"))
+
+// Date creation
+print("\n--- Date Creation ---")
+match make_date(2024, 12, 25) {
+    Ok(xmas) => {
+        print("Christmas 2024: " + to_iso(xmas))
+        print("  Weekday: " + weekday_name(xmas))
+    },
+    Err(e) => print("Error: " + e)
+}
+
+match make_time(2024, 7, 4, 12, 0, 0) {
+    Ok(july4) => {
+        print("July 4th 2024 noon: " + format(july4, "%Y-%m-%d %H:%M:%S"))
+    },
+    Err(e) => print("Error: " + e)
+}
+
+// Date arithmetic
+print("\n--- Date Arithmetic ---")
+let tomorrow = add_days(ts, 1)
+print("Tomorrow: " + format(tomorrow, "%Y-%m-%d"))
+
+let next_week = add_weeks(ts, 1)
+print("Next week: " + format(next_week, "%Y-%m-%d"))
+
+let next_month = add_months(ts, 1)
+print("Next month: " + format(next_month, "%Y-%m-%d"))
+
+let next_year = add_years(ts, 1)
+print("Next year: " + format(next_year, "%Y-%m-%d"))
+
+let in_2_hours = add_hours(ts, 2)
+print("In 2 hours: " + format(in_2_hours, "%H:%M:%S"))
+
+// Using constants
+print("\n--- Duration Constants ---")
+print("One minute: " + str(MINUTE) + " seconds")
+print("One hour: " + str(HOUR) + " seconds")
+print("One day: " + str(DAY) + " seconds")
+print("One week: " + str(WEEK) + " seconds")
+
+let in_90_mins = add_seconds(ts, 90 * MINUTE)
+print("In 90 minutes: " + format(in_90_mins, "%H:%M:%S"))
+
+// Comparisons and diff
+print("\n--- Comparisons ---")
+let past = add_days(ts, -7)
+let future = add_days(ts, 7)
+
+print("7 days ago before now: " + str(before(past, ts)))
+print("7 days from now after now: " + str(after(future, ts)))
+
+let d = diff(ts, past)
+print("Difference: " + str(d["days"]) + " days, " + str(d["hours"]) + " hours")
+
+// Parsing
+print("\n--- Parsing Dates ---")
+match parse("2024-06-15 14:30:00", "%Y-%m-%d %H:%M:%S") {
+    Ok(parsed) => print("Parsed '2024-06-15 14:30:00': " + to_iso(parsed)),
+    Err(e) => print("Parse error: " + e)
+}
+
+match parse_iso("2024-03-20T10:30:00+00:00") {
+    Ok(parsed) => print("Parsed ISO date: " + format(parsed, "%Y-%m-%d %H:%M:%S")),
+    Err(e) => print("Parse error: " + e)
+}
+
+// List some timezones
+print("\n--- Available Timezones (sample) ---")
+let tzs = list_timezones()
+for i in 0..5 {
+    print("  " + tzs[i])
+}
+print("  ... and " + str(len(tzs) - 5) + " more")
+
+print("\n=== Demo Complete ===")

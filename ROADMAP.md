@@ -195,6 +195,7 @@ fn process_file(path: String) -> Result<Data, Error> {
 ### 5.1 Concurrency ✅ COMPLETE
 
 **Design Decision:** Go-style concurrency (threads + channels) instead of async/await.
+
 - Simpler mental model (no function coloring)
 - Existing stdlib works without modification
 - Covers 99% of web app use cases
@@ -231,6 +232,7 @@ close(ch)
 ```
 
 **Future Enhancements (Phase 5.1b):**
+
 - [ ] `spawn(fn)` / `join(handle)` - background task execution
 - [ ] `parallel([fn1, fn2, ...])` - run multiple functions in parallel
 - [ ] `select([ch1, ch2, ...])` - wait on multiple channels

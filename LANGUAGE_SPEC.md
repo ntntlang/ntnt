@@ -29,7 +29,7 @@ requires, ensures, invariant, old, result
 // Functions & Control
 fn, let, mut, if, else, match, for, in, while, loop, return, break, continue, defer
 
-// Types & Structures  
+// Types & Structures
 type, struct, enum, impl, trait, pub, self
 
 // Modules
@@ -235,7 +235,7 @@ trait Serializable {
 
 trait Comparable {
     fn compare(self, other: Self) -> Int
-    
+
     // Default implementation
     fn less_than(self, other: Self) -> Bool {
         return self.compare(other) < 0
@@ -302,7 +302,7 @@ match value {
 
 match number {
     0 => "zero",
-    1 => "one", 
+    1 => "one",
     n if n < 0 => "negative",
     _ => "other",
 }
@@ -316,7 +316,7 @@ Execute cleanup code when leaving scope (LIFO order):
 fn process_file(path: String) -> Result<Data, Error> {
     let file = open(path)
     defer close(file)  // Always runs, even on error/return
-    
+
     let data = read(file)
     return Ok(data)
 }
@@ -388,18 +388,60 @@ import { helper } from "./lib/utils"
 
 ### Core Modules
 
-| Module | Functions |
-|--------|-----------|
-| `std/string` | split, join, trim, replace, contains, starts_with, ends_with, to_upper, to_lower, char_at, substring, pad_left, pad_right |
-| `std/math` | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E |
-| `std/collections` | push, pop, shift, first, last, reverse, slice, concat, is_empty, contains, index_of, sort, map, filter, reduce, find |
-| `std/env` | get_env, set_env, args, cwd |
-| `std/fs` | read_file, write_file, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size |
-| `std/path` | join, dirname, basename, extension, stem, resolve, is_absolute, is_relative, with_extension, normalize |
-| `std/json` | parse, stringify, stringify_pretty |
-| `std/time` | now, now_millis, now_nanos, sleep, elapsed, format_timestamp, duration_secs, duration_millis |
-| `std/crypto` | sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode |
-| `std/url` | parse, encode, encode_component, decode, build_query, join |
+| Module            | Functions                                                                                                                                           |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `std/string`      | split, join, trim, replace, contains, starts_with, ends_with, to_upper, to_lower, char_at, substring, pad_left, pad_right                           |
+| `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E                                                                                      |
+| `std/collections` | push, pop, shift, first, last, reverse, slice, concat, is_empty, contains, index_of, sort, map, filter, reduce, find                                |
+| `std/env`         | get_env, set_env, args, cwd                                                                                                                         |
+| `std/fs`          | read_file, write_file, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size |
+| `std/path`        | join, dirname, basename, extension, stem, resolve, is_absolute, is_relative, with_extension, normalize                                              |
+| `std/json`        | parse, stringify, stringify_pretty                                                                                                                  |
+| `std/time`        | **Go-like time module:** now, now_millis, now_nanos, to_utc, to_timezone, format, format_in, to_iso, parse, parse_iso, make_time, make_date, add_seconds/minutes/hours/days/weeks/months/years, diff, before, after, equal, year/month/day/hour/minute/second, weekday, weekday_name, month_name, day_of_year, is_leap_year, list_timezones, sleep, elapsed, SECOND/MINUTE/HOUR/DAY/WEEK constants |
+| `std/crypto`      | sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode                                                           |
+| `std/url`         | parse, encode, encode_component, decode, build_query, join                                                                                          |
+
+### Time Module (`std/time`)
+
+The time module provides comprehensive Go-like time handling with IANA timezone support.
+
+```ntnt
+import { now, to_timezone, format, add_days, weekday_name, HOUR } from "std/time"
+
+// Current timestamp
+let ts = now()  // Unix timestamp (seconds)
+
+// Timezone conversion (returns map with year, month, day, hour, minute, second, etc.)
+let ny = to_timezone(ts, "America/New_York")
+print("NYC time: " + str(ny["hour"]) + ":" + str(ny["minute"]))  // EST/EDT
+
+// Formatting (strftime format)
+print(format(ts, "%Y-%m-%d %H:%M:%S"))    // 2026-01-13 04:06:53
+print(format_in(ts, "Asia/Tokyo", "%H:%M %Z"))  // 13:06 JST
+
+// Date creation
+match make_date(2024, 12, 25) {
+    Ok(xmas) => print(weekday_name(xmas)),  // Wednesday
+    Err(e) => print(e)
+}
+
+// Date arithmetic (calendar-aware)
+let tomorrow = add_days(ts, 1)
+let next_month = add_months(ts, 1)  // Handles month overflow
+let in_2_hours = add_seconds(ts, 2 * HOUR)
+
+// Parsing
+match parse_iso("2024-03-20T10:30:00+00:00") {
+    Ok(parsed) => print(parsed),
+    Err(e) => print(e)
+}
+
+// Comparisons
+print(before(ts, add_days(ts, 1)))  // true
+
+// Common timezones
+let tzs = list_timezones()  // ["UTC", "America/New_York", "Asia/Tokyo", ...]
+```
 
 ### HTTP Client (`std/http`)
 
@@ -505,7 +547,7 @@ let ch = channel()
 // Producer pattern
 send(ch, map { "type": "task", "data": process_item() })
 
-// Consumer pattern  
+// Consumer pattern
 let msg = recv(ch)
 print("Received: " + str(msg))
 
