@@ -5,6 +5,7 @@ When generating or editing `.tnt` files (NTNT language), follow these critical s
 ## ⚠️ ALWAYS Lint Before Run
 
 Before running any `.tnt` file, run `ntnt lint` first to catch common mistakes:
+
 ```bash
 ntnt lint myfile.tnt    # Always do this first
 ntnt run myfile.tnt     # Only after lint passes
@@ -13,7 +14,9 @@ ntnt run myfile.tnt     # Only after lint passes
 ## Mandatory Syntax Rules
 
 ### Map Literals
+
 Always use `map {}` for key-value structures. Never use bare `{}` for maps.
+
 ```ntnt
 // Correct
 let data = map { "name": "Alice", "age": 30 }
@@ -23,7 +26,9 @@ let data = { "name": "Alice" }
 ```
 
 ### String Interpolation
+
 Use `{expr}` directly in strings. Do not use `${expr}` or backticks.
+
 ```ntnt
 // Correct
 let msg = "Hello, {name}!"
@@ -33,7 +38,9 @@ let msg = `Hello, ${name}!`
 ```
 
 ### Route Patterns
+
 Always use raw strings `r"..."` for HTTP route patterns containing parameters.
+
 ```ntnt
 // Correct
 get(r"/users/{id}", handler)
@@ -43,7 +50,9 @@ get("/users/{id}", handler)
 ```
 
 ### NO Backslash Escapes - CRITICAL
+
 NTNT does NOT support `\"`, `\n`, `\t` in regular strings. Use raw strings:
+
 ```ntnt
 // Correct - raw string for content with quotes
 let html = r#"<div class="main">Hello</div>"#
@@ -53,7 +62,9 @@ let html = "<div class=\"main\">Hello</div>"
 ```
 
 ### Contract Placement
+
 Place `requires` and `ensures` between return type and function body.
+
 ```ntnt
 fn divide(a: Int, b: Int) -> Int
     requires b != 0
@@ -64,28 +75,36 @@ fn divide(a: Int, b: Int) -> Int
 ```
 
 ### Range Expressions
+
 Use `..` for exclusive ranges, `..=` for inclusive. No `range()` function.
+
 ```ntnt
 for i in 0..10 { }   // 0 to 9
 for i in 0..=10 { }  // 0 to 10
 ```
 
 ### Imports
+
 Use JavaScript-style imports with `/` path separators.
+
 ```ntnt
 import { split, join } from "std/string"
 import "std/math" as math
 ```
 
 ### Mutability
+
 Variables are immutable by default. Use `let mut` for mutable variables.
+
 ```ntnt
 let mut counter = 0
 counter = counter + 1
 ```
 
 ### Functions Over Methods
+
 Use standalone functions, not method calls.
+
 ```ntnt
 len("hello")      // Correct
 str(42)           // Correct
@@ -98,13 +117,14 @@ push(arr, item)   // Correct
 ## HTTP POST/Form Handling
 
 Use `parse_query()` from `std/url` to parse form data:
+
 ```ntnt
 import { parse_query } from "std/url"
 
 fn post(req) {
     // parse_query converts "name=Alice&age=25" → map { "name": "Alice", "age": "25" }
     let form = parse_query(req.body)
-    
+
     let name = form["name"]
     let age = int(form["age"])  // Convert to int for database!
 }
@@ -113,6 +133,7 @@ fn post(req) {
 ## Type Conversion for Database
 
 **Form fields are strings. Convert before database operations:**
+
 ```ntnt
 // WRONG - causes "db error"
 execute(db, "INSERT INTO users (age) VALUES ($1)", [form["age"]])
@@ -125,9 +146,11 @@ execute(db, "INSERT INTO users (age) VALUES ($1)", [age])
 ## Standard Library Reference
 
 ### Built-in (no import)
+
 `print`, `len`, `str`, `int`, `float`, `abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `Some`, `None`, `Ok`, `Err`, `unwrap`, `unwrap_or`, `is_some`, `is_none`, `is_ok`, `is_err`
 
 ### Common imports
+
 ```ntnt
 import { split, join, trim, replace } from "std/string"
 import { encode, decode, parse_query, build_query } from "std/url"

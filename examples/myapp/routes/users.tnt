@@ -56,10 +56,11 @@ fn get(req) {
                         let row_email = user_email + r#"</td><td>"#
                         let row_age = user_age + r#"</td><td class=""#
                         let row_status = status_class + r#"">"# + status + r#"</td><td>"#
-                        let row_form = r#"<form method="POST" action="/users/delete" style="display: inline;"><input type="hidden" name="id" value=""#
-                        let row_button = user_id + r#""><button type="submit" class="btn-delete">Delete</button></form></td></tr>"#
+                        let row_edit = r#"<a href="/users/edit?id="# + user_id + r#"" class="btn-edit">Edit</a> "#
+                        let row_delete_form = r#"<form method="POST" action="/users/delete" style="display: inline;"><input type="hidden" name="id" value=""#
+                        let row_delete_button = user_id + r#""><button type="submit" class="btn-delete">Delete</button></form></td></tr>"#
                         
-                        let row = row_start + row_id + row_name + row_email + row_age + row_status + row_form + row_button
+                        let row = row_start + row_id + row_name + row_email + row_age + row_status + row_edit + row_delete_form + row_delete_button
                         rows = rows + row
                     }
                     
@@ -151,6 +152,19 @@ fn get(req) {
         }
         button:hover {
             background: #0056b3;
+        }
+        .btn-edit {
+            background: #28a745;
+            color: white;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 0.9rem;
+            display: inline-block;
+            margin-right: 0.5rem;
+        }
+        .btn-edit:hover {
+            background: #218838;
         }
         .btn-delete {
             background: #dc3545;

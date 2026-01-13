@@ -140,8 +140,9 @@ cargo build --release
 ## Use `ntnt inspect` for Project Understanding
 
 Before making changes to an NTNT project, use `ntnt inspect` to understand:
+
 - Function signatures and contracts
-- HTTP routes and handlers  
+- HTTP routes and handlers
 - Module imports and dependencies
 - Struct definitions and invariants
 
@@ -169,7 +170,7 @@ import { parse_query } from "std/url"
 fn post(req) {
     // parse_query converts "name=Alice&age=25" → map { "name": "Alice", "age": "25" }
     let form = parse_query(req.body)
-    
+
     let name = form["name"]
     let age = int(form["age"])  // Convert to int for database!
 }

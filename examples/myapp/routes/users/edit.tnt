@@ -1,0 +1,263 @@
+// routes/users/edit.tnt → GET /users/edit and POST /users/edit
+
+import { html } from "std/http/server"
+import { connect, query, execute, close } from "std/db/postgres"
+import { get_env } from "std/env"
+import { parse_query } from "std/url"
+
+fn get_db_connection() {
+    let db_url = match get_env("DATABASE_URL") {
+        Some(url) => url,
+        None => "postgres://ntnt:password@localhost/ntnt"
+    }
+    return connect(db_url)
+}
+
+// GET /users/edit?id=123 - Show edit form
+fn get(req) {
+    let user_id = int(req.query_params["id"])
+    
+    let db_result = get_db_connection()
+    
+    match db_result {
+        Ok(db) => {
+            let user_result = query(db, 
+                "SELECT id, name, email, age, active FROM users WHERE id = $1",
+                [user_id]
+            )
+            
+            close(db)
+            
+            match user_result {
+                Ok(users) => {
+                    if len(users) == 0 {
+                        return html(r#"<!DOCTYPE html>
+<html>
+<head><title>User Not Found</title></head>
+<body>
+    <h1>User Not Found</h1>
+    <p><a href="/users">← Back to Users</a></p>
+</body>
+</html>"#)
+                    }
+                    
+                    let user = users[0]
+                    let id_str = str(user["id"])
+                    let name = user["name"]
+                    let email = user["email"]
+                    let age_str = str(user["age"])
+                    let is_active = user["active"]
+                    
+                    let checked = match is_active {
+                        true => " checked",
+                        _ => ""
+                    }
+                    
+                    let page = r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>Edit User - NTNT Demo</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+        }
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: #555;
+            font-weight: 500;
+        }
+        input[type="text"],
+        input[type="email"],
+        input[type="number"] {
+            width: 100%;
+            padding: 0.5rem;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        input[type="checkbox"] {
+            margin-right: 0.5rem;
+        }
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            font-weight: normal;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 4px;
+            font-size: 1rem;
+            cursor: pointer;
+            margin-right: 1rem;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        .btn-cancel {
+            background: #6c757d;
+            text-decoration: none;
+            display: inline-block;
+            padding: 0.75rem 1.5rem;
+            border-radius: 4px;
+            color: white;
+        }
+        .btn-cancel:hover {
+            background: #545b62;
+        }
+        .back-link {
+            color: #007bff;
+            text-decoration: none;
+            margin-top: 1rem;
+            display: inline-block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Edit User #"# + id_str + r#"</h1>
+        
+        <form method="POST" action="/users/edit">
+            <input type="hidden" name="id" value=""# + id_str + r#"">
+            
+            <div class="form-group">
+                <label>Name:</label>
+                <input type="text" name="name" value=""# + name + r#"" required>
+            </div>
+            
+            <div class="form-group">
+                <label>Email:</label>
+                <input type="email" name="email" value=""# + email + r#"" required>
+            </div>
+            
+            <div class="form-group">
+                <label>Age:</label>
+                <input type="number" name="age" value=""# + age_str + r#"" min="1" max="150" required>
+            </div>
+            
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="hidden" name="active" value="false">
+                    <input type="checkbox" name="active" value="true""# + checked + r#">
+                    Active
+                </label>
+            </div>
+            
+            <button type="submit">Update User</button>
+            <a href="/users" class="btn-cancel">Cancel</a>
+        </form>
+    </div>
+</body>
+</html>"#
+                    
+                    return html(page)
+                }
+                Err(e) => {
+                    return html(r#"<!DOCTYPE html>
+<html>
+<head><title>Error</title></head>
+<body>
+    <h1>Database Error</h1>
+    <p>Failed to load user: "# + e + r#"</p>
+    <p><a href="/users">← Back to Users</a></p>
+</body>
+</html>"#)
+                }
+            }
+        }
+        Err(e) => {
+            return html(r#"<!DOCTYPE html>
+<html>
+<head><title>Database Error</title></head>
+<body>
+    <h1>Database Error</h1>
+    <p>Failed to connect: "# + e + r#"</p>
+    <p><a href="/users">← Back to Users</a></p>
+</body>
+</html>"#)
+        }
+    }
+}
+
+// POST /users/edit - Update user
+fn post(req) {
+    let db_result = get_db_connection()
+    
+    match db_result {
+        Ok(db) => {
+            let form = parse_query(req.body)
+            let user_id = int(form["id"])
+            let name = form["name"]
+            let email = form["email"]
+            let age = int(form["age"])
+            
+            // Checkbox: hidden input sends "false", checkbox (if checked) sends "true"
+            // parse_query() takes the last value when keys repeat, so checked = "true", unchecked = "false"
+            let active = form["active"] == "true"
+            
+            let update_result = execute(db,
+                "UPDATE users SET name = $1, email = $2, age = $3, active = $4 WHERE id = $5",
+                [name, email, age, active, user_id]
+            )
+            
+            close(db)
+            
+            match update_result {
+                Ok(_) => {
+                    return html(r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="refresh" content="0;url=/users">
+</head>
+<body>
+    <p>User updated successfully. <a href="/users">Click here if not redirected.</a></p>
+</body>
+</html>"#)
+                }
+                Err(e) => {
+                    return html(r#"<!DOCTYPE html>
+<html>
+<head><title>Error</title></head>
+<body>
+    <h1>Failed to update user</h1>
+    <p>Error: "# + e + r#"</p>
+    <p><a href="/users">← Back to Users</a></p>
+</body>
+</html>"#)
+                }
+            }
+        }
+        Err(e) => {
+            return html(r#"<!DOCTYPE html>
+<html>
+<head><title>Database Error</title></head>
+<body>
+    <h1>Database Error</h1>
+    <p>Failed to connect: "# + e + r#"</p>
+    <p><a href="/users">← Back to Users</a></p>
+</body>
+</html>"#)
+        }
+    }
+}

@@ -15,6 +15,7 @@ ntnt run myfile.tnt
 ```
 
 The `ntnt lint` command catches common mistakes like:
+
 - Escaped quotes (`\"`) which cause parser errors
 - JavaScript-style `${var}` interpolation
 - Python-style `range()` calls
@@ -260,23 +261,23 @@ print(response.body)      // ERROR if get() returned Err
 
 ### Built-in Functions (No Import Required)
 
-| Function | Description |
-|----------|-------------|
-| `print(...)` | Output to stdout |
-| `len(x)` | Length of string/array |
-| `str(x)` | Convert any value to string |
-| `int(x)` | Convert string to integer |
-| `float(x)` | Convert string to float |
-| `abs(x)` | Absolute value |
-| `min(a, b)` | Minimum of two values |
-| `max(a, b)` | Maximum of two values |
-| `sqrt(x)` | Square root |
-| `pow(base, exp)` | Exponentiation |
-| `round(x)`, `floor(x)`, `ceil(x)` | Rounding |
-| `Some(v)`, `None` | Option constructors |
-| `Ok(v)`, `Err(e)` | Result constructors |
-| `unwrap(x)`, `unwrap_or(x, default)` | Unwrap helpers |
-| `is_some(x)`, `is_none(x)`, `is_ok(x)`, `is_err(x)` | Type checks |
+| Function                                            | Description                 |
+| --------------------------------------------------- | --------------------------- |
+| `print(...)`                                        | Output to stdout            |
+| `len(x)`                                            | Length of string/array      |
+| `str(x)`                                            | Convert any value to string |
+| `int(x)`                                            | Convert string to integer   |
+| `float(x)`                                          | Convert string to float     |
+| `abs(x)`                                            | Absolute value              |
+| `min(a, b)`                                         | Minimum of two values       |
+| `max(a, b)`                                         | Maximum of two values       |
+| `sqrt(x)`                                           | Square root                 |
+| `pow(base, exp)`                                    | Exponentiation              |
+| `round(x)`, `floor(x)`, `ceil(x)`                   | Rounding                    |
+| `Some(v)`, `None`                                   | Option constructors         |
+| `Ok(v)`, `Err(e)`                                   | Result constructors         |
+| `unwrap(x)`, `unwrap_or(x, default)`                | Unwrap helpers              |
+| `is_some(x)`, `is_none(x)`, `is_ok(x)`, `is_err(x)` | Type checks                 |
 
 ### Common Imports
 
@@ -370,11 +371,11 @@ fn post(req) {
     // parse_query converts "name=Alice&email=alice%40example.com&age=30"
     // into map { "name": "Alice", "email": "alice@example.com", "age": "30" }
     let form = parse_query(req.body)
-    
+
     let name = form["name"]     // "Alice"
     let email = form["email"]   // "alice@example.com" (auto URL-decoded)
     let age = int(form["age"])  // 30 (convert string to int for database)
-    
+
     // ...process data...
 }
 ```
@@ -428,7 +429,7 @@ struct BankAccount {
 
 impl BankAccount {
     invariant self.balance >= 0
-    
+
     fn deposit(self, amount: Int) -> Int
         requires amount > 0
         ensures self.balance == old(self.balance) + amount
@@ -452,6 +453,7 @@ ntnt inspect ./routes --pretty
 ```
 
 Output includes:
+
 - All functions with their contracts
 - HTTP routes with handlers
 - Module imports
@@ -465,7 +467,7 @@ Output includes:
 fn process_file(path: String) {
     let file = open(path)
     defer close(file)  // Always runs on scope exit
-    
+
     // Work with file...
 }
 ```
@@ -491,7 +493,7 @@ let msg = recv(ch)
 ```ntnt
 fn fetch_user(id: String) -> Result<User, String> {
     let response = get("https://api.example.com/users/{id}")
-    
+
     match response {
         Ok(r) => {
             if r.status == 200 {
@@ -550,7 +552,7 @@ match users_result {
 }
 
 // execute() - For INSERT, UPDATE, DELETE (no rows returned)
-let insert_result = execute(db, 
+let insert_result = execute(db,
     "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
     [name, email, age]
 )
@@ -570,7 +572,7 @@ let name = "Alice"                    // String for VARCHAR
 let age = int(age_str)                // Integer for INT column
 let active = true                     // Boolean for BOOLEAN column
 
-execute(db, 
+execute(db,
     "INSERT INTO users (name, age, active) VALUES ($1, $2, $3)",
     [name, age, active]
 )
@@ -595,7 +597,7 @@ for user in users {
     let id = user["id"]         // Integer
     let name = user["name"]     // String
     let email = user["email"]   // String
-    
+
     // Convert to string for display/concatenation
     let id_str = str(user["id"])
     print("User #{id_str}: {name}")
@@ -612,14 +614,14 @@ import { parse_query } from "std/url"
 // CREATE - POST handler
 fn post(req) {
     let db = unwrap(connect("postgres://..."))
-    
+
     let form = parse_query(req.body)
     let name = form["name"]
     let age = int(form["age"])  // Convert to int for database!
-    
+
     execute(db, "INSERT INTO users (name, age) VALUES ($1, $2)", [name, age])
     close(db)
-    
+
     return html(r#"<p>User created!</p>"#)
 }
 
@@ -628,20 +630,20 @@ fn get(req) {
     let db = unwrap(connect("postgres://..."))
     let users = unwrap(query(db, "SELECT * FROM users", []))
     close(db)
-    
+
     // Build response...
 }
 
 // DELETE - POST handler (HTML forms only support GET/POST)
 fn delete_user(req) {
     let db = unwrap(connect("postgres://..."))
-    
+
     let form = parse_query(req.body)
     let user_id = int(form["id"])  // Convert to int for database!
-    
+
     execute(db, "DELETE FROM users WHERE id = $1", [user_id])
     close(db)
-    
+
     return html(r#"<p>User deleted!</p>"#)
 }
 ```
