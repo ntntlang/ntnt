@@ -388,25 +388,25 @@ import { helper } from "./lib/utils"
 
 ### Core Modules
 
-| Module            | Functions                                                                                                                                                                                                                                                                                                                                                                                          |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Module            | Functions                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `std/string`      | **Comprehensive:** split, join, concat, repeat, reverse, trim, trim_left, trim_right, trim_chars, to_upper, to_lower, capitalize, title, to_snake_case, to_camel_case, to_pascal_case, to_kebab_case, slugify, contains, starts_with, ends_with, index_of, last_index_of, count, replace, replace_all, char_at, substring, chars, lines, words, truncate, pad_left, pad_right, center, is_empty, is_blank, is_numeric, is_alpha, is_alphanumeric, is_lowercase, is_uppercase, is_whitespace, matches |
-| `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E                                                                                                                                                                                                                                                                                                                                     |
-| `std/collections` | push, pop, shift, first, last, reverse, slice, concat, is_empty, contains, index_of, sort, map, filter, reduce, find                                                                                                                                                                                                                                                                               |
-| `std/env`         | get_env, set_env, args, cwd                                                                                                                                                                                                                                                                                                                                                                        |
-| `std/fs`          | read_file, write_file, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size                                                                                                                                                                                                                                                |
-| `std/path`        | join, dirname, basename, extension, stem, resolve, is_absolute, is_relative, with_extension, normalize                                                                                                                                                                                                                                                                                             |
-| `std/json`        | parse, stringify, stringify_pretty                                                                                                                                                                                                                                                                                                                                                                 |
-| `std/time`        | **Go-like time module:** now, now_millis, now_nanos, to_utc, to_timezone, format, format_in, to_iso, parse, parse_iso, make_time, make_date, add_seconds/minutes/hours/days/weeks/months/years, diff, before, after, equal, year/month/day/hour/minute/second, weekday, weekday_name, month_name, day_of_year, is_leap_year, list_timezones, sleep, elapsed, SECOND/MINUTE/HOUR/DAY/WEEK constants |
-| `std/crypto`      | sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode                                                                                                                                                                                                                                                                                                          |
-| `std/url`         | parse, encode, encode_component, decode, build_query, join                                                                                                                                                                                                                                                                                                                                         |
+| `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `std/collections` | push, pop, shift, first, last, reverse, slice, concat, is_empty, contains, index_of, sort, map, filter, reduce, find                                                                                                                                                                                                                                                                                                                                                                                 |
+| `std/env`         | get_env, set_env, args, cwd                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `std/fs`          | read_file, write_file, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size                                                                                                                                                                                                                                                                                                                                                  |
+| `std/path`        | join, dirname, basename, extension, stem, resolve, is_absolute, is_relative, with_extension, normalize                                                                                                                                                                                                                                                                                                                                                                                               |
+| `std/json`        | parse, stringify, stringify_pretty                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `std/time`        | **Go-like time module:** now, now_millis, now_nanos, to_utc, to_timezone, format, format_in, to_iso, parse, parse_iso, make_time, make_date, add_seconds/minutes/hours/days/weeks/months/years, diff, before, after, equal, year/month/day/hour/minute/second, weekday, weekday_name, month_name, day_of_year, is_leap_year, list_timezones, sleep, elapsed, SECOND/MINUTE/HOUR/DAY/WEEK constants                                                                                                   |
+| `std/crypto`      | sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `std/url`         | parse, encode, encode_component, decode, build_query, join                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 ### String Module (`std/string`)
 
 Comprehensive string manipulation matching Go and JavaScript capabilities.
 
 ```ntnt
-import { 
+import {
     trim, trim_left, trim_right, trim_chars,
     to_upper, to_lower, capitalize, title,
     to_snake_case, to_camel_case, to_kebab_case, slugify,
@@ -501,7 +501,8 @@ let tzs = list_timezones()  // ["UTC", "America/New_York", "Asia/Tokyo", ...]
 ### HTTP Client (`std/http`)
 
 ```ntnt
-import { get, post, request, get_json, post_json } from "std/http"
+import { get, post, put, delete, patch, head, request, fetch } from "std/http"
+import { get_json, post_json, post_form, basic_auth, download, upload } from "std/http"
 
 // Simple GET
 match get("https://api.example.com/data") {
@@ -513,6 +514,33 @@ match get("https://api.example.com/data") {
 match post("https://api.example.com/users", "{\"name\": \"Alice\"}") {
     Ok(response) => print(response.status),
     Err(e) => print("Error: " + e)
+}
+
+// POST form data (application/x-www-form-urlencoded)
+match post_form("https://api.example.com/login", map {
+    "username": "alice",
+    "password": "secret"
+}) {
+    Ok(response) => print(response.status),
+    Err(e) => print("Error: " + e)
+}
+
+// Basic Authentication
+match basic_auth("https://api.example.com/secure", "user", "pass") {
+    Ok(response) => print(response.body),
+    Err(e) => print("Auth failed: " + e)
+}
+
+// Download file
+match download("https://example.com/file.pdf", "./downloads/file.pdf") {
+    Ok(result) => print("Downloaded " + result.size + " bytes"),
+    Err(e) => print("Download failed: " + e)
+}
+
+// Upload file (multipart form)
+match upload("https://api.example.com/upload", "./photo.jpg", "file") {
+    Ok(response) => print(response.body),
+    Err(e) => print("Upload failed: " + e)
 }
 
 // Full request with headers
@@ -529,7 +557,42 @@ match request(map {
     Ok(response) => print(response.body),
     Err(e) => print("Error: " + e)
 }
+
+// fetch() - Full request with cookies support
+match fetch(map {
+    "url": "https://api.example.com/session",
+    "method": "GET",
+    "cookies": map { "session_id": "abc123" },
+    "headers": map { "Accept": "application/json" }
+}) {
+    Ok(response) => {
+        print(response.body)
+        // Response includes cookies from server
+        if response.cookies != nil {
+            print(response.cookies)
+        }
+    },
+    Err(e) => print("Error: " + e)
+}
 ```
+
+**HTTP Functions:**
+| Function | Description |
+|----------|-------------|
+| `get(url)` | Simple GET request |
+| `post(url, body)` | POST with text body |
+| `put(url, body)` | PUT request |
+| `delete(url)` | DELETE request |
+| `patch(url, body)` | PATCH request |
+| `head(url)` | HEAD request (headers only) |
+| `get_json(url)` | GET with JSON response parsing |
+| `post_json(url, data)` | POST JSON data |
+| `post_form(url, form)` | POST form-urlencoded data |
+| `basic_auth(url, user, pass)` | GET with Basic auth |
+| `download(url, path)` | Download to file |
+| `upload(url, path, field)` | Multipart file upload |
+| `request(opts)` | Full control (method, headers, timeout) |
+| `fetch(opts)` | Full control + cookies |
 
 ### HTTP Server (`std/http/server`)
 

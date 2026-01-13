@@ -1,9 +1,14 @@
 //! std/http module - HTTP client for making requests
 
 use std::collections::HashMap;
+use std::io::Write;
+use std::fs::File;
+use std::path::Path;
 use crate::interpreter::Value;
 use crate::error::IntentError;
 use crate::stdlib::json::{json_to_intent_value, intent_value_to_json};
+use reqwest::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
+use base64::Engine;
 
 type Result<T> = std::result::Result<T, IntentError>;
 
@@ -425,6 +430,360 @@ fn http_post_json(url: &str, data: &Value) -> Result<Value> {
     }
 }
 
+/// HTTP GET with Basic Authentication
+fn http_basic_auth(url: &str, username: &str, password: &str) -> Result<Value> {
+    let credentials = format!("{}:{}", username, password);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+    let auth_header = format!("Basic {}", encoded);
+    
+    let client = reqwest::blocking::Client::new();
+    match client.get(url)
+        .header(AUTHORIZATION, &auth_header)
+        .send() {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let headers = response.headers().clone();
+            match response.text() {
+                Ok(body) => {
+                    let resp_value = response_to_value(status, &headers, body);
+                    Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Ok".to_string(),
+                        values: vec![resp_value],
+                    })
+                }
+                Err(e) => Ok(Value::EnumValue {
+                    enum_name: "Result".to_string(),
+                    variant: "Err".to_string(),
+                    values: vec![Value::String(format!("Failed to read response body: {}", e))],
+                }),
+            }
+        }
+        Err(e) => Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            values: vec![Value::String(format!("HTTP request failed: {}", e))],
+        }),
+    }
+}
+
+/// HTTP POST with form data (application/x-www-form-urlencoded)
+fn http_post_form(url: &str, form_data: &HashMap<String, Value>) -> Result<Value> {
+    let mut form: Vec<(String, String)> = Vec::new();
+    
+    for (key, value) in form_data {
+        let string_value = match value {
+            Value::String(s) => s.clone(),
+            Value::Int(i) => i.to_string(),
+            Value::Float(f) => f.to_string(),
+            Value::Bool(b) => b.to_string(),
+            _ => format!("{:?}", value),
+        };
+        form.push((key.clone(), string_value));
+    }
+    
+    let client = reqwest::blocking::Client::new();
+    match client.post(url)
+        .form(&form)
+        .send() {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let headers = response.headers().clone();
+            match response.text() {
+                Ok(body) => {
+                    let resp_value = response_to_value(status, &headers, body);
+                    Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Ok".to_string(),
+                        values: vec![resp_value],
+                    })
+                }
+                Err(e) => Ok(Value::EnumValue {
+                    enum_name: "Result".to_string(),
+                    variant: "Err".to_string(),
+                    values: vec![Value::String(format!("Failed to read response body: {}", e))],
+                }),
+            }
+        }
+        Err(e) => Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            values: vec![Value::String(format!("HTTP request failed: {}", e))],
+        }),
+    }
+}
+
+/// Download a file from URL
+fn http_download(url: &str, file_path: &str) -> Result<Value> {
+    let path = Path::new(file_path);
+    
+    // Create parent directories if they don't exist
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| IntentError::RuntimeError(format!("Failed to create directory: {}", e)))?;
+        }
+    }
+    
+    let client = reqwest::blocking::Client::new();
+    match client.get(url).send() {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            if status >= 200 && status < 300 {
+                match response.bytes() {
+                    Ok(bytes) => {
+                        match File::create(path) {
+                            Ok(mut file) => {
+                                match file.write_all(&bytes) {
+                                    Ok(_) => {
+                                        let mut result_map = HashMap::new();
+                                        result_map.insert("status".to_string(), Value::Int(status as i64));
+                                        result_map.insert("path".to_string(), Value::String(file_path.to_string()));
+                                        result_map.insert("size".to_string(), Value::Int(bytes.len() as i64));
+                                        
+                                        Ok(Value::EnumValue {
+                                            enum_name: "Result".to_string(),
+                                            variant: "Ok".to_string(),
+                                            values: vec![Value::Map(result_map)],
+                                        })
+                                    }
+                                    Err(e) => Ok(Value::EnumValue {
+                                        enum_name: "Result".to_string(),
+                                        variant: "Err".to_string(),
+                                        values: vec![Value::String(format!("Failed to write file: {}", e))],
+                                    }),
+                                }
+                            }
+                            Err(e) => Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(format!("Failed to create file: {}", e))],
+                            }),
+                        }
+                    }
+                    Err(e) => Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Err".to_string(),
+                        values: vec![Value::String(format!("Failed to read response: {}", e))],
+                    }),
+                }
+            } else {
+                Ok(Value::EnumValue {
+                    enum_name: "Result".to_string(),
+                    variant: "Err".to_string(),
+                    values: vec![Value::String(format!("HTTP error: status {}", status))],
+                })
+            }
+        }
+        Err(e) => Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            values: vec![Value::String(format!("HTTP request failed: {}", e))],
+        }),
+    }
+}
+
+/// Upload a file to URL (multipart form data)
+fn http_upload(url: &str, file_path: &str, field_name: &str) -> Result<Value> {
+    use reqwest::blocking::multipart;
+    
+    let path = Path::new(file_path);
+    if !path.exists() {
+        return Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            values: vec![Value::String(format!("File not found: {}", file_path))],
+        });
+    }
+    
+    let file_name = path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    
+    let form = multipart::Form::new()
+        .file(field_name.to_string(), file_path)
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to create form with file: {}", e)))?;
+    
+    let client = reqwest::blocking::Client::new();
+    match client.post(url)
+        .multipart(form)
+        .send() {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let headers = response.headers().clone();
+            match response.text() {
+                Ok(body) => {
+                    let mut resp_value = response_to_value(status, &headers, body);
+                    // Add the filename to the response for convenience
+                    if let Value::Map(ref mut map) = resp_value {
+                        map.insert("filename".to_string(), Value::String(file_name));
+                    }
+                    Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Ok".to_string(),
+                        values: vec![resp_value],
+                    })
+                }
+                Err(e) => Ok(Value::EnumValue {
+                    enum_name: "Result".to_string(),
+                    variant: "Err".to_string(),
+                    values: vec![Value::String(format!("Failed to read response body: {}", e))],
+                }),
+            }
+        }
+        Err(e) => Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            values: vec![Value::String(format!("HTTP request failed: {}", e))],
+        }),
+    }
+}
+
+/// HTTP request with cookies
+fn http_request_with_cookies(opts: &HashMap<String, Value>) -> Result<Value> {
+    let url = match opts.get("url") {
+        Some(Value::String(u)) => u.clone(),
+        _ => return Err(IntentError::TypeError("request() requires 'url' option".to_string())),
+    };
+    
+    let method = match opts.get("method") {
+        Some(Value::String(m)) => m.to_uppercase(),
+        _ => "GET".to_string(),
+    };
+    
+    // Build client with cookie store if needed
+    let client_builder = reqwest::blocking::Client::builder();
+    let client = client_builder
+        .cookie_store(true)
+        .build()
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to create HTTP client: {}", e)))?;
+    
+    let mut request = match method.as_str() {
+        "GET" => client.get(&url),
+        "POST" => client.post(&url),
+        "PUT" => client.put(&url),
+        "DELETE" => client.delete(&url),
+        "PATCH" => client.patch(&url),
+        "HEAD" => client.head(&url),
+        _ => return Err(IntentError::RuntimeError(format!("Unsupported HTTP method: {}", method))),
+    };
+    
+    // Add headers
+    if let Some(Value::Map(headers)) = opts.get("headers") {
+        for (key, value) in headers {
+            if let Value::String(v) = value {
+                request = request.header(key.as_str(), v.as_str());
+            }
+        }
+    }
+    
+    // Add cookies from map
+    if let Some(Value::Map(cookies)) = opts.get("cookies") {
+        let cookie_str: Vec<String> = cookies.iter()
+            .filter_map(|(k, v)| {
+                if let Value::String(val) = v {
+                    Some(format!("{}={}", k, val))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !cookie_str.is_empty() {
+            request = request.header(COOKIE, cookie_str.join("; "));
+        }
+    }
+    
+    // Add basic auth
+    if let (Some(Value::String(username)), Some(Value::String(password))) = 
+        (opts.get("username"), opts.get("password")) {
+        let credentials = format!("{}:{}", username, password);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+        request = request.header(AUTHORIZATION, format!("Basic {}", encoded));
+    }
+    
+    // Add body
+    if let Some(Value::String(body)) = opts.get("body") {
+        request = request.body(body.clone());
+    }
+    
+    // Add JSON body
+    if let Some(data) = opts.get("json") {
+        let json_body = intent_value_to_json(data);
+        request = request.header("Content-Type", "application/json")
+            .body(json_body.to_string());
+    }
+    
+    // Add form data
+    if let Some(Value::Map(form_data)) = opts.get("form") {
+        let mut form: Vec<(String, String)> = Vec::new();
+        for (key, value) in form_data {
+            let string_value = match value {
+                Value::String(s) => s.clone(),
+                Value::Int(i) => i.to_string(),
+                Value::Float(f) => f.to_string(),
+                Value::Bool(b) => b.to_string(),
+                _ => format!("{:?}", value),
+            };
+            form.push((key.clone(), string_value));
+        }
+        request = request.form(&form);
+    }
+    
+    // Add timeout (in seconds)
+    if let Some(Value::Int(timeout)) = opts.get("timeout") {
+        request = request.timeout(std::time::Duration::from_secs(*timeout as u64));
+    }
+    
+    match request.send() {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let headers = response.headers().clone();
+            
+            // Extract cookies from response
+            let mut response_cookies = HashMap::new();
+            for cookie_header in headers.get_all(SET_COOKIE) {
+                if let Ok(cookie_str) = cookie_header.to_str() {
+                    // Parse simple cookie format: name=value; ...
+                    if let Some(equals_pos) = cookie_str.find('=') {
+                        let name = cookie_str[..equals_pos].to_string();
+                        let rest = &cookie_str[equals_pos + 1..];
+                        let value = rest.split(';').next().unwrap_or("").to_string();
+                        response_cookies.insert(name, Value::String(value));
+                    }
+                }
+            }
+            
+            match response.text() {
+                Ok(body) => {
+                    let mut resp_value = response_to_value(status, &headers, body);
+                    // Add cookies to response
+                    if let Value::Map(ref mut map) = resp_value {
+                        if !response_cookies.is_empty() {
+                            map.insert("cookies".to_string(), Value::Map(response_cookies));
+                        }
+                    }
+                    Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Ok".to_string(),
+                        values: vec![resp_value],
+                    })
+                }
+                Err(e) => Ok(Value::EnumValue {
+                    enum_name: "Result".to_string(),
+                    variant: "Err".to_string(),
+                    values: vec![Value::String(format!("Failed to read response body: {}", e))],
+                }),
+            }
+        }
+        Err(e) => Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            values: vec![Value::String(format!("HTTP request failed: {}", e))],
+        }),
+    }
+}
+
 /// Initialize the std/http module
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
@@ -533,6 +892,68 @@ pub fn init() -> HashMap<String, Value> {
             match (&args[0], &args[1]) {
                 (Value::String(url), data) => http_post_json(url, data),
                 _ => Err(IntentError::TypeError("post_json() requires URL string and data".to_string())),
+            }
+        },
+    });
+    
+    // basic_auth(url, username, password) -> Result<Response, Error> - GET with Basic auth
+    module.insert("basic_auth".to_string(), Value::NativeFunction {
+        name: "basic_auth".to_string(),
+        arity: 3,
+        func: |args| {
+            match (&args[0], &args[1], &args[2]) {
+                (Value::String(url), Value::String(username), Value::String(password)) => 
+                    http_basic_auth(url, username, password),
+                _ => Err(IntentError::TypeError("basic_auth() requires URL, username, and password strings".to_string())),
+            }
+        },
+    });
+    
+    // post_form(url, form_data) -> Result<Response, Error> - POST with form encoding
+    module.insert("post_form".to_string(), Value::NativeFunction {
+        name: "post_form".to_string(),
+        arity: 2,
+        func: |args| {
+            match (&args[0], &args[1]) {
+                (Value::String(url), Value::Map(form_data)) => http_post_form(url, form_data),
+                _ => Err(IntentError::TypeError("post_form() requires URL string and form data map".to_string())),
+            }
+        },
+    });
+    
+    // download(url, file_path) -> Result<{status, path, size}, Error> - Download file
+    module.insert("download".to_string(), Value::NativeFunction {
+        name: "download".to_string(),
+        arity: 2,
+        func: |args| {
+            match (&args[0], &args[1]) {
+                (Value::String(url), Value::String(file_path)) => http_download(url, file_path),
+                _ => Err(IntentError::TypeError("download() requires URL string and file path string".to_string())),
+            }
+        },
+    });
+    
+    // upload(url, file_path, field_name) -> Result<Response, Error> - Upload file
+    module.insert("upload".to_string(), Value::NativeFunction {
+        name: "upload".to_string(),
+        arity: 3,
+        func: |args| {
+            match (&args[0], &args[1], &args[2]) {
+                (Value::String(url), Value::String(file_path), Value::String(field_name)) => 
+                    http_upload(url, file_path, field_name),
+                _ => Err(IntentError::TypeError("upload() requires URL, file path, and field name strings".to_string())),
+            }
+        },
+    });
+    
+    // fetch(options) -> Result<Response, Error> - Full HTTP request with cookies/auth support
+    module.insert("fetch".to_string(), Value::NativeFunction {
+        name: "fetch".to_string(),
+        arity: 1,
+        func: |args| {
+            match &args[0] {
+                Value::Map(opts) => http_request_with_cookies(opts),
+                _ => Err(IntentError::TypeError("fetch() requires an options map".to_string())),
             }
         },
     });

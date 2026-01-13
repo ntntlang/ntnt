@@ -1,0 +1,239 @@
+// HTTP Client Demo - Showcasing all HTTP client features in NTNT
+// Run with: ntnt examples/http_client_demo.tnt
+
+import { get, post, put, patch, head, get_json, post_json, post_form, basic_auth, request, fetch } from "std/http"
+import { repeat } from "std/string"
+
+fn main() {
+    print("🌐 NTNT HTTP Client Demo")
+    print(repeat("=", 50))
+    
+    // 1. Basic GET request
+    print("")
+    print("📥 1. Basic GET Request")
+    match get("https://httpbin.org/get") {
+        Ok(response) => {
+            print("  Status: ")
+            print(response.status)
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    // 2. GET with JSON parsing
+    print("")
+    print("📊 2. GET JSON (auto-parse)")
+    match get_json("https://httpbin.org/json") {
+        Ok(data) => {
+            print("  Parsed JSON successfully!")
+            print("  Slideshow author: ")
+            print(data.slideshow.author)
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    // 3. POST request
+    print("")
+    print("📤 3. POST Request")
+    match post("https://httpbin.org/post", "Hello, World!") {
+        Ok(response) => {
+            print("  Status: ")
+            print(response.status)
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    // 4. POST JSON data
+    print("")
+    print("📝 4. POST JSON Data")
+    let user_data = map {
+        "name": "Alice",
+        "role": "Developer",
+        "active": "true"
+    }
+    match post_json("https://httpbin.org/post", user_data) {
+        Ok(response) => {
+            print("  JSON posted successfully!")
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    // 5. POST Form data (application/x-www-form-urlencoded)
+    print("")
+    print("📋 5. POST Form Data")
+    let form = map {
+        "username": "bob",
+        "password": "secret123",
+        "remember": "true"
+    }
+    match post_form("https://httpbin.org/post", form) {
+        Ok(response) => {
+            print("  Status: ")
+            print(response.status)
+            print("  Form submitted successfully!")
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    // 6. Basic Authentication
+    print("")
+    print("🔐 6. Basic Authentication")
+    match basic_auth("https://httpbin.org/basic-auth/user/passwd", "user", "passwd") {
+        Ok(response) => {
+            print("  Status: ")
+            print(response.status)
+            if response.status == 200 {
+                print("  ✅ Authentication successful!")
+            }
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    // 7. Full request with options (fetch)
+    print("")
+    print("⚙️ 7. Full Request with Options (fetch)")
+    let headers = map {
+        "X-Custom-Header": "NTNT-Client",
+        "Accept": "application/json"
+    }
+    let options = map {
+        "url": "https://httpbin.org/headers",
+        "method": "GET",
+        "headers": headers,
+        "timeout": 30
+    }
+    match fetch(options) {
+        Ok(response) => {
+            print("  Status: ")
+            print(response.status)
+            print("  Custom headers sent successfully!")
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    // 8. Request with cookies
+    print("")
+    print("🍪 8. Request with Cookies")
+    let cookies = map {
+        "session_id": "abc123",
+        "user": "testuser"
+    }
+    let cookie_options = map {
+        "url": "https://httpbin.org/cookies",
+        "method": "GET",
+        "cookies": cookies
+    }
+    match fetch(cookie_options) {
+        Ok(response) => {
+            print("  Status: ")
+            print(response.status)
+            print("  Cookies sent to server!")
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    // 9. PUT request
+    print("")
+    print("✏️ 9. PUT Request")
+    match put("https://httpbin.org/put", "Updated content") {
+        Ok(response) => {
+            print("  Status: ")
+            print(response.status)
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    // 10. DELETE request
+    print("")
+    print("🗑️ 10. DELETE Request")
+    let delete_opts = map {
+        "url": "https://httpbin.org/delete",
+        "method": "DELETE"
+    }
+    match request(delete_opts) {
+        Ok(response) => {
+            print("  Status: ")
+            print(response.status)
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    // 11. PATCH request
+    print("")
+    print("🔧 11. PATCH Request")
+    match patch("https://httpbin.org/patch", "Patched data") {
+        Ok(response) => {
+            print("  Status: ")
+            print(response.status)
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    // 12. HEAD request
+    print("")
+    print("📋 12. HEAD Request (headers only)")
+    match head("https://httpbin.org/get") {
+        Ok(response) => {
+            print("  Status: ")
+            print(response.status)
+        }
+        Err(e) => {
+            print("  Error: ")
+            print(e)
+        }
+    }
+    
+    print("")
+    print(repeat("=", 50))
+    print("✅ HTTP Client Demo Complete!")
+    print("")
+    print("Available functions:")
+    print("  • get(url)                    - Simple GET")
+    print("  • get_json(url)               - GET with JSON parsing")
+    print("  • post(url, body)             - POST text/plain")
+    print("  • post_json(url, data)        - POST JSON")
+    print("  • post_form(url, form_data)   - POST form-urlencoded")
+    print("  • put(url, body)              - PUT request")
+    print("  • delete(url)                 - DELETE request")
+    print("  • patch(url, body)            - PATCH request")
+    print("  • head(url)                   - HEAD request")
+    print("  • basic_auth(url, user, pass) - GET with Basic auth")
+    print("  • download(url, path)         - Download to file")
+    print("  • upload(url, path, field)    - Upload file (multipart)")
+    print("  • request(opts)               - Full control")
+    print("  • fetch(opts)                 - Full control + cookies")
+}
+
+main()

@@ -5262,4 +5262,57 @@ c")
             panic!("Expected String, got {:?}", result);
         }
     }
+    
+    #[test]
+    fn test_std_http_new_functions_exist() {
+        // Test that all new HTTP functions exist and are callable
+        let result = eval(r#"
+            import { basic_auth, post_form, download, upload, fetch } from "std/http"
+            
+            // Test that basic_auth returns a Result (will fail with invalid URL)
+            let auth_result = basic_auth("invalid://test", "user", "pass")
+            match auth_result {
+                Ok(r) => "ok",
+                Err(e) => "error"
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+    
+    #[test]
+    fn test_std_http_post_form_structure() {
+        // Test that post_form accepts a map and returns a Result
+        let result = eval(r#"
+            import { post_form } from "std/http"
+            
+            let form = map { "username": "test", "password": "secret" }
+            let result = post_form("invalid://test", form)
+            match result {
+                Ok(r) => "ok",
+                Err(e) => "error"
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
+    
+    #[test]
+    fn test_std_http_fetch_with_cookies() {
+        // Test that fetch accepts cookies option
+        let result = eval(r#"
+            import { fetch } from "std/http"
+            
+            let cookies = map { "session": "abc123" }
+            let opts = map {
+                "url": "invalid://test",
+                "method": "GET",
+                "cookies": cookies
+            }
+            let result = fetch(opts)
+            match result {
+                Ok(r) => "ok",
+                Err(e) => "error"
+            }
+        "#).unwrap();
+        assert!(matches!(result, Value::String(_)));
+    }
 }
