@@ -188,7 +188,7 @@ fn get(req) {
 <body>
     <div class="container">
         <h1>🗄️ Database User Management</h1>
-        <p class="subtitle">PostgreSQL Integration Demo</p>
+        <p class="subtitle">PostgreSQL Integration Demo (CRUD)</p>
         
         <table>
             <thead>

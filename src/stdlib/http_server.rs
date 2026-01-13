@@ -374,11 +374,29 @@ pub fn init() -> HashMap<String, Value> {
         },
     });
     
-    // Response.json(data) -> Response - Create a JSON response
+    // Response.json(data, status_code?) -> Response - Create a JSON response
+    // If status_code is provided, use it; otherwise default to 200
     module.insert("json".to_string(), Value::NativeFunction {
         name: "json".to_string(),
-        arity: 1,
+        arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
         func: |args| {
+            if args.is_empty() || args.len() > 2 {
+                return Err(IntentError::TypeError(
+                    "json() requires 1 or 2 arguments (data, optional status_code)".to_string()
+                ));
+            }
+            
+            let status_code = if args.len() == 2 {
+                match &args[1] {
+                    Value::Int(code) => *code,
+                    _ => return Err(IntentError::TypeError(
+                        "json() status code must be an integer".to_string()
+                    )),
+                }
+            } else {
+                200
+            };
+            
             let json_value = intent_value_to_json(&args[0]);
             let body = json_value.to_string();
             let mut headers = HashMap::new();
@@ -386,7 +404,7 @@ pub fn init() -> HashMap<String, Value> {
                 "content-type".to_string(),
                 Value::String("application/json".to_string()),
             );
-            Ok(create_response_value(200, headers, body))
+            Ok(create_response_value(status_code, headers, body))
         },
     });
     

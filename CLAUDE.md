@@ -127,6 +127,9 @@ cargo run -- run examples/demo.tnt
 # Validate syntax
 cargo run -- validate file.tnt
 
+# Test HTTP server (auto start/stop with requests)
+cargo run -- test server.tnt --get /api/status --post /users --body 'name=Alice'
+
 # Inspect project structure (JSON output for agents)
 cargo run -- inspect file.tnt --pretty
 
@@ -150,6 +153,7 @@ Before making changes to an NTNT project, use `ntnt inspect` to understand:
 
 - `std/string` - split, join, trim, replace, contains
 - `std/url` - encode, decode, parse_query, build_query
+- `std/env` - get_env, load_env, args, cwd
 - `std/collections` - push, pop, map, filter, reduce
 - `std/http` - get, post, put, delete, get_json
 - `std/http_server` - listen, get, post, json, html

@@ -2,13 +2,16 @@
 
 When generating or editing `.tnt` files (NTNT language), follow these critical syntax rules:
 
-## ⚠️ ALWAYS Lint Before Run
+## ⚠️ ALWAYS Lint/Test Before Run
 
-Before running any `.tnt` file, run `ntnt lint` first to catch common mistakes:
+Before running any `.tnt` file, validate first:
 
 ```bash
 ntnt lint myfile.tnt    # Always do this first
 ntnt run myfile.tnt     # Only after lint passes
+
+# For HTTP servers - test automatically
+ntnt test server.tnt --get /api/status --post /users --body 'name=Alice'
 ```
 
 ## Mandatory Syntax Rules
@@ -148,6 +151,21 @@ execute(db, "INSERT INTO users (age) VALUES ($1)", [age])
 ### Built-in (no import)
 
 `print`, `len`, `str`, `int`, `float`, `abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `Some`, `None`, `Ok`, `Err`, `unwrap`, `unwrap_or`, `is_some`, `is_none`, `is_ok`, `is_err`
+
+### Environment Variables
+
+```ntnt
+import { get_env, load_env } from "std/env"
+
+// Load from .env file (sets environment variables)
+let _ = load_env(".env")  // Returns Result<(), String>
+
+// Get individual variables
+let db_url = match get_env("DATABASE_URL") {
+    Some(url) => url,
+    None => "postgres://localhost/db"
+}
+```
 
 ### Common imports
 

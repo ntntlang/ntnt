@@ -2,16 +2,19 @@
 
 This document provides critical syntax rules and patterns for AI agents generating NTNT code. Following these rules will prevent common errors and produce idiomatic code.
 
-## ⚠️ MANDATORY Workflow: Always Lint Before Run
+## ⚠️ MANDATORY Workflow: Always Lint/Test Before Run
 
-**Before running ANY `.tnt` file, run `ntnt lint` first:**
+**Before running ANY `.tnt` file, validate it first:**
 
 ```bash
-# ALWAYS do this first
+# ALWAYS do this first - catches syntax errors
 ntnt lint myfile.tnt
 
 # Only after lint passes, run the file
 ntnt run myfile.tnt
+
+# For HTTP servers - test automatically without manual curl
+ntnt test server.tnt --get /api/status --post /users --body 'name=Alice&age=25'
 ```
 
 The `ntnt lint` command catches common mistakes like:
@@ -22,7 +25,23 @@ The `ntnt lint` command catches common mistakes like:
 - Missing `map {}` keyword
 - Route patterns needing raw strings
 
-**This one step prevents 90% of debugging time.**
+The `ntnt test` command starts a server, makes HTTP requests, and shuts down automatically - perfect for testing APIs:
+
+```bash
+# Test multiple endpoints
+ntnt test app.tnt --get /health --get /api/users/1 --verbose
+
+# Test POST with form data
+ntnt test app.tnt --post /users --body 'name=Alice&email=alice@test.com&age=30'
+
+# Test PUT and DELETE
+ntnt test app.tnt --put /api/users/1 --body 'name=Updated' --delete /api/users/999
+
+# Custom port
+ntnt test app.tnt --port 8080 --get /status
+```
+
+**This prevents 90% of debugging time.**
 
 ## Critical Syntax Rules
 

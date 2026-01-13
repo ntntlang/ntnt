@@ -57,5 +57,43 @@ pub fn init() -> HashMap<String, Value> {
         },
     });
     
+    // load_env(path) -> Result<(), String> - Load .env file
+    module.insert("load_env".to_string(), Value::NativeFunction {
+        name: "load_env".to_string(),
+        arity: 1,
+        func: |args| {
+            match &args[0] {
+                Value::String(path) => {
+                    match std::fs::read_to_string(path) {
+                        Ok(content) => {
+                            for line in content.lines() {
+                                let line = line.trim();
+                                // Skip comments and empty lines
+                                if line.is_empty() || line.starts_with('#') {
+                                    continue;
+                                }
+                                // Parse KEY=VALUE
+                                if let Some((key, value)) = line.split_once('=') {
+                                    std::env::set_var(key.trim(), value.trim());
+                                }
+                            }
+                            Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Ok".to_string(),
+                                values: vec![Value::Unit],
+                            })
+                        }
+                        Err(e) => Ok(Value::EnumValue {
+                            enum_name: "Result".to_string(),
+                            variant: "Err".to_string(),
+                            values: vec![Value::String(format!("Failed to load .env: {}", e))],
+                        }),
+                    }
+                }
+                _ => Err(IntentError::TypeError("load_env() requires a string path".to_string())),
+            }
+        },
+    });
+    
     module
 }

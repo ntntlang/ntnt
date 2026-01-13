@@ -8,9 +8,18 @@
 // Run with: ntnt run examples/myapp/app.tnt
 
 import { html, json } from "std/http/server"
+import { load_env } from "std/env"
 
 print("=== NTNT File-Based Routing Demo ===")
 print("")
+
+// Load environment variables from .env file
+let env_result = load_env("examples/myapp/.env")
+match env_result {
+    Ok(_) => print("✓ Loaded .env file"),
+    Err(e) => print("Note: .env file not found (using system environment)")
+}
+
 print("Loading routes from routes/ directory...")
 
 // Auto-discover all routes from the routes/ directory
