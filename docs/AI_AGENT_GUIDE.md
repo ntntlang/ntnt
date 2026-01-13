@@ -127,7 +127,71 @@ let template = r#"
 
 **Supported escapes:** `\n` (newline), `\t` (tab), `\r` (carriage return), `\\` (backslash), `\"` (quote), `\'` (single quote), `\{` and `\}` (literal braces)
 
-### 5. Truthy/Falsy Values
+### 5. Template Strings (Triple-Quoted)
+
+For HTML/template content, use triple-quoted strings `"""..."""` with `{{expr}}` interpolation. This is CSS-safe (single `{}` pass through).
+
+```ntnt
+// ✅ CORRECT - Template strings with {{}} interpolation
+let name = "Alice"
+let page = """
+<!DOCTYPE html>
+<style>
+    h1 { color: blue; }    // Single braces pass through unchanged!
+</style>
+<body>
+    <h1>Hello, {{name}}!</h1>
+</body>
+"""
+
+// ✅ For loops in templates
+let users = ["Alice", "Bob", "Charlie"]
+let list = """
+<ul>
+{{#for user in users}}
+    <li>{{user}}</li>
+{{/for}}
+</ul>
+"""
+
+// ✅ Conditionals in templates
+let logged_in = true
+let nav = """
+<nav>
+{{#if logged_in}}
+    <a href="/profile">Profile</a>
+{{#else}}
+    <a href="/login">Login</a>
+{{/if}}
+</nav>
+"""
+
+// ✅ Complex expressions work too
+let items = [map { "name": "Widget", "price": 99 }]
+let store = """
+{{#for item in items}}
+<div>{{item["name"]}}: ${{item["price"]}}</div>
+{{/for}}
+"""
+
+// ✅ Escape literal double braces with backslash
+let code_sample = """
+Use \{{ and \}} to output literal double braces.
+"""
+```
+
+**Template String Rules:**
+
+| Syntax                   | Result                       |
+| ------------------------ | ---------------------------- |
+| `{{expr}}`               | Interpolate expression       |
+| `{ ... }`                | Literal (CSS/JS safe)        |
+| `{{#for x in arr}}...{{/for}}` | Loop over array        |
+| `{{#if cond}}...{{/if}}` | Conditional                  |
+| `{{#if cond}}...{{#else}}...{{/if}}` | If-else            |
+| `\{{` and `\}}`          | Literal `{{` and `}}`        |
+
+### 6. Truthy/Falsy Values
 
 NTNT supports truthy/falsy evaluation for cleaner conditionals. **Numbers (including 0) are always truthy** to avoid subtle bugs.
 
@@ -152,24 +216,24 @@ if len(results) > 0 {       // Just use: if results
 
 **Truthy/Falsy Rules:**
 
-| Value | Truthy/Falsy |
-|-------|--------------|
-| `true` | Truthy |
-| `false` | Falsy |
-| `None` | Falsy |
-| `Some(x)` | Truthy |
-| `""` (empty string) | Falsy |
-| `"text"` | Truthy |
-| `[]` (empty array) | Falsy |
-| `[1, 2]` | Truthy |
-| `map {}` | Falsy |
-| `map { "a": 1 }` | Truthy |
-| `0`, `0.0` | **Truthy** |
-| Any number | **Truthy** |
+| Value               | Truthy/Falsy |
+| ------------------- | ------------ |
+| `true`              | Truthy       |
+| `false`             | Falsy        |
+| `None`              | Falsy        |
+| `Some(x)`           | Truthy       |
+| `""` (empty string) | Falsy        |
+| `"text"`            | Truthy       |
+| `[]` (empty array)  | Falsy        |
+| `[1, 2]`            | Truthy       |
+| `map {}`            | Falsy        |
+| `map { "a": 1 }`    | Truthy       |
+| `0`, `0.0`          | **Truthy**   |
+| Any number          | **Truthy**   |
 
 **Why 0 is truthy:** Avoids bugs like `if count { }` failing when count is legitimately 0.
 
-### 6. Contract Placement (requires/ensures)
+### 7. Contract Placement (requires/ensures)
 
 Contracts go AFTER the return type but BEFORE the function body:
 
@@ -205,7 +269,7 @@ fn divide(a: Int, b: Int) -> Int {
 }
 ```
 
-### 7. Range Expressions
+### 8. Range Expressions
 
 ```ntnt
 // ✅ CORRECT - NTNT range syntax
@@ -218,7 +282,7 @@ for i in range(10) { }           // ERROR: range is not a function
 for i in range(0, 10) { }        // ERROR
 ```
 
-### 8. Import Syntax
+### 9. Import Syntax
 
 NTNT uses JavaScript-style imports with quoted paths and `/` separators:
 
@@ -239,7 +303,7 @@ from std.string import split         // Wrong: Python style
 use std::string::split;              // Wrong: Rust style
 ```
 
-### 9. Mutable Variables
+### 10. Mutable Variables
 
 Variables are immutable by default. Use `mut` for mutability:
 
@@ -256,7 +320,7 @@ let counter = 0
 counter = counter + 1    // ERROR: cannot assign to immutable variable
 ```
 
-### 10. Match Expression Syntax
+### 11. Match Expression Syntax
 
 Use `=>` (fat arrow) and commas between arms:
 
@@ -280,7 +344,7 @@ match value {
 }
 ```
 
-### 11. Function Calls vs Methods
+### 12. Function Calls vs Methods
 
 Many operations are standalone functions, not methods:
 
@@ -299,7 +363,7 @@ my_array.length           // ERROR
 arr.push(item)            // May not work as expected
 ```
 
-### 12. Result/Option Handling
+### 13. Result/Option Handling
 
 Always handle `Result` and `Option` types explicitly:
 

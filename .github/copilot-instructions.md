@@ -79,6 +79,44 @@ let brace = "literal \{brace\}"   // \{ \} = literal braces
 let html = r#"<div class="main">Hello</div>"#
 ```
 
+### Template Strings (Triple-Quoted)
+
+For HTML templates with dynamic content, use `"""..."""` with `{{expr}}` interpolation. Single `{}` pass through (CSS-safe).
+
+```ntnt
+// Template with interpolation
+let name = "Alice"
+let page = """
+<style>
+    h1 { color: blue; }
+</style>
+<h1>Hello, {{name}}!</h1>
+"""
+
+// For loops in templates
+let items = ["a", "b", "c"]
+let list = """
+<ul>
+{{#for item in items}}
+    <li>{{item}}</li>
+{{/for}}
+</ul>
+"""
+
+// Conditionals in templates
+let show = true
+let out = """
+{{#if show}}
+    <p>Visible</p>
+{{#else}}
+    <p>Hidden</p>
+{{/if}}
+"""
+
+// Escape literal {{ with backslash
+let code = """Use \{{ and \}} for literal braces"""
+```
+
 ### Contract Placement
 
 Place `requires` and `ensures` between return type and function body.

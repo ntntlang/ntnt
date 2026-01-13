@@ -1,0 +1,81 @@
+// Test template strings
+
+// Basic interpolation with {{}}
+let name = "World"
+let greeting = """
+Hello, {{name}}!
+"""
+print(greeting)
+
+// CSS single braces should pass through
+let css = """
+<style>
+    h1 { color: blue; }
+    .container { padding: 20px; }
+</style>
+"""
+print(css)
+
+// For loop in template
+let users = ["Alice", "Bob", "Charlie"]
+let list = """
+<ul>
+{{#for user in users}}
+    <li>{{user}}</li>
+{{/for}}
+</ul>
+"""
+print(list)
+
+// If conditional in template
+let show_footer = true
+let page = """
+<html>
+<body>
+    <h1>Welcome</h1>
+{{#if show_footer}}
+    <footer>Copyright 2025</footer>
+{{/if}}
+</body>
+</html>
+"""
+print(page)
+
+// If-else in template
+let logged_in = false
+let nav = """
+<nav>
+{{#if logged_in}}
+    <a href="/profile">Profile</a>
+{{#else}}
+    <a href="/login">Login</a>
+{{/if}}
+</nav>
+"""
+print(nav)
+
+// Complex expressions
+let items = [
+    map { "name": "Widget", "price": 99 },
+    map { "name": "Gadget", "price": 149 }
+]
+let store = """
+<div class="products">
+{{#for item in items}}
+    <div class="product">
+        <span>{{item["name"]}}</span>
+        <span>${{item["price"]}}</span>
+    </div>
+{{/for}}
+</div>
+"""
+print(store)
+
+// Escaped braces
+let escaped = """
+Use \{{ double braces }} for interpolation.
+Single { braces } pass through.
+"""
+print(escaped)
+
+print("All template string tests passed!")

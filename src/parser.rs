@@ -4,7 +4,7 @@
 
 use crate::ast::*;
 use crate::error::{IntentError, Result};
-use crate::lexer::{Token, TokenKind, StringPart as LexerStringPart};
+use crate::lexer::{Token, TokenKind, StringPart as LexerStringPart, TemplatePart as LexerTemplatePart};
 
 /// Parser for Intent source code
 pub struct Parser {
@@ -1269,6 +1269,15 @@ impl Parser {
             }
         }
         
+        // Template string literal (triple-quoted)
+        if let Some(token) = self.peek() {
+            if let TokenKind::TemplateString(ref parts) = token.kind {
+                let parts = parts.clone();
+                self.advance();
+                return self.parse_template_string(&parts);
+            }
+        }
+        
         // Raw string literal (treated same as regular string)
         if let Some(token) = self.peek() {
             if let TokenKind::RawString(ref s) = token.kind {
@@ -1410,6 +1419,68 @@ impl Parser {
         }
         
         Ok(Expression::InterpolatedString(ast_parts))
+    }
+    
+    /// Parse a template string (triple-quoted) into TemplateParts
+    fn parse_template_string(&mut self, parts: &[LexerTemplatePart]) -> Result<Expression> {
+        let ast_parts = self.parse_template_parts(parts)?;
+        Ok(Expression::TemplateString(ast_parts))
+    }
+    
+    /// Recursively parse template parts from lexer format to AST format
+    fn parse_template_parts(&mut self, parts: &[LexerTemplatePart]) -> Result<Vec<TemplatePart>> {
+        let mut ast_parts = Vec::new();
+        
+        for part in parts {
+            match part {
+                LexerTemplatePart::Literal(s) => {
+                    ast_parts.push(TemplatePart::Literal(s.clone()));
+                }
+                LexerTemplatePart::Expr(expr_str) => {
+                    // Parse the expression string
+                    let lexer = crate::lexer::Lexer::new(expr_str);
+                    let tokens: Vec<_> = lexer.collect();
+                    let mut parser = Parser::new(tokens);
+                    let expr = parser.expression()?;
+                    ast_parts.push(TemplatePart::Expr(expr));
+                }
+                LexerTemplatePart::ForLoop { var, iterable, body } => {
+                    // Parse the iterable expression
+                    let lexer = crate::lexer::Lexer::new(iterable);
+                    let tokens: Vec<_> = lexer.collect();
+                    let mut parser = Parser::new(tokens);
+                    let iterable_expr = parser.expression()?;
+                    
+                    // Recursively parse the body
+                    let body_parts = self.parse_template_parts(body)?;
+                    
+                    ast_parts.push(TemplatePart::ForLoop {
+                        var: var.clone(),
+                        iterable: iterable_expr,
+                        body: body_parts,
+                    });
+                }
+                LexerTemplatePart::IfBlock { condition, then_parts, else_parts } => {
+                    // Parse the condition expression
+                    let lexer = crate::lexer::Lexer::new(condition);
+                    let tokens: Vec<_> = lexer.collect();
+                    let mut parser = Parser::new(tokens);
+                    let condition_expr = parser.expression()?;
+                    
+                    // Recursively parse then and else parts
+                    let then_ast = self.parse_template_parts(then_parts)?;
+                    let else_ast = self.parse_template_parts(else_parts)?;
+                    
+                    ast_parts.push(TemplatePart::IfBlock {
+                        condition: condition_expr,
+                        then_parts: then_ast,
+                        else_parts: else_ast,
+                    });
+                }
+            }
+        }
+        
+        Ok(ast_parts)
     }
     
     /// Parse a match expression: match expr { pattern => body, ... }

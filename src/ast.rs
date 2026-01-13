@@ -261,6 +261,9 @@ pub enum Expression {
     /// Interpolated string: `"Hello, {name}!"`
     InterpolatedString(Vec<StringPart>),
     
+    /// Template string: `"""Hello, {{name}}!"""`
+    TemplateString(Vec<TemplatePart>),
+    
     /// Struct literal
     StructLiteral {
         name: String,
@@ -374,6 +377,27 @@ pub enum StringPart {
     Literal(String),
     /// Expression to interpolate
     Expr(Expression),
+}
+
+/// Template string part (triple-quoted strings with {{}} syntax)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TemplatePart {
+    /// Literal string segment
+    Literal(String),
+    /// Expression to interpolate: {{expr}}
+    Expr(Expression),
+    /// For loop: {{#for var in iterable}}body{{/for}}
+    ForLoop {
+        var: String,
+        iterable: Expression,
+        body: Vec<TemplatePart>,
+    },
+    /// If conditional: {{#if condition}}then{{#else}}else{{/if}}
+    IfBlock {
+        condition: Expression,
+        then_parts: Vec<TemplatePart>,
+        else_parts: Vec<TemplatePart>,
+    },
 }
 
 /// Struct field

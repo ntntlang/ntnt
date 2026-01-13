@@ -2318,7 +2318,96 @@ impl Interpreter {
                 }
                 Ok(Value::String(result))
             }
+            
+            Expression::TemplateString(parts) => {
+                self.eval_template_parts(parts)
+            }
         }
+    }
+    
+    /// Evaluate template string parts
+    fn eval_template_parts(&mut self, parts: &[TemplatePart]) -> Result<Value> {
+        let mut result = String::new();
+        
+        for part in parts {
+            match part {
+                TemplatePart::Literal(s) => result.push_str(s),
+                TemplatePart::Expr(expr) => {
+                    let value = self.eval_expression(expr)?;
+                    result.push_str(&value.to_string());
+                }
+                TemplatePart::ForLoop { var, iterable, body } => {
+                    let iterable_value = self.eval_expression(iterable)?;
+                    
+                    match iterable_value {
+                        Value::Array(items) => {
+                            for item in items {
+                                // Create new scope for each iteration
+                                let previous = Rc::clone(&self.environment);
+                                self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+                                
+                                // Bind the loop variable
+                                self.environment.borrow_mut().define(var.clone(), item);
+                                
+                                // Evaluate the body and append to result
+                                let body_result = self.eval_template_parts(body)?;
+                                if let Value::String(s) = body_result {
+                                    result.push_str(&s);
+                                }
+                                
+                                // Restore environment
+                                self.environment = previous;
+                            }
+                        }
+                        Value::Map(map) => {
+                            // When iterating over a map, yield (key, value) pairs
+                            for (k, v) in map.iter() {
+                                // Create new scope for each iteration
+                                let previous = Rc::clone(&self.environment);
+                                self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+                                
+                                // Create a tuple-like array for the pair
+                                let pair = Value::Array(vec![
+                                    Value::String(k.clone()),
+                                    v.clone(),
+                                ]);
+                                self.environment.borrow_mut().define(var.clone(), pair);
+                                
+                                let body_result = self.eval_template_parts(body)?;
+                                if let Value::String(s) = body_result {
+                                    result.push_str(&s);
+                                }
+                                
+                                // Restore environment
+                                self.environment = previous;
+                            }
+                        }
+                        _ => {
+                            return Err(IntentError::RuntimeError(
+                                format!("Template for loop requires array or map, got {}", iterable_value.type_name())
+                            ));
+                        }
+                    }
+                }
+                TemplatePart::IfBlock { condition, then_parts, else_parts } => {
+                    let condition_value = self.eval_expression(condition)?;
+                    
+                    if condition_value.is_truthy() {
+                        let then_result = self.eval_template_parts(then_parts)?;
+                        if let Value::String(s) = then_result {
+                            result.push_str(&s);
+                        }
+                    } else if !else_parts.is_empty() {
+                        let else_result = self.eval_template_parts(else_parts)?;
+                        if let Value::String(s) = else_result {
+                            result.push_str(&s);
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(Value::String(result))
     }
     
     /// Try to match a pattern against a value, returning variable bindings if successful

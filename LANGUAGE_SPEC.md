@@ -80,6 +80,66 @@ let literal_brace = "use \{curly\} braces"
 
 For content with many special characters, use raw strings which don't process escapes:
 
+```ntnt
+let html = r#"<div class="container">Hello</div>"#
+let json = r#"{"name": "Alice", "age": 30}"#
+```
+
+### Template Strings (Triple-Quoted)
+
+For HTML templates and multi-line content with dynamic values, use triple-quoted strings `"""..."""`:
+
+```ntnt
+let name = "Alice"
+let page = """
+<html>
+<style>
+    h1 { color: blue; }
+</style>
+<body>
+    <h1>Hello, {{name}}!</h1>
+</body>
+</html>
+"""
+```
+
+**Template String Features:**
+
+| Syntax                   | Description                    |
+| ------------------------ | ------------------------------ |
+| `{{expr}}`               | Interpolate expression         |
+| `{ ... }`                | Literal braces (CSS/JS safe)   |
+| `{{#for x in arr}}...{{/for}}` | Loop over array          |
+| `{{#if cond}}...{{/if}}` | Conditional                    |
+| `{{#if cond}}...{{#else}}...{{/if}}` | If-else              |
+| `\{{` and `\}}`          | Literal `{{` and `}}`          |
+
+**Template Loops:**
+```ntnt
+let users = ["Alice", "Bob", "Charlie"]
+let list = """
+<ul>
+{{#for user in users}}
+    <li>{{user}}</li>
+{{/for}}
+</ul>
+"""
+```
+
+**Template Conditionals:**
+```ntnt
+let logged_in = true
+let nav = """
+<nav>
+{{#if logged_in}}
+    <a href="/profile">Profile</a>
+{{#else}}
+    <a href="/login">Login</a>
+{{/if}}
+</nav>
+"""
+```
+
 ## Types
 
 ### Primitive Types
@@ -326,19 +386,19 @@ fn sort<T: Comparable>(arr: [T]) -> [T] {
 
 NTNT supports truthy/falsy evaluation in conditionals. **Numbers (including 0) are always truthy** to avoid subtle bugs.
 
-| Value | Truthy/Falsy |
-|-------|-------------|
-| `true` | Truthy |
-| `false` | Falsy |
-| `None` | Falsy |
-| `Some(x)` | Truthy |
-| `""` (empty string) | Falsy |
-| `"text"` | Truthy |
-| `[]` (empty array) | Falsy |
-| `[1, 2]` | Truthy |
-| `map {}` | Falsy |
-| `map { "a": 1 }` | Truthy |
-| `0`, `0.0`, any number | **Truthy** |
+| Value                  | Truthy/Falsy |
+| ---------------------- | ------------ |
+| `true`                 | Truthy       |
+| `false`                | Falsy        |
+| `None`                 | Falsy        |
+| `Some(x)`              | Truthy       |
+| `""` (empty string)    | Falsy        |
+| `"text"`               | Truthy       |
+| `[]` (empty array)     | Falsy        |
+| `[1, 2]`               | Truthy       |
+| `map {}`               | Falsy        |
+| `map { "a": 1 }`       | Truthy       |
+| `0`, `0.0`, any number | **Truthy**   |
 
 ```ntnt
 // Clean conditional checks

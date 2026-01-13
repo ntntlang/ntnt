@@ -14,6 +14,27 @@ pub enum StringPart {
     Interpolation(String),
 }
 
+/// Part of a template string (triple-quoted)
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemplatePart {
+    /// Literal string portion
+    Literal(String),
+    /// Expression to interpolate: {{expr}}
+    Expr(String),
+    /// For loop: {{#for x in items}}...{{/for}}
+    ForLoop {
+        var: String,
+        iterable: String,
+        body: Vec<TemplatePart>,
+    },
+    /// If conditional: {{#if condition}}...{{#else}}...{{/if}}
+    IfBlock {
+        condition: String,
+        then_parts: Vec<TemplatePart>,
+        else_parts: Vec<TemplatePart>,
+    },
+}
+
 /// Token types for the Intent language
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
@@ -134,6 +155,9 @@ pub enum TokenKind {
     
     // Interpolated string parts
     InterpolatedString(Vec<StringPart>),
+    
+    // Template string (triple-quoted with {{}} interpolation)
+    TemplateString(Vec<TemplatePart>),
     
     // Special
     Eof,
@@ -376,6 +400,213 @@ impl<'a> Lexer<'a> {
             start_column,
             self.current_lexeme.clone(),
         )
+    }
+
+    /// Scan a template string literal: """..."""
+    /// Uses {{expr}} for interpolation (double braces, CSS-safe)
+    /// Supports {{#for x in items}}...{{/for}} and {{#if cond}}...{{#else}}...{{/if}}
+    fn scan_template_string(&mut self) -> Token {
+        let start_line = self.line;
+        let start_column = self.column;
+        self.current_lexeme.clear();
+        
+        let mut content = String::new();
+        
+        // Read until closing """
+        loop {
+            match self.peek() {
+                Some(&'"') => {
+                    self.advance();
+                    if self.peek() == Some(&'"') {
+                        self.advance();
+                        if self.peek() == Some(&'"') {
+                            self.advance();
+                            // Found closing """
+                            break;
+                        } else {
+                            // Just two quotes, add them to content
+                            content.push('"');
+                            content.push('"');
+                        }
+                    } else {
+                        // Just one quote
+                        content.push('"');
+                    }
+                }
+                Some(&ch) => {
+                    content.push(ch);
+                    self.advance();
+                }
+                None => break, // Unterminated template string
+            }
+        }
+        
+        // Parse the content into TemplateParts
+        let parts = self.parse_template_content(&content);
+        
+        Token::new(
+            TokenKind::TemplateString(parts),
+            start_line,
+            start_column,
+            self.current_lexeme.clone(),
+        )
+    }
+    
+    /// Parse template string content into parts
+    fn parse_template_content(&self, content: &str) -> Vec<TemplatePart> {
+        let mut parts = Vec::new();
+        let mut chars = content.chars().peekable();
+        let mut literal = String::new();
+        
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                // Check for escaped {{ or }}
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    if chars.peek() == Some(&'{') {
+                        chars.next();
+                        literal.push_str("{{");
+                    } else {
+                        literal.push('{');
+                    }
+                } else if chars.peek() == Some(&'}') {
+                    chars.next();
+                    if chars.peek() == Some(&'}') {
+                        chars.next();
+                        literal.push_str("}}");
+                    } else {
+                        literal.push('}');
+                    }
+                } else {
+                    literal.push('\\');
+                }
+            } else if ch == '{' && chars.peek() == Some(&'{') {
+                chars.next(); // consume second {
+                
+                // Save accumulated literal
+                if !literal.is_empty() {
+                    parts.push(TemplatePart::Literal(literal.clone()));
+                    literal.clear();
+                }
+                
+                // Read until }}
+                let mut expr = String::new();
+                let mut brace_depth = 0;
+                
+                while let Some(c) = chars.next() {
+                    if c == '{' {
+                        brace_depth += 1;
+                        expr.push(c);
+                    } else if c == '}' {
+                        if chars.peek() == Some(&'}') && brace_depth == 0 {
+                            chars.next(); // consume second }
+                            break;
+                        } else if brace_depth > 0 {
+                            brace_depth -= 1;
+                            expr.push(c);
+                        } else {
+                            expr.push(c);
+                        }
+                    } else {
+                        expr.push(c);
+                    }
+                }
+                
+                // Parse the directive
+                let expr = expr.trim();
+                
+                if let Some(stripped) = expr.strip_prefix("#for ") {
+                    // Parse: #for x in items
+                    if let Some((var_part, iter_part)) = stripped.split_once(" in ") {
+                        let var = var_part.trim().to_string();
+                        let iterable = iter_part.trim().to_string();
+                        
+                        // Find the body until {{/for}}
+                        let rest: String = chars.clone().collect();
+                        if let Some(end_pos) = rest.find("{{/for}}") {
+                            let body_content = &rest[..end_pos];
+                            let body_parts = self.parse_template_content(body_content);
+                            
+                            // Advance past the body and closing tag
+                            for _ in 0..(end_pos + 8) {
+                                chars.next();
+                            }
+                            
+                            parts.push(TemplatePart::ForLoop {
+                                var,
+                                iterable,
+                                body: body_parts,
+                            });
+                        } else {
+                            // No closing tag found, treat as literal
+                            parts.push(TemplatePart::Literal(format!("{{{{#for {}}}}}", stripped)));
+                        }
+                    } else {
+                        // Invalid for syntax, treat as literal
+                        parts.push(TemplatePart::Literal(format!("{{{{#for {}}}}}", stripped)));
+                    }
+                } else if let Some(stripped) = expr.strip_prefix("#if ") {
+                    // Parse: #if condition
+                    let condition = stripped.trim().to_string();
+                    
+                    // Find the body parts until {{/if}} (with optional {{#else}})
+                    let rest: String = chars.clone().collect();
+                    
+                    // Find {{#else}} and {{/if}} positions
+                    let else_pos = rest.find("{{#else}}");
+                    let endif_pos = rest.find("{{/if}}");
+                    
+                    if let Some(endif) = endif_pos {
+                        let (then_content, else_content) = if let Some(else_p) = else_pos {
+                            if else_p < endif {
+                                (&rest[..else_p], Some(&rest[(else_p + 9)..endif]))
+                            } else {
+                                (&rest[..endif], None)
+                            }
+                        } else {
+                            (&rest[..endif], None)
+                        };
+                        
+                        let then_parts = self.parse_template_content(then_content);
+                        let else_parts = if let Some(ec) = else_content {
+                            self.parse_template_content(ec)
+                        } else {
+                            Vec::new()
+                        };
+                        
+                        // Advance past everything including closing tag
+                        for _ in 0..(endif + 7) {
+                            chars.next();
+                        }
+                        
+                        parts.push(TemplatePart::IfBlock {
+                            condition,
+                            then_parts,
+                            else_parts,
+                        });
+                    } else {
+                        // No closing tag found, treat as literal
+                        parts.push(TemplatePart::Literal(format!("{{{{#if {}}}}}", stripped)));
+                    }
+                } else if expr.starts_with("/for") || expr.starts_with("/if") || expr.starts_with("#else") {
+                    // Closing tags handled above, should not reach here
+                    // If we do, it's unmatched - treat as literal
+                    parts.push(TemplatePart::Literal(format!("{{{{{}}}}}", expr)));
+                } else {
+                    // Regular expression interpolation
+                    parts.push(TemplatePart::Expr(expr.to_string()));
+                }
+            } else {
+                literal.push(ch);
+            }
+        }
+        
+        // Don't forget remaining literal
+        if !literal.is_empty() {
+            parts.push(TemplatePart::Literal(literal));
+        }
+        
+        parts
     }
 
     fn scan_number(&mut self, first: char) -> Token {
@@ -628,7 +859,26 @@ impl<'a> Lexer<'a> {
         
         let token = match ch {
             // String literals
-            '"' | '\'' => self.scan_string(ch),
+            '"' | '\'' => {
+                // Check for triple-quote template string
+                if ch == '"' && self.peek() == Some(&'"') {
+                    self.advance(); // consume second "
+                    if self.peek() == Some(&'"') {
+                        self.advance(); // consume third "
+                        self.scan_template_string()
+                    } else {
+                        // Empty string ""
+                        Token::new(
+                            TokenKind::String(String::new()),
+                            start_line,
+                            start_column,
+                            "\"\"".into(),
+                        )
+                    }
+                } else {
+                    self.scan_string(ch)
+                }
+            }
             
             // Numbers
             '0'..='9' => self.scan_number(ch),

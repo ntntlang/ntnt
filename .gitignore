@@ -40,3 +40,6 @@ docs/_build/
 # Local configuration
 .env
 .env.local
+
+# Private examples
+examples/snowgauge/

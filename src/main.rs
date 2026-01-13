@@ -1836,6 +1836,31 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                 }
             }
             
+            // Template strings - expressions inside {{}}
+            Expression::TemplateString(parts) => {
+                use ntnt::ast::TemplatePart;
+                fn collect_from_template_parts(parts: &[TemplatePart], names: &mut std::collections::HashSet<String>, collect_fn: &dyn Fn(&Expression, &mut std::collections::HashSet<String>)) {
+                    for part in parts {
+                        match part {
+                            TemplatePart::Literal(_) => {}
+                            TemplatePart::Expr(expr) => {
+                                collect_fn(expr, names);
+                            }
+                            TemplatePart::ForLoop { iterable, body, .. } => {
+                                collect_fn(iterable, names);
+                                collect_from_template_parts(body, names, collect_fn);
+                            }
+                            TemplatePart::IfBlock { condition, then_parts, else_parts } => {
+                                collect_fn(condition, names);
+                                collect_from_template_parts(then_parts, names, collect_fn);
+                                collect_from_template_parts(else_parts, names, collect_fn);
+                            }
+                        }
+                    }
+                }
+                collect_from_template_parts(parts, names, &collect_from_expr);
+            }
+            
             // Struct literals - the struct name and field values
             Expression::StructLiteral { name, fields } => {
                 names.insert(name.clone());

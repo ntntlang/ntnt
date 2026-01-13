@@ -462,3 +462,113 @@ if !empty {
     assert!(stdout.contains("query-present"), "Non-empty string in && should work");
     assert!(stdout.contains("empty-absent"), "!empty_string should be true");
 }
+
+// ==========================================================================
+// Template String Tests (triple-quoted strings with {{}} interpolation)
+// ==========================================================================
+
+#[test]
+fn test_template_string_basic_interpolation() {
+    let code = r#"
+let name = "World"
+let greeting = """Hello, {{name}}!"""
+print(greeting)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Template string basic interpolation should work");
+    assert!(stdout.contains("Hello, World!"), "Should interpolate {{name}}");
+}
+
+#[test]
+fn test_template_string_css_passthrough() {
+    let code = r#"
+let css = """h1 { color: blue; }"""
+print(css)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "CSS in template string should work");
+    assert!(stdout.contains("h1 { color: blue; }"), "Single braces should pass through unchanged");
+}
+
+#[test]
+fn test_template_string_for_loop() {
+    let code = r#"
+let items = ["a", "b", "c"]
+let out = """{{#for x in items}}[{{x}}]{{/for}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Template for loop should work");
+    assert!(stdout.contains("[a]"), "Should iterate first item");
+    assert!(stdout.contains("[b]"), "Should iterate second item");
+    assert!(stdout.contains("[c]"), "Should iterate third item");
+}
+
+#[test]
+fn test_template_string_if_condition() {
+    let code = r#"
+let show = true
+let out = """{{#if show}}visible{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Template if condition should work");
+    assert!(stdout.contains("visible"), "Should show content when condition is true");
+}
+
+#[test]
+fn test_template_string_if_else() {
+    let code = r#"
+let logged_in = false
+let nav = """{{#if logged_in}}profile{{#else}}login{{/if}}"""
+print(nav)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Template if-else should work");
+    assert!(stdout.contains("login"), "Should show else branch when condition is false");
+    assert!(!stdout.contains("profile"), "Should not show then branch when condition is false");
+}
+
+#[test]
+fn test_template_string_escaped_braces() {
+    let code = r#"
+let out = """Use \{{ and \}} for literal braces"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Template escaped braces should work");
+    assert!(stdout.contains("{{ and }}"), "Should output literal double braces");
+}
+
+#[test]
+fn test_template_string_complex_expressions() {
+    let code = r#"
+let items = [
+    map { "name": "Widget", "price": 99 }
+]
+let out = """{{#for item in items}}{{item["name"]}}: ${{item["price"]}}{{/for}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Template complex expressions should work");
+    assert!(stdout.contains("Widget: $99"), "Should interpolate map access expressions");
+}
+
+#[test]
+fn test_template_string_multiline() {
+    let code = r#"
+let name = "Test"
+let page = """
+<html>
+<body>
+    <h1>{{name}}</h1>
+</body>
+</html>
+"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Multiline template string should work");
+    assert!(stdout.contains("<h1>Test</h1>"), "Should interpolate in multiline content");
+    assert!(stdout.contains("<html>"), "Should preserve HTML tags");
+}
