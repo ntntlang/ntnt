@@ -50,8 +50,9 @@ NTNT (pronounced "Intent") is an experimental programming language and ecosystem
 - URL utilities: `std/url` (parse, encode, decode, build_query)
 - HTTP Client: `std/http` (get, post, put, delete, request)
 - **HTTP Server**: `std/http/server` (routing, middleware, static files, contract-verified endpoints)
+- **Agent Tooling**: `ntnt inspect` (JSON introspection), `ntnt validate` (pre-run error checking)
 
-**209 passing tests** | **Version 0.1.6**
+**227 passing tests** | **Version 0.1.7**
 
 **Next Up**: Async/await, Database connectivity (Phase 5 continued)
 
@@ -86,6 +87,12 @@ ntnt repl
 # Run a Web Application
 ntnt run examples/website.tnt
 # Browse to http://localhost:3000
+
+# Validate files before running (outputs JSON)
+ntnt validate examples/
+
+# Inspect project structure (outputs JSON for agents)
+ntnt inspect examples/website.tnt --pretty
 ```
 
 ## File Extension
@@ -803,7 +810,7 @@ fn home(req) {
 fn get_status(req) {
     return json(map {
         "status": "ok",
-        "version": "0.1.6"
+        "version": "0.1.7"
     })
 }
 
@@ -956,7 +963,7 @@ Routes registered: 7
 [RESPONSE] 200 (OK)
 {
   "status": "healthy",
-  "version": "0.1.6"
+  "version": "0.1.7"
 }
 
 [REQUEST 2] GET /divide?a=20&b=4
@@ -976,3 +983,91 @@ This is perfect for:
 - **AI agents**: Single atomic command instead of start/curl/kill
 - **CI/CD pipelines**: Quick smoke tests with exit codes
 - **Development**: Rapid iteration without browser
+
+## Agent Tooling
+
+NTNT includes built-in commands designed for AI agents and automated tooling.
+
+### `ntnt inspect` - Project Introspection
+
+Output JSON describing the structure of an NTNT project:
+
+```bash
+ntnt inspect examples/website.tnt --pretty
+```
+
+```json
+{
+  "files": ["website.tnt"],
+  "functions": [
+    {
+      "name": "fetch_page",
+      "line": 102,
+      "params": [{"name": "req", "type": null}],
+      "contracts": null
+    }
+  ],
+  "routes": [
+    {"method": "GET", "path": "/fetch", "handler": "fetch_page", "line": 184}
+  ],
+  "middleware": [
+    {"handler": "logger", "line": 81}
+  ],
+  "static": [
+    {"prefix": "/assets", "directory": "$ASSETS_DIR", "line": 189}
+  ],
+  "imports": [
+    {"source": "std/http/server", "items": ["html", "json"]}
+  ]
+}
+```
+
+This enables agents to:
+- Understand project structure without reading all files
+- Find functions by name and jump to line numbers
+- Discover HTTP routes and their handlers
+- Identify middleware and static file configurations
+
+### `ntnt validate` - Pre-Run Validation
+
+Check files for errors before running, with JSON output:
+
+```bash
+ntnt validate examples/
+```
+
+```
+✓ contracts.tnt
+✓ hello.tnt
+⚠ website.tnt (3 warnings)
+
+All files valid!
+Warnings: 3
+```
+
+```json
+{
+  "files": [
+    {
+      "file": "website.tnt",
+      "valid": true,
+      "errors": [],
+      "warnings": [
+        {"type": "unused_import", "message": "Unused import: 'text'"}
+      ]
+    }
+  ],
+  "summary": {
+    "total": 23,
+    "valid": 23,
+    "errors": 0,
+    "warnings": 17
+  }
+}
+```
+
+This enables agents to:
+- Validate changes before runtime
+- Catch syntax errors early
+- Identify unused imports
+- Exit with non-zero code on errors (useful for CI)

@@ -282,6 +282,7 @@ my-app/
 ```
 
 **Conventions:**
+
 - [ ] `routes/` - File path = URL path, exports = HTTP methods
 - [ ] `[param].tnt` - Dynamic URL segments (e.g., `[id].tnt` → `/users/:id`)
 - [ ] `index.tnt` - Directory root handler
@@ -290,6 +291,7 @@ my-app/
 - [ ] Hot-reload on file changes
 
 **Example Route:**
+
 ```ntnt
 // routes/users/[id].tnt
 
@@ -307,6 +309,7 @@ export fn delete(req)
 ```
 
 **Entry Point:**
+
 ```ntnt
 // app.tnt
 routes("routes/")  // Auto-discover all routes
@@ -350,19 +353,20 @@ Errors: 1
 
 **Why This Matters for Agents:**
 
-| Task | Traditional | NTNT |
-|------|-------------|------|
-| Add route `/api/orders` | Edit router + create file | Create `routes/api/orders.tnt` |
-| Understand app structure | Read all files | `ntnt inspect` |
-| Check for errors | Run and hope | `ntnt validate` |
+| Task                     | Traditional               | NTNT                           |
+| ------------------------ | ------------------------- | ------------------------------ |
+| Add route `/api/orders`  | Edit router + create file | Create `routes/api/orders.tnt` |
+| Understand app structure | Read all files            | `ntnt inspect`                 |
+| Check for errors         | Run and hope              | `ntnt validate`                |
 
 **Features:**
+
 - [ ] File-based route discovery
 - [ ] Dynamic segments `[param].tnt`
 - [ ] Auto-loaded middleware and lib
 - [ ] Hot-reload
-- [ ] `ntnt inspect` - JSON introspection
-- [ ] `ntnt validate` - Pre-run validation
+- [x] `ntnt inspect` - JSON introspection
+- [x] `ntnt validate` - Pre-run validation
 
 ### 5.6 Database Connectivity
 
@@ -401,8 +405,8 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] HTTP server with routing
 - [ ] File-based routing (`routes/`, `lib/`, `middleware/` conventions)
 - [ ] Hot-reload on file changes
-- [ ] `ntnt inspect` - JSON introspection for agents
-- [ ] `ntnt validate` - Pre-run error checking
+- [x] `ntnt inspect` - JSON introspection for agents
+- [x] `ntnt validate` - Pre-run error checking
 - [ ] PostgreSQL database driver
 - [x] JSON, time, crypto, URL utilities
 

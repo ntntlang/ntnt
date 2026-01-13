@@ -76,7 +76,9 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 
 ### Tooling
 
-- **CLI**: `ntnt run <file>`, `ntnt repl`, `ntnt check`, `ntnt parse`, `ntnt lex`, `ntnt test` commands
+- **CLI**: `ntnt run <file>`, `ntnt repl`, `ntnt check`, `ntnt parse`, `ntnt lex`, `ntnt test`, `ntnt inspect`, `ntnt validate` commands
+- **Agent Introspection**: `ntnt inspect` outputs JSON describing project structure (functions, routes, middleware, static dirs)
+- **Pre-Run Validation**: `ntnt validate` checks syntax and detects unused imports with JSON output
 - **VS Code Extension**: Syntax highlighting for `.tnt` files
 - **IDE Integration**: Language server protocol implementation (planned)
 - **Build System**: Integrated compilation, testing, and deployment (planned)
