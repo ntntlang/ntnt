@@ -176,7 +176,7 @@ let db_url = match get_env("DATABASE_URL") {
 ```ntnt
 import { split, join, trim, replace } from "std/string"
 import { encode, decode, parse_query, build_query } from "std/url"
-import { push, pop, map, filter, reduce } from "std/collections"
+import { push, pop, keys, values, entries, has_key } from "std/collections"
 import { get, post, get_json } from "std/http"
 import { listen, get, post, json, html } from "std/http_server"
 import { connect, query, execute, close } from "std/db/postgres"

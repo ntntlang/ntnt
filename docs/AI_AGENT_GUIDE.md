@@ -98,7 +98,7 @@ NTNT supports standard escape sequences in regular strings:
 ```ntnt
 // ✅ CORRECT - Escape sequences ARE supported
 let with_newline = "line1\nline2\nline3"    // \n = newline
-let with_tab = "col1\tcol2\tcol3"           // \t = tab  
+let with_tab = "col1\tcol2\tcol3"           // \t = tab
 let with_quote = "She said \"hello\""        // \" = quote
 let with_backslash = "path\\to\\file"        // \\ = backslash
 let literal_brace = "use \{curly\} braces"   // \{ \} = literal braces
@@ -304,8 +304,9 @@ import { split, join, trim, replace, contains, starts_with, ends_with } from "st
 // URL encoding/decoding and form parsing
 import { encode, decode, parse_query, build_query } from "std/url"
 
-// Collections
-import { push, pop, first, last, reverse, slice, map, filter, reduce, find } from "std/collections"
+// Collections - Arrays and Maps
+import { push, pop, first, last, reverse, slice, concat, is_empty } from "std/collections"
+import { keys, values, entries, has_key } from "std/collections"  // Map iteration
 
 // HTTP client
 import { get, post, put, delete, get_json, post_json } from "std/http"

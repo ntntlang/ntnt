@@ -167,5 +167,73 @@ pub fn init() -> HashMap<String, Value> {
         },
     });
     
+    // ========== Map Iteration Functions ==========
+    
+    // keys(map) -> Array - Get all keys from a map as an array
+    module.insert("keys".to_string(), Value::NativeFunction {
+        name: "keys".to_string(),
+        arity: 1,
+        func: |args| {
+            match &args[0] {
+                Value::Map(map) => {
+                    let keys: Vec<Value> = map.keys()
+                        .map(|k| Value::String(k.clone()))
+                        .collect();
+                    Ok(Value::Array(keys))
+                }
+                _ => Err(IntentError::TypeError("keys() requires a map".to_string())),
+            }
+        },
+    });
+    
+    // values(map) -> Array - Get all values from a map as an array
+    module.insert("values".to_string(), Value::NativeFunction {
+        name: "values".to_string(),
+        arity: 1,
+        func: |args| {
+            match &args[0] {
+                Value::Map(map) => {
+                    let values: Vec<Value> = map.values().cloned().collect();
+                    Ok(Value::Array(values))
+                }
+                _ => Err(IntentError::TypeError("values() requires a map".to_string())),
+            }
+        },
+    });
+    
+    // entries(map) -> Array - Get all key-value pairs as array of [key, value] arrays
+    module.insert("entries".to_string(), Value::NativeFunction {
+        name: "entries".to_string(),
+        arity: 1,
+        func: |args| {
+            match &args[0] {
+                Value::Map(map) => {
+                    let entries: Vec<Value> = map.iter()
+                        .map(|(k, v)| Value::Array(vec![
+                            Value::String(k.clone()),
+                            v.clone()
+                        ]))
+                        .collect();
+                    Ok(Value::Array(entries))
+                }
+                _ => Err(IntentError::TypeError("entries() requires a map".to_string())),
+            }
+        },
+    });
+    
+    // has_key(map, key) -> Bool - Check if a map contains a key
+    module.insert("has_key".to_string(), Value::NativeFunction {
+        name: "has_key".to_string(),
+        arity: 2,
+        func: |args| {
+            match (&args[0], &args[1]) {
+                (Value::Map(map), Value::String(key)) => {
+                    Ok(Value::Bool(map.contains_key(key)))
+                }
+                _ => Err(IntentError::TypeError("has_key() requires a map and string key".to_string())),
+            }
+        },
+    });
+    
     module
 }
