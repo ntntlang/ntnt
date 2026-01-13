@@ -1598,6 +1598,44 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                 }
             }));
         }
+        
+        // Check for escaped quotes in strings - NTNT doesn't support backslash escapes
+        // This is a common mistake that causes parser errors
+        if line.contains("\\\"") && !trimmed.starts_with("//") && !trimmed.starts_with("/*") {
+            // Check if it's inside a string (not in a raw string)
+            let in_raw_string = line.contains("r\"") || line.contains("r#\"") || line.contains("r##\"");
+            if !in_raw_string {
+                issues.push(json!({
+                    "severity": "error",
+                    "rule": "escaped_quotes_not_supported",
+                    "message": "NTNT does NOT support backslash escapes like \\\" in regular strings. Use raw strings r#\"...\"# for content containing quotes.",
+                    "line": line_num + 1,
+                    "fix": {
+                        "description": "Wrap the string in r#\"...\"# instead of using \\\" escapes"
+                    }
+                }));
+            }
+        }
+        
+        // Check for other common escape sequences that don't work
+        if (line.contains("\\n") || line.contains("\\t") || line.contains("\\\\")) 
+            && !trimmed.starts_with("//") 
+            && !trimmed.starts_with("/*")
+            && !line.contains("r\"") 
+            && !line.contains("r#\"") {
+            // Only warn if it looks like it's in a string context
+            if line.contains("\"") {
+                issues.push(json!({
+                    "severity": "warning",
+                    "rule": "escape_sequences_literal",
+                    "message": "NTNT strings treat backslashes literally. Use raw strings r\"...\" if you want the literal \\n/\\t, or use actual newlines/tabs in your string.",
+                    "line": line_num + 1,
+                    "fix": {
+                        "description": "For literal backslashes use raw strings. For actual newlines, use multi-line strings."
+                    }
+                }));
+            }
+        }
     }
     
     issues

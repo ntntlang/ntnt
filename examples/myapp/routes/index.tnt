@@ -26,6 +26,7 @@ fn get(req) {
     <ul>
         <li><a href="/">GET /</a> → <code>routes/index.tnt</code></li>
         <li><a href="/about">GET /about</a> → <code>routes/about.tnt</code></li>
+        <li><a href="/users">GET /users</a> → <code>routes/users.tnt</code> 🗄️ <strong>Database Demo</strong></li>
         <li><a href="/api/status">GET /api/status</a> → <code>routes/api/status.tnt</code></li>
         <li><a href="/api/users">GET /api/users</a> → <code>routes/api/users/index.tnt</code></li>
         <li><a href="/api/users/42">GET /api/users/42</a> → <code>routes/api/users/[id].tnt</code></li>

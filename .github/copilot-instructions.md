@@ -2,6 +2,14 @@
 
 When generating or editing `.tnt` files (NTNT language), follow these critical syntax rules:
 
+## ⚠️ ALWAYS Lint Before Run
+
+Before running any `.tnt` file, run `ntnt lint` first to catch common mistakes:
+```bash
+ntnt lint myfile.tnt    # Always do this first
+ntnt run myfile.tnt     # Only after lint passes
+```
+
 ## Mandatory Syntax Rules
 
 ### Map Literals
@@ -32,6 +40,16 @@ get(r"/users/{id}", handler)
 
 // Wrong - {id} interpreted as interpolation
 get("/users/{id}", handler)
+```
+
+### NO Backslash Escapes - CRITICAL
+NTNT does NOT support `\"`, `\n`, `\t` in regular strings. Use raw strings:
+```ntnt
+// Correct - raw string for content with quotes
+let html = r#"<div class="main">Hello</div>"#
+
+// WRONG - causes parser errors!
+let html = "<div class=\"main\">Hello</div>"
 ```
 
 ### Contract Placement
@@ -71,25 +89,56 @@ Use standalone functions, not method calls.
 ```ntnt
 len("hello")      // Correct
 str(42)           // Correct
+int("42")         // Correct - string to integer
 push(arr, item)   // Correct
 
 "hello".len()     // Wrong
 ```
 
+## HTTP POST/Form Handling
+
+Use `parse_query()` from `std/url` to parse form data:
+```ntnt
+import { parse_query } from "std/url"
+
+fn post(req) {
+    // parse_query converts "name=Alice&age=25" → map { "name": "Alice", "age": "25" }
+    let form = parse_query(req.body)
+    
+    let name = form["name"]
+    let age = int(form["age"])  // Convert to int for database!
+}
+```
+
+## Type Conversion for Database
+
+**Form fields are strings. Convert before database operations:**
+```ntnt
+// WRONG - causes "db error"
+execute(db, "INSERT INTO users (age) VALUES ($1)", [form["age"]])
+
+// CORRECT
+let age = int(form["age"])
+execute(db, "INSERT INTO users (age) VALUES ($1)", [age])
+```
+
 ## Standard Library Reference
 
 ### Built-in (no import)
-`print`, `len`, `str`, `abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `Some`, `None`, `Ok`, `Err`, `unwrap`, `unwrap_or`, `is_some`, `is_none`, `is_ok`, `is_err`
+`print`, `len`, `str`, `int`, `float`, `abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `Some`, `None`, `Ok`, `Err`, `unwrap`, `unwrap_or`, `is_some`, `is_none`, `is_ok`, `is_err`
 
 ### Common imports
 ```ntnt
 import { split, join, trim, replace } from "std/string"
+import { encode, decode, parse_query, build_query } from "std/url"
 import { push, pop, map, filter, reduce } from "std/collections"
 import { get, post, get_json } from "std/http"
 import { listen, get, post, json, html } from "std/http_server"
+import { connect, query, execute, close } from "std/db/postgres"
 import { read_file, write_file, exists } from "std/fs"
 import { parse, stringify } from "std/json"
 import { now, format } from "std/time"
+import { get_env } from "std/env"
 import { channel, send, recv } from "std/concurrent"
 ```
 

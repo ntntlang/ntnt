@@ -2,6 +2,27 @@
 
 This document provides critical syntax rules and patterns for AI agents generating NTNT code. Following these rules will prevent common errors and produce idiomatic code.
 
+## ⚠️ MANDATORY Workflow: Always Lint Before Run
+
+**Before running ANY `.tnt` file, run `ntnt lint` first:**
+
+```bash
+# ALWAYS do this first
+ntnt lint myfile.tnt
+
+# Only after lint passes, run the file
+ntnt run myfile.tnt
+```
+
+The `ntnt lint` command catches common mistakes like:
+- Escaped quotes (`\"`) which cause parser errors
+- JavaScript-style `${var}` interpolation
+- Python-style `range()` calls
+- Missing `map {}` keyword
+- Route patterns needing raw strings
+
+**This one step prevents 90% of debugging time.**
+
 ## Critical Syntax Rules
 
 ### 1. Map Literals Require `map` Keyword
@@ -50,6 +71,36 @@ get(r"/api/v1/items/{category}/{item_id}", get_item)
 get("/users/{id}", get_user)          // ERROR: `id` is undefined
 post("/users/{user_id}/posts", handler)  // ERROR
 ```
+
+### 4. NO Backslash Escapes in Regular Strings
+
+**CRITICAL:** NTNT does NOT support escape sequences like `\"`, `\n`, `\t` in regular strings. Use raw strings for content with quotes:
+
+```ntnt
+// ✅ CORRECT - Use raw strings for content with quotes
+let html = r#"<div class="container">Hello</div>"#
+let json = r#"{"name": "Alice", "age": 30}"#
+let sql = r#"SELECT * FROM users WHERE name = 'John'"#
+
+// For multi-line content, raw strings also work
+let template = r#"
+<html>
+    <body class="main">
+        <h1>Welcome</h1>
+    </body>
+</html>
+"#
+
+// ✅ Also correct - Concatenation to avoid quotes
+let attr = "class=" + chr(34) + "container" + chr(34)
+
+// ❌ WRONG - These cause parser errors
+let html = "<div class=\"container\">Hello</div>"   // ERROR: \" not supported
+let line = "Line1\nLine2"                            // Literal \n, not newline
+let path = "C:\\Users\\name"                         // Literal \\, not single \
+```
+
+**Why this matters:** Forgetting this rule causes cryptic "Expected expression" parser errors that are hard to debug.
 
 ### 4. Contract Placement (requires/ensures)
 
@@ -213,7 +264,9 @@ print(response.body)      // ERROR if get() returned Err
 |----------|-------------|
 | `print(...)` | Output to stdout |
 | `len(x)` | Length of string/array |
-| `str(x)` | Convert to string |
+| `str(x)` | Convert any value to string |
+| `int(x)` | Convert string to integer |
+| `float(x)` | Convert string to float |
 | `abs(x)` | Absolute value |
 | `min(a, b)` | Minimum of two values |
 | `max(a, b)` | Maximum of two values |
@@ -231,6 +284,9 @@ print(response.body)      // ERROR if get() returned Err
 // String operations
 import { split, join, trim, replace, contains, starts_with, ends_with } from "std/string"
 
+// URL encoding/decoding and form parsing
+import { encode, decode, parse_query, build_query } from "std/url"
+
 // Collections
 import { push, pop, first, last, reverse, slice, map, filter, reduce, find } from "std/collections"
 
@@ -239,6 +295,9 @@ import { get, post, put, delete, get_json, post_json } from "std/http"
 
 // HTTP server
 import { listen, get, post, json, html, text, redirect, serve_static, routes } from "std/http_server"
+
+// PostgreSQL database
+import { connect, query, execute, close } from "std/db/postgres"
 
 // File system
 import { read_file, write_file, exists, is_file, is_dir, mkdir, readdir } from "std/fs"
@@ -278,6 +337,71 @@ serve_static("/static", "./public")
 
 // Start server
 listen(8080)
+```
+
+### HTTP Request Object Properties
+
+**CRITICAL:** The request object (`req`) has specific properties. Do NOT assume other frameworks' conventions:
+
+```ntnt
+// ✅ CORRECT - Available request properties
+req.method        // "GET", "POST", etc.
+req.path          // "/users/123"
+req.params        // Map of route parameters: params["id"] = "123"
+req.query         // Map of query string: ?name=alice → query["name"] = "alice"
+req.headers       // Map of headers: headers["content-type"]
+req.body          // Raw request body as STRING (for POST/PUT)
+
+// ❌ WRONG - These do NOT exist
+req.form          // DOES NOT EXIST - use req.body and parse it
+req.json          // DOES NOT EXIST as property - body is a string
+req.data          // DOES NOT EXIST
+req.params.id     // WRONG - use req.params["id"]
+```
+
+### Parsing Form Data (POST requests)
+
+Use `parse_query()` from `std/url` to parse form data:
+
+```ntnt
+import { parse_query } from "std/url"
+
+fn post(req) {
+    // parse_query converts "name=Alice&email=alice%40example.com&age=30"
+    // into map { "name": "Alice", "email": "alice@example.com", "age": "30" }
+    let form = parse_query(req.body)
+    
+    let name = form["name"]     // "Alice"
+    let email = form["email"]   // "alice@example.com" (auto URL-decoded)
+    let age = int(form["age"])  // 30 (convert string to int for database)
+    
+    // ...process data...
+}
+```
+
+**Note:** `parse_query()` automatically URL-decodes values (handles `%20`, `+`, etc.).
+
+### Type Conversion Functions
+
+**CRITICAL for database operations:** Form fields are always strings. Database columns may require specific types:
+
+```ntnt
+// ✅ Built-in conversion functions
+int("42")         // Converts string to integer: 42
+float("3.14")     // Converts string to float: 3.14
+str(42)           // Converts integer to string: "42"
+str(3.14)         // Converts float to string: "3.14"
+
+// Common pattern: form field to database integer
+let form = parse_query(req.body)
+let age = int(form["age"])      // Convert "25" to 25 for DB
+let user_id = int(form["id"])   // Convert "123" to 123 for DB
+
+// ❌ WRONG - Passing string to integer column causes "db error"
+execute(db, "INSERT INTO users (age) VALUES ($1)", [form["age"]])  // ERROR!
+
+// ✅ CORRECT - Convert first
+execute(db, "INSERT INTO users (age) VALUES ($1)", [int(form["age"])])  // Works!
 ```
 
 ## Contract Patterns
@@ -378,5 +502,146 @@ fn fetch_user(id: String) -> Result<User, String> {
         },
         Err(e) => return Err(e),
     }
+}
+```
+
+## PostgreSQL Database Patterns
+
+### Connection and Basic Operations
+
+```ntnt
+import { connect, query, execute, close } from "std/db/postgres"
+import { get_env } from "std/env"
+
+// Connect using environment variable (recommended)
+fn get_db_connection() {
+    let db_url = match get_env("DATABASE_URL") {
+        Some(url) => url,
+        None => "postgres://user:pass@localhost/mydb"
+    }
+    return connect(db_url)
+}
+
+// Usage
+let db_result = get_db_connection()
+match db_result {
+    Ok(db) => {
+        // ... use database ...
+        close(db)  // Always close when done!
+    }
+    Err(e) => {
+        print("Connection failed: {e}")
+    }
+}
+```
+
+### Query vs Execute
+
+```ntnt
+// query() - For SELECT statements that return rows
+let users_result = query(db, "SELECT * FROM users WHERE active = $1", [true])
+match users_result {
+    Ok(users) => {
+        for user in users {
+            print("Name: {user[\"name\"]}, Age: {user[\"age\"]}")
+        }
+    }
+    Err(e) => print("Query failed: {e}")
+}
+
+// execute() - For INSERT, UPDATE, DELETE (no rows returned)
+let insert_result = execute(db, 
+    "INSERT INTO users (name, email, age) VALUES ($1, $2, $3)",
+    [name, email, age]
+)
+match insert_result {
+    Ok(_) => print("User added"),
+    Err(e) => print("Insert failed: {e}")
+}
+```
+
+### Parameter Binding
+
+**CRITICAL:** Use `$1`, `$2`, etc. for parameters. Types must match column types:
+
+```ntnt
+// ✅ CORRECT - Parameters match column types
+let name = "Alice"                    // String for VARCHAR
+let age = int(age_str)                // Integer for INT column
+let active = true                     // Boolean for BOOLEAN column
+
+execute(db, 
+    "INSERT INTO users (name, age, active) VALUES ($1, $2, $3)",
+    [name, age, active]
+)
+
+// ✅ CORRECT - Integer parameter for WHERE clause
+let user_id = int(id_str)
+execute(db, "DELETE FROM users WHERE id = $1", [user_id])
+
+// ❌ WRONG - String passed to integer column causes "db error"
+execute(db, "DELETE FROM users WHERE id = $1", [id_str])  // ERROR!
+execute(db, "INSERT INTO users (age) VALUES ($1)", ["25"])  // ERROR!
+```
+
+### Query Results
+
+Query results are arrays of maps. Access columns by name:
+
+```ntnt
+let users = unwrap(query(db, "SELECT id, name, email FROM users", []))
+
+for user in users {
+    let id = user["id"]         // Integer
+    let name = user["name"]     // String
+    let email = user["email"]   // String
+    
+    // Convert to string for display/concatenation
+    let id_str = str(user["id"])
+    print("User #{id_str}: {name}")
+}
+```
+
+### Complete CRUD Example
+
+```ntnt
+import { connect, query, execute, close } from "std/db/postgres"
+import { html } from "std/http_server"
+import { parse_query } from "std/url"
+
+// CREATE - POST handler
+fn post(req) {
+    let db = unwrap(connect("postgres://..."))
+    
+    let form = parse_query(req.body)
+    let name = form["name"]
+    let age = int(form["age"])  // Convert to int for database!
+    
+    execute(db, "INSERT INTO users (name, age) VALUES ($1, $2)", [name, age])
+    close(db)
+    
+    return html(r#"<p>User created!</p>"#)
+}
+
+// READ - GET handler
+fn get(req) {
+    let db = unwrap(connect("postgres://..."))
+    let users = unwrap(query(db, "SELECT * FROM users", []))
+    close(db)
+    
+    // Build response...
+}
+
+// DELETE - POST handler (HTML forms only support GET/POST)
+fn delete_user(req) {
+    let db = unwrap(connect("postgres://..."))
+    
+    let form = parse_query(req.body)
+    let user_id = int(form["id"])  // Convert to int for database!
+    
+    execute(db, "DELETE FROM users WHERE id = $1", [user_id])
+    close(db)
+    
+    return html(r#"<p>User deleted!</p>"#)
 }
 ```

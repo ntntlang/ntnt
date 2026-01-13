@@ -6,6 +6,17 @@ This file provides instructions for Claude when working with NTNT (.tnt) code fi
 
 NTNT (pronounced "Intent") is an agent-native programming language designed for AI-driven web application development. File extension: `.tnt`
 
+## ⚠️ MANDATORY: Always Lint Before Run
+
+**Before running ANY `.tnt` file, run lint first:**
+
+```bash
+ntnt lint myfile.tnt    # Check for common mistakes
+ntnt run myfile.tnt     # Only after lint passes
+```
+
+This prevents wasted debugging time on parser errors.
+
 ## Critical Syntax Rules
 
 ### 1. Map Literals REQUIRE `map` Keyword
@@ -40,7 +51,18 @@ get(r"/users/{id}", handler)
 get("/users/{id}", handler)  // {id} becomes interpolation
 ```
 
-### 4. Contracts Go BETWEEN Return Type and Body
+### 4. NO Backslash Escapes - Use Raw Strings
+
+```ntnt
+// ✅ CORRECT - Use raw strings for quotes
+let html = r#"<div class="main">Hello</div>"#
+let json = r#"{"name": "Alice"}"#
+
+// ❌ WRONG - Causes parser errors!
+let html = "<div class=\"main\">Hello</div>"
+```
+
+### 5. Contracts Go BETWEEN Return Type and Body
 
 ```ntnt
 // ✅ CORRECT
@@ -52,7 +74,7 @@ fn divide(a: Int, b: Int) -> Int
 }
 ```
 
-### 5. Range Syntax (Not `range()` Function)
+### 6. Range Syntax (Not `range()` Function)
 
 ```ntnt
 // ✅ CORRECT
@@ -126,14 +148,48 @@ Before making changes to an NTNT project, use `ntnt inspect` to understand:
 ## Standard Library Modules
 
 - `std/string` - split, join, trim, replace, contains
+- `std/url` - encode, decode, parse_query, build_query
 - `std/collections` - push, pop, map, filter, reduce
 - `std/http` - get, post, put, delete, get_json
 - `std/http_server` - listen, get, post, json, html
+- `std/db/postgres` - connect, query, execute, close
 - `std/fs` - read_file, write_file, exists, mkdir
 - `std/json` - parse, stringify
 - `std/time` - now, format, add_days
 - `std/env` - get_env, set_env
 - `std/concurrent` - channel, send, recv, sleep_ms
+
+## HTTP Form Handling
+
+Use `parse_query()` from `std/url` to parse form data:
+
+```ntnt
+import { parse_query } from "std/url"
+
+fn post(req) {
+    // parse_query converts "name=Alice&age=25" → map { "name": "Alice", "age": "25" }
+    let form = parse_query(req.body)
+    
+    let name = form["name"]
+    let age = int(form["age"])  // Convert to int for database!
+}
+```
+
+## Type Conversion
+
+**CRITICAL for database operations:**
+
+```ntnt
+// Built-in conversion functions
+int("42")      // String to integer
+float("3.14")  // String to float
+str(42)        // Any value to string
+
+// Form fields are ALWAYS strings - convert for database!
+let form = parse_query(req.body)
+let age = int(form["age"])
+let user_id = int(form["id"])
+```
 
 ## Full Reference
 

@@ -265,6 +265,37 @@ pub fn init() -> HashMap<String, Value> {
         },
     });
     
+    // parse_query(query_string) -> Map - Parse query/form string to map (inverse of build_query)
+    module.insert("parse_query".to_string(), Value::NativeFunction {
+        name: "parse_query".to_string(),
+        arity: 1,
+        func: |args| {
+            match &args[0] {
+                Value::String(query) => {
+                    let mut result: HashMap<String, Value> = HashMap::new();
+                    
+                    if !query.is_empty() {
+                        for pair in query.split('&') {
+                            if let Some((key, value)) = pair.split_once('=') {
+                                // URL decode both key and value
+                                let decoded_key = url_decode(key).unwrap_or_else(|_| key.to_string());
+                                let decoded_value = url_decode(value).unwrap_or_else(|_| value.to_string());
+                                result.insert(decoded_key, Value::String(decoded_value));
+                            } else if !pair.is_empty() {
+                                // Handle keys without values (e.g., "flag" in "flag&name=value")
+                                let decoded_key = url_decode(pair).unwrap_or_else(|_| pair.to_string());
+                                result.insert(decoded_key, Value::String(String::new()));
+                            }
+                        }
+                    }
+                    
+                    Ok(Value::Map(result))
+                }
+                _ => Err(IntentError::TypeError("parse_query() requires a string".to_string())),
+            }
+        },
+    });
+    
     // join(base, path) -> String - Join base URL with path
     module.insert("join".to_string(), Value::NativeFunction {
         name: "join".to_string(),
