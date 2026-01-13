@@ -1,6 +1,6 @@
 # NTNT Language Specification
 
-## Version 0.1 (Draft)
+## Version 0.1.8
 
 This document specifies the syntax, semantics, and core features of the NTNT programming language.
 
@@ -11,18 +11,32 @@ This document specifies the syntax, semantics, and core features of the NTNT pro
 3. [Contracts](#contracts)
 4. [Functions and Methods](#functions-and-methods)
 5. [Built-in Functions](#built-in-functions)
-6. [Effects](#effects)
-7. [Concurrency](#concurrency)
-8. [Modules](#modules)
+6. [Traits](#traits)
+7. [Control Flow](#control-flow)
+8. [Effects](#effects)
+9. [Concurrency](#concurrency)
+10. [Modules](#modules)
+11. [Standard Library](#standard-library)
 
 ## Lexical Structure
 
 ### Keywords
 
 ```
-contract, requires, ensures, invariant, effect, protocol, intent, approve
-fn, let, mut, if, else, match, loop, while, return, break, continue
-type, struct, enum, impl, use, mod, pub
+// Contracts
+requires, ensures, invariant, old, result
+
+// Functions & Control
+fn, let, mut, if, else, match, for, in, while, loop, return, break, continue, defer
+
+// Types & Structures  
+type, struct, enum, impl, trait, pub, self
+
+// Modules
+import, from, export
+
+// Literals
+true, false, map, Ok, Err, Some, None
 ```
 
 ### Identifiers
@@ -33,12 +47,14 @@ type, struct, enum, impl, use, mod, pub
 
 ### Literals
 
-- Integers: `42`, `0x2A`, `0b101010`
+- Integers: `42`, `-17`
 - Floats: `3.14`, `1.0e-10`
-- Strings: `"hello"`, `'single'`
+- Strings: `"hello"`, `"with {interpolation}"`
+- Raw Strings: `r"no \n escapes"`, `r#"can use "quotes""#`
 - Booleans: `true`, `false`
 - Arrays: `[1, 2, 3]`
-- Objects: `{key: value}`
+- Maps: `map { "key": value, "key2": value2 }`
+- Ranges: `0..10` (exclusive), `0..=10` (inclusive)
 
 ## Types
 
@@ -53,10 +69,11 @@ type, struct, enum, impl, use, mod, pub
 ### Compound Types
 
 - Arrays: `[T]`
-- Tuples: `(T1, T2, ...)`
+- Maps: `Map<K, V>` with literal syntax `map { key: value }`
 - Structs: Named product types
-- Enums: Tagged union types
-- Functions: `(T1, T2) -> T3`
+- Enums: Tagged union types with `Option<T>` and `Result<T, E>` built-in
+- Functions: `fn(T1, T2) -> T3`
+- Ranges: `Range` (from `..` and `..=` expressions)
 
 ### Type Annotations
 
@@ -196,102 +213,306 @@ let bounded = clamp(15, 0, 10)  // 10
 
 ## Effects
 
-Effects track side effects and error conditions.
-
-### Effect Types
+Effects track side effects and error conditions (foundation implemented, full effect system planned).
 
 ```ntnt
-fn read_file(path: String) -> Result<String, IOError> / {IO, Error}
+fn read_file(path: String) -> Result<String, Error> with io {
+    // implementation
+}
 ```
 
-### Effect Handlers
+## Traits
+
+Traits define shared behavior that types can implement.
+
+### Trait Declaration
 
 ```ntnt
-try {
-    let content = read_file("data.txt")?;
-    process(content);
-} catch IOError as e {
-    log_error(e);
+trait Serializable {
+    fn to_json(self) -> String
+    fn from_json(json: String) -> Self
+}
+
+trait Comparable {
+    fn compare(self, other: Self) -> Int
+    
+    // Default implementation
+    fn less_than(self, other: Self) -> Bool {
+        return self.compare(other) < 0
+    }
+}
+```
+
+### Trait Implementation
+
+```ntnt
+impl Comparable for User {
+    fn compare(self, other: User) -> Int {
+        return self.id - other.id
+    }
+    // less_than uses default implementation
+}
+```
+
+### Trait Bounds
+
+```ntnt
+fn sort<T: Comparable>(arr: [T]) -> [T] {
+    // Can use compare() and less_than() on elements
+}
+```
+
+## Control Flow
+
+### For-In Loops
+
+```ntnt
+// Iterate over arrays
+for item in items {
+    print(item)
+}
+
+// Iterate over ranges
+for i in 0..10 {
+    print(i)  // 0 through 9
+}
+
+for i in 0..=10 {
+    print(i)  // 0 through 10 (inclusive)
+}
+
+// Iterate over strings (characters)
+for char in "hello" {
+    print(char)
+}
+
+// Iterate over maps
+for key in my_map {
+    print(key + ": " + str(my_map[key]))
+}
+```
+
+### Match Expressions
+
+```ntnt
+match value {
+    Ok(data) => process(data),
+    Err(e) => handle_error(e),
+}
+
+match number {
+    0 => "zero",
+    1 => "one", 
+    n if n < 0 => "negative",
+    _ => "other",
+}
+```
+
+### Defer Statement
+
+Execute cleanup code when leaving scope (LIFO order):
+
+```ntnt
+fn process_file(path: String) -> Result<Data, Error> {
+    let file = open(path)
+    defer close(file)  // Always runs, even on error/return
+    
+    let data = read(file)
+    return Ok(data)
 }
 ```
 
 ## Concurrency
 
-### Protocols
+NTNT uses Go-style concurrency with channels (no async/await).
+
+### Channels
 
 ```ntnt
-protocol Handshake {
-    send Hello(String) -> receive HelloAck(String) -> end
-}
-```
+import { channel, send, recv, try_recv, recv_timeout, close } from "std/concurrent"
 
-### Async Operations
+// Create a channel
+let ch = channel()
 
-```ntnt
-async fn fetch_data(url: String) -> Result<Data, NetworkError> {
-    // implementation
+// Send values (blocks if no receiver ready)
+send(ch, "hello")
+send(ch, map { "user_id": 123 })
+
+// Receive (blocks until value available)
+let msg = recv(ch)
+
+// Non-blocking receive
+match try_recv(ch) {
+    Some(value) => process(value),
+    None => print("No message")
 }
+
+// Receive with timeout (milliseconds)
+match recv_timeout(ch, 5000) {
+    Some(value) => handle(value),
+    None => print("Timeout")
+}
+
+// Close channel
+close(ch)
 ```
 
 ## Modules
 
-### Module Declaration
+### Import Syntax
 
 ```ntnt
-mod math {
-    pub fn add(a: Int, b: Int) -> Int {
-        a + b
-    }
+// Import specific items
+import { split, join, trim } from "std/string"
+
+// Import with alias
+import { get as http_get } from "std/http"
+
+// Import entire module
+import "std/math" as math
+```
+
+### File-Based Modules
+
+```ntnt
+// lib/utils.tnt
+pub fn helper() -> String {
+    return "help"
+}
+
+// main.tnt
+import { helper } from "./lib/utils"
+```
+
+## Standard Library
+
+### Core Modules
+
+| Module | Functions |
+|--------|-----------|
+| `std/string` | split, join, trim, replace, contains, starts_with, ends_with, to_upper, to_lower, char_at, substring, pad_left, pad_right |
+| `std/math` | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E |
+| `std/collections` | push, pop, shift, first, last, reverse, slice, concat, is_empty, contains, index_of, sort, map, filter, reduce, find |
+| `std/env` | get_env, set_env, args, cwd |
+| `std/fs` | read_file, write_file, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size |
+| `std/path` | join, dirname, basename, extension, stem, resolve, is_absolute, is_relative, with_extension, normalize |
+| `std/json` | parse, stringify, stringify_pretty |
+| `std/time` | now, now_millis, now_nanos, sleep, elapsed, format_timestamp, duration_secs, duration_millis |
+| `std/crypto` | sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode |
+| `std/url` | parse, encode, encode_component, decode, build_query, join |
+
+### HTTP Client (`std/http`)
+
+```ntnt
+import { get, post, request, get_json, post_json } from "std/http"
+
+// Simple GET
+match get("https://api.example.com/data") {
+    Ok(response) => print(response.body),
+    Err(e) => print("Error: " + e)
+}
+
+// POST with body
+match post("https://api.example.com/users", "{\"name\": \"Alice\"}") {
+    Ok(response) => print(response.status),
+    Err(e) => print("Error: " + e)
+}
+
+// Full request with headers
+match request(map {
+    "url": "https://api.example.com/data",
+    "method": "POST",
+    "headers": map {
+        "Authorization": "Bearer token123",
+        "Content-Type": "application/json"
+    },
+    "body": "{\"key\": \"value\"}",
+    "timeout": 30
+}) {
+    Ok(response) => print(response.body),
+    Err(e) => print("Error: " + e)
 }
 ```
 
-### Imports
+### HTTP Server (`std/http/server`)
 
 ```ntnt
-use math::add;
-use std::collections::HashMap;
+import { text, html, json, status, redirect } from "std/http/server"
+
+fn home(req) {
+    return text("Welcome!")
+}
+
+fn get_user(req) {
+    let id = req.params.id
+    return json(map { "id": id, "name": "User " + id })
+}
+
+fn create_user(req)
+    requires len(req.body) > 0
+{
+    // Contract violations return 400 Bad Request
+    return json(map { "created": true })
+}
+
+// Register routes
+get("/", home)
+get(r"/users/{id}", get_user)
+post("/users", create_user)
+
+// Serve static files
+serve_static("/assets", "./public")
+
+// Start server
+listen(8080)
 ```
 
-## Structured Edits
-
-Code modifications are represented as typed operations:
+### Database (`std/db/postgres`)
 
 ```ntnt
-edit AddParameter {
-    target: "fn process_data",
-    param: "config: Config"
+import { connect, query, execute, begin, commit, rollback, close } from "std/db/postgres"
+
+let db = connect("postgresql://user:pass@localhost/mydb")
+
+// Query with parameters
+match query(db, "SELECT * FROM users WHERE id = $1", [user_id]) {
+    Ok(rows) => {
+        for row in rows {
+            print(row.name)
+        }
+    },
+    Err(e) => print("Query failed: " + e)
 }
+
+// Transaction
+begin(db)
+execute(db, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", [100, from_id])
+execute(db, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", [100, to_id])
+commit(db)
+
+close(db)
 ```
 
-## Intent Annotations
+### Concurrency (`std/concurrent`)
 
 ```ntnt
-/// intent: "Implements Dijkstra's shortest path algorithm for routing"
-fn shortest_path(graph: Graph, start: Node) -> Map<Node, Distance> {
-    // implementation
-}
-```
+import { channel, send, recv, close, sleep_ms, thread_count } from "std/concurrent"
 
-## Observability
+print("Running on " + str(thread_count()) + " threads")
 
-Built-in logging of AI decisions:
+let ch = channel()
 
-```ntnt
-#[observe]
-fn optimize_query(query: Query) -> OptimizedQuery {
-    // AI reasoning logged automatically
-}
-```
+// Producer pattern
+send(ch, map { "type": "task", "data": process_item() })
 
-## Human Approval
+// Consumer pattern  
+let msg = recv(ch)
+print("Received: " + str(msg))
 
-```ntnt
-#[requires_approval("UI changes")]
-fn update_ui(component: Component) {
-    // implementation
-}
+sleep_ms(1000)  // Sleep for 1 second
+close(ch)
 ```
 
 ---
 
-_This specification is preliminary and subject to change. See the whitepaper for detailed motivation and the [ROADMAP.md](ROADMAP.md) for the 13-phase implementation plan._
+_This specification reflects NTNT v0.1.8. See [ROADMAP.md](ROADMAP.md) for the implementation plan._

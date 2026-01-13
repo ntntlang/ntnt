@@ -10,13 +10,31 @@ The current implementation is a tree-walking interpreter written in Rust:
 
 ```
 src/
-├── main.rs          # CLI entry point (run, repl commands)
+├── main.rs          # CLI entry point (run, repl, inspect, validate commands)
+├── lib.rs           # Library exports
 ├── lexer.rs         # Tokenizer for NTNT source code
 ├── parser.rs        # Recursive descent parser → AST
 ├── ast.rs           # Abstract syntax tree definitions
 ├── interpreter.rs   # Tree-walking evaluator with contracts
 ├── contracts.rs     # Contract checking, old() value storage
-└── errors.rs        # Error types and formatting
+├── types.rs         # Type definitions and type checking
+├── error.rs         # Error types and formatting
+└── stdlib/          # Standard library modules
+    ├── mod.rs       # Module registry
+    ├── string.rs    # std/string
+    ├── math.rs      # std/math
+    ├── collections.rs # std/collections
+    ├── env.rs       # std/env
+    ├── fs.rs        # std/fs
+    ├── path.rs      # std/path
+    ├── json.rs      # std/json
+    ├── time.rs      # std/time
+    ├── crypto.rs    # std/crypto
+    ├── url.rs       # std/url
+    ├── http.rs      # std/http (client)
+    ├── http_server.rs # std/http/server
+    ├── postgres.rs  # std/db/postgres
+    └── concurrent.rs # std/concurrent
 ```
 
 ### Key Features Implemented
@@ -59,9 +77,10 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
   - `std/time`: Time operations (now, sleep, elapsed, format_timestamp, duration_secs)
   - `std/crypto`: Cryptographic functions (sha256, hmac_sha256, uuid, random_bytes, hex_encode)
   - `std/url`: URL parsing and encoding (parse, encode, decode, build_query, join)
-  - `std/http`: HTTP client (get, post, put, delete, request)
+  - `std/http`: HTTP client (get, post, put, delete, patch, head, request, get_json, post_json)
   - `std/http/server`: HTTP server with routing, middleware, static files, and contract-verified endpoints
-  - `std/concurrent`: Go-style concurrency (channel, send, recv, try_recv, recv_timeout, close)
+  - `std/db/postgres`: PostgreSQL database (connect, query, query_one, execute, begin, commit, rollback, close)
+  - `std/concurrent`: Go-style concurrency (channel, send, recv, try_recv, recv_timeout, close, sleep_ms, thread_count)
 
 ### Language Runtime (Planned)
 
@@ -118,7 +137,9 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 ├─────────────────────────────────────────────────┤
 │  Runtime             ← Interpreter, contracts    │
 ├─────────────────────────────────────────────────┤
-│  Storage             ← Database (Phase 5)        │
+│  Storage             ← PostgreSQL ✅             │
+├─────────────────────────────────────────────────┤
+│  Concurrency         ← Channels, threads ✅      │
 ├─────────────────────────────────────────────────┤
 │  Tooling             ← CLI, VS Code, deployment  │
 └─────────────────────────────────────────────────┘
@@ -148,12 +169,20 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 
 ## Future Extensions
 
+**Completed (Phases 1-5):**
 - HTTP server with contract-verified endpoints ✅
-- Database access with repository patterns (Phase 5)
-- Async/await for concurrent operations (Phase 5)
+- PostgreSQL database with transactions ✅
+- Go-style concurrency with channels ✅
+- File-based routing with hot reload ✅
+- Agent introspection (`ntnt inspect`) ✅
+
+**Planned:**
+- Testing framework with contract-based test generation (Phase 6)
+- LSP server for IDE integration (Phase 7)
+- Package manager with registry (Phase 7)
+- Bytecode compiler for performance (Phase 8)
+- Native compilation via LLVM/Cranelift (Phase 8)
 - Domain-specific dialects
-- Integration with existing languages
-- Advanced AI reasoning capabilities
 - Formal verification integration
 - Docker deployment and container support (Phase 11)
 
