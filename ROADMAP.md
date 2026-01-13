@@ -364,7 +364,7 @@ Errors: 1
 - [x] File-based route discovery via `routes()` function
 - [x] Dynamic segments `[param].tnt` → `{param}` in URL
 - [x] Auto-loaded middleware and lib directories
-- [ ] Hot-reload
+- [x] Hot-reload on file changes (mtime-based, zero dependencies)
 - [x] `ntnt inspect` - JSON introspection (detects file-based routes)
 - [x] `ntnt validate` - Pre-run validation
 
@@ -404,7 +404,7 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] HTTP client (blocking)
 - [x] HTTP server with routing
 - [x] File-based routing (`routes()` with `routes/`, `lib/`, `middleware/` conventions)
-- [ ] Hot-reload on file changes
+- [x] Hot-reload on file changes (mtime-based, no dependencies)
 - [x] `ntnt inspect` - JSON introspection for agents
 - [x] `ntnt validate` - Pre-run error checking
 - [ ] PostgreSQL database driver

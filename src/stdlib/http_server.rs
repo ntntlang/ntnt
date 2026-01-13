@@ -21,6 +21,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::time::SystemTime;
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
 
@@ -39,12 +40,20 @@ pub struct Route {
     pub segments: Vec<RouteSegment>,
 }
 
+/// Information about a route's source file for hot-reload
+#[derive(Debug, Clone)]
+pub struct RouteSource {
+    pub file_path: Option<String>,  // None for inline routes
+    pub mtime: Option<SystemTime>,  // Last modification time
+}
+
 /// Server state stored in the interpreter
 #[derive(Debug, Clone)]
 pub struct ServerState {
-    pub routes: Vec<(Route, Value)>,  // Routes with their handlers
+    pub routes: Vec<(Route, Value, RouteSource)>,  // Routes with handlers and source info
     pub static_dirs: Vec<(String, String)>,  // (url_prefix, filesystem_path)
     pub middleware: Vec<Value>,  // Middleware functions to run before handlers
+    pub hot_reload: bool,  // Whether hot-reload is enabled
 }
 
 impl ServerState {
@@ -53,6 +62,7 @@ impl ServerState {
             routes: Vec::new(),
             static_dirs: Vec::new(),
             middleware: Vec::new(),
+            hot_reload: true,  // Enable hot-reload by default in dev
         }
     }
     
@@ -62,28 +72,77 @@ impl ServerState {
         self.middleware.clear();
     }
     
+    /// Add a route without source file info (inline routes)
     pub fn add_route(&mut self, method: &str, pattern: &str, handler: Value) {
+        self.add_route_with_source(method, pattern, handler, None);
+    }
+    
+    /// Add a route with source file info for hot-reload
+    pub fn add_route_with_source(&mut self, method: &str, pattern: &str, handler: Value, file_path: Option<String>) {
         let route = Route {
             method: method.to_string(),
             pattern: pattern.to_string(),
             segments: parse_route_pattern(pattern),
         };
-        self.routes.push((route, handler));
+        
+        // Get file mtime if path provided
+        let mtime = file_path.as_ref().and_then(|p| {
+            std::fs::metadata(p).ok().and_then(|m| m.modified().ok())
+        });
+        
+        let source = RouteSource { file_path, mtime };
+        self.routes.push((route, handler, source));
     }
     
     pub fn route_count(&self) -> usize {
         self.routes.len()
     }
     
-    pub fn find_route(&self, method: &str, path: &str) -> Option<(Value, HashMap<String, String>)> {
-        for (route, handler) in &self.routes {
+    /// Find a route and return its index for potential hot-reload
+    pub fn find_route(&self, method: &str, path: &str) -> Option<(Value, HashMap<String, String>, usize)> {
+        for (index, (route, handler, _source)) in self.routes.iter().enumerate() {
             if route.method == method {
                 if let Some(params) = match_route(path, route) {
-                    return Some((handler.clone(), params));
+                    return Some((handler.clone(), params, index));
                 }
             }
         }
         None
+    }
+    
+    /// Check if a route needs reloading based on file mtime
+    pub fn needs_reload(&self, route_index: usize) -> bool {
+        if !self.hot_reload {
+            return false;
+        }
+        
+        if let Some((_, _, source)) = self.routes.get(route_index) {
+            if let (Some(file_path), Some(cached_mtime)) = (&source.file_path, &source.mtime) {
+                // Check current file mtime
+                if let Ok(metadata) = std::fs::metadata(file_path) {
+                    if let Ok(current_mtime) = metadata.modified() {
+                        return current_mtime > *cached_mtime;
+                    }
+                }
+            }
+        }
+        false
+    }
+    
+    /// Update a route's handler after hot-reload
+    pub fn update_route_handler(&mut self, route_index: usize, new_handler: Value) {
+        if let Some((_, handler, source)) = self.routes.get_mut(route_index) {
+            *handler = new_handler;
+            // Update mtime
+            if let Some(file_path) = &source.file_path {
+                source.mtime = std::fs::metadata(file_path).ok().and_then(|m| m.modified().ok());
+            }
+        }
+    }
+    
+    /// Get the source info for a route
+    pub fn get_route_source(&self, route_index: usize) -> Option<&RouteSource> {
+        self.routes.get(route_index).map(|(_, _, source)| source)
     }
     
     pub fn add_static_dir(&mut self, prefix: String, directory: String) {
@@ -863,7 +922,7 @@ mod tests {
         
         let result = state.find_route("GET", "/users/123");
         assert!(result.is_some());
-        let (handler, params) = result.unwrap();
+        let (handler, params, _index) = result.unwrap();
         assert_value_string(&handler, "handler");
         assert_eq!(params.get("id"), Some(&"123".to_string()));
     }
@@ -908,17 +967,17 @@ mod tests {
         assert_eq!(state.route_count(), 4);
         
         // Test finding each route
-        let (handler, _) = state.find_route("GET", "/").unwrap();
+        let (handler, _, _) = state.find_route("GET", "/").unwrap();
         assert_value_string(&handler, "home");
         
-        let (handler, _) = state.find_route("GET", "/users").unwrap();
+        let (handler, _, _) = state.find_route("GET", "/users").unwrap();
         assert_value_string(&handler, "list_users");
         
-        let (handler, params) = state.find_route("GET", "/users/42").unwrap();
+        let (handler, params, _) = state.find_route("GET", "/users/42").unwrap();
         assert_value_string(&handler, "get_user");
         assert_eq!(params.get("id"), Some(&"42".to_string()));
         
-        let (handler, _) = state.find_route("POST", "/users").unwrap();
+        let (handler, _, _) = state.find_route("POST", "/users").unwrap();
         assert_value_string(&handler, "create_user");
     }
 

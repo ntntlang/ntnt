@@ -6,6 +6,7 @@ fn get(req) {
     return json(map {
         "status": "ok",
         "version": "0.1.7",
-        "routing": "file-based"
+        "routing": "file-based",
+        "hot_reload": "working!"
     })
 }

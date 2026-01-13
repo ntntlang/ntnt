@@ -950,12 +950,14 @@ my-app/
 ```
 
 **Entry point (`app.tnt`):**
+
 ```ntnt
 routes("routes")  // Auto-discover all routes!
 listen(3000)
 ```
 
 **Route file (`routes/api/users/[id].tnt`):**
+
 ```ntnt
 import { json } from "std/http/server"
 
@@ -972,14 +974,17 @@ fn delete(req) {
 ```
 
 **Conventions:**
+
 - Files in `routes/` become URL paths
 - `index.tnt` = directory root handler
 - `[param].tnt` = dynamic segment (e.g., `[id].tnt` → `/users/{id}`)
 - Function names = HTTP methods (`get`, `post`, `put`, `delete`, etc.)
 - `lib/` modules are auto-imported into routes
 - `middleware/` files load in alphabetical order (use `01_`, `02_` prefixes)
+- **Hot-reload enabled** - edit route files and changes take effect on next request
 
 **Agent workflow:**
+
 ```bash
 # Add a new route - just create the file!
 mkdir -p routes/api/products
@@ -991,6 +996,10 @@ fn get(req) {
 }
 EOF
 # Route /api/products is now live!
+
+# Edit a route while server is running - hot-reload handles it
+echo 'fn get(req) { return json(["updated!"]) }' > routes/api/products/index.tnt
+# Next request sees the change immediately
 
 # Inspect discovers file-based routes
 ntnt inspect my-app | jq '.routes'

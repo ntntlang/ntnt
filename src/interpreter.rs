@@ -1150,11 +1150,14 @@ impl Interpreter {
         // Scan routes directory recursively
         let routes = self.discover_routes(&base_dir, &base_dir, &lib_modules)?;
         
-        // Register all discovered routes
+        // Register all discovered routes with source info for hot-reload
         for (method, pattern, handler, file) in &routes {
-            self.server_state.add_route(method, pattern, handler.clone());
+            self.server_state.add_route_with_source(method, pattern, handler.clone(), Some(file.clone()));
             println!("  {} {} -> {}", method, pattern, file);
         }
+        
+        println!("");
+        println!("Hot-reload enabled: edit route files and changes take effect on next request");
         
         Ok(Value::Int(routes.len() as i64))
     }
@@ -1326,6 +1329,51 @@ impl Interpreter {
         Ok(routes)
     }
     
+    /// Reload a single route handler from a file (for hot-reload)
+    fn reload_route_handler(&mut self, file_path: &str, method: &str) -> Result<Value> {
+        use std::fs;
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        
+        let path = std::path::Path::new(file_path);
+        
+        // Read and parse the file
+        let source_code = fs::read_to_string(path)
+            .map_err(|e| IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path, e)))?;
+        
+        let lexer = Lexer::new(&source_code);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse()?;
+        
+        // Create a fresh environment
+        let previous_env = Rc::clone(&self.environment);
+        let previous_file = self.current_file.clone();
+        
+        self.environment = Rc::new(RefCell::new(Environment::new()));
+        self.current_file = Some(file_path.to_string());
+        
+        // Re-define builtins
+        self.define_builtins();
+        
+        // Evaluate the module
+        self.eval(&ast)?;
+        
+        // Find the handler for the specified method
+        let method_name = method.to_lowercase();
+        let env = self.environment.borrow();
+        let handler = env.values.get(&method_name).cloned();
+        drop(env);
+        
+        // Restore environment
+        self.environment = previous_env;
+        self.current_file = previous_file;
+        
+        handler.ok_or_else(|| IntentError::RuntimeError(
+            format!("Handler '{}' not found in {}", method_name, file_path)
+        ))
+    }
+
     /// Convert a file path to a URL pattern
     /// 
     /// Examples:
@@ -2687,7 +2735,26 @@ impl Interpreter {
             let path = url.split('?').next().unwrap_or(&url).to_string();
             
             // First, try to find a matching route
-            if let Some((handler, route_params)) = self.server_state.find_route(&method, &path) {
+            if let Some((mut handler, route_params, route_index)) = self.server_state.find_route(&method, &path) {
+                // Hot-reload check: if file changed, reload the handler
+                if self.server_state.needs_reload(route_index) {
+                    if let Some(source) = self.server_state.get_route_source(route_index).cloned() {
+                        if let Some(file_path) = &source.file_path {
+                            // Re-parse and reload the handler
+                            match self.reload_route_handler(file_path, &method) {
+                                Ok(new_handler) => {
+                                    self.server_state.update_route_handler(route_index, new_handler.clone());
+                                    handler = new_handler;
+                                    println!("[hot-reload] Reloaded: {}", file_path);
+                                }
+                                Err(e) => {
+                                    eprintln!("[hot-reload] Error reloading {}: {}", file_path, e);
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 // Process request to get request Value
                 match http_server::process_request(request, route_params) {
                     Ok((mut req_value, http_request)) => {
