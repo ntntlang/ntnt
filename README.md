@@ -55,7 +55,7 @@ NTNT (pronounced "Intent") is an experimental programming language and ecosystem
 - **Agent Tooling**: `ntnt inspect` (JSON introspection), `ntnt validate` (pre-run error checking)
 - **PostgreSQL**: `std/db/postgres` (connect, query, execute, transactions)
 
-**241 passing tests** | **Version 0.1.8**
+**257 passing tests** | **Version 0.1.8**
 
 **Next Up**: Phase 6 - Testing framework, contract-based test generation, intent annotations
 

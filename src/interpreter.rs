@@ -3979,6 +3979,200 @@ mod tests {
         }
     }
 
+    // ==================== New std/string tests ====================
+    
+    #[test]
+    fn test_std_string_trim_left_right() {
+        let result = eval(r#"
+            import { trim_left, trim_right } from "std/string"
+            let s = "  hello  "
+            trim_left(s) == "hello  " && trim_right(s) == "  hello"
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_string_trim_chars() {
+        let result = eval(r#"
+            import { trim_chars } from "std/string"
+            trim_chars("***hello***", "*")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello");
+        } else {
+            panic!("Expected string");
+        }
+    }
+    
+    #[test]
+    fn test_std_string_capitalize_title() {
+        let result = eval(r#"
+            import { capitalize, title } from "std/string"
+            capitalize("hello world") == "Hello world" && title("hello world") == "Hello World"
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_string_case_conversion() {
+        let result = eval(r#"
+            import { to_snake_case, to_camel_case, to_pascal_case, to_kebab_case } from "std/string"
+            to_snake_case("helloWorld") == "hello_world" &&
+            to_camel_case("hello_world") == "helloWorld" &&
+            to_pascal_case("hello_world") == "HelloWorld" &&
+            to_kebab_case("helloWorld") == "hello-world"
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_string_slugify() {
+        let result = eval(r#"
+            import { slugify } from "std/string"
+            slugify("Hello World! This is NTNT.")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello-world-this-is-ntnt");
+        } else {
+            panic!("Expected string");
+        }
+    }
+    
+    #[test]
+    fn test_std_string_last_index_of() {
+        let result = eval(r#"
+            import { last_index_of } from "std/string"
+            last_index_of("hello hello", "hello")
+        "#).unwrap();
+        if let Value::Int(i) = result {
+            assert_eq!(i, 6);
+        } else {
+            panic!("Expected int");
+        }
+    }
+    
+    #[test]
+    fn test_std_string_count() {
+        let result = eval(r#"
+            import { count } from "std/string"
+            count("the quick brown fox jumps over the lazy dog", "the")
+        "#).unwrap();
+        if let Value::Int(i) = result {
+            assert_eq!(i, 2);
+        } else {
+            panic!("Expected int");
+        }
+    }
+    
+    #[test]
+    fn test_std_string_replace_all() {
+        let result = eval(r#"
+            import { replace_all } from "std/string"
+            replace_all("hello hello", "hello", "hi")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hi hi");
+        } else {
+            panic!("Expected string");
+        }
+    }
+    
+    #[test]
+    fn test_std_string_lines_words() {
+        let result = eval(r#"
+            import { lines, words } from "std/string"
+            let l = lines("a
+b
+c")
+            let w = words("  hello   world  ")
+            len(l) == 3 && len(w) == 2
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_string_truncate() {
+        let result = eval(r#"
+            import { truncate } from "std/string"
+            truncate("hello world", 8, "...")
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello...");
+        } else {
+            panic!("Expected string");
+        }
+    }
+    
+    #[test]
+    fn test_std_string_padding() {
+        let result = eval(r#"
+            import { pad_left, pad_right, center } from "std/string"
+            pad_left("42", 5, "0") == "00042" &&
+            pad_right("hi", 5, ".") == "hi..." &&
+            center("hi", 6, "*") == "**hi**"
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_string_validation() {
+        let result = eval(r#"
+            import { is_empty, is_blank, is_numeric, is_alpha, is_alphanumeric } from "std/string"
+            is_empty("") == true &&
+            is_empty("x") == false &&
+            is_blank("   ") == true &&
+            is_blank(" x ") == false &&
+            is_numeric("123") == true &&
+            is_numeric("12a") == false &&
+            is_alpha("abc") == true &&
+            is_alpha("ab3") == false &&
+            is_alphanumeric("abc123") == true
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_string_case_validation() {
+        let result = eval(r#"
+            import { is_lowercase, is_uppercase, is_whitespace } from "std/string"
+            is_lowercase("hello") == true &&
+            is_uppercase("HELLO") == true &&
+            is_whitespace("   ") == true
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_string_matches() {
+        let result = eval(r#"
+            import { matches } from "std/string"
+            matches("hello", "h*o") == true &&
+            matches("hello", "h?llo") == true &&
+            matches("hello", "world") == false &&
+            matches("test.txt", "*.txt") == true
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_string_repeat_reverse() {
+        let result = eval(r#"
+            import { repeat, reverse } from "std/string"
+            repeat("ab", 3) == "ababab" && reverse("hello") == "olleh"
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+    
+    #[test]
+    fn test_std_string_chars() {
+        let result = eval(r#"
+            import { chars } from "std/string"
+            let c = chars("abc")
+            len(c) == 3 && c[0] == "a" && c[1] == "b" && c[2] == "c"
+        "#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
     #[test]
     fn test_import_std_math_constants() {
         let result = eval(r#"

@@ -388,18 +388,73 @@ import { helper } from "./lib/utils"
 
 ### Core Modules
 
-| Module            | Functions                                                                                                                                           |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `std/string`      | split, join, trim, replace, contains, starts_with, ends_with, to_upper, to_lower, char_at, substring, pad_left, pad_right                           |
-| `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E                                                                                      |
-| `std/collections` | push, pop, shift, first, last, reverse, slice, concat, is_empty, contains, index_of, sort, map, filter, reduce, find                                |
-| `std/env`         | get_env, set_env, args, cwd                                                                                                                         |
-| `std/fs`          | read_file, write_file, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size |
-| `std/path`        | join, dirname, basename, extension, stem, resolve, is_absolute, is_relative, with_extension, normalize                                              |
-| `std/json`        | parse, stringify, stringify_pretty                                                                                                                  |
+| Module            | Functions                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `std/string`      | **Comprehensive:** split, join, concat, repeat, reverse, trim, trim_left, trim_right, trim_chars, to_upper, to_lower, capitalize, title, to_snake_case, to_camel_case, to_pascal_case, to_kebab_case, slugify, contains, starts_with, ends_with, index_of, last_index_of, count, replace, replace_all, char_at, substring, chars, lines, words, truncate, pad_left, pad_right, center, is_empty, is_blank, is_numeric, is_alpha, is_alphanumeric, is_lowercase, is_uppercase, is_whitespace, matches |
+| `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E                                                                                                                                                                                                                                                                                                                                     |
+| `std/collections` | push, pop, shift, first, last, reverse, slice, concat, is_empty, contains, index_of, sort, map, filter, reduce, find                                                                                                                                                                                                                                                                               |
+| `std/env`         | get_env, set_env, args, cwd                                                                                                                                                                                                                                                                                                                                                                        |
+| `std/fs`          | read_file, write_file, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size                                                                                                                                                                                                                                                |
+| `std/path`        | join, dirname, basename, extension, stem, resolve, is_absolute, is_relative, with_extension, normalize                                                                                                                                                                                                                                                                                             |
+| `std/json`        | parse, stringify, stringify_pretty                                                                                                                                                                                                                                                                                                                                                                 |
 | `std/time`        | **Go-like time module:** now, now_millis, now_nanos, to_utc, to_timezone, format, format_in, to_iso, parse, parse_iso, make_time, make_date, add_seconds/minutes/hours/days/weeks/months/years, diff, before, after, equal, year/month/day/hour/minute/second, weekday, weekday_name, month_name, day_of_year, is_leap_year, list_timezones, sleep, elapsed, SECOND/MINUTE/HOUR/DAY/WEEK constants |
-| `std/crypto`      | sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode                                                           |
-| `std/url`         | parse, encode, encode_component, decode, build_query, join                                                                                          |
+| `std/crypto`      | sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode                                                                                                                                                                                                                                                                                                          |
+| `std/url`         | parse, encode, encode_component, decode, build_query, join                                                                                                                                                                                                                                                                                                                                         |
+
+### String Module (`std/string`)
+
+Comprehensive string manipulation matching Go and JavaScript capabilities.
+
+```ntnt
+import { 
+    trim, trim_left, trim_right, trim_chars,
+    to_upper, to_lower, capitalize, title,
+    to_snake_case, to_camel_case, to_kebab_case, slugify,
+    split, join, lines, words, chars,
+    contains, starts_with, ends_with, index_of, last_index_of, count,
+    replace, replace_all, truncate,
+    pad_left, pad_right, center,
+    is_empty, is_blank, is_numeric, is_alpha, is_alphanumeric, matches
+} from "std/string"
+
+// Trimming
+trim("  hello  ")           // "hello"
+trim_left("  hello")        // "hello"
+trim_chars("###hi###", "#") // "hi"
+
+// Case conversion
+capitalize("hello world")   // "Hello world"
+title("hello world")        // "Hello World"
+to_snake_case("helloWorld") // "hello_world"
+to_camel_case("hello_world") // "helloWorld"
+slugify("Hello World!")     // "hello-world"
+
+// Search & Count
+contains(s, "fox")          // true/false
+last_index_of(s, "the")     // last position
+count(s, "the")             // occurrence count
+replace("hi hi", "hi", "yo") // "yo hi" (first only)
+replace_all("hi hi", "hi", "yo") // "yo yo"
+
+// Extraction
+lines("a\nb\nc")            // ["a", "b", "c"]
+words("hello   world")      // ["hello", "world"]
+chars("abc")                // ["a", "b", "c"]
+truncate("hello world", 8, "...") // "hello..."
+
+// Padding
+pad_left("42", 5, "0")      // "00042"
+pad_right("hi", 5, ".")     // "hi..."
+center("hi", 8, "*")        // "***hi***"
+
+// Validation
+is_empty("")                // true
+is_blank("   ")             // true (only whitespace)
+is_numeric("123")           // true
+is_alpha("abc")             // true
+is_alphanumeric("abc123")   // true
+matches("test.txt", "*.txt") // true (glob-like)
+```
 
 ### Time Module (`std/time`)
 

@@ -1,0 +1,108 @@
+// Comprehensive String Module Demo
+// Demonstrates all std/string functions
+
+import { 
+    // Basic operations
+    split, join, concat, repeat, reverse,
+    // Trimming
+    trim, trim_left, trim_right, trim_chars,
+    // Case conversion
+    to_upper, to_lower, capitalize, title,
+    to_snake_case, to_camel_case, to_pascal_case, to_kebab_case, slugify,
+    // Search & Replace
+    contains, starts_with, ends_with, index_of, last_index_of, count,
+    replace, replace_all,
+    // Extraction
+    char_at, substring, chars, lines, words, truncate,
+    // Padding
+    pad_left, pad_right, center,
+    // Validation
+    is_empty, is_blank, is_numeric, is_alpha, is_alphanumeric,
+    is_lowercase, is_uppercase, is_whitespace, matches
+} from "std/string"
+
+print("=== NTNT String Module Demo ===\n")
+
+// ========== Basic Operations ==========
+print("--- Basic Operations ---")
+let text = "hello,world,foo,bar"
+print("split: " + str(split(text, ",")))  // ["hello", "world", "foo", "bar"]
+print("join: " + join(["a", "b", "c"], "-"))  // "a-b-c"
+print("concat: " + concat("Hello", " World"))  // "Hello World"
+print("repeat: " + repeat("ab", 3))  // "ababab"
+print("reverse: " + reverse("hello"))  // "olleh"
+
+// ========== Trimming ==========
+print("\n--- Trimming ---")
+let padded = "  hello world  "
+print("trim: '" + trim(padded) + "'")  // "hello world"
+print("trim_left: '" + trim_left(padded) + "'")  // "hello world  "
+print("trim_right: '" + trim_right(padded) + "'")  // "  hello world"
+print("trim_chars: '" + trim_chars("###hello###", "#") + "'")  // "hello"
+
+// ========== Case Conversion ==========
+print("\n--- Case Conversion ---")
+print("to_upper: " + to_upper("hello"))  // "HELLO"
+print("to_lower: " + to_lower("HELLO"))  // "hello"
+print("capitalize: " + capitalize("hello world"))  // "Hello world"
+print("title: " + title("hello world"))  // "Hello World"
+
+print("\n--- Case Style Conversion ---")
+print("to_snake_case: " + to_snake_case("helloWorld"))  // "hello_world"
+print("to_camel_case: " + to_camel_case("hello_world"))  // "helloWorld"
+print("to_pascal_case: " + to_pascal_case("hello_world"))  // "HelloWorld"
+print("to_kebab_case: " + to_kebab_case("helloWorld"))  // "hello-world"
+print("slugify: " + slugify("Hello World! This is NTNT."))  // "hello-world-this-is-ntnt"
+
+// ========== Search & Replace ==========
+print("\n--- Search & Replace ---")
+let sentence = "the quick brown fox jumps over the lazy dog"
+print("contains 'fox': " + str(contains(sentence, "fox")))  // true
+print("starts_with 'the': " + str(starts_with(sentence, "the")))  // true
+print("ends_with 'dog': " + str(ends_with(sentence, "dog")))  // true
+print("index_of 'fox': " + str(index_of(sentence, "fox")))  // 16
+print("last_index_of 'the': " + str(last_index_of(sentence, "the")))  // 31
+print("count 'the': " + str(count(sentence, "the")))  // 2
+print("replace: " + replace("hello hello", "hello", "hi"))  // "hi hello"
+print("replace_all: " + replace_all("hello hello", "hello", "hi"))  // "hi hi"
+
+// ========== Extraction ==========
+print("\n--- Extraction ---")
+print("char_at: " + char_at("hello", 1))  // "e"
+print("substring: " + substring("hello world", 0, 5))  // "hello"
+print("chars: " + str(chars("abc")))  // ["a", "b", "c"]
+
+let multiline = "line1
+line2
+line3"
+print("lines: " + str(lines(multiline)))  // ["line1", "line2", "line3"]
+print("words: " + str(words("hello   world   foo")))  // ["hello", "world", "foo"]
+print("truncate: " + truncate("hello world", 8, "..."))  // "hello..."
+
+// ========== Padding ==========
+print("\n--- Padding ---")
+print("pad_left: '" + pad_left("42", 5, "0") + "'")  // "00042"
+print("pad_right: '" + pad_right("hi", 5, ".") + "'")  // "hi..."
+print("center: '" + center("hi", 10, "*") + "'")  // "****hi****"
+
+// ========== Validation ==========
+print("\n--- Validation ---")
+print("is_empty(''): " + str(is_empty("")))  // true
+print("is_empty('x'): " + str(is_empty("x")))  // false
+print("is_blank('   '): " + str(is_blank("   ")))  // true
+print("is_blank(' x '): " + str(is_blank(" x ")))  // false
+print("is_numeric('123'): " + str(is_numeric("123")))  // true
+print("is_numeric('12a'): " + str(is_numeric("12a")))  // false
+print("is_alpha('abc'): " + str(is_alpha("abc")))  // true
+print("is_alpha('ab3'): " + str(is_alpha("ab3")))  // false
+print("is_alphanumeric('abc123'): " + str(is_alphanumeric("abc123")))  // true
+print("is_lowercase('hello'): " + str(is_lowercase("hello")))  // true
+print("is_uppercase('HELLO'): " + str(is_uppercase("HELLO")))  // true
+print("is_whitespace('   '): " + str(is_whitespace("   ")))  // true
+
+print("\n--- Pattern Matching ---")
+print("matches 'hello' with 'h*o': " + str(matches("hello", "h*o")))  // true
+print("matches 'hello' with 'h?llo': " + str(matches("hello", "h?llo")))  // true
+print("matches 'hello' with 'world': " + str(matches("hello", "world")))  // false
+
+print("\n=== Demo Complete ===")
