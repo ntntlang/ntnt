@@ -19,10 +19,9 @@ ntnt test server.tnt --get /api/status --post /users --body 'name=Alice&age=25'
 
 The `ntnt lint` command catches common mistakes like:
 
-- Escaped quotes (`\"`) which cause parser errors
-- JavaScript-style `${var}` interpolation
-- Python-style `range()` calls
-- Missing `map {}` keyword
+- JavaScript-style `${var}` interpolation (use `{var}` instead)
+- Python-style `range()` calls (use `0..n` syntax)
+- Missing `map {}` keyword for map literals
 - Route patterns needing raw strings
 
 The `ntnt test` command starts a server, makes HTTP requests, and shuts down automatically - perfect for testing APIs:
@@ -92,17 +91,23 @@ get("/users/{id}", get_user)          // ERROR: `id` is undefined
 post("/users/{user_id}/posts", handler)  // ERROR
 ```
 
-### 4. NO Backslash Escapes in Regular Strings
+### 4. String Escape Sequences
 
-**CRITICAL:** NTNT does NOT support escape sequences like `\"`, `\n`, `\t` in regular strings. Use raw strings for content with quotes:
+NTNT supports standard escape sequences in regular strings:
 
 ```ntnt
-// ✅ CORRECT - Use raw strings for content with quotes
+// ✅ CORRECT - Escape sequences ARE supported
+let with_newline = "line1\nline2\nline3"    // \n = newline
+let with_tab = "col1\tcol2\tcol3"           // \t = tab  
+let with_quote = "She said \"hello\""        // \" = quote
+let with_backslash = "path\\to\\file"        // \\ = backslash
+let literal_brace = "use \{curly\} braces"   // \{ \} = literal braces
+
+// Raw strings for complex content (no escape processing)
 let html = r#"<div class="container">Hello</div>"#
 let json = r#"{"name": "Alice", "age": 30}"#
-let sql = r#"SELECT * FROM users WHERE name = 'John'"#
 
-// For multi-line content, raw strings also work
+// For multi-line content with lots of special characters
 let template = r#"
 <html>
     <body class="main">
@@ -110,19 +115,11 @@ let template = r#"
     </body>
 </html>
 "#
-
-// ✅ Also correct - Concatenation to avoid quotes
-let attr = "class=" + chr(34) + "container" + chr(34)
-
-// ❌ WRONG - These cause parser errors
-let html = "<div class=\"container\">Hello</div>"   // ERROR: \" not supported
-let line = "Line1\nLine2"                            // Literal \n, not newline
-let path = "C:\\Users\\name"                         // Literal \\, not single \
 ```
 
-**Why this matters:** Forgetting this rule causes cryptic "Expected expression" parser errors that are hard to debug.
+**Supported escapes:** `\n` (newline), `\t` (tab), `\r` (carriage return), `\\` (backslash), `\"` (quote), `\'` (single quote), `\{` and `\}` (literal braces)
 
-### 4. Contract Placement (requires/ensures)
+### 5. Contract Placement (requires/ensures)
 
 Contracts go AFTER the return type but BEFORE the function body:
 
@@ -325,6 +322,9 @@ import { read_file, write_file, exists, is_file, is_dir, mkdir, readdir } from "
 // JSON
 import { parse, stringify, stringify_pretty } from "std/json"
 
+// CSV
+import { parse, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
+
 // Time
 import { now, format, add_days, add_months } from "std/time"
 
@@ -423,6 +423,53 @@ execute(db, "INSERT INTO users (age) VALUES ($1)", [form["age"]])  // ERROR!
 // ✅ CORRECT - Convert first
 execute(db, "INSERT INTO users (age) VALUES ($1)", [int(form["age"])])  // Works!
 ```
+
+## CSV Processing Patterns
+
+```ntnt
+import { parse, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
+import { get } from "std/http"
+
+// Parse CSV into array of arrays
+let csv_data = "name,age,city\nAlice,30,NYC\nBob,25,LA"
+let rows = parse(csv_data)
+// rows = [["name","age","city"], ["Alice","30","NYC"], ["Bob","25","LA"]]
+
+// Parse CSV with first row as headers (returns array of maps)
+let records = parse_with_headers(csv_data)
+// records = [{"name": "Alice", "age": "30", "city": "NYC"}, ...]
+
+for record in records {
+    print("Name: " + record["name"] + ", Age: " + record["age"])
+}
+
+// Stringify array to CSV
+let data = [["fruit", "count"], ["apple", "5"], ["banana", "3"]]
+let csv_output = stringify(data)
+// csv_output = "fruit,count\napple,5\nbanana,3"
+
+// Stringify maps with headers
+let maps = [
+    map { "name": "Alice", "score": "95" },
+    map { "name": "Bob", "score": "88" }
+]
+let headers = ["name", "score"]
+let csv_from_maps = stringify_with_headers(maps, headers)
+// csv_from_maps = "name,score\nAlice,95\nBob,88"
+
+// Fetch and parse remote CSV
+fn fetch_csv_data(url: String) {
+    let response = get(url)
+    let records = parse_with_headers(response.body)
+    return records
+}
+
+// Custom delimiter (e.g., tab-separated)
+let tsv = "name\tage\nAlice\t30"
+let rows = parse(tsv, "\t")
+```
+
+**Note:** CSV field values are always strings. Use `int()` or `float()` to convert numeric fields.
 
 ## Contract Patterns
 

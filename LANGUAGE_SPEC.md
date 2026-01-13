@@ -49,12 +49,36 @@ true, false, map, Ok, Err, Some, None
 
 - Integers: `42`, `-17`
 - Floats: `3.14`, `1.0e-10`
-- Strings: `"hello"`, `"with {interpolation}"`
+- Strings: `"hello"`, `"with {interpolation}"`, `"line1\nline2"` (with escapes)
 - Raw Strings: `r"no \n escapes"`, `r#"can use "quotes""#`
 - Booleans: `true`, `false`
 - Arrays: `[1, 2, 3]`
 - Maps: `map { "key": value, "key2": value2 }`
 - Ranges: `0..10` (exclusive), `0..=10` (inclusive)
+
+### String Escape Sequences
+
+Regular strings support standard escape sequences:
+
+| Escape | Result |
+|--------|--------|
+| `\n`   | Newline |
+| `\t`   | Tab |
+| `\r`   | Carriage return |
+| `\\`   | Backslash |
+| `\"`   | Double quote |
+| `\'`   | Single quote |
+| `\{`   | Literal `{` (prevents interpolation) |
+| `\}`   | Literal `}` |
+
+```ntnt
+let multiline = "line1\nline2\nline3"
+let tabbed = "col1\tcol2\tcol3"
+let quoted = "She said \"hello\""
+let literal_brace = "use \{curly\} braces"
+```
+
+For content with many special characters, use raw strings which don't process escapes:
 
 ## Types
 
@@ -397,6 +421,7 @@ import { helper } from "./lib/utils"
 | `std/fs`          | read_file, write_file, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size                                                                                                                                                                                                                                                                                                                                                  |
 | `std/path`        | join, dirname, basename, extension, stem, resolve, is_absolute, is_relative, with_extension, normalize                                                                                                                                                                                                                                                                                                                                                                                               |
 | `std/json`        | parse, stringify, stringify_pretty                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `std/csv`         | parse, parse_with_headers, stringify, stringify_with_headers                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `std/time`        | **Go-like time module:** now, now_millis, now_nanos, to_utc, to_timezone, format, format_in, to_iso, parse, parse_iso, make_time, make_date, add_seconds/minutes/hours/days/weeks/months/years, diff, before, after, equal, year/month/day/hour/minute/second, weekday, weekday_name, month_name, day_of_year, is_leap_year, list_timezones, sleep, elapsed, SECOND/MINUTE/HOUR/DAY/WEEK constants                                                                                                   |
 | `std/crypto`      | sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `std/url`         | parse, encode, encode_component, decode, build_query, parse_query, join                                                                                                                                                                                                                                                                                                                                                                                                                              |

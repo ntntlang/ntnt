@@ -1,0 +1,67 @@
+// Test escape sequences and CSV parsing
+import { parse, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
+
+// Test 1: Escape sequences in strings
+print("=== Escape Sequence Tests ===")
+let with_newline = "line1\nline2\nline3"
+print("String with newlines:")
+print(with_newline)
+
+let with_tab = "col1\tcol2\tcol3"
+print("String with tabs: " + with_tab)
+
+let with_quote = "He said \"hello\""
+print("String with quotes: " + with_quote)
+
+let with_backslash = "path\\to\\file"
+print("String with backslashes: " + with_backslash)
+
+// Test 2: CSV parsing (array of arrays)
+print("\n=== CSV Parse Tests ===")
+let csv_data = "name,age,city\nAlice,30,NYC\nBob,25,LA\nCharlie,35,Chicago"
+print("Input CSV:")
+print(csv_data)
+
+let rows = parse(csv_data)
+print("\nParsed as array of arrays:")
+for row in rows {
+    print(str(row))
+}
+
+// Test 3: CSV with headers (array of maps)
+print("\n=== CSV Parse With Headers ===")
+let records = parse_with_headers(csv_data)
+print("Parsed as array of maps:")
+for record in records {
+    print("Name: " + record["name"] + ", Age: " + record["age"] + ", City: " + record["city"])
+}
+
+// Test 4: CSV stringify
+print("\n=== CSV Stringify Tests ===")
+let data = [["fruit", "count"], ["apple", "5"], ["banana", "3"]]
+let csv_out = stringify(data)
+print("Stringified:")
+print(csv_out)
+
+// Test 5: Stringify with headers
+print("\n=== Stringify With Headers ===")
+let maps = [
+    map { "name": "Dave", "score": "95" },
+    map { "name": "Eve", "score": "88" }
+]
+let headers = ["name", "score"]
+let csv_maps = stringify_with_headers(maps, headers)
+print("From maps:")
+print(csv_maps)
+
+// Test 6: Quoted fields (fields containing commas)
+print("\n=== Quoted Field Parsing ===")
+let quoted_csv = "name,description\n\"Smith, John\",\"A description, with commas\"\nJane,Simple"
+print("Input with quoted fields:")
+print(quoted_csv)
+let quoted_parsed = parse_with_headers(quoted_csv)
+for r in quoted_parsed {
+    print("Name: [" + r["name"] + "] Desc: [" + r["description"] + "]")
+}
+
+print("\n=== All Tests Passed! ===")

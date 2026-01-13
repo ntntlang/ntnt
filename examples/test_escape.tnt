@@ -1,0 +1,4 @@
+import { listen, html } from "std/http/server"
+
+let test = "line1\nline2"
+print(test)

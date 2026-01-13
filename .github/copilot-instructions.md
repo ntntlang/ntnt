@@ -52,16 +52,20 @@ get(r"/users/{id}", handler)
 get("/users/{id}", handler)
 ```
 
-### NO Backslash Escapes - CRITICAL
+### String Escapes
 
-NTNT does NOT support `\"`, `\n`, `\t` in regular strings. Use raw strings:
+NTNT supports standard escape sequences in regular strings:
 
 ```ntnt
-// Correct - raw string for content with quotes
-let html = r#"<div class="main">Hello</div>"#
+// Supported escapes
+let newline = "line1\nline2"      // \n = newline
+let tabbed = "col1\tcol2"         // \t = tab
+let quoted = "She said \"hi\""    // \" = quote
+let path = "C:\\Users\\name"      // \\ = backslash
+let brace = "literal \{brace\}"   // \{ \} = literal braces
 
-// WRONG - causes parser errors!
-let html = "<div class=\"main\">Hello</div>"
+// Raw strings for complex content (no escape processing)
+let html = r#"<div class="main">Hello</div>"#
 ```
 
 ### Contract Placement
@@ -178,6 +182,7 @@ import { listen, get, post, json, html } from "std/http_server"
 import { connect, query, execute, close } from "std/db/postgres"
 import { read_file, write_file, exists } from "std/fs"
 import { parse, stringify } from "std/json"
+import { parse, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
 import { now, format } from "std/time"
 import { get_env } from "std/env"
 import { channel, send, recv } from "std/concurrent"
