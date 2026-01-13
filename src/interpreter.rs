@@ -1911,19 +1911,22 @@ impl Interpreter {
                     }
                     
                     // Special handling for HTTP route registration
+                    // Only intercept if first arg is a route pattern (starts with /)
+                    // NOT if it's a URL (starts with http:// or https://) - those are HTTP client calls
                     let http_methods = ["get", "post", "put", "delete", "patch"];
                     if http_methods.contains(&name.as_str()) && arguments.len() == 2 {
                         let pattern = self.eval_expression(&arguments[0])?;
-                        let handler = self.eval_expression(&arguments[1])?;
                         
-                        if let Value::String(pattern_str) = pattern {
-                            let method = name.to_uppercase();
-                            self.server_state.add_route(&method, &pattern_str, handler);
-                            return Ok(Value::Unit);
-                        } else {
-                            return Err(IntentError::TypeError(
-                                format!("{}() requires a string pattern as first argument", name)
-                            ));
+                        // Check if this is a route pattern vs a URL
+                        if let Value::String(pattern_str) = &pattern {
+                            // Route patterns start with /, URLs start with http
+                            if pattern_str.starts_with('/') {
+                                let handler = self.eval_expression(&arguments[1])?;
+                                let method = name.to_uppercase();
+                                self.server_state.add_route(&method, pattern_str, handler);
+                                return Ok(Value::Unit);
+                            }
+                            // Otherwise fall through to normal function call (HTTP client)
                         }
                     }
                 }
@@ -5042,6 +5045,27 @@ mod tests {
             assert_eq!(s, "got error as expected");
         } else {
             panic!("Expected String");
+        }
+    }
+    
+    #[test]
+    fn test_std_http_post_returns_result_not_unit() {
+        // Test that post() with a URL returns a Result, not Unit
+        // This tests the fix for the bug where post() was being intercepted
+        // by the HTTP server route registration code
+        let result = eval(r#"
+            import { post } from "std/http"
+            let result = post("invalid://test", "body")
+            // Should return Err(...) for invalid URL, not Unit
+            match result {
+                Ok(resp) => "got ok",
+                Err(e) => "got error as expected",
+            }
+        "#).unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "got error as expected");
+        } else {
+            panic!("Expected String, got {:?}", result);
         }
     }
 }
