@@ -1,8 +1,174 @@
 # NTNT Programming Language
 
-NTNT (pronounced "Intent") is an experimental programming language and ecosystem designed specifically for AI-driven development. Unlike traditional languages built for human developers, NTNT empowers AI agents as primary software creators while maintaining deep human oversight and collaboration.
+NTNT (pronounced "Intent") is an experimental Agent-Native programming language for building web applications with minimal boilerplate and built-in runtime safety through contracts. Unlike traditional languages built for human developers, NTNT aims to empower AI agents as primary software creators while maintaining deep human oversight and collaboration.
 
-**Goal: Build production-ready web applications and APIs with AI-powered development and runtime safety guarantees.**
+## Quick Start
+
+### Installation
+
+```bash
+git clone https://github.com/joshcramer/ntnt.git
+cd ntnt
+cargo build --release
+cargo install --path . --locked
+```
+
+### Hello World
+
+```bash
+echo 'print("Hello, World!")' > hello.tnt
+ntnt run hello.tnt
+```
+
+### A Complete Web API
+
+```ntnt
+// api.tnt
+import { json } from "std/http/server"
+
+get("/", |req| json(map { "message": "Hello!" }))
+get("/users/{id}", |req| json(map { "id": req.params.id }))
+
+listen(3000)
+```
+
+```bash
+ntnt run api.tnt
+# Visit http://localhost:3000
+```
+
+### Commands
+
+```bash
+ntnt --help              # See all commands
+ntnt repl                # Interactive REPL
+ntnt validate examples/  # Check for errors (JSON output)
+ntnt inspect api.tnt     # Project structure as JSON
+```
+
+## Why NTNT?
+
+What if we designed a programming language for a future where AI agents write most of the code and humans participate primarily in an oversight and guidance role?
+
+Traditional programming languages were designed for humans typing code character by character. But as AI agents become increasingly capable of generating, testing, and deploying software, the requirements shift. Agents need machine-readable introspection, structured validation, and predictable patterns. Humans need transparency, safety guarantees, and the ability to understand what the code is supposed to do without reading every line.
+
+NTNT is an experiment in building for that future.
+
+NTNT reimagines software development for an era where AI agents handle the heavy lifting of coding, testing, and deployment. The language features:
+
+- **First-Class Contracts**: Design-by-contract principles built into the syntax for guaranteed correctness
+- **Runtime Safety**: Struct invariants and pre/post conditions enforced at runtime
+- **Built-in Functions**: Math utilities (`abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `sign`, `clamp`)
+- **Typed Error Effects**: Explicit error handling and failure conditions
+- **Semantic Versioning**: Automatic API compatibility management
+- **Structured Edits**: AST-based code manipulation for safe refactoring
+- **Multi-Agent Collaboration**: Built-in support for AI agents working together
+- **Human-in-the-Loop Governance**: Transparent decision-making with human approval gates
+
+### Agent-First Design
+
+NTNT treats AI agents as first-class developers, not afterthoughts.
+
+**Machine-readable introspection**: The `ntnt inspect` command outputs JSON describing every function, route, middleware, contract, and import in a project. An agent can understand an entire codebase structure in a single call without parsing source files.
+
+```bash
+ntnt inspect api.tnt --json
+```
+
+```json
+{
+  "functions": [{ "name": "get_user", "line": 12, "contracts": { "requires": ["id > 0"] } }],
+  "routes": [{ "method": "GET", "path": "/users/{id}", "handler": "get_user" }],
+  "imports": [{ "source": "std/http/server", "items": ["json", "get"] }]
+}
+```
+
+**Pre-execution validation**: `ntnt validate` checks code for errors before running it, with structured JSON output that agents can parse programmatically.
+
+**File-based routing**: Agents can create new API endpoints by creating files—no configuration, no registration code. Create `routes/api/users.tnt` and `/api/users` exists.
+
+**Hot-reload**: Changes take effect on the next request. Agents can iterate without restart cycles.
+
+### Contracts as First-Class Citizens
+
+Contracts aren't a library or an annotation—they're part of the language syntax:
+
+```ntnt
+fn withdraw(amount: Int) -> Int
+    requires amount > 0
+    requires amount <= self.balance
+    ensures result >= 0
+{
+    self.balance = self.balance - amount
+    return self.balance
+}
+```
+
+This changes how both agents and humans interact with code:
+
+- **For agents**: Contracts are machine-readable specifications. An agent can read `requires amount > 0` and know exactly what inputs are valid without analyzing the implementation.
+- **For humans**: Contracts serve as executable documentation. You can understand what a function expects and guarantees at a glance.
+- **For HTTP APIs**: A failed precondition automatically returns 400 Bad Request. A failed postcondition returns 500 Internal Server Error. The contract _is_ the validation layer.
+
+### Radically Simple
+
+A JSON API endpoint that would take 20+ lines in Go or require a full project setup in Next.js:
+
+```ntnt
+import { json } from "std/http/server"
+
+get("/users/{id}", |req| json(map {
+    "id": req.params.id,
+    "name": "User " + req.params.id
+}))
+
+listen(3000)
+```
+
+One file. No package.json, no tsconfig, no node_modules, no dependency decisions. Write the code, run it.
+
+### Batteries Included
+
+Every web application needs these. NTNT includes them:
+
+| What           | Module            | No need to choose between...           |
+| -------------- | ----------------- | -------------------------------------- |
+| HTTP Server    | `std/http/server` | Express, Fastify, Hono, Koa, Nest      |
+| HTTP Client    | `std/http`        | fetch, axios, got, node-fetch, ky      |
+| PostgreSQL     | `std/db/postgres` | pg, postgres.js, Prisma, Drizzle, Knex |
+| JSON           | `std/json`        | Built-in                               |
+| Time/Timezones | `std/time`        | moment, dayjs, date-fns, Luxon         |
+| Crypto         | `std/crypto`      | crypto, bcrypt, uuid libraries         |
+
+One import. It works. The decision is made.
+
+### The Downsides
+
+**Performance**: NTNT is interpreted, not compiled. It handles hundreds of requests per second comfortably—enough for most web applications—but it's not suitable for compute-intensive workloads, real-time systems, or high-frequency trading.
+
+**Ecosystem**: The standard library covers common web development needs, but there's no package manager and no third-party ecosystem. If you need something that doesn't exist, you'll write it yourself or call an external service.
+
+**Maturity**: NTNT is experimental. The API may change. There's no debugger yet—you have print statements and contracts. IDE support is limited to syntax highlighting.
+
+**Familiarity**: LLMs aren't trained specifically on NTNT, though the syntax is similar enough to Rust and TypeScript that they handle it reasonably well. No one on your team knows NTNT—but the language is small enough to learn in a day.
+
+### Who Should Use NTNT?
+
+**Good fit:**
+
+- Prototypes and MVPs where shipping fast matters more than optimizing performance
+- Internal tools where you control the environment and don't need ecosystem breadth
+- AI-generated applications where agents are writing most of the code
+- Learning projects where contracts make expected behavior explicit
+
+**Not a good fit:**
+
+- Performance-critical applications (use Rust, Go, or C++)
+- Projects requiring specific libraries (ML frameworks, game engines, specialized protocols)
+- Teams that need mature IDE support and debugging tools
+- Distributed systems requiring clustering, consensus, or cross-node coordination
+
+---
 
 ## Current Status
 
@@ -55,84 +221,15 @@ NTNT (pronounced "Intent") is an experimental programming language and ecosystem
 - **Agent Tooling**: `ntnt inspect` (JSON introspection), `ntnt validate` (pre-run error checking)
 - **PostgreSQL**: `std/db/postgres` (connect, query, execute, transactions)
 
-**257 passing tests** | **Version 0.1.8**
+**238 passing tests** | **Version 0.1.8**
 
 **Next Up**: Phase 6 - Testing framework, contract-based test generation, intent annotations
 
 See [ROADMAP.md](ROADMAP.md) for the full 10-phase implementation plan.
 
-## Quick Start
-
-### Installation
-
-The easiest way to install NTNT is via Cargo. This will build the binary and add it to your global PATH.
-
-```bash
-# Clone the repository
-git clone https://github.com/joshcramer/ntnt.git
-cd ntnt
-
-# Build
-cargo build --release
-
-# Install globally
-cargo install --path . --locked
-```
-
-### Usage
-
-Once installed, you can run NTNT from any directory:
-
-```bash
-# See ntnt help
-ntnt --help
-
-# Run a program
-ntnt run examples/contracts_full.tnt
-
-# Start the REPL
-ntnt repl
-
-# Run a Web Application
-ntnt run examples/website.tnt
-# Browse to http://localhost:3000
-
-# Validate files before running (outputs JSON)
-ntnt validate examples/
-
-# Inspect project structure (outputs JSON for agents)
-ntnt inspect examples/website.tnt --pretty
-```
-
 ## File Extension
 
-NTNT uses a single file extension:
-
-- `.tnt` - NTNT source files
-
-## Overview
-
-NTNT reimagines software development for an era where AI agents handle the heavy lifting of coding, testing, and deployment. The language features:
-
-- **First-Class Contracts**: Design-by-contract principles built into the syntax for guaranteed correctness
-- **Runtime Safety**: Struct invariants and pre/post conditions enforced at runtime
-- **Built-in Functions**: Math utilities (`abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `sign`, `clamp`)
-- **Typed Error Effects**: Explicit error handling and failure conditions
-- **Semantic Versioning**: Automatic API compatibility management
-- **Structured Edits**: AST-based code manipulation for safe refactoring
-- **Multi-Agent Collaboration**: Built-in support for AI agents working together
-- **Human-in-the-Loop Governance**: Transparent decision-making with human approval gates
-
-### Production Roadmap
-
-NTNT is being developed toward production web application capabilities:
-
-- **Phases 1-5**: Core language, contracts, types, traits, web ✅ Complete
-- **Phase 6**: Testing framework with contract-based test generation
-- **Phase 7**: LSP, package manager, debugger
-- **Phase 11**: Docker deployment and container support
-
-Performance targets: <1ms contract overhead, >10k requests/sec
+NTNT uses `.tnt` for source files.
 
 ## Example
 
