@@ -1,7 +1,7 @@
 {
   "Function with contracts": {
     "prefix": "fnc",
-    "body": ["fn ${1:name}(${2:params})", "    requires ${3:precondition}", "    ensures ${4:postcondition}", "{", "    $0", "}"],
+    "body": ["fn ${1:name}(${2:params}) -> ${3:ReturnType}", "    requires ${4:precondition}", "    ensures ${5:postcondition}", "{", "    $0", "}"],
     "description": "Function with requires/ensures contracts"
   },
   "Function": {
@@ -44,6 +44,16 @@
     "body": ["for ${1:item} in ${2:collection} {", "    $0", "}"],
     "description": "For-in loop"
   },
+  "For loop with range": {
+    "prefix": "forr",
+    "body": ["for ${1:i} in ${2:0}..${3:10} {", "    $0", "}"],
+    "description": "For loop with exclusive range (0..10 = 0 to 9)"
+  },
+  "For loop inclusive range": {
+    "prefix": "forri",
+    "body": ["for ${1:i} in ${2:0}..=${3:10} {", "    $0", "}"],
+    "description": "For loop with inclusive range (0..=10 = 0 to 10)"
+  },
   "Let binding": {
     "prefix": "let",
     "body": ["let ${1:name} = ${2:value}"],
@@ -54,10 +64,35 @@
     "body": ["let mut ${1:name} = ${2:value}"],
     "description": "Mutable let binding"
   },
+  "Map literal": {
+    "prefix": "map",
+    "body": ["map {", "    \"${1:key}\": ${2:value}", "}"],
+    "description": "Map literal - ALWAYS use map{} for key-value structures"
+  },
+  "Map literal inline": {
+    "prefix": "mapi",
+    "body": ["map { \"${1:key}\": ${2:value} }"],
+    "description": "Inline map literal"
+  },
+  "Empty map": {
+    "prefix": "mape",
+    "body": ["map {}"],
+    "description": "Empty map literal"
+  },
   "Match expression": {
     "prefix": "match",
-    "body": ["match ${1:value} {", "    ${2:pattern} => ${3:result},", "    _ => ${4:default}", "}"],
+    "body": ["match ${1:value} {", "    ${2:pattern} => ${3:result},", "    _ => ${4:default},", "}"],
     "description": "Match expression"
+  },
+  "Match Result": {
+    "prefix": "matchr",
+    "body": ["match ${1:result} {", "    Ok(${2:value}) => ${3:handle_success},", "    Err(${4:e}) => ${5:handle_error},", "}"],
+    "description": "Match expression for Result type"
+  },
+  "Match Option": {
+    "prefix": "matcho",
+    "body": ["match ${1:option} {", "    Some(${2:value}) => ${3:handle_some},", "    None => ${4:handle_none},", "}"],
+    "description": "Match expression for Option type"
   },
   "Requires clause": {
     "prefix": "req",
@@ -69,6 +104,16 @@
     "body": ["ensures ${1:condition}"],
     "description": "Postcondition"
   },
+  "Ensures with old": {
+    "prefix": "enso",
+    "body": ["ensures ${1:self.field} == old(${2:self.field}) ${3:+ amount}"],
+    "description": "Postcondition with old() for pre-state comparison"
+  },
+  "Ensures result": {
+    "prefix": "ensr",
+    "body": ["ensures result ${1:== expected}"],
+    "description": "Postcondition referencing result"
+  },
   "Invariant clause": {
     "prefix": "inv",
     "body": ["invariant ${1:self.field > 0}"],
@@ -77,7 +122,77 @@
   "Old value": {
     "prefix": "old",
     "body": ["old(${1:expr})"],
-    "description": "Reference to pre-execution value"
+    "description": "Reference to pre-execution value in ensures"
+  },
+  "HTTP GET route": {
+    "prefix": "route",
+    "body": ["get(r\"/${1:path}\", fn(req) {", "    $0", "    return json(map { \"status\": \"ok\" })", "})"],
+    "description": "HTTP GET route with raw string pattern"
+  },
+  "HTTP GET route with param": {
+    "prefix": "routep",
+    "body": ["get(r\"/${1:resource}/{${2:id}}\", fn(req) {", "    let ${2:id} = req.params[\"${2:id}\"]", "    $0", "    return json(map { \"${2:id}\": ${2:id} })", "})"],
+    "description": "HTTP GET route with URL parameter"
+  },
+  "HTTP POST route": {
+    "prefix": "routepost",
+    "body": ["post(r\"/${1:path}\", fn(req) {", "    let body = req.json()", "    $0", "    return json(map { \"created\": true })", "})"],
+    "description": "HTTP POST route with JSON body"
+  },
+  "HTTP Server": {
+    "prefix": "server",
+    "body": ["import { listen, get, post, json, html, serve_static } from \"std/http_server\"", "", "get(r\"/\", fn(req) {", "    return html(\"<h1>Hello World</h1>\")", "})", "", "get(r\"/api/health\", fn(req) {", "    return json(map { \"status\": \"ok\" })", "})", "", "listen(${1:8080})"],
+    "description": "Basic HTTP server setup"
+  },
+  "Import": {
+    "prefix": "imp",
+    "body": ["import { ${1:items} } from \"${2:std/module}\""],
+    "description": "Import statement"
+  },
+  "Import std/string": {
+    "prefix": "impstr",
+    "body": ["import { ${1:split, join, trim} } from \"std/string\""],
+    "description": "Import from std/string"
+  },
+  "Import std/http": {
+    "prefix": "imphttp",
+    "body": ["import { ${1:get, post, get_json} } from \"std/http\""],
+    "description": "Import from std/http"
+  },
+  "Import std/http_server": {
+    "prefix": "impserver",
+    "body": ["import { listen, get, post, json, html, serve_static } from \"std/http_server\""],
+    "description": "Import from std/http_server"
+  },
+  "Import std/fs": {
+    "prefix": "impfs",
+    "body": ["import { ${1:read_file, write_file, exists} } from \"std/fs\""],
+    "description": "Import from std/fs"
+  },
+  "Import std/json": {
+    "prefix": "impjson",
+    "body": ["import { parse, stringify } from \"std/json\""],
+    "description": "Import from std/json"
+  },
+  "Import std/collections": {
+    "prefix": "impcoll",
+    "body": ["import { ${1:push, pop, map, filter, reduce} } from \"std/collections\""],
+    "description": "Import from std/collections"
+  },
+  "Import std/concurrent": {
+    "prefix": "impconc",
+    "body": ["import { channel, send, recv, sleep_ms } from \"std/concurrent\""],
+    "description": "Import from std/concurrent"
+  },
+  "Channel": {
+    "prefix": "chan",
+    "body": ["let ${1:ch} = channel()", "", "// Sender", "spawn(fn() {", "    send(${1:ch}, ${2:message})", "})", "", "// Receiver", "let ${3:msg} = recv(${1:ch})"],
+    "description": "Channel-based concurrency pattern"
+  },
+  "Defer": {
+    "prefix": "defer",
+    "body": ["defer ${1:cleanup_function()}"],
+    "description": "Defer statement for cleanup"
   },
   "Enum": {
     "prefix": "enum",
@@ -99,9 +214,34 @@
     "body": ["print(${1:\"message\"})"],
     "description": "Print statement"
   },
+  "Print interpolated": {
+    "prefix": "pri",
+    "body": ["print(\"${1:message}: {${2:value}}\")"],
+    "description": "Print with string interpolation"
+  },
   "Assert": {
     "prefix": "ass",
     "body": ["assert(${1:condition}, ${2:\"message\"})"],
     "description": "Assert statement"
+  },
+  "Raw string": {
+    "prefix": "rstr",
+    "body": ["r\"${1:string with special chars}\""],
+    "description": "Raw string literal"
+  },
+  "Raw string extended": {
+    "prefix": "rstre",
+    "body": ["r#\"${1:string with \"quotes\" inside}\"#"],
+    "description": "Extended raw string literal (can contain quotes)"
+  },
+  "Unwrap": {
+    "prefix": "unw",
+    "body": ["unwrap(${1:result})"],
+    "description": "Unwrap Result or Option"
+  },
+  "Unwrap or": {
+    "prefix": "unwor",
+    "body": ["unwrap_or(${1:option}, ${2:default})"],
+    "description": "Unwrap with default value"
   }
 }

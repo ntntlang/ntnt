@@ -53,7 +53,27 @@
         "language": "ntnt",
         "path": "./snippets/ntnt.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "NTNT Language",
+      "properties": {
+        "ntnt.copilotInstructions.autoInject": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically inject NTNT syntax rules into GitHub Copilot context. This helps Copilot generate correct NTNT code by including critical syntax rules like map{} vs {}, raw strings for routes, etc."
+        },
+        "ntnt.lint.enableOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run NTNT linter automatically when saving .tnt files"
+        },
+        "ntnt.lint.showWarnings": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show lint warnings in addition to errors"
+        }
+      }
+    }
   },
   "icon": "icons/intent-logo.png",
   "galleryBanner": {

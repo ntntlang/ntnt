@@ -134,6 +134,34 @@ enum Commands {
         #[arg(value_name = "PATH")]
         path: PathBuf,
     },
+    /// Lint source files for common issues and style problems
+    /// 
+    /// Performs comprehensive analysis to catch common mistakes:
+    /// - Route patterns without raw strings (should use r"/path/{id}")
+    /// - Potential map literal confusion (suggests map {} when appropriate)
+    /// - Missing contracts on public functions
+    /// - Unused imports
+    /// - And more...
+    /// 
+    /// Outputs JSON with suggestions and auto-fix hints.
+    /// 
+    /// Examples:
+    ///   ntnt lint app.tnt
+    ///   ntnt lint routes/ --fix
+    ///   ntnt lint . --quiet
+    Lint {
+        /// The source file or directory to lint
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        
+        /// Show only errors, not warnings or suggestions
+        #[arg(long, short)]
+        quiet: bool,
+        
+        /// Output auto-fix suggestions as JSON patch
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 fn main() {
@@ -157,6 +185,7 @@ fn main() {
         Some(Commands::Check { file }) => check_file(&file),
         Some(Commands::Inspect { path, pretty }) => inspect_project(&path, pretty),
         Some(Commands::Validate { path }) => validate_project(&path),
+        Some(Commands::Lint { path, quiet, fix }) => lint_project(&path, quiet, fix),
         None => {
             if let Some(file) = cli.file {
                 run_file(&file)
@@ -756,6 +785,28 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
         "structs": structs,
         "enums": enums,
         "imports": imports,
+        "syntax_reference": {
+            "critical_rules": {
+                "map_literals": "Use `map { \"key\": value }` NOT `{ \"key\": value }` - bare {} creates blocks",
+                "route_patterns": "Use raw strings for routes: `get(r\"/users/{id}\", handler)` - regular strings interpret {} as interpolation",
+                "string_interpolation": "Use `\"{variable}\"` for interpolation, NOT `${variable}` or backticks",
+                "ranges": "Use `0..10` (exclusive) or `0..=10` (inclusive), NOT range()",
+                "imports": "Use `import { x } from \"std/module\"` with `/` separator",
+                "contracts": "Place requires/ensures AFTER return type, BEFORE body",
+                "mutability": "Use `let mut x` for mutable variables"
+            },
+            "builtin_functions": ["print", "len", "str", "abs", "min", "max", "sqrt", "pow", "round", "floor", "ceil", "Some", "None", "Ok", "Err", "unwrap", "unwrap_or", "is_some", "is_none", "is_ok", "is_err"],
+            "common_imports": {
+                "std/string": ["split", "join", "trim", "replace", "contains", "starts_with", "ends_with"],
+                "std/collections": ["push", "pop", "map", "filter", "reduce", "first", "last"],
+                "std/http": ["get", "post", "put", "delete", "get_json", "post_json"],
+                "std/http_server": ["listen", "get", "post", "json", "html", "text", "redirect", "serve_static"],
+                "std/fs": ["read_file", "write_file", "exists", "mkdir", "readdir"],
+                "std/json": ["parse", "stringify", "stringify_pretty"],
+                "std/time": ["now", "format", "add_days"],
+                "std/concurrent": ["channel", "send", "recv", "sleep_ms"]
+            }
+        }
     });
     
     if pretty {
@@ -1085,6 +1136,471 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
     }
     
     Ok(())
+}
+
+/// Lint a project for common issues and style problems
+fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result<()> {
+    use serde_json::{json, Value as JsonValue};
+    
+    let files = collect_tnt_files(path)?;
+    
+    let mut results: Vec<JsonValue> = Vec::new();
+    let mut error_count = 0;
+    let mut warning_count = 0;
+    let mut suggestion_count = 0;
+    
+    for file_path in &files {
+        let relative_path = file_path.strip_prefix(path.parent().unwrap_or(path))
+            .unwrap_or(file_path)
+            .to_string_lossy()
+            .to_string();
+            
+        let source = match fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                results.push(json!({
+                    "file": relative_path,
+                    "issues": [{"severity": "error", "message": format!("Could not read file: {}", e), "line": null}],
+                }));
+                error_count += 1;
+                continue;
+            }
+        };
+        
+        let lexer = Lexer::new(&source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = IntentParser::new(tokens);
+        
+        match parser.parse() {
+            Ok(ast) => {
+                // Run comprehensive lint checks
+                let issues = lint_ast(&ast, &source, &relative_path);
+                
+                for issue in &issues {
+                    let severity = issue["severity"].as_str().unwrap_or("warning");
+                    match severity {
+                        "error" => error_count += 1,
+                        "warning" => warning_count += 1,
+                        "suggestion" => suggestion_count += 1,
+                        _ => {}
+                    }
+                }
+                
+                if !issues.is_empty() {
+                    results.push(json!({
+                        "file": relative_path,
+                        "issues": issues,
+                    }));
+                    
+                    if !quiet {
+                        let warn_str = if warning_count > 0 { format!("{} warnings", warning_count) } else { String::new() };
+                        let sug_str = if suggestion_count > 0 { format!("{} suggestions", suggestion_count) } else { String::new() };
+                        let parts: Vec<&str> = [warn_str.as_str(), sug_str.as_str()].iter()
+                            .filter(|s| !s.is_empty())
+                            .copied()
+                            .collect();
+                        eprintln!("{} {} ({})", "⚠".yellow(), relative_path, parts.join(", "));
+                    }
+                } else {
+                    eprintln!("{} {}", "✓".green(), relative_path);
+                }
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                let line = extract_line_from_error(&error_msg);
+                
+                results.push(json!({
+                    "file": relative_path,
+                    "issues": [{
+                        "severity": "error",
+                        "rule": "parse_error",
+                        "message": error_msg,
+                        "line": line
+                    }],
+                }));
+                error_count += 1;
+                
+                eprintln!("{} {}", "✗".red(), relative_path);
+            }
+        }
+    }
+    
+    // Summary
+    eprintln!();
+    if error_count == 0 && warning_count == 0 && suggestion_count == 0 {
+        eprintln!("{}", "No issues found!".green().bold());
+    } else {
+        if error_count > 0 {
+            eprintln!("{}: {}", "Errors".red().bold(), error_count);
+        }
+        if warning_count > 0 && !quiet {
+            eprintln!("{}: {}", "Warnings".yellow().bold(), warning_count);
+        }
+        if suggestion_count > 0 && !quiet {
+            eprintln!("{}: {}", "Suggestions".cyan().bold(), suggestion_count);
+        }
+    }
+    
+    // Output JSON
+    let mut output = json!({
+        "files": results,
+        "summary": {
+            "total_files": files.len(),
+            "errors": error_count,
+            "warnings": warning_count,
+            "suggestions": suggestion_count,
+        }
+    });
+    
+    // Add syntax quick reference for agents if there are issues
+    if show_fixes && (error_count > 0 || warning_count > 0) {
+        output["syntax_hints"] = json!({
+            "map_literals": "Use `map { \"key\": value }` not `{ \"key\": value }`",
+            "route_patterns": "Use raw strings `r\"/path/{id}\"` for routes with parameters",
+            "string_interpolation": "Use `\"{variable}\"` not `\"${variable}\"`",
+            "ranges": "Use `0..10` (exclusive) or `0..=10` (inclusive), not `range()`",
+            "imports": "Use `import { x } from \"std/module\"` with `/` path separator",
+        });
+    }
+    
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    
+    // Exit with error code if any errors
+    if error_count > 0 {
+        std::process::exit(1);
+    }
+    
+    Ok(())
+}
+
+/// Comprehensive lint checks for NTNT code
+fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serde_json::Value> {
+    use ntnt::ast::{Statement, Expression, StringPart};
+    use serde_json::json;
+    
+    let mut issues = Vec::new();
+    let source_lines: Vec<&str> = source.lines().collect();
+    
+    // Track context
+    let mut http_route_functions = std::collections::HashSet::new();
+    http_route_functions.insert("get");
+    http_route_functions.insert("post");
+    http_route_functions.insert("put");
+    http_route_functions.insert("delete");
+    http_route_functions.insert("patch");
+    http_route_functions.insert("options");
+    http_route_functions.insert("head");
+    
+    fn find_line_number(source_lines: &[&str], pattern: &str) -> Option<usize> {
+        for (i, line) in source_lines.iter().enumerate() {
+            if line.contains(pattern) {
+                return Some(i + 1);
+            }
+        }
+        None
+    }
+    
+    fn check_expr_for_issues(
+        expr: &Expression,
+        source_lines: &[&str],
+        issues: &mut Vec<serde_json::Value>,
+        http_route_functions: &std::collections::HashSet<&str>,
+    ) {
+        match expr {
+            // Check for route patterns without raw strings
+            Expression::Call { function, arguments } => {
+                if let Expression::Identifier(name) = function.as_ref() {
+                    if http_route_functions.contains(name.as_str()) {
+                        // First argument should be a route pattern
+                        if let Some(first_arg) = arguments.first() {
+                            match first_arg {
+                                Expression::String(s) if s.contains('{') && s.contains('}') => {
+                                    // Regular string with {} - likely needs raw string
+                                    let line = find_line_number(source_lines, s);
+                                    issues.push(json!({
+                                        "severity": "warning",
+                                        "rule": "route_pattern_needs_raw_string",
+                                        "message": format!("Route pattern '{}' contains {{}} but is not a raw string. Use r\"{}\" to prevent interpolation.", s, s),
+                                        "line": line,
+                                        "fix": {
+                                            "replacement": format!("r\"{}\"", s),
+                                            "description": "Wrap route pattern in raw string"
+                                        }
+                                    }));
+                                }
+                                Expression::InterpolatedString(parts) => {
+                                    // Interpolated string used as route - definitely wrong
+                                    let has_route_params = parts.iter().any(|p| {
+                                        if let StringPart::Literal(s) = p {
+                                            s.contains("/{") || s.contains("}/")
+                                        } else {
+                                            false
+                                        }
+                                    });
+                                    if has_route_params {
+                                        issues.push(json!({
+                                            "severity": "warning",
+                                            "rule": "route_pattern_interpolation",
+                                            "message": "Route pattern appears to use string interpolation where route parameters were intended. Use raw string r\"/path/{param}\" for route parameters.",
+                                            "line": null,
+                                            "fix": {
+                                                "description": "Convert to raw string with route parameters"
+                                            }
+                                        }));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                
+                // Recurse into function and arguments
+                check_expr_for_issues(function, source_lines, issues, http_route_functions);
+                for arg in arguments {
+                    check_expr_for_issues(arg, source_lines, issues, http_route_functions);
+                }
+            }
+            
+            // Recurse into other expression types
+            Expression::Binary { left, right, .. } => {
+                check_expr_for_issues(left, source_lines, issues, http_route_functions);
+                check_expr_for_issues(right, source_lines, issues, http_route_functions);
+            }
+            Expression::Unary { operand, .. } => {
+                check_expr_for_issues(operand, source_lines, issues, http_route_functions);
+            }
+            Expression::Array(items) => {
+                for item in items {
+                    check_expr_for_issues(item, source_lines, issues, http_route_functions);
+                }
+            }
+            Expression::MapLiteral(pairs) => {
+                for (k, v) in pairs {
+                    check_expr_for_issues(k, source_lines, issues, http_route_functions);
+                    check_expr_for_issues(v, source_lines, issues, http_route_functions);
+                }
+            }
+            Expression::Lambda { body, .. } => {
+                check_expr_for_issues(body, source_lines, issues, http_route_functions);
+            }
+            Expression::Block(block) => {
+                for stmt in &block.statements {
+                    check_stmt_for_issues(stmt, source_lines, issues, http_route_functions);
+                }
+            }
+            Expression::IfExpr { condition, then_branch, else_branch } => {
+                check_expr_for_issues(condition, source_lines, issues, http_route_functions);
+                check_expr_for_issues(then_branch, source_lines, issues, http_route_functions);
+                check_expr_for_issues(else_branch, source_lines, issues, http_route_functions);
+            }
+            Expression::Match { scrutinee, arms } => {
+                check_expr_for_issues(scrutinee, source_lines, issues, http_route_functions);
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        check_expr_for_issues(guard, source_lines, issues, http_route_functions);
+                    }
+                    check_expr_for_issues(&arm.body, source_lines, issues, http_route_functions);
+                }
+            }
+            Expression::MethodCall { object, arguments, .. } => {
+                check_expr_for_issues(object, source_lines, issues, http_route_functions);
+                for arg in arguments {
+                    check_expr_for_issues(arg, source_lines, issues, http_route_functions);
+                }
+            }
+            Expression::FieldAccess { object, .. } => {
+                check_expr_for_issues(object, source_lines, issues, http_route_functions);
+            }
+            Expression::Index { object, index } => {
+                check_expr_for_issues(object, source_lines, issues, http_route_functions);
+                check_expr_for_issues(index, source_lines, issues, http_route_functions);
+            }
+            Expression::Range { start, end, .. } => {
+                check_expr_for_issues(start, source_lines, issues, http_route_functions);
+                check_expr_for_issues(end, source_lines, issues, http_route_functions);
+            }
+            Expression::Assign { target, value } => {
+                check_expr_for_issues(target, source_lines, issues, http_route_functions);
+                check_expr_for_issues(value, source_lines, issues, http_route_functions);
+            }
+            Expression::Await(inner) | Expression::Try(inner) => {
+                check_expr_for_issues(inner, source_lines, issues, http_route_functions);
+            }
+            Expression::StructLiteral { fields, .. } => {
+                for (_, v) in fields {
+                    check_expr_for_issues(v, source_lines, issues, http_route_functions);
+                }
+            }
+            Expression::EnumVariant { arguments, .. } => {
+                for arg in arguments {
+                    check_expr_for_issues(arg, source_lines, issues, http_route_functions);
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    fn check_stmt_for_issues(
+        stmt: &Statement,
+        source_lines: &[&str],
+        issues: &mut Vec<serde_json::Value>,
+        http_route_functions: &std::collections::HashSet<&str>,
+    ) {
+        match stmt {
+            Statement::Expression(expr) => {
+                check_expr_for_issues(expr, source_lines, issues, http_route_functions);
+            }
+            Statement::Let { value, .. } => {
+                if let Some(expr) = value {
+                    check_expr_for_issues(expr, source_lines, issues, http_route_functions);
+                }
+            }
+            Statement::Function { body, contract, name, .. } => {
+                // Check for functions without contracts (suggestion only for exported ones)
+                if contract.is_none() {
+                    let line = find_line_number(source_lines, &format!("fn {}", name));
+                    issues.push(json!({
+                        "severity": "suggestion",
+                        "rule": "function_no_contract",
+                        "message": format!("Function '{}' has no contracts. Consider adding requires/ensures for better documentation and safety.", name),
+                        "line": line,
+                    }));
+                }
+                
+                for s in &body.statements {
+                    check_stmt_for_issues(s, source_lines, issues, http_route_functions);
+                }
+            }
+            Statement::If { condition, then_branch, else_branch } => {
+                check_expr_for_issues(condition, source_lines, issues, http_route_functions);
+                for s in &then_branch.statements {
+                    check_stmt_for_issues(s, source_lines, issues, http_route_functions);
+                }
+                if let Some(eb) = else_branch {
+                    for s in &eb.statements {
+                        check_stmt_for_issues(s, source_lines, issues, http_route_functions);
+                    }
+                }
+            }
+            Statement::While { condition, body } => {
+                check_expr_for_issues(condition, source_lines, issues, http_route_functions);
+                for s in &body.statements {
+                    check_stmt_for_issues(s, source_lines, issues, http_route_functions);
+                }
+            }
+            Statement::ForIn { iterable, body, .. } => {
+                check_expr_for_issues(iterable, source_lines, issues, http_route_functions);
+                for s in &body.statements {
+                    check_stmt_for_issues(s, source_lines, issues, http_route_functions);
+                }
+            }
+            Statement::Loop { body } => {
+                for s in &body.statements {
+                    check_stmt_for_issues(s, source_lines, issues, http_route_functions);
+                }
+            }
+            Statement::Return(Some(expr)) => {
+                check_expr_for_issues(expr, source_lines, issues, http_route_functions);
+            }
+            Statement::Defer(expr) => {
+                check_expr_for_issues(expr, source_lines, issues, http_route_functions);
+            }
+            Statement::Impl { methods, invariants, .. } => {
+                for method in methods {
+                    check_stmt_for_issues(method, source_lines, issues, http_route_functions);
+                }
+                for inv in invariants {
+                    check_expr_for_issues(inv, source_lines, issues, http_route_functions);
+                }
+            }
+            Statement::Module { body, .. } => {
+                for s in body {
+                    check_stmt_for_issues(s, source_lines, issues, http_route_functions);
+                }
+            }
+            Statement::Export { statement, .. } => {
+                if let Some(s) = statement {
+                    check_stmt_for_issues(s, source_lines, issues, http_route_functions);
+                }
+            }
+            _ => {}
+        }
+    }
+    
+    // Run checks on all statements
+    for stmt in &ast.statements {
+        check_stmt_for_issues(stmt, &source_lines, &mut issues, &http_route_functions);
+    }
+    
+    // Also run the existing unused import analysis
+    let ast_warnings = analyze_ast_warnings(ast, source);
+    for w in ast_warnings {
+        issues.push(json!({
+            "severity": "warning",
+            "rule": w["type"].as_str().unwrap_or("unknown"),
+            "message": w["message"],
+            "line": null,
+        }));
+    }
+    
+    // Check source-level patterns that might indicate issues
+    // These are heuristic checks on the raw source
+    for (line_num, line) in source_lines.iter().enumerate() {
+        // Check for JavaScript-style template strings
+        if line.contains("${") && line.contains("`") {
+            issues.push(json!({
+                "severity": "warning",
+                "rule": "javascript_template_string",
+                "message": "Possible JavaScript-style template string detected. NTNT uses \"{variable}\" for interpolation, not `${variable}`.",
+                "line": line_num + 1,
+                "fix": {
+                    "description": "Replace `${var}` with \"{var}\" and remove backticks"
+                }
+            }));
+        }
+        
+        // Check for Python-style range() calls
+        if line.contains("range(") && (line.contains("for ") || line.contains("for\t")) {
+            issues.push(json!({
+                "severity": "warning", 
+                "rule": "python_style_range",
+                "message": "Possible Python-style range() detected. NTNT uses `0..10` for exclusive ranges or `0..=10` for inclusive.",
+                "line": line_num + 1,
+                "fix": {
+                    "description": "Replace range(n) with 0..n or range(a, b) with a..b"
+                }
+            }));
+        }
+        
+        // Check for Rust/Python-style imports (heuristic)
+        let trimmed = line.trim();
+        if trimmed.starts_with("from ") && trimmed.contains(" import ") {
+            issues.push(json!({
+                "severity": "error",
+                "rule": "python_import_syntax",
+                "message": "Python-style import detected. NTNT uses `import {{ x }} from \"module\"`.",
+                "line": line_num + 1,
+                "fix": {
+                    "description": "Rewrite as: import { x } from \"std/module\""
+                }
+            }));
+        }
+        
+        if trimmed.starts_with("use ") && trimmed.contains("::") {
+            issues.push(json!({
+                "severity": "error",
+                "rule": "rust_import_syntax", 
+                "message": "Rust-style import detected. NTNT uses `import {{ x }} from \"module\"`.",
+                "line": line_num + 1,
+                "fix": {
+                    "description": "Rewrite as: import { x } from \"std/module\""
+                }
+            }));
+        }
+    }
+    
+    issues
 }
 
 /// Collect all .tnt files from a path (file or directory)

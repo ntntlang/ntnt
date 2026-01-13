@@ -112,7 +112,7 @@ This changes how both agents and humans interact with code:
 
 ### Radically Simple
 
-A JSON API endpoint that would take 20+ lines in Go or require a full project setup in Next.js:
+A JSON API endpoint in NTNT:
 
 ```ntnt
 import { json } from "std/http/server"
@@ -126,6 +126,84 @@ listen(3000)
 ```
 
 One file. No package.json, no tsconfig, no node_modules, no dependency decisions. Write the code, run it.
+
+**The same endpoint in Go:**
+
+```go
+package main
+
+import (
+    "encoding/json"
+    "net/http"
+    "strings"
+)
+
+func main() {
+    http.HandleFunc("/users/", func(w http.ResponseWriter, r *http.Request) {
+        id := strings.TrimPrefix(r.URL.Path, "/users/")
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]string{
+            "id":   id,
+            "name": "User " + id,
+        })
+    })
+    http.ListenAndServe(":3000", nil)
+}
+```
+
+**The same endpoint in Next.js:**
+
+```typescript
+// app/api/users/[id]/route.ts
+import { NextResponse } from "next/server";
+
+export async function GET(request: Request, { params }: { params: { id: string } }) {
+  return NextResponse.json({
+    id: params.id,
+    name: `User ${params.id}`,
+  });
+}
+```
+
+Plus: `package.json`, `tsconfig.json`, `next.config.js`, `node_modules/` (~300MB), and a build step.
+
+**The same endpoint in Python (Flask):**
+
+```python
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+
+@app.route('/users/<id>')
+def get_user(id):
+    return jsonify({
+        'id': id,
+        'name': f'User {id}'
+    })
+
+if __name__ == '__main__':
+    app.run(port=3000)
+```
+
+Plus: `requirements.txt`, virtual environment setup, and `pip install flask`.
+
+**The same endpoint in Python (FastAPI):**
+
+```python
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/users/{id}")
+def get_user(id: str):
+    return {"id": id, "name": f"User {id}"}
+```
+
+Plus: `requirements.txt`, `uvicorn` server, virtual environment, and `pip install fastapi uvicorn`.
+
+---
+
+NTNT isn't simpler because it's less capable—it's simpler because the decisions are already made. One HTTP server. One way to return JSON. One command to run it.
 
 ### Batteries Included
 
