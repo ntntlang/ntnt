@@ -18,13 +18,24 @@ ntnt test server.tnt --get /api/status --post /users --body 'name=Alice'
 
 ### Map Literals
 
-Always use `map {}` for key-value structures. Never use bare `{}` for maps.
+Use `map {}` for top-level maps. Nested maps inside a `map {}` are inferred automatically.
 
 ```ntnt
-// Correct
+// Correct - top level requires map keyword
 let data = map { "name": "Alice", "age": 30 }
 
-// Wrong - {} is a block expression
+// Correct - nested maps inferred (cleaner)
+let config = map {
+    "server": { "host": "localhost", "port": 8080 },
+    "db": { "url": "postgres://..." }
+}
+
+// Also correct - explicit nested maps (backwards compatible)
+let config = map {
+    "server": map { "host": "localhost" }
+}
+
+// Wrong - top-level {} is a block expression
 let data = { "name": "Alice" }
 ```
 

@@ -10,11 +10,13 @@ use crate::lexer::{Token, TokenKind, StringPart as LexerStringPart};
 pub struct Parser {
     tokens: Vec<Token>,
     current: usize,
+    /// Track if we're inside a map literal context (for nested map inference)
+    in_map_context: bool,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, current: 0 }
+        Parser { tokens, current: 0, in_map_context: false }
     }
 
     /// Parse a complete program
@@ -1152,6 +1154,70 @@ impl Parser {
         // Check for :
         matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::Colon))
     }
+    
+    /// Check if the upcoming tokens look like a nested map literal ({ "key": value } or { key: value })
+    /// This looks ahead without consuming tokens. Used for nested map inference.
+    fn is_nested_map_literal(&self) -> bool {
+        let mut pos = self.current;
+        
+        // Check for {
+        if pos >= self.tokens.len() {
+            return false;
+        }
+        if !matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::LeftBrace)) {
+            return false;
+        }
+        pos += 1;
+        
+        // Check for } (empty map literal)
+        if matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::RightBrace)) {
+            return true;
+        }
+        
+        // Check for string key (most common for maps)
+        if matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::String(_))) {
+            pos += 1;
+            // Check for :
+            return matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::Colon));
+        }
+        
+        // Check for identifier key (also valid for maps)
+        if matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::Identifier(_))) {
+            pos += 1;
+            // Check for :
+            return matches!(self.tokens.get(pos).map(|t| &t.kind), Some(TokenKind::Colon));
+        }
+        
+        false
+    }
+    
+    /// Parse the contents of a map literal (after the opening brace)
+    /// Sets in_map_context to enable nested map inference for values
+    fn parse_map_contents(&mut self) -> Result<Expression> {
+        let mut pairs = Vec::new();
+        
+        // Save previous context and enter map context
+        let was_in_map = self.in_map_context;
+        self.in_map_context = true;
+        
+        if !self.check(&TokenKind::RightBrace) {
+            loop {
+                let key = self.expression()?;
+                self.consume(&TokenKind::Colon, "Expected ':' after map key")?;
+                let value = self.expression()?;
+                pairs.push((key, value));
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+        }
+        
+        // Restore previous context
+        self.in_map_context = was_in_map;
+        
+        self.consume(&TokenKind::RightBrace, "Expected '}' after map entries")?;
+        Ok(Expression::MapLiteral(pairs))
+    }
 
     fn arguments(&mut self) -> Result<Vec<Expression>> {
         let mut args = Vec::new();
@@ -1297,20 +1363,13 @@ impl Parser {
         // Map literal: map { key: value, ... }
         if self.match_token(&[TokenKind::Map]) {
             self.consume(&TokenKind::LeftBrace, "Expected '{' after 'map'")?;
-            let mut pairs = Vec::new();
-            if !self.check(&TokenKind::RightBrace) {
-                loop {
-                    let key = self.expression()?;
-                    self.consume(&TokenKind::Colon, "Expected ':' after map key")?;
-                    let value = self.expression()?;
-                    pairs.push((key, value));
-                    if !self.match_token(&[TokenKind::Comma]) {
-                        break;
-                    }
-                }
-            }
-            self.consume(&TokenKind::RightBrace, "Expected '}' after map entries")?;
-            return Ok(Expression::MapLiteral(pairs));
+            return self.parse_map_contents();
+        }
+        
+        // Nested map inference: when in map context, { "key": value } is treated as a map
+        if self.in_map_context && self.is_nested_map_literal() {
+            self.advance(); // consume the {
+            return self.parse_map_contents();
         }
 
         // Block expression

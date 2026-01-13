@@ -44,22 +44,30 @@ ntnt test app.tnt --port 8080 --get /status
 
 ## Critical Syntax Rules
 
-### 1. Map Literals Require `map` Keyword
+### 1. Map Literals Require `map` Keyword (at Top Level)
 
-**This is the most common mistake.** In NTNT, `{}` creates a block expression, NOT a map/object.
+**Important:** In NTNT, `{}` creates a block expression, NOT a map/object. Use `map {}` for the top-level map.
+
+However, **nested maps are inferred automatically** - inside a `map {}`, you can use plain `{}` for nested maps.
 
 ```ntnt
-// ✅ CORRECT - Use `map {}` for key-value structures
+// ✅ CORRECT - Use `map {}` at top level
 let user = map { "name": "Alice", "age": 30 }
 let empty_map = map {}
+
+// ✅ CORRECT - Nested maps are inferred (cleaner syntax)
 let config = map {
-    "host": "localhost",
-    "port": 8080,
-    "debug": true
+    "server": { "host": "localhost", "port": 8080 },
+    "database": { "url": "postgres://...", "pool": 5 }
 }
 
-// ❌ WRONG - This creates a block expression, not a map
-let user = { "name": "Alice" }   // ERROR or unexpected behavior
+// ✅ ALSO CORRECT - Explicit `map` for nested (backwards compatible)
+let config = map {
+    "server": map { "host": "localhost", "port": 8080 }
+}
+
+// ❌ WRONG - Top-level map still requires `map` keyword
+let user = { "name": "Alice" }   // ERROR: This is a block, not a map
 let empty = {}                    // This is an empty block, not empty map
 ```
 
