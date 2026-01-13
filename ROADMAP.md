@@ -186,31 +186,52 @@ fn process_file(path: String) -> Result<Data, Error> {
 
 ---
 
-## Phase 5: Async, I/O & Web
+## Phase 5: Concurrency, I/O & Web
 
 **Goal:** Everything needed to build a web application.
 
-### 5.1 Async Runtime
+### 5.1 Concurrency ✅ COMPLETE
 
-- [ ] `async`/`await` syntax
-- [ ] Future type
-- [ ] Async function contracts
-- [ ] Task executor
+**Design Decision:** Go-style concurrency (threads + channels) instead of async/await.
+- Simpler mental model (no function coloring)
+- Existing stdlib works without modification
+- Covers 99% of web app use cases
+
+- [x] `std/concurrent`: channel, send, recv, try_recv, recv_timeout, close
+- [x] Thread-safe value serialization for channel communication
+- [x] sleep_ms, thread_count utilities
 
 ```ntnt
-async fn fetch_user(id: String) -> Result<User, HttpError>
-    requires id.len() > 0
-{
-    let response = await http.get("/users/" + id)
-    return response.json()
+import { channel, send, recv, try_recv, close } from "std/concurrent"
+
+// Create channel for communication
+let ch = channel()
+
+// Send values (primitives, arrays, maps, structs)
+send(ch, map { "user_id": 123, "action": "signup" })
+
+// Receive (blocks until value available)
+let msg = recv(ch)
+
+// Non-blocking receive
+match try_recv(ch) {
+    Some(value) => process(value),
+    None => print("No message yet")
 }
 
-// Concurrent execution
-let (user, posts) = await all(
-    fetch_user(id),
-    fetch_posts(id)
-)
+// With timeout
+match recv_timeout(ch, 5000) {
+    Some(value) => handle(value),
+    None => print("Timeout after 5 seconds")
+}
+
+close(ch)
 ```
+
+**Future Enhancements (Phase 5.1b):**
+- [ ] `spawn(fn)` / `join(handle)` - background task execution
+- [ ] `parallel([fn1, fn2, ...])` - run multiple functions in parallel
+- [ ] `select([ch1, ch2, ...])` - wait on multiple channels
 
 ### 5.2 File System I/O ✅ COMPLETE
 
@@ -399,7 +420,7 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 
 **Phase 5 Deliverables:**
 
-- [ ] Async/await runtime
+- [x] Concurrency primitives (`std/concurrent` - channels, send/recv, thread_count)
 - [x] File system operations
 - [x] HTTP client (blocking)
 - [x] HTTP server with routing

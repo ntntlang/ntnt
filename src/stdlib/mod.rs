@@ -19,6 +19,7 @@ pub mod url;
 pub mod http;
 pub mod http_server;
 pub mod postgres;
+pub mod concurrent;
 
 use std::collections::HashMap;
 use crate::interpreter::Value;
@@ -43,6 +44,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/http".to_string(), http::init());
     modules.insert("std/http/server".to_string(), http_server::init());
     modules.insert("std/db/postgres".to_string(), postgres::init());
+    modules.insert("std/concurrent".to_string(), concurrent::init());
     
     modules
 }

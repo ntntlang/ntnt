@@ -61,6 +61,7 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
   - `std/url`: URL parsing and encoding (parse, encode, decode, build_query, join)
   - `std/http`: HTTP client (get, post, put, delete, request)
   - `std/http/server`: HTTP server with routing, middleware, static files, and contract-verified endpoints
+  - `std/concurrent`: Go-style concurrency (channel, send, recv, try_recv, recv_timeout, close)
 
 ### Language Runtime (Planned)
 

@@ -26,7 +26,7 @@ NTNT (pronounced "Intent") is an experimental programming language and ecosystem
 - File-based modules with `import`/`export`
 - Module aliasing: `import "std/math" as math`
 - Selective imports: `import { split, join } from "std/string"`
-- Standard library: `std/string`, `std/math`, `std/collections`, `std/env`, `std/fs`, `std/path`, `std/json`, `std/time`
+- Standard library: `std/string`, `std/math`, `std/collections`, `std/env`, `std/fs`, `std/path`, `std/json`, `std/time`, `std/concurrent`
 
 **Phase 4: Traits & Essential Features** ✅ Complete
 
@@ -53,10 +53,11 @@ NTNT (pronounced "Intent") is an experimental programming language and ecosystem
 - **File-Based Routing**: `routes()` for convention-over-configuration (routes/, lib/, middleware/ auto-discovery)
 - **Agent Tooling**: `ntnt inspect` (JSON introspection), `ntnt validate` (pre-run error checking)
 - **PostgreSQL**: `std/db/postgres` (connect, query, execute, transactions)
+- **Concurrency**: `std/concurrent` (channels, send/recv, timeouts for Go-style concurrency)
 
-**233 passing tests** | **Version 0.1.7**
+**240 passing tests** | **Version 0.1.8**
 
-**Next Up**: Async/await, Redis driver (Phase 5 continued)
+**Next Up**: Redis driver, caching layer (Phase 5 continued)
 
 See [ROADMAP.md](ROADMAP.md) for the full 10-phase implementation plan.
 
@@ -711,6 +712,42 @@ print(d.millis)             // 60000
 print(d.nanos)              // 60000000000
 ```
 
+**std/concurrent** - Go-style concurrency primitives
+
+```ntnt
+import { channel, send, recv, try_recv, recv_timeout, close, sleep_ms, thread_count } from "std/concurrent"
+
+// Create a channel for communication
+let ch = channel()
+
+// Send values through the channel
+send(ch, "hello")
+send(ch, map { "count": 42 })
+
+// Blocking receive
+let msg = recv(ch)  // Blocks until value available
+
+// Non-blocking receive
+match try_recv(ch) {
+    Some(value) => print("Got: " + str(value)),
+    None => print("No message yet")
+}
+
+// Receive with timeout (milliseconds)
+match recv_timeout(ch, 1000) {
+    Some(value) => print("Got: " + str(value)),
+    None => print("Timeout!")
+}
+
+// Get available CPU threads
+let threads = thread_count()  // e.g., 8
+
+// Close channel when done
+close(ch)
+```
+
+Channels support sending these types: `Int`, `Float`, `Bool`, `String`, arrays, maps, structs, and enums. Functions cannot be sent through channels.
+
 ## Editor Support
 
 ### VS Code
@@ -802,6 +839,7 @@ NTNT bridges the gap between AI's speed and consistency with human judgment and 
 | `std/http`        | get, post, put, delete, request, get_json, post_json           |
 | `std/http/server` | text, html, json, status, redirect + get, post, put, listen    |
 | `std/db/postgres` | connect, query, query_one, execute, begin, commit, rollback    |
+| `std/concurrent`  | channel, send, recv, try_recv, recv_timeout, close, sleep_ms   |
 
 ## PostgreSQL Database
 

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "ntnt")]
 #[command(author = "NTNT Language Team")]
-#[command(version = "0.1.7")]
+#[command(version = "0.1.8")]
 #[command(about = "NTNT (Intent) - A programming language for AI-driven development", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -173,7 +173,7 @@ fn main() {
 }
 
 fn run_repl() -> anyhow::Result<()> {
-    println!("{}", "NTNT (Intent) Programming Language v0.1.7".green().bold());
+    println!("{}", "NTNT (Intent) Programming Language v0.1.8".green().bold());
     println!("Type {} for help, {} to exit\n", ":help".cyan(), ":quit".cyan());
 
     let mut rl = DefaultEditor::new()?;

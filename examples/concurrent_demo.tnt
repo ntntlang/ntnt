@@ -1,0 +1,146 @@
+// Concurrency Demo - Channel-based communication
+//
+// This demo shows how to use channels for concurrent communication.
+// Run with: ./target/release/ntnt run examples/concurrent_demo.tnt
+
+import { channel, send, recv, try_recv, recv_timeout, close, sleep_ms, thread_count } from "std/concurrent"
+
+fn main() {
+    print("=== NTNT Concurrency Demo ===")
+    print("")
+    
+    // Check available threads
+    let threads = thread_count()
+    print("Available CPU threads: " + str(threads))
+    print("")
+    
+    // Demo 1: Basic channel send/recv
+    print("--- Demo 1: Basic Channel ---")
+    let ch1 = channel()
+    
+    // Send some values
+    send(ch1, "Hello")
+    send(ch1, "World")
+    send(ch1, 42)
+    send(ch1, map { "key": "value", "count": 123 })
+    
+    // Receive them
+    print("Received: " + str(recv(ch1)))
+    print("Received: " + str(recv(ch1)))
+    print("Received: " + str(recv(ch1)))
+    print("Received: " + str(recv(ch1)))
+    
+    close(ch1)
+    print("")
+    
+    // Demo 2: Non-blocking try_recv
+    print("--- Demo 2: Non-blocking try_recv ---")
+    let ch2 = channel()
+    
+    // Try to receive from empty channel
+    match try_recv(ch2) {
+        Some(v) => print("Got: " + str(v)),
+        None => print("Channel is empty (expected)")
+    }
+    
+    // Send and then try_recv
+    send(ch2, "surprise!")
+    match try_recv(ch2) {
+        Some(v) => print("Got: " + str(v)),
+        None => print("Channel is empty")
+    }
+    
+    close(ch2)
+    print("")
+    
+    // Demo 3: Timeout receive
+    print("--- Demo 3: Timeout Receive ---")
+    let ch3 = channel()
+    
+    print("Waiting for message with 100ms timeout...")
+    match recv_timeout(ch3, 100) {
+        Some(v) => print("Got: " + str(v)),
+        None => print("Timeout! No message received (expected)")
+    }
+    
+    // Now send something first
+    send(ch3, "fast message")
+    print("Waiting for message with 100ms timeout...")
+    match recv_timeout(ch3, 100) {
+        Some(v) => print("Got: " + str(v)),
+        None => print("Timeout!")
+    }
+    
+    close(ch3)
+    print("")
+    
+    // Demo 4: Sending complex data structures
+    print("--- Demo 4: Complex Data Structures ---")
+    let ch4 = channel()
+    
+    // Send an array
+    send(ch4, [1, 2, 3, 4, 5])
+    
+    // Send a nested map
+    send(ch4, map {
+        "user": map {
+            "name": "Alice",
+            "age": 30
+        },
+        "permissions": ["read", "write", "admin"]
+    })
+    
+    // Send a Result-like enum value
+    send(ch4, Ok("Success!"))
+    
+    print("Received array: " + str(recv(ch4)))
+    print("Received nested map: " + str(recv(ch4)))
+    print("Received enum: " + str(recv(ch4)))
+    
+    close(ch4)
+    print("")
+    
+    // Demo 5: Producer/Consumer pattern simulation
+    print("--- Demo 5: Producer/Consumer Pattern ---")
+    let work_channel = channel()
+    
+    // Simulate a producer sending work items
+    print("Producing 5 work items...")
+    for i in 1..=5 {
+        let job = map { "job_id": i, "task": "process_item_" + str(i) }
+        send(work_channel, job)
+    }
+    // Send a sentinel value (negative job_id) to signal completion
+    send(work_channel, map { "job_id": -1, "task": "done" })
+    
+    // Simulate a consumer processing items
+    print("Consuming work items...")
+    let running = true
+    while running {
+        let item = recv(work_channel)
+        if item["job_id"] == -1 {
+            print("  Received done signal, stopping")
+            running = false
+        } else {
+            print("  Processing: " + str(item["task"]))
+            sleep_ms(50)  // Simulate work
+        }
+    }
+    
+    close(work_channel)
+    print("")
+    
+    print("=== Demo Complete ===")
+    print("")
+    print("The std/concurrent module provides:")
+    print("  - channel()       Create a new channel")
+    print("  - send(ch, val)   Send a value (returns false if closed)")
+    print("  - recv(ch)        Receive a value (blocks until available)")
+    print("  - try_recv(ch)    Non-blocking receive (returns Option)")
+    print("  - recv_timeout()  Receive with timeout (returns Option)")
+    print("  - close(ch)       Close the channel")
+    print("  - sleep_ms(n)     Sleep for n milliseconds")
+    print("  - thread_count()  Get available CPU threads")
+}
+
+main()
