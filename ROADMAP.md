@@ -256,84 +256,113 @@ listen(8080)  // Start server
 - [x] JSON request/response helpers (get_json, post_json)
 - [ ] Async HTTP requests (deferred to async runtime)
 
-### 5.5 File-Based Routing & Hot Reload
+### 5.5 File-Based Routing & Introspection
 
-**Goal:** Enable modular, hot-reloadable applications where the filesystem defines the routing structure. This is critical for AI agents—adding a route means creating a single file, no wiring required.
+**Goal:** Convention-based project structure with agent-friendly introspection. No configuration files—the folder structure IS the architecture.
 
-**Architecture:**
+---
+
+#### Project Structure
 
 ```
-app/
-├── app.tnt           # Config, middleware, listen()
-├── routes/
-│   ├── index.tnt     # GET /
-│   ├── about.tnt     # GET /about
+my-app/
+├── routes/                # File-based routing (path = URL)
+│   ├── index.tnt          # GET /
+│   ├── about.tnt          # GET /about
 │   ├── users/
-│   │   ├── index.tnt # GET /users
-│   │   ├── [id].tnt  # GET /users/:id (dynamic segment)
-│   │   └── create.tnt
+│   │   ├── index.tnt      # GET /users
+│   │   └── [id].tnt       # GET/POST/DELETE /users/:id
 │   └── api/
-│       └── status.tnt
+│       └── orders.tnt     # /api/orders
+├── lib/                   # Shared modules (auto-imported)
+│   └── db.tnt
+└── middleware/            # Auto-loaded in alphabetical order
+    ├── 01_logger.tnt
+    └── 02_auth.tnt
 ```
 
-**Features:**
+**Conventions:**
+- [ ] `routes/` - File path = URL path, exports = HTTP methods
+- [ ] `[param].tnt` - Dynamic URL segments (e.g., `[id].tnt` → `/users/:id`)
+- [ ] `index.tnt` - Directory root handler
+- [ ] `lib/` - Shared code, auto-imported into all routes
+- [ ] `middleware/` - Auto-loaded in alphabetical order (use `01_`, `02_` prefixes)
+- [ ] Hot-reload on file changes
 
-- [ ] `routes/` directory convention: file path = URL path
-- [ ] Dynamic segments via `[param].tnt` naming (e.g., `[id].tnt` → `/users/:id`)
-- [ ] HTTP method exports: `export fn get(req)`, `export fn post(req)`, etc.
-- [ ] Hot-reload: file changes detected, module re-parsed on next request
-- [ ] Nested routes via subdirectories
-- [ ] `index.tnt` as directory root handler
-- [ ] Shared layouts/middleware per directory (optional `_layout.tnt`, `_middleware.tnt`)
-
-**Example Route File:**
-
+**Example Route:**
 ```ntnt
 // routes/users/[id].tnt
-// Automatically handles GET /users/:id and DELETE /users/:id
-
-import { json, status } from "std/http/server"
-import { find_user, delete_user } from "../../models/user"
 
 export fn get(req) {
-    let user = find_user(req.params.id)
+    let user = db.find_user(req.params.id)
     return json(user)
 }
 
 export fn delete(req)
-    requires req.user.is_admin
+    requires req.user.role == "admin"
 {
-    delete_user(req.params.id)
+    db.delete_user(req.params.id)
     return status(204)
 }
 ```
 
-**App Entry Point:**
-
+**Entry Point:**
 ```ntnt
 // app.tnt
-import { use_middleware, listen } from "std/http/server"
-import { logger, auth } from "./middleware"
-
-// Apply global middleware
-use_middleware(logger)
-use_middleware(auth)
-
-// Auto-discover and register all routes from routes/ directory
-// Routes are hot-reloaded when files change
-routes("routes/")
-
+routes("routes/")  // Auto-discover all routes
 listen(3000)
 ```
 
-**Why File-Based Routing:**
-| Benefit | Description |
-|---------|-------------|
-| **AI-Friendly** | "Create `/api/orders`" → Agent creates `routes/api/orders.tnt`. Done. |
-| **Locality** | All logic for a route lives in one file |
-| **Zero Wiring** | No router configuration to maintain |
-| **Hot Reload** | Change a file, refresh browser, see changes |
-| **Discoverability** | URL structure mirrors filesystem |
+---
+
+#### CLI Commands
+
+**`ntnt inspect [path]`** - JSON description of project structure (for agents)
+
+```bash
+$ ntnt inspect
+
+{
+  "routes": [
+    {"method": "GET", "path": "/", "file": "routes/index.tnt"},
+    {"method": "GET", "path": "/users/{id}", "file": "routes/users/[id].tnt",
+     "contracts": ["requires req.params.id != \"\""]}
+  ],
+  "lib": ["lib/db.tnt"],
+  "middleware": ["middleware/01_logger.tnt", "middleware/02_auth.tnt"]
+}
+```
+
+**`ntnt validate`** - Check for errors before running
+
+```bash
+$ ntnt validate
+
+✓ routes/index.tnt
+✓ routes/users/[id].tnt
+✗ routes/api/orders.tnt
+  Line 15: Unused import 'status'
+
+Errors: 1
+```
+
+---
+
+**Why This Matters for Agents:**
+
+| Task | Traditional | NTNT |
+|------|-------------|------|
+| Add route `/api/orders` | Edit router + create file | Create `routes/api/orders.tnt` |
+| Understand app structure | Read all files | `ntnt inspect` |
+| Check for errors | Run and hope | `ntnt validate` |
+
+**Features:**
+- [ ] File-based route discovery
+- [ ] Dynamic segments `[param].tnt`
+- [ ] Auto-loaded middleware and lib
+- [ ] Hot-reload
+- [ ] `ntnt inspect` - JSON introspection
+- [ ] `ntnt validate` - Pre-run validation
 
 ### 5.6 Database Connectivity
 
@@ -364,13 +393,16 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] `std/url`: parse, encode, encode_component, decode, build_query, join
 - [x] `std/http`: get, post, put, delete, patch, head, request, get_json, post_json
 
-**Deliverables:**
+**Phase 5 Deliverables:**
 
 - [ ] Async/await runtime
 - [x] File system operations
 - [x] HTTP client (blocking)
 - [x] HTTP server with routing
-- [ ] File-based routing with hot-reload (`routes/` directory convention)
+- [ ] File-based routing (`routes/`, `lib/`, `middleware/` conventions)
+- [ ] Hot-reload on file changes
+- [ ] `ntnt inspect` - JSON introspection for agents
+- [ ] `ntnt validate` - Pre-run error checking
 - [ ] PostgreSQL database driver
 - [x] JSON, time, crypto, URL utilities
 
