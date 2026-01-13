@@ -597,7 +597,7 @@ match fetch(map {
 ### HTTP Server (`std/http/server`)
 
 ```ntnt
-import { text, html, json, status, redirect } from "std/http/server"
+import { text, html, json, status, redirect, static_file, response } from "std/http/server"
 
 fn home(req) {
     return text("Welcome!")
@@ -606,6 +606,30 @@ fn home(req) {
 fn get_user(req) {
     let id = req.params.id
     return json(map { "id": id, "name": "User " + id })
+}
+
+// Return JSON with custom status code
+fn not_found_user(req) {
+    return json(map { "error": "User not found" }, 404)
+}
+
+// Return HTML with status code
+fn error_page(req) {
+    return html("<h1>Server Error</h1>", 500)
+}
+
+// Serve static content with browser caching (1 hour default)
+fn serve_css(req) {
+    let css = read_file("styles.css")
+    return static_file(css, "text/css", 86400)  // Cache for 24 hours
+}
+
+// Full control over response
+fn custom_response(req) {
+    return response(200, map {
+        "Content-Type": "text/plain",
+        "X-Custom-Header": "value"
+    }, "Custom body")
 }
 
 fn create_user(req)
@@ -626,6 +650,16 @@ serve_static("/assets", "./public")
 // Start server
 listen(8080)
 ```
+
+**Response Functions:**
+- `html(body, status?)` - HTML response (no-cache by default)
+- `json(data, status?)` - JSON response (no-cache by default)
+- `text(body)` - Plain text response
+- `static_file(content, content_type, max_age?)` - Cacheable static content
+- `response(status, headers, body)` - Full control over response
+- `redirect(url)` - 302 redirect
+- `not_found()` - 404 response
+- `error(message)` - 500 response
 
 ### Database (`std/db/postgres`)
 

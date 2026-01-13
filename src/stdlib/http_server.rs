@@ -348,6 +348,11 @@ pub fn init() -> HashMap<String, Value> {
                         "content-type".to_string(),
                         Value::String("text/plain; charset=utf-8".to_string()),
                     );
+                    // Prevent caching for dynamic text content
+                    headers.insert(
+                        "cache-control".to_string(),
+                        Value::String("no-cache, no-store, must-revalidate".to_string()),
+                    );
                     Ok(create_response_value(200, headers, body.clone()))
                 }
                 _ => Err(IntentError::TypeError("text() requires a string".to_string())),
@@ -355,27 +360,55 @@ pub fn init() -> HashMap<String, Value> {
         },
     });
     
-    // Response.html(body) -> Response - Create an HTML response
+    // Response.html(body, status_code?) -> Response - Create an HTML response
+    // Includes cache-control headers to prevent browser caching
     module.insert("html".to_string(), Value::NativeFunction {
         name: "html".to_string(),
-        arity: 1,
+        arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
         func: |args| {
-            match &args[0] {
-                Value::String(body) => {
-                    let mut headers = HashMap::new();
-                    headers.insert(
-                        "content-type".to_string(),
-                        Value::String("text/html; charset=utf-8".to_string()),
-                    );
-                    Ok(create_response_value(200, headers, body.clone()))
-                }
-                _ => Err(IntentError::TypeError("html() requires a string".to_string())),
+            if args.is_empty() || args.len() > 2 {
+                return Err(IntentError::TypeError(
+                    "html() requires 1 or 2 arguments (body, optional status_code)".to_string()
+                ));
             }
+            
+            let body = match &args[0] {
+                Value::String(s) => s.clone(),
+                _ => return Err(IntentError::TypeError("html() body must be a string".to_string())),
+            };
+            
+            let status_code = if args.len() == 2 {
+                match &args[1] {
+                    Value::Int(code) => *code,
+                    _ => return Err(IntentError::TypeError(
+                        "html() status code must be an integer".to_string()
+                    )),
+                }
+            } else {
+                200
+            };
+            
+            let mut headers = HashMap::new();
+            headers.insert(
+                "content-type".to_string(),
+                Value::String("text/html; charset=utf-8".to_string()),
+            );
+            // Prevent browser caching of dynamic HTML content
+            headers.insert(
+                "cache-control".to_string(),
+                Value::String("no-cache, no-store, must-revalidate".to_string()),
+            );
+            headers.insert(
+                "pragma".to_string(),
+                Value::String("no-cache".to_string()),
+            );
+            Ok(create_response_value(status_code, headers, body))
         },
     });
     
     // Response.json(data, status_code?) -> Response - Create a JSON response
     // If status_code is provided, use it; otherwise default to 200
+    // Includes cache-control headers to prevent browser caching
     module.insert("json".to_string(), Value::NativeFunction {
         name: "json".to_string(),
         arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
@@ -403,6 +436,11 @@ pub fn init() -> HashMap<String, Value> {
             headers.insert(
                 "content-type".to_string(),
                 Value::String("application/json".to_string()),
+            );
+            // Prevent browser caching of API responses
+            headers.insert(
+                "cache-control".to_string(),
+                Value::String("no-cache, no-store, must-revalidate".to_string()),
             );
             Ok(create_response_value(status_code, headers, body))
         },
@@ -479,6 +517,81 @@ pub fn init() -> HashMap<String, Value> {
         },
     });
     
+    // Response.static_file(content, content_type, max_age?) -> Response
+    // Create a response with caching enabled for static assets
+    // max_age is in seconds, defaults to 3600 (1 hour)
+    module.insert("static_file".to_string(), Value::NativeFunction {
+        name: "static_file".to_string(),
+        arity: 0, // Accepts 2 or 3 arguments
+        func: |args| {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(IntentError::TypeError(
+                    "static_file() requires 2-3 arguments (content, content_type, optional max_age)".to_string()
+                ));
+            }
+            
+            let content = match &args[0] {
+                Value::String(s) => s.clone(),
+                _ => return Err(IntentError::TypeError("static_file() content must be a string".to_string())),
+            };
+            
+            let content_type = match &args[1] {
+                Value::String(s) => s.clone(),
+                _ => return Err(IntentError::TypeError("static_file() content_type must be a string".to_string())),
+            };
+            
+            let max_age = if args.len() == 3 {
+                match &args[2] {
+                    Value::Int(n) => *n,
+                    _ => return Err(IntentError::TypeError("static_file() max_age must be an integer".to_string())),
+                }
+            } else {
+                3600 // Default 1 hour
+            };
+            
+            let mut headers = HashMap::new();
+            headers.insert(
+                "content-type".to_string(),
+                Value::String(content_type),
+            );
+            headers.insert(
+                "cache-control".to_string(),
+                Value::String(format!("public, max-age={}", max_age)),
+            );
+            Ok(create_response_value(200, headers, content))
+        },
+    });
+    
+    // Response.response(status, headers, body) -> Response
+    // Create a fully custom response with complete control over headers
+    module.insert("response".to_string(), Value::NativeFunction {
+        name: "response".to_string(),
+        arity: 3,
+        func: |args| {
+            let status = match &args[0] {
+                Value::Int(code) => *code,
+                _ => return Err(IntentError::TypeError("response() status must be an integer".to_string())),
+            };
+            
+            let custom_headers = match &args[1] {
+                Value::Map(map) => map.clone(),
+                _ => return Err(IntentError::TypeError("response() headers must be a map".to_string())),
+            };
+            
+            let body = match &args[2] {
+                Value::String(s) => s.clone(),
+                _ => return Err(IntentError::TypeError("response() body must be a string".to_string())),
+            };
+            
+            let mut headers = HashMap::new();
+            for (key, value) in custom_headers {
+                headers.insert(key.to_lowercase(), value);
+            }
+            
+            Ok(create_response_value(status, headers, body))
+        },
+    });
+    
     // Note: new_server, get, post, put, delete, patch, and listen are handled
     // specially in the interpreter because they need access to interpreter state
     
@@ -552,6 +665,16 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
                 response_builder = response_builder.with_header(header);
             }
         }
+    }
+    
+    // Force connection close to prevent stale responses on keep-alive connections
+    if let Ok(header) = tiny_http::Header::from_bytes("Connection".as_bytes(), "close".as_bytes()) {
+        response_builder = response_builder.with_header(header);
+    }
+    
+    // Add server identifier
+    if let Ok(header) = tiny_http::Header::from_bytes("Server".as_bytes(), "ntnt-http".as_bytes()) {
+        response_builder = response_builder.with_header(header);
     }
     
     request.respond(response_builder)
@@ -717,11 +840,17 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
         .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
     let cache_control = tiny_http::Header::from_bytes(b"Cache-Control", b"public, max-age=3600")
         .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+    let connection_close = tiny_http::Header::from_bytes(b"Connection", b"close")
+        .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+    let server_header = tiny_http::Header::from_bytes(b"Server", b"ntnt-http")
+        .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
     
     let response = tiny_http::Response::from_data(buffer)
         .with_status_code(200)
         .with_header(content_type)
-        .with_header(cache_control);
+        .with_header(cache_control)
+        .with_header(connection_close)
+        .with_header(server_header);
     
     request.respond(response)
         .map_err(|e| IntentError::RuntimeError(format!("Failed to send response: {}", e)))

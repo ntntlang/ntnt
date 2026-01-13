@@ -789,6 +789,18 @@ These features are valuable but not essential for the initial release:
 - SQLite
 - Redis client
 
+### High-Performance HTTP Server
+
+The current HTTP server uses `tiny_http` which is simple and reliable but uses `Connection: close` for each request. For high-traffic production applications:
+
+- Async runtime (tokio/hyper) for concurrent connections
+- HTTP/2 support with multiplexing
+- Connection pooling and keep-alive
+- Request pipelining
+- Configurable worker threads
+- Zero-copy response streaming
+- Performance target: 100k+ req/sec on commodity hardware
+
 ### WebSocket Support
 
 - WebSocket server/client
