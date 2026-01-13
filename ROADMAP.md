@@ -368,12 +368,12 @@ Errors: 1
 - [x] `ntnt inspect` - JSON introspection (detects file-based routes)
 - [x] `ntnt validate` - Pre-run validation
 
-### 5.6 Database Connectivity
+### 5.6 Database Connectivity ✅
 
-- [ ] Connection management
-- [ ] Parameterized queries (prevent SQL injection)
-- [ ] Transaction support with contracts
-- [ ] PostgreSQL driver (built-in)
+- [x] Connection management
+- [x] Parameterized queries (prevent SQL injection)
+- [x] Transaction support (begin/commit/rollback)
+- [x] PostgreSQL driver (`std/db/postgres`)
 
 ```ntnt
 import { Database } from "std/db/postgres"
@@ -407,7 +407,7 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] Hot-reload on file changes (mtime-based, no dependencies)
 - [x] `ntnt inspect` - JSON introspection for agents
 - [x] `ntnt validate` - Pre-run error checking
-- [ ] PostgreSQL database driver
+- [x] PostgreSQL database driver (`std/db/postgres`)
 - [x] JSON, time, crypto, URL utilities
 
 ---
@@ -745,6 +745,20 @@ These features are valuable but not essential for the initial release:
 - Formal verification of message sequences
 
 ### Additional Database Drivers
+
+**PostgreSQL Enhanced Support (Current):**
+
+- [x] Basic types: INT, BIGINT, FLOAT, DOUBLE, TEXT, VARCHAR, BOOL
+- [x] NUMERIC/DECIMAL (via rust_decimal)
+- [x] DATE, TIME, TIMESTAMP, TIMESTAMPTZ (via chrono)
+- [x] JSON/JSONB
+- [x] UUID
+- [x] Arrays: INT[], TEXT[], FLOAT[], BOOL[]
+- [ ] BYTEA (binary data)
+- [ ] INTERVAL
+- [ ] PostGIS geometry types
+
+**Additional Drivers:**
 
 - MySQL/MariaDB
 - SQLite

@@ -1,0 +1,196 @@
+// PostgreSQL Database Demo
+// 
+// Setup instructions:
+//
+// 1. Create the database and user (as postgres superuser):
+//    psql -U postgres -c "CREATE USER ntnt WITH PASSWORD 'password';"
+//    psql -U postgres -c "CREATE DATABASE ntnt OWNER ntnt;"
+//
+// 2. Import the sample data:
+//    psql -U ntnt -d ntnt -f examples/ntnt.sql
+//
+// 3. Run this demo:
+//    export DATABASE_URL="postgres://ntnt:password@localhost/ntnt"
+//    ./target/release/ntnt run examples/postgres_demo.tnt
+
+import { connect, query, query_one, execute, close, begin, commit, rollback } from "std/db/postgres"
+import { get_env } from "std/env"
+
+fn main() {
+    // Get connection string from environment (or use default)
+    let db_url = match get_env("DATABASE_URL") {
+        Some(url) => url,
+        None => "postgres://ntnt:password@localhost/ntnt"
+    }
+    
+    print("Using: " + db_url)
+    
+    // Connect to database
+    print("Connecting to PostgreSQL...")
+    let result = connect(db_url)
+    
+    match result {
+        Ok(db) => {
+            print("Connected successfully!")
+            print("")
+            
+            // Basic Queries
+            print("=== All Users ===")
+            let users_result = query(db, "SELECT id, name, email, age, active FROM users ORDER BY id", [])
+            
+            match users_result {
+                Ok(users) => {
+                    for user in users {
+                        let status = "inactive"
+                        if user["active"] {
+                            status = "active"
+                        }
+                        print("  " + str(user["id"]) + ". " + user["name"] + " (" + status + ")")
+                    }
+                },
+                Err(e) => print("Error: " + e)
+            }
+            
+            // Parameterized Query
+            print("")
+            print("=== Active Users Over 28 ===")
+            let active_result = query(db, 
+                "SELECT name, age FROM users WHERE active = true AND age > $1 ORDER BY age",
+                [28]
+            )
+            
+            match active_result {
+                Ok(users) => {
+                    for user in users {
+                        print("  - " + user["name"] + ", age " + str(user["age"]))
+                    }
+                },
+                Err(e) => print("Error: " + e)
+            }
+            
+            // Single Row Query
+            print("")
+            print("=== Find User by Email ===")
+            let alice = query_one(db, 
+                "SELECT id, name, email FROM users WHERE email = $1", 
+                ["alice@example.com"]
+            )
+            
+            match alice {
+                Ok(user) => {
+                    // query_one returns the row directly (a Map) or Unit if not found
+                    // Since we're querying by unique email, we know it exists
+                    print("  Found: " + user["name"] + " (id: " + str(user["id"]) + ")")
+                },
+                Err(e) => print("Error: " + e)
+            }
+            
+            // Aggregation Query
+            print("")
+            print("=== Order Statistics ===")
+            let stats = query_one(db, "SELECT COUNT(*) as total_orders, SUM(total) as total_revenue FROM orders WHERE status = $1", ["completed"])
+            
+            match stats {
+                Ok(row) => {
+                    // Aggregation always returns a row
+                    print("  Completed orders: " + str(row["total_orders"]))
+                    print("  Total revenue: $" + str(row["total_revenue"]))
+                },
+                Err(e) => print("Error: " + e)
+            }
+            
+            // JOIN Query
+            print("")
+            print("=== Recent Orders with User Info ===")
+            let orders = query(db, "SELECT o.id, u.name as customer, o.status, o.total FROM orders o JOIN users u ON o.user_id = u.id ORDER BY o.created_at DESC LIMIT 5", [])
+            
+            match orders {
+                Ok(rows) => {
+                    for order in rows {
+                        print("  Order #" + str(order["id"]) + ": " + order["customer"] + " - $" + str(order["total"]) + " (" + order["status"] + ")")
+                    }
+                },
+                Err(e) => print("Error: " + e)
+            }
+            
+            // Products Query  
+            print("")
+            print("=== Products in Stock ===")
+            let products = query(db, 
+                "SELECT name, price, stock FROM products WHERE stock > $1 ORDER BY price DESC LIMIT 5",
+                [50]
+            )
+            
+            match products {
+                Ok(rows) => {
+                    for p in rows {
+                        print("  - " + p["name"] + ": $" + str(p["price"]) + " (" + str(p["stock"]) + " in stock)")
+                    }
+                },
+                Err(e) => print("Error: " + e)
+            }
+            
+            // Transaction Example
+            print("")
+            print("=== Transaction Demo ===")
+            print("  Starting transaction...")
+            
+            let tx_result = begin(db)
+            match tx_result {
+                Ok(tx) => {
+                    // Update stock
+                    let update_result = execute(tx, 
+                        "UPDATE products SET stock = stock - 1 WHERE name = $1",
+                        ["Laptop"]
+                    )
+                    
+                    match update_result {
+                        Ok(count) => print("  Updated " + str(count) + " product(s)"),
+                        Err(e) => print("  Update error: " + e)
+                    }
+                    
+                    // Rollback to undo (demo purposes)
+                    rollback(tx)
+                    print("  Rolled back (demo - no actual changes)")
+                },
+                Err(e) => print("  Transaction error: " + e)
+            }
+            
+            // Insert Example (using execute)
+            print("")
+            print("=== Insert Demo ===")
+            let insert_result = execute(db,
+                "INSERT INTO users (name, email, age) VALUES ($1, $2, $3) ON CONFLICT (email) DO NOTHING",
+                ["Test User", "test@example.com", 99]
+            )
+            
+            match insert_result {
+                Ok(count) => {
+                    if count > 0 {
+                        print("  Inserted new user!")
+                    } else {
+                        print("  User already exists (email conflict)")
+                    }
+                },
+                Err(e) => print("  Insert error: " + e)
+            }
+            
+            // Clean up test user
+            execute(db, "DELETE FROM users WHERE email = $1", ["test@example.com"])
+            
+            // Close connection
+            print("")
+            print("=== Done ===")
+            close(db)
+            print("Connection closed.")
+        },
+        Err(e) => {
+            print("Connection failed: " + e)
+            print("")
+            print("Make sure PostgreSQL is running and the database exists.")
+            print("See examples/ntnt.sql for setup instructions.")
+        }
+    }
+}
+
+main()

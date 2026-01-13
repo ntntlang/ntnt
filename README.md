@@ -52,10 +52,11 @@ NTNT (pronounced "Intent") is an experimental programming language and ecosystem
 - **HTTP Server**: `std/http/server` (routing, middleware, static files, contract-verified endpoints)
 - **File-Based Routing**: `routes()` for convention-over-configuration (routes/, lib/, middleware/ auto-discovery)
 - **Agent Tooling**: `ntnt inspect` (JSON introspection), `ntnt validate` (pre-run error checking)
+- **PostgreSQL**: `std/db/postgres` (connect, query, execute, transactions)
 
-**231 passing tests** | **Version 0.1.7**
+**233 passing tests** | **Version 0.1.7**
 
-**Next Up**: Async/await, Database connectivity (Phase 5 continued)
+**Next Up**: Async/await, Redis driver (Phase 5 continued)
 
 See [ROADMAP.md](ROADMAP.md) for the full 10-phase implementation plan.
 
@@ -794,6 +795,81 @@ NTNT bridges the gap between AI's speed and consistency with human judgment and 
 | `std/url`         | parse, encode, decode, build_query, join                       |
 | `std/http`        | get, post, put, delete, request, get_json, post_json           |
 | `std/http/server` | text, html, json, status, redirect + get, post, put, listen    |
+| `std/db/postgres` | connect, query, query_one, execute, begin, commit, rollback    |
+
+## PostgreSQL Database
+
+NTNT includes a built-in PostgreSQL driver for database operations:
+
+```ntnt
+import { connect, query, query_one, execute, close } from "std/db/postgres"
+import { get_env } from "std/env"
+
+fn main() {
+    // Connect using DATABASE_URL environment variable
+    let result = connect(get_env("DATABASE_URL"))
+
+    match result {
+        Ok(db) => {
+            // Parameterized queries (safe from SQL injection)
+            let users = query(db, "SELECT * FROM users WHERE active = $1", [true])
+
+            match users {
+                Ok(rows) => {
+                    for user in rows {
+                        print(user["name"] + ": " + user["email"])
+                    }
+                },
+                Err(e) => print("Query error: " + e)
+            }
+
+            // Single row query
+            let user = query_one(db, "SELECT * FROM users WHERE id = $1", [42])
+
+            // Insert/Update/Delete (returns affected row count)
+            let count = execute(db,
+                "INSERT INTO users (name, email) VALUES ($1, $2)",
+                ["Alice", "alice@example.com"]
+            )
+
+            close(db)
+        },
+        Err(e) => print("Connection failed: " + e)
+    }
+}
+```
+
+### Transactions
+
+```ntnt
+import { connect, begin, commit, rollback, execute } from "std/db/postgres"
+
+fn transfer(db, from_id, to_id, amount) {
+    // Start transaction
+    match begin(db) {
+        Ok(tx) => {
+            execute(tx, "UPDATE accounts SET balance = balance - $1 WHERE id = $2", [amount, from_id])
+            execute(tx, "UPDATE accounts SET balance = balance + $1 WHERE id = $2", [amount, to_id])
+            commit(tx)
+            print("Transfer complete!")
+        },
+        Err(e) => print("Transaction failed: " + e)
+    }
+}
+```
+
+### PostgreSQL Functions
+
+| Function                       | Description                                                     |
+| ------------------------------ | --------------------------------------------------------------- |
+| `connect(url)`                 | Connect to database, returns `Result<Connection, Error>`        |
+| `query(conn, sql, params)`     | Execute query, returns `Result<Array<Row>, Error>`              |
+| `query_one(conn, sql, params)` | Query single row, returns `Result<Row \| null, Error>`          |
+| `execute(conn, sql, params)`   | Execute statement, returns `Result<int, Error>` (affected rows) |
+| `begin(conn)`                  | Start transaction                                               |
+| `commit(conn)`                 | Commit transaction                                              |
+| `rollback(conn)`               | Rollback transaction                                            |
+| `close(conn)`                  | Close connection                                                |
 
 ## HTTP Server
 
