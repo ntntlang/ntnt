@@ -71,8 +71,11 @@ The easiest way to install NTNT is via Cargo. This will build the binary and add
 git clone https://github.com/joshcramer/ntnt.git
 cd ntnt
 
+# Build
+cargo build --release
+
 # Install globally
-cargo install --path .
+cargo install --path . --locked
 ```
 
 ### Usage
