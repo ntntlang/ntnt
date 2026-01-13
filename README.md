@@ -83,6 +83,9 @@ cargo install --path . --locked
 Once installed, you can run NTNT from any directory:
 
 ```bash
+# See ntnt help
+ntnt --help
+
 # Run a program
 ntnt run examples/contracts_full.tnt
 
