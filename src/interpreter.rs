@@ -106,14 +106,26 @@ pub struct FunctionContract {
 }
 
 impl Value {
+    /// Determine if a value is truthy for conditionals
+    /// 
+    /// Falsy values: false, Unit, None, empty strings, empty arrays, empty maps
+    /// Truthy values: everything else (including 0 and 0.0 to avoid subtle bugs)
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Bool(b) => *b,
             Value::Unit => false,
-            Value::Int(0) => false,
-            Value::Float(f) if *f == 0.0 => false,
-            Value::String(s) if s.is_empty() => false,
-            Value::Array(a) if a.is_empty() => false,
+            // Numbers are ALWAYS truthy (including 0) - avoids "if count {}" bugs
+            Value::Int(_) => true,
+            Value::Float(_) => true,
+            // Empty collections are falsy
+            Value::String(s) => !s.is_empty(),
+            Value::Array(a) => !a.is_empty(),
+            Value::Map(m) => !m.is_empty(),
+            // None is falsy, Some(x) is truthy
+            Value::EnumValue { enum_name, variant, .. } => {
+                !(enum_name == "Option" && variant == "None")
+            }
+            // Everything else is truthy
             _ => true,
         }
     }

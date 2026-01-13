@@ -366,3 +366,99 @@ print(rows[2][1])
     assert!(stdout.contains("name"), "First cell should be 'name'");
     assert!(stdout.contains("25"), "Should access Bob's age (row 2, col 1)");
 }
+// ============================================================================
+// Truthy/Falsy Values
+// ============================================================================
+
+#[test]
+fn test_truthy_numbers_including_zero() {
+    let code = r#"
+if 0 { print("zero-truthy") } else { print("zero-falsy") }
+if 1 { print("one-truthy") }
+if -1 { print("neg-truthy") }
+if 0.0 { print("float-zero-truthy") } else { print("float-zero-falsy") }
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Number truthiness should work");
+    assert!(stdout.contains("zero-truthy"), "0 should be truthy");
+    assert!(stdout.contains("one-truthy"), "1 should be truthy");
+    assert!(stdout.contains("neg-truthy"), "-1 should be truthy");
+    assert!(stdout.contains("float-zero-truthy"), "0.0 should be truthy");
+}
+
+#[test]
+fn test_truthy_empty_string_is_falsy() {
+    let code = r#"
+let empty = ""
+let full = "hello"
+if empty { print("empty-truthy") } else { print("empty-falsy") }
+if full { print("full-truthy") }
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "String truthiness should work");
+    assert!(stdout.contains("empty-falsy"), "Empty string should be falsy");
+    assert!(stdout.contains("full-truthy"), "Non-empty string should be truthy");
+}
+
+#[test]
+fn test_truthy_empty_array_is_falsy() {
+    let code = r#"
+let empty = []
+let full = [1, 2, 3]
+if empty { print("empty-truthy") } else { print("empty-falsy") }
+if full { print("full-truthy") }
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Array truthiness should work");
+    assert!(stdout.contains("empty-falsy"), "Empty array should be falsy");
+    assert!(stdout.contains("full-truthy"), "Non-empty array should be truthy");
+}
+
+#[test]
+fn test_truthy_empty_map_is_falsy() {
+    let code = r#"
+let empty = map {}
+let full = map { "a": 1 }
+if empty { print("empty-truthy") } else { print("empty-falsy") }
+if full { print("full-truthy") }
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Map truthiness should work");
+    assert!(stdout.contains("empty-falsy"), "Empty map should be falsy");
+    assert!(stdout.contains("full-truthy"), "Non-empty map should be truthy");
+}
+
+#[test]
+fn test_truthy_none_is_falsy() {
+    let code = r#"
+let none_val = None
+let some_val = Some(42)
+if none_val { print("none-truthy") } else { print("none-falsy") }
+if some_val { print("some-truthy") }
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Option truthiness should work");
+    assert!(stdout.contains("none-falsy"), "None should be falsy");
+    assert!(stdout.contains("some-truthy"), "Some should be truthy");
+}
+
+#[test]
+fn test_truthy_in_conditionals() {
+    let code = r#"
+let query = "site=bear_lake"
+let empty = ""
+
+// Short-circuit with truthy check
+if query && true {
+    print("query-present")
+}
+
+if !empty {
+    print("empty-absent")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Truthy conditionals should work");
+    assert!(stdout.contains("query-present"), "Non-empty string in && should work");
+    assert!(stdout.contains("empty-absent"), "!empty_string should be true");
+}

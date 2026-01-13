@@ -127,7 +127,49 @@ let template = r#"
 
 **Supported escapes:** `\n` (newline), `\t` (tab), `\r` (carriage return), `\\` (backslash), `\"` (quote), `\'` (single quote), `\{` and `\}` (literal braces)
 
-### 5. Contract Placement (requires/ensures)
+### 5. Truthy/Falsy Values
+
+NTNT supports truthy/falsy evaluation for cleaner conditionals. **Numbers (including 0) are always truthy** to avoid subtle bugs.
+
+```ntnt
+// ✅ CORRECT - Clean truthy checks
+if query_string {           // Empty string is falsy
+    process(query_string)
+}
+
+if results {                // Empty array is falsy
+    return results[0]
+}
+
+if config {                 // Empty map is falsy
+    apply(config)
+}
+
+// ❌ VERBOSE - These work but are unnecessary
+if len(query_string) > 0 {  // Just use: if query_string
+if len(results) > 0 {       // Just use: if results
+```
+
+**Truthy/Falsy Rules:**
+
+| Value | Truthy/Falsy |
+|-------|--------------|
+| `true` | Truthy |
+| `false` | Falsy |
+| `None` | Falsy |
+| `Some(x)` | Truthy |
+| `""` (empty string) | Falsy |
+| `"text"` | Truthy |
+| `[]` (empty array) | Falsy |
+| `[1, 2]` | Truthy |
+| `map {}` | Falsy |
+| `map { "a": 1 }` | Truthy |
+| `0`, `0.0` | **Truthy** |
+| Any number | **Truthy** |
+
+**Why 0 is truthy:** Avoids bugs like `if count { }` failing when count is legitimately 0.
+
+### 6. Contract Placement (requires/ensures)
 
 Contracts go AFTER the return type but BEFORE the function body:
 
@@ -163,7 +205,7 @@ fn divide(a: Int, b: Int) -> Int {
 }
 ```
 
-### 5. Range Expressions
+### 7. Range Expressions
 
 ```ntnt
 // ✅ CORRECT - NTNT range syntax
@@ -176,7 +218,7 @@ for i in range(10) { }           // ERROR: range is not a function
 for i in range(0, 10) { }        // ERROR
 ```
 
-### 6. Import Syntax
+### 8. Import Syntax
 
 NTNT uses JavaScript-style imports with quoted paths and `/` separators:
 
@@ -197,7 +239,7 @@ from std.string import split         // Wrong: Python style
 use std::string::split;              // Wrong: Rust style
 ```
 
-### 7. Mutable Variables
+### 9. Mutable Variables
 
 Variables are immutable by default. Use `mut` for mutability:
 
@@ -214,7 +256,7 @@ let counter = 0
 counter = counter + 1    // ERROR: cannot assign to immutable variable
 ```
 
-### 8. Match Expression Syntax
+### 10. Match Expression Syntax
 
 Use `=>` (fat arrow) and commas between arms:
 
@@ -238,7 +280,7 @@ match value {
 }
 ```
 
-### 9. Function Calls vs Methods
+### 11. Function Calls vs Methods
 
 Many operations are standalone functions, not methods:
 
@@ -257,7 +299,7 @@ my_array.length           // ERROR
 arr.push(item)            // May not work as expected
 ```
 
-### 10. Result/Option Handling
+### 12. Result/Option Handling
 
 Always handle `Result` and `Option` types explicitly:
 

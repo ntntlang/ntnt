@@ -53,7 +53,7 @@ true, false, map, Ok, Err, Some, None
 - Raw Strings: `r"no \n escapes"`, `r#"can use "quotes""#`
 - Booleans: `true`, `false`
 - Arrays: `[1, 2, 3]`
-- Maps: `map { "key": value, "key2": value2 }`
+- Maps: `map { "key": value }` (nested maps are inferred: `map { "a": { "b": 1 } }`)
 - Ranges: `0..10` (exclusive), `0..=10` (inclusive)
 
 ### String Escape Sequences
@@ -98,6 +98,40 @@ For content with many special characters, use raw strings which don't process es
 - Enums: Tagged union types with `Option<T>` and `Result<T, E>` built-in
 - Functions: `fn(T1, T2) -> T3`
 - Ranges: `Range` (from `..` and `..=` expressions)
+
+### Map Literals and Nested Inference
+
+Top-level maps require the `map` keyword. Nested maps inside a `map {}` are automatically inferred.
+
+```ntnt
+// Top-level map requires `map` keyword
+let user = map { "name": "Alice", "age": 30 }
+
+// Nested maps are inferred (cleaner syntax)
+let config = map {
+    "server": { "host": "localhost", "port": 8080 },
+    "database": { "url": "postgres://...", "pool": 5 }
+}
+
+// Deep nesting works at any level
+let data = map {
+    "level1": {
+        "level2": {
+            "level3": { "value": 42 }
+        }
+    }
+}
+
+// Access nested values
+print(data["level1"]["level2"]["level3"]["value"])  // 42
+
+// Explicit `map` keyword still works (backwards compatible)
+let explicit = map {
+    "nested": map { "key": "value" }
+}
+```
+
+**Note:** Top-level `{}` without `map` creates a block expression, not a map.
 
 ### Type Annotations
 
@@ -288,6 +322,45 @@ fn sort<T: Comparable>(arr: [T]) -> [T] {
 
 ## Control Flow
 
+### Truthy/Falsy Values
+
+NTNT supports truthy/falsy evaluation in conditionals. **Numbers (including 0) are always truthy** to avoid subtle bugs.
+
+| Value | Truthy/Falsy |
+|-------|-------------|
+| `true` | Truthy |
+| `false` | Falsy |
+| `None` | Falsy |
+| `Some(x)` | Truthy |
+| `""` (empty string) | Falsy |
+| `"text"` | Truthy |
+| `[]` (empty array) | Falsy |
+| `[1, 2]` | Truthy |
+| `map {}` | Falsy |
+| `map { "a": 1 }` | Truthy |
+| `0`, `0.0`, any number | **Truthy** |
+
+```ntnt
+// Clean conditional checks
+if query_string {           // Empty string is falsy
+    process(query_string)
+}
+
+if results {                // Empty array is falsy
+    return results[0]
+}
+
+if user_data {              // Empty map is falsy
+    apply(user_data)
+}
+
+// 0 is truthy - avoids "if count {}" bugs
+let count = 0
+if count {                  // Still truthy!
+    print(count)
+}
+```
+
 ### For-In Loops
 
 ```ntnt
@@ -310,10 +383,27 @@ for char in "hello" {
     print(char)
 }
 
-// Iterate over maps
-for key in my_map {
-    print(key + ": " + str(my_map[key]))
+// Iterate over map keys using keys()
+import { keys, values, entries, has_key } from "std/collections"
+
+let users = map {
+    "alice": { "score": 100, "level": 5 },
+    "bob": { "score": 85, "level": 3 }
 }
+
+for name in keys(users) {
+    let user = users[name]
+    print("{name}: score={user[\"score\"]}")
+}
+
+// Check if key exists
+if has_key(users, "alice") {
+    print("Alice found!")
+}
+
+// Get all values or key-value pairs
+let all_scores = values(users)      // Array of user maps
+let all_entries = entries(users)    // Array of [key, value] pairs
 ```
 
 ### Match Expressions
@@ -416,7 +506,7 @@ import { helper } from "./lib/utils"
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `std/string`      | **Comprehensive:** split, join, concat, repeat, reverse, trim, trim_left, trim_right, trim_chars, to_upper, to_lower, capitalize, title, to_snake_case, to_camel_case, to_pascal_case, to_kebab_case, slugify, contains, starts_with, ends_with, index_of, last_index_of, count, replace, replace_all, char_at, substring, chars, lines, words, truncate, pad_left, pad_right, center, is_empty, is_blank, is_numeric, is_alpha, is_alphanumeric, is_lowercase, is_uppercase, is_whitespace, matches |
 | `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `std/collections` | push, pop, shift, first, last, reverse, slice, concat, is_empty, contains, index_of, sort, map, filter, reduce, find                                                                                                                                                                                                                                                                                                                                                                                 |
+| `std/collections` | push, pop, shift, first, last, reverse, slice, concat, is_empty, contains, index_of, sort, map, filter, reduce, find, **keys, values, entries, has_key** (map iteration)                                                                                                                                                                                                                                                                                                                             |
 | `std/env`         | get_env, load_env, args, cwd                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `std/fs`          | read_file, write_file, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size                                                                                                                                                                                                                                                                                                                                                  |
 | `std/path`        | join, dirname, basename, extension, stem, resolve, is_absolute, is_relative, with_extension, normalize                                                                                                                                                                                                                                                                                                                                                                                               |
