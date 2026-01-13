@@ -1,0 +1,54 @@
+// routes/index.tnt → GET /
+//
+// The homepage route. Export a function named after the HTTP method.
+
+import { html } from "std/http/server"
+
+fn get(req) {
+    return html(r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>NTNT File-Based Routing</title>
+    <style>
+        body { font-family: system-ui; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+        h1 { color: #333; }
+        a { color: #0066cc; }
+        code { background: #f4f4f4; padding: 0.2em 0.4em; border-radius: 3px; }
+        pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>🚀 NTNT File-Based Routing</h1>
+    <p>This app uses convention-over-configuration routing!</p>
+    
+    <h2>Routes</h2>
+    <ul>
+        <li><a href="/">GET /</a> → <code>routes/index.tnt</code></li>
+        <li><a href="/about">GET /about</a> → <code>routes/about.tnt</code></li>
+        <li><a href="/api/status">GET /api/status</a> → <code>routes/api/status.tnt</code></li>
+        <li><a href="/api/users">GET /api/users</a> → <code>routes/api/users/index.tnt</code></li>
+        <li><a href="/api/users/42">GET /api/users/42</a> → <code>routes/api/users/[id].tnt</code></li>
+    </ul>
+    
+    <h2>How It Works</h2>
+    <pre>
+my-app/
+├── app.tnt              # Entry point: routes("routes")
+├── routes/              # File path = URL path
+│   ├── index.tnt        # GET /
+│   ├── about.tnt        # GET /about
+│   └── api/
+│       ├── status.tnt   # GET /api/status
+│       └── users/
+│           ├── index.tnt    # GET /api/users
+│           └── [id].tnt     # GET /api/users/{id}
+├── lib/                 # Shared modules (auto-imported)
+│   └── db.tnt
+└── middleware/          # Auto-loaded in alphabetical order
+    └── 01_logger.tnt
+    </pre>
+</body>
+</html>
+    "#)
+}

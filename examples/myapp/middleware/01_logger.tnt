@@ -1,0 +1,11 @@
+// middleware/01_logger.tnt
+//
+// Logs all incoming requests. Middleware files are loaded in alphabetical order,
+// so use prefixes like 01_, 02_ to control the order.
+//
+// Export a function named `middleware` or `handler` to register it.
+
+fn middleware(req) {
+    print("[" + req.method + "] " + req.path)
+    return ()  // Return unit to continue to next handler
+}

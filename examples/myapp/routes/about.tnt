@@ -1,0 +1,22 @@
+// routes/about.tnt → GET /about
+
+import { html } from "std/http/server"
+
+fn get(req) {
+    return html(r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>About - NTNT</title>
+    <style>
+        body { font-family: system-ui; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+    </style>
+</head>
+<body>
+    <h1>About NTNT</h1>
+    <p>NTNT is a programming language designed for AI-driven development.</p>
+    <p><a href="/">← Back to Home</a></p>
+</body>
+</html>
+    "#)
+}

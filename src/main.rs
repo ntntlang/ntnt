@@ -721,6 +721,29 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
                 _ => {}
             }
         }
+        
+        // Detect file-based routes (functions named get, post, etc. in routes/ directory)
+        if relative_path.contains("/routes/") || relative_path.starts_with("routes/") {
+            let url_path = file_path_to_url(&relative_path);
+            let http_methods = ["get", "post", "put", "delete", "patch", "head", "options"];
+            
+            for stmt in &ast.statements {
+                if let Statement::Function { name, .. } = stmt {
+                    let method = name.to_lowercase();
+                    if http_methods.contains(&method.as_str()) {
+                        let line = line_map.get(&format!("fn {}", name)).copied();
+                        let route = json!({
+                            "method": method.to_uppercase(),
+                            "path": url_path,
+                            "file": relative_path.clone(),
+                            "line": line,
+                            "routing": "file-based",
+                        });
+                        routes.push(route);
+                    }
+                }
+            }
+        }
     }
     
     let output = json!({
@@ -899,6 +922,55 @@ fn extract_static_dir(expr: &ntnt::ast::Expression, file: &str, source: &str) ->
         }
     }
     None
+}
+
+/// Convert a file path in routes/ directory to a URL pattern
+/// 
+/// Examples:
+/// - routes/index.tnt → /
+/// - routes/about.tnt → /about
+/// - routes/api/users/index.tnt → /api/users
+/// - routes/api/users/[id].tnt → /api/users/{id}
+fn file_path_to_url(path: &str) -> String {
+    // Remove routes/ prefix
+    let path = path
+        .strip_prefix("routes/")
+        .or_else(|| path.rsplit("/routes/").next())
+        .unwrap_or(path);
+    
+    // Split into segments and process
+    let mut segments: Vec<String> = Vec::new();
+    
+    for segment in path.split('/') {
+        // Remove .tnt extension
+        let segment = segment.strip_suffix(".tnt").unwrap_or(segment);
+        
+        // Skip index (represents directory root)
+        if segment == "index" {
+            continue;
+        }
+        
+        // Skip parent directory parts
+        if segment.is_empty() || segment == ".." {
+            continue;
+        }
+        
+        // Convert [param] to {param}
+        let segment = if segment.starts_with('[') && segment.ends_with(']') {
+            let param = &segment[1..segment.len()-1];
+            format!("{{{}}}", param)
+        } else {
+            segment.to_string()
+        };
+        
+        segments.push(segment);
+    }
+    
+    if segments.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", segments.join("/"))
+    }
 }
 
 /// Find the line number of a function call in source

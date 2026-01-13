@@ -1,0 +1,22 @@
+// NTNT File-Based Routing Example
+//
+// This demonstrates the convention-over-configuration approach:
+// - routes/ directory defines URL paths
+// - lib/ contains shared modules
+// - middleware/ runs in alphabetical order
+//
+// Run with: ntnt run examples/myapp/app.tnt
+
+import { html, json } from "std/http/server"
+
+print("=== NTNT File-Based Routing Demo ===")
+print("")
+print("Loading routes from routes/ directory...")
+
+// Auto-discover all routes from the routes/ directory
+// Also loads lib/ and middleware/ automatically
+routes("examples/myapp/routes")
+
+print("")
+print("Starting server...")
+listen(3000)

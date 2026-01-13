@@ -281,3 +281,88 @@ fn test_inspect_handles_invalid_file_gracefully() {
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert!(json["functions"].as_array().unwrap().is_empty());
 }
+
+// ============================================================================
+// File-based routing detection tests
+// ============================================================================
+
+#[test]
+fn test_inspect_detects_file_based_routes() {
+    let (stdout, _, code) = run_ntnt(&["inspect", "examples/myapp"]);
+    assert_eq!(code, 0);
+    
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("Should output valid JSON");
+    
+    let routes = json["routes"].as_array().expect("Should have routes array");
+    
+    // Should detect all file-based routes
+    assert!(routes.len() >= 6, "Should detect at least 6 routes, found {}", routes.len());
+    
+    // Check for specific routes
+    let route_paths: Vec<&str> = routes.iter()
+        .filter_map(|r| r["path"].as_str())
+        .collect();
+    
+    assert!(route_paths.contains(&"/"), "Should detect root route");
+    assert!(route_paths.contains(&"/about"), "Should detect /about route");
+    assert!(route_paths.contains(&"/api/status"), "Should detect /api/status route");
+    assert!(route_paths.contains(&"/api/users"), "Should detect /api/users route");
+    assert!(route_paths.iter().any(|p| p.contains("/api/users/") && p.contains("id")), 
+        "Should detect /api/users/{{id}} route");
+}
+
+#[test]
+fn test_inspect_file_based_routes_have_correct_methods() {
+    let (stdout, _, _) = run_ntnt(&["inspect", "examples/myapp"]);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    
+    let routes = json["routes"].as_array().unwrap();
+    
+    // Find routes for /api/users/{id} - should have GET, PUT, DELETE
+    let user_routes: Vec<&serde_json::Value> = routes.iter()
+        .filter(|r| r["path"].as_str().map(|p| p.contains("/api/users/") && p.contains("id")).unwrap_or(false))
+        .collect();
+    
+    let methods: Vec<&str> = user_routes.iter()
+        .filter_map(|r| r["method"].as_str())
+        .collect();
+    
+    assert!(methods.contains(&"GET"), "Should have GET method");
+    assert!(methods.contains(&"PUT"), "Should have PUT method");
+    assert!(methods.contains(&"DELETE"), "Should have DELETE method");
+}
+
+#[test]
+fn test_inspect_file_based_routes_marked_correctly() {
+    let (stdout, _, _) = run_ntnt(&["inspect", "examples/myapp"]);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    
+    let routes = json["routes"].as_array().unwrap();
+    
+    // All routes in myapp should be marked as "file-based"
+    for route in routes {
+        assert_eq!(
+            route["routing"].as_str(),
+            Some("file-based"),
+            "Route {} should be marked as file-based",
+            route["path"]
+        );
+    }
+}
+
+#[test]
+fn test_inspect_file_based_routes_have_line_numbers() {
+    let (stdout, _, _) = run_ntnt(&["inspect", "examples/myapp"]);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    
+    let routes = json["routes"].as_array().unwrap();
+    
+    for route in routes {
+        assert!(
+            route["line"].is_number(),
+            "Route {} should have a line number",
+            route["path"]
+        );
+    }
+}

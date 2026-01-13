@@ -1069,6 +1069,305 @@ impl Interpreter {
         self.bind_imports(items, &module_exports, &source_key, alias)
     }
 
+    /// Load file-based routes from a directory
+    /// 
+    /// Scans a directory for .tnt files and registers routes based on:
+    /// - File path = URL path (e.g., routes/users/[id].tnt → /users/{id})
+    /// - Exported functions = HTTP methods (e.g., export fn get(req) → GET)
+    /// - index.tnt = directory root (e.g., routes/users/index.tnt → /users)
+    /// - [param].tnt = dynamic segments (e.g., [id].tnt → {id})
+    /// 
+    /// Also auto-loads:
+    /// - lib/ directory as shared modules available in routes
+    /// - middleware/ directory in alphabetical order
+    fn load_file_based_routes(&mut self, dir_path: &str) -> Result<Value> {
+        use std::fs;
+        
+        // Resolve the directory path
+        let base_dir = if std::path::Path::new(dir_path).is_relative() {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(dir_path))
+                .unwrap_or_else(|_| std::path::PathBuf::from(dir_path))
+        } else {
+            std::path::PathBuf::from(dir_path)
+        };
+        
+        // Check for lib/ directory and load shared modules
+        let lib_dir = base_dir.parent()
+            .map(|p| p.join("lib"))
+            .unwrap_or_else(|| std::path::PathBuf::from("lib"));
+        
+        let mut lib_modules: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        
+        if lib_dir.exists() && lib_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&lib_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().map(|e| e == "tnt").unwrap_or(false) {
+                        let module_name = path.file_stem()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        
+                        if let Ok(exports) = self.load_module_exports(&path) {
+                            lib_modules.insert(module_name, exports);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Check for middleware/ directory and load middleware in order
+        let middleware_dir = base_dir.parent()
+            .map(|p| p.join("middleware"))
+            .unwrap_or_else(|| std::path::PathBuf::from("middleware"));
+        
+        if middleware_dir.exists() && middleware_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&middleware_dir) {
+                let mut middleware_files: Vec<_> = entries
+                    .flatten()
+                    .filter(|e| e.path().extension().map(|ext| ext == "tnt").unwrap_or(false))
+                    .collect();
+                
+                // Sort alphabetically for predictable order (01_logger.tnt, 02_auth.tnt, etc.)
+                middleware_files.sort_by_key(|e| e.path());
+                
+                for entry in middleware_files {
+                    let path = entry.path();
+                    if let Ok(exports) = self.load_module_exports(&path) {
+                        // Look for a handler function (middleware or handler)
+                        if let Some(handler) = exports.get("middleware").or_else(|| exports.get("handler")) {
+                            self.server_state.add_middleware(handler.clone());
+                            let name = path.file_stem()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "unknown".to_string());
+                            println!("  Loaded middleware: {}", name);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Scan routes directory recursively
+        let routes = self.discover_routes(&base_dir, &base_dir, &lib_modules)?;
+        
+        // Register all discovered routes
+        for (method, pattern, handler, file) in &routes {
+            self.server_state.add_route(method, pattern, handler.clone());
+            println!("  {} {} -> {}", method, pattern, file);
+        }
+        
+        Ok(Value::Int(routes.len() as i64))
+    }
+    
+    /// Load a module and return its exports
+    fn load_module_exports(&mut self, file_path: &std::path::Path) -> Result<HashMap<String, Value>> {
+        use std::fs;
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        
+        let source_code = fs::read_to_string(file_path)
+            .map_err(|e| IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path.display(), e)))?;
+        
+        let lexer = Lexer::new(&source_code);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse()?;
+        
+        // Create a fresh environment for the module
+        let previous_env = Rc::clone(&self.environment);
+        let previous_file = self.current_file.clone();
+        
+        self.environment = Rc::new(RefCell::new(Environment::new()));
+        self.current_file = Some(file_path.to_string_lossy().to_string());
+        
+        // Re-define builtins in the new environment
+        self.define_builtins();
+        
+        // Evaluate the module
+        self.eval(&ast)?;
+        
+        // Collect exports (everything defined at module level)
+        let mut exports: HashMap<String, Value> = HashMap::new();
+        let env = self.environment.borrow();
+        for (name, value) in env.values.iter() {
+            // Skip builtins
+            if !matches!(value, Value::NativeFunction { .. }) {
+                exports.insert(name.clone(), value.clone());
+            }
+        }
+        drop(env);
+        
+        // Restore environment
+        self.environment = previous_env;
+        self.current_file = previous_file;
+        
+        Ok(exports)
+    }
+    
+    /// Recursively discover routes in a directory
+    fn discover_routes(
+        &mut self,
+        dir: &std::path::Path,
+        base_dir: &std::path::Path,
+        lib_modules: &HashMap<String, HashMap<String, Value>>,
+    ) -> Result<Vec<(String, String, Value, String)>> {
+        use std::fs;
+        
+        let mut routes = Vec::new();
+        
+        if !dir.exists() || !dir.is_dir() {
+            return Err(IntentError::RuntimeError(format!(
+                "Routes directory does not exist: {}", dir.display()
+            )));
+        }
+        
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .map_err(|e| IntentError::RuntimeError(format!("Failed to read directory: {}", e)))?
+            .flatten()
+            .collect();
+        
+        // Sort for consistent ordering
+        entries.sort_by_key(|e| e.path());
+        
+        for entry in entries {
+            let path = entry.path();
+            
+            if path.is_dir() {
+                // Recurse into subdirectory
+                let sub_routes = self.discover_routes(&path, base_dir, lib_modules)?;
+                routes.extend(sub_routes);
+            } else if path.extension().map(|e| e == "tnt").unwrap_or(false) {
+                // Process .tnt file
+                let file_routes = self.process_route_file(&path, base_dir, lib_modules)?;
+                routes.extend(file_routes);
+            }
+        }
+        
+        Ok(routes)
+    }
+    
+    /// Process a single route file and extract HTTP method handlers
+    fn process_route_file(
+        &mut self,
+        file_path: &std::path::Path,
+        base_dir: &std::path::Path,
+        lib_modules: &HashMap<String, HashMap<String, Value>>,
+    ) -> Result<Vec<(String, String, Value, String)>> {
+        use std::fs;
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        
+        let mut routes = Vec::new();
+        
+        // Convert file path to URL pattern
+        let relative_path = file_path.strip_prefix(base_dir)
+            .map_err(|_| IntentError::RuntimeError("Failed to get relative path".to_string()))?;
+        
+        let url_pattern = self.file_path_to_url_pattern(relative_path);
+        
+        // Read and parse the file
+        let source_code = fs::read_to_string(file_path)
+            .map_err(|e| IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path.display(), e)))?;
+        
+        let lexer = Lexer::new(&source_code);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse()?;
+        
+        // Create a fresh environment for the route module
+        let previous_env = Rc::clone(&self.environment);
+        let previous_file = self.current_file.clone();
+        
+        self.environment = Rc::new(RefCell::new(Environment::new()));
+        self.current_file = Some(file_path.to_string_lossy().to_string());
+        
+        // Re-define builtins
+        self.define_builtins();
+        
+        // Inject lib modules into the environment
+        for (name, exports) in lib_modules {
+            let mut fields = HashMap::new();
+            for (fn_name, value) in exports {
+                fields.insert(fn_name.clone(), value.clone());
+            }
+            self.environment.borrow_mut().define(
+                name.clone(),
+                Value::Struct { name: format!("lib:{}", name), fields },
+            );
+        }
+        
+        // Evaluate the module
+        self.eval(&ast)?;
+        
+        // Find exported HTTP method handlers
+        let http_methods = ["get", "post", "put", "delete", "patch", "head", "options"];
+        
+        let env = self.environment.borrow();
+        for method in http_methods {
+            if let Some(handler) = env.values.get(method) {
+                // Check if it's a function
+                if matches!(handler, Value::Function { .. }) {
+                    let http_method = method.to_uppercase();
+                    routes.push((
+                        http_method,
+                        url_pattern.clone(),
+                        handler.clone(),
+                        file_path.to_string_lossy().to_string(),
+                    ));
+                }
+            }
+        }
+        drop(env);
+        
+        // Restore environment
+        self.environment = previous_env;
+        self.current_file = previous_file;
+        
+        Ok(routes)
+    }
+    
+    /// Convert a file path to a URL pattern
+    /// 
+    /// Examples:
+    /// - index.tnt → /
+    /// - about.tnt → /about
+    /// - users/index.tnt → /users
+    /// - users/[id].tnt → /users/{id}
+    /// - api/products/[id]/reviews.tnt → /api/products/{id}/reviews
+    fn file_path_to_url_pattern(&self, path: &std::path::Path) -> String {
+        let mut segments: Vec<String> = Vec::new();
+        
+        for component in path.components() {
+            if let std::path::Component::Normal(os_str) = component {
+                let segment = os_str.to_string_lossy().to_string();
+                
+                // Remove .tnt extension
+                let segment = segment.strip_suffix(".tnt").unwrap_or(&segment).to_string();
+                
+                // Skip index files (they represent the directory root)
+                if segment == "index" {
+                    continue;
+                }
+                
+                // Convert [param] to {param}
+                let segment = if segment.starts_with('[') && segment.ends_with(']') {
+                    let param_name = &segment[1..segment.len()-1];
+                    format!("{{{}}}", param_name)
+                } else {
+                    segment
+                };
+                
+                segments.push(segment);
+            }
+        }
+        
+        if segments.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", segments.join("/"))
+        }
+    }
+
     /// Evaluate a program
     pub fn eval(&mut self, program: &Program) -> Result<Value> {
         let mut result = Value::Unit;
@@ -1541,6 +1840,18 @@ impl Interpreter {
                                     "serve_static() requires two string arguments: (url_prefix, directory)".to_string()
                                 ));
                             }
+                        }
+                    }
+                    
+                    // Special handling for routes(directory) - file-based routing
+                    if name == "routes" && arguments.len() == 1 {
+                        let directory = self.eval_expression(&arguments[0])?;
+                        if let Value::String(dir_str) = directory {
+                            return self.load_file_based_routes(&dir_str);
+                        } else {
+                            return Err(IntentError::TypeError(
+                                "routes() requires a string directory path".to_string()
+                            ));
                         }
                     }
                     

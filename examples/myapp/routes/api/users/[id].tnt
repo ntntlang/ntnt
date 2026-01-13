@@ -1,0 +1,42 @@
+// routes/api/users/[id].tnt → GET/PUT/DELETE /api/users/{id}
+//
+// Dynamic route segment! The [id] in the filename becomes {id} in the URL.
+// Access it via req.params.id
+
+import { json, status } from "std/http/server"
+
+fn get(req) {
+    let id = req.params.id
+    
+    // Simple user lookup by ID
+    if id == "1" {
+        return json(map { "id": 1, "name": "Alice", "email": "alice@example.com" })
+    }
+    if id == "2" {
+        return json(map { "id": 2, "name": "Bob", "email": "bob@example.com" })
+    }
+    if id == "3" {
+        return json(map { "id": 3, "name": "Charlie", "email": "charlie@example.com" })
+    }
+    
+    return json(map {
+        "error": "User not found",
+        "id": id
+    })
+}
+
+fn put(req) {
+    let id = req.params.id
+    return json(map {
+        "message": "User updated",
+        "id": id
+    })
+}
+
+fn delete(req) {
+    let id = req.params.id
+    return json(map {
+        "message": "User deleted",
+        "id": id
+    })
+}

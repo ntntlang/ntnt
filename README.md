@@ -50,9 +50,10 @@ NTNT (pronounced "Intent") is an experimental programming language and ecosystem
 - URL utilities: `std/url` (parse, encode, decode, build_query)
 - HTTP Client: `std/http` (get, post, put, delete, request)
 - **HTTP Server**: `std/http/server` (routing, middleware, static files, contract-verified endpoints)
+- **File-Based Routing**: `routes()` for convention-over-configuration (routes/, lib/, middleware/ auto-discovery)
 - **Agent Tooling**: `ntnt inspect` (JSON introspection), `ntnt validate` (pre-run error checking)
 
-**227 passing tests** | **Version 0.1.7**
+**231 passing tests** | **Version 0.1.7**
 
 **Next Up**: Async/await, Database connectivity (Phase 5 continued)
 
@@ -927,6 +928,74 @@ Contract behavior:
 - **Postcondition failure** returns HTTP **500 Internal Server Error**
 - Error messages include function name and failed condition
 
+### File-Based Routing
+
+For larger applications, use convention-over-configuration routing where the folder structure defines your API:
+
+```
+my-app/
+├── app.tnt              # Entry point
+├── routes/              # File path = URL path
+│   ├── index.tnt        # GET /
+│   ├── about.tnt        # GET /about
+│   └── api/
+│       ├── status.tnt   # GET /api/status
+│       └── users/
+│           ├── index.tnt    # GET/POST /api/users
+│           └── [id].tnt     # GET/PUT/DELETE /api/users/{id}
+├── lib/                 # Shared modules (auto-imported)
+│   └── db.tnt
+└── middleware/          # Auto-loaded in alphabetical order
+    └── 01_logger.tnt
+```
+
+**Entry point (`app.tnt`):**
+```ntnt
+routes("routes")  // Auto-discover all routes!
+listen(3000)
+```
+
+**Route file (`routes/api/users/[id].tnt`):**
+```ntnt
+import { json } from "std/http/server"
+
+// GET /api/users/{id}
+fn get(req) {
+    let id = req.params.id
+    return json(map { "id": id, "name": "User " + id })
+}
+
+// DELETE /api/users/{id}
+fn delete(req) {
+    return json(map { "message": "User deleted" })
+}
+```
+
+**Conventions:**
+- Files in `routes/` become URL paths
+- `index.tnt` = directory root handler
+- `[param].tnt` = dynamic segment (e.g., `[id].tnt` → `/users/{id}`)
+- Function names = HTTP methods (`get`, `post`, `put`, `delete`, etc.)
+- `lib/` modules are auto-imported into routes
+- `middleware/` files load in alphabetical order (use `01_`, `02_` prefixes)
+
+**Agent workflow:**
+```bash
+# Add a new route - just create the file!
+mkdir -p routes/api/products
+cat > routes/api/products/index.tnt << 'EOF'
+import { json } from "std/http/server"
+
+fn get(req) {
+    return json(["product1", "product2"])
+}
+EOF
+# Route /api/products is now live!
+
+# Inspect discovers file-based routes
+ntnt inspect my-app | jq '.routes'
+```
+
 ### HTTP Test Mode
 
 Test HTTP servers without manual curl commands using `ntnt test`:
@@ -1003,26 +1072,19 @@ ntnt inspect examples/website.tnt --pretty
     {
       "name": "fetch_page",
       "line": 102,
-      "params": [{"name": "req", "type": null}],
+      "params": [{ "name": "req", "type": null }],
       "contracts": null
     }
   ],
-  "routes": [
-    {"method": "GET", "path": "/fetch", "handler": "fetch_page", "line": 184}
-  ],
-  "middleware": [
-    {"handler": "logger", "line": 81}
-  ],
-  "static": [
-    {"prefix": "/assets", "directory": "$ASSETS_DIR", "line": 189}
-  ],
-  "imports": [
-    {"source": "std/http/server", "items": ["html", "json"]}
-  ]
+  "routes": [{ "method": "GET", "path": "/fetch", "handler": "fetch_page", "line": 184 }],
+  "middleware": [{ "handler": "logger", "line": 81 }],
+  "static": [{ "prefix": "/assets", "directory": "$ASSETS_DIR", "line": 189 }],
+  "imports": [{ "source": "std/http/server", "items": ["html", "json"] }]
 }
 ```
 
 This enables agents to:
+
 - Understand project structure without reading all files
 - Find functions by name and jump to line numbers
 - Discover HTTP routes and their handlers
@@ -1052,9 +1114,7 @@ Warnings: 3
       "file": "website.tnt",
       "valid": true,
       "errors": [],
-      "warnings": [
-        {"type": "unused_import", "message": "Unused import: 'text'"}
-      ]
+      "warnings": [{ "type": "unused_import", "message": "Unused import: 'text'" }]
     }
   ],
   "summary": {
@@ -1067,6 +1127,7 @@ Warnings: 3
 ```
 
 This enables agents to:
+
 - Validate changes before runtime
 - Catch syntax errors early
 - Identify unused imports

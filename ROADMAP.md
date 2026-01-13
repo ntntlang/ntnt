@@ -361,11 +361,11 @@ Errors: 1
 
 **Features:**
 
-- [ ] File-based route discovery
-- [ ] Dynamic segments `[param].tnt`
-- [ ] Auto-loaded middleware and lib
+- [x] File-based route discovery via `routes()` function
+- [x] Dynamic segments `[param].tnt` → `{param}` in URL
+- [x] Auto-loaded middleware and lib directories
 - [ ] Hot-reload
-- [x] `ntnt inspect` - JSON introspection
+- [x] `ntnt inspect` - JSON introspection (detects file-based routes)
 - [x] `ntnt validate` - Pre-run validation
 
 ### 5.6 Database Connectivity
@@ -403,7 +403,7 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] File system operations
 - [x] HTTP client (blocking)
 - [x] HTTP server with routing
-- [ ] File-based routing (`routes/`, `lib/`, `middleware/` conventions)
+- [x] File-based routing (`routes()` with `routes/`, `lib/`, `middleware/` conventions)
 - [ ] Hot-reload on file changes
 - [x] `ntnt inspect` - JSON introspection for agents
 - [x] `ntnt validate` - Pre-run error checking

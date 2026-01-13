@@ -1,0 +1,25 @@
+// routes/api/users/index.tnt → GET /api/users
+
+import { json } from "std/http/server"
+
+// In-memory users for demo
+let users = [
+    map { "id": 1, "name": "Alice", "email": "alice@example.com" },
+    map { "id": 2, "name": "Bob", "email": "bob@example.com" },
+    map { "id": 3, "name": "Charlie", "email": "charlie@example.com" }
+]
+
+fn get(req) {
+    return json(map {
+        "users": users,
+        "count": 3
+    })
+}
+
+fn post(req) {
+    // In a real app, this would create a user
+    return json(map {
+        "message": "User created",
+        "id": 4
+    })
+}
