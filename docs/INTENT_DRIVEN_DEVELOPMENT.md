@@ -98,9 +98,9 @@ TDD is excellent for **code quality** and **developer confidence**.
 
 | Aspect               | TDD                                | IDD                                      |
 | -------------------- | ---------------------------------- | ---------------------------------------- |
-| **Written by**       | Developers                         | Humans + Agents collaboratively          |
+| **Written by**       | Humans + Agents collaboratively    | Humans + Agents collaboratively          |
 | **Written in**       | Code (Python, JavaScript, etc.)    | Natural language + structured assertions |
-| **Readable by**      | Developers only                    | Anyone                                   |
+| **Readable by**      | Developers & agents only           | Anyone                                   |
 | **Answers**          | "Does the code work?"              | "Does the code do what I wanted?"        |
 | **Abstraction**      | Implementation details             | Business intent                          |
 | **Owns the spec**    | Tests ARE the spec (but in code)   | Intent IS the spec (in English)          |
@@ -109,7 +109,7 @@ TDD is excellent for **code quality** and **developer confidence**.
 
 ### A Concrete Example
 
-**TDD Test (developer writes this):**
+**TDD Test (developer or agent writes this):**
 
 ```python
 def test_location_selection():
@@ -123,7 +123,7 @@ def test_invalid_location_falls_back():
     assert "Denver" in response.text  # Falls back to default
 ```
 
-**IDD Intent (human writes this):**
+**IDD Intent (collaboratively written by humans and agents):**
 
 ```
 ### Feature: Location Selection
@@ -150,12 +150,12 @@ Tests:
 2. **The Audience Problem**
 
    - TDD requires code literacy to understand the spec
-   - IDD lets non-technical stakeholders read and edit requirements
-   - Product managers can review intent files; they can't review pytest files
+   - IDD lets non-technical stakeholders and users read and edit requirements
+   - Product managers can review intent files; they generally can't review pytest files
 
 3. **The AI Collaboration Problem**
 
-   - TDD assumes a human developer writes both tests and code
+   - TDD assumes a human developer or agent writes both tests and code
    - IDD explicitly separates "what I want" (human) from "how to build it" (agent)
    - Agents can verify their work against intent without human re-review
 
@@ -167,8 +167,8 @@ Tests:
 
 5. **The Evolution Problem**
    - In TDD, changing requirements means rewriting tests (developer work)
-   - In IDD, changing requirements means editing plain text (human work)
-   - The agent handles translating new intent into new code
+   - In IDD, changing requirements means editing plain text (collaborative human / agent work)
+   - The agent handles translating new intent into new code and verifying that modified code complies with the body of intent
 
 ### IDD and TDD Can Coexist
 
@@ -2810,35 +2810,386 @@ The goal isn't 100% annotation coverage—it's that every piece of code has a cl
 
 ---
 
-## Implementation Plan
+## Implementation Roadmap
 
-### Phase 1: Core (2-3 weeks)
+The roadmap is broken into incremental milestones. Each milestone is testable with a real app before proceeding to the next.
 
-| Component           | Description             | Effort   |
-| ------------------- | ----------------------- | -------- |
-| Intent parser       | Parse .intent files     | 3-4 days |
-| HTTP test runner    | Run GET/POST assertions | 3-4 days |
-| `ntnt intent check` | Basic verification      | 2-3 days |
-| Output formatting   | Clear pass/fail display | 1-2 days |
+### Milestone 0: POC Preparation (1-2 days)
 
-### Phase 2: Tooling (2 weeks)
+**Goal:** Choose a test app and write its intent file manually.
 
-| Component              | Description      | Effort   |
-| ---------------------- | ---------------- | -------- |
-| `ntnt intent init`     | Code scaffolding | 3-4 days |
-| `ntnt intent watch`    | File watching    | 2-3 days |
-| `ntnt intent coverage` | Coverage report  | 2-3 days |
-| `ntnt intent diff`     | Gap analysis     | 2-3 days |
+| Task | Description |
+|------|-------------|
+| Select test app | Use `snowgauge.tnt` or similar small HTTP app |
+| Write intent file by hand | Create `snowgauge.intent` with 2-3 features |
+| Define success criteria | What would prove the concept works? |
 
-### Phase 3: Polish (1-2 weeks)
+**Deliverable:** A handwritten `.intent` file for an existing app.
 
-| Component          | Description            | Effort   |
-| ------------------ | ---------------------- | -------- |
-| @implements parser | Code annotations       | 2-3 days |
-| Schema validation  | Data structure checks  | 3-4 days |
-| Error messages     | Helpful failure output | 2-3 days |
+**Test:** Read the intent file - does it accurately describe what the app should do?
 
-**Total estimate: 5-7 weeks**
+---
+
+### Milestone 1: Intent Parser (2-3 days)
+
+**Goal:** Parse `.intent` files into a usable data structure.
+
+| Task | Description |
+|------|-------------|
+| Define intent AST | Rust structs for Meta, Features, Data, Constraints |
+| Write parser | Parse YAML-ish intent format |
+| Error handling | Clear errors for malformed intent files |
+| Unit tests | Parse various intent file examples |
+
+```rust
+// Target: parse intent file into this structure
+struct IntentFile {
+    meta: Meta,
+    features: Vec<Feature>,
+    data: Vec<DataSchema>,
+    constraints: Vec<Constraint>,
+}
+
+struct Feature {
+    id: String,
+    description: String,
+    tests: Vec<TestCase>,
+}
+
+struct TestCase {
+    name: String,
+    request: Option<HttpRequest>,
+    assertions: Vec<Assertion>,
+}
+```
+
+**Deliverable:** `ntnt intent parse snowgauge.intent` prints parsed structure.
+
+**Test:** Parse the handwritten intent file successfully.
+
+---
+
+### Milestone 2: HTTP Test Runner (3-4 days)
+
+**Goal:** Execute HTTP tests against a running server.
+
+| Task | Description |
+|------|-------------|
+| Server management | Start NTNT app in background, capture port |
+| HTTP client | Make GET/POST requests |
+| Basic assertions | `status: 200`, `body contains "text"` |
+| Result collection | Track pass/fail for each assertion |
+
+```bash
+# Target behavior
+$ ntnt intent check snowgauge.tnt
+
+Starting server on port 54321...
+
+Feature: Site Selection
+  ✓ GET / returns status 200
+  ✓ body contains "Bear Lake"
+  ✓ body contains "Wild Basin"
+
+Feature: Snow Display
+  ✓ GET /?site=bear_lake returns status 200
+  ✓ body contains "Snow Depth"
+
+2/2 features passing (5/5 assertions)
+```
+
+**Deliverable:** `ntnt intent check` runs HTTP tests against live server.
+
+**Test:** Run against snowgauge, see meaningful pass/fail results.
+
+---
+
+### Milestone 3: POC Validation (1-2 days)
+
+**Goal:** Use the system for real development and evaluate.
+
+| Task | Description |
+|------|-------------|
+| Add a feature via IDD | Write intent first, then implement |
+| Break something intentionally | Verify the check catches it |
+| Get feedback | Does this feel useful? What's missing? |
+| Document learnings | What worked? What's awkward? |
+
+**Experiment checklist:**
+- [ ] Write intent for new feature before coding
+- [ ] Run `ntnt intent check` - see it fail
+- [ ] Implement feature
+- [ ] Run `ntnt intent check` - see it pass
+- [ ] Break the feature intentionally
+- [ ] Run `ntnt intent check` - see it fail with useful message
+
+**Deliverable:** Written evaluation of POC - go/no-go decision.
+
+**Test:** The subjective question: "Do I want to keep using this?"
+
+---
+
+### Milestone 4: Expanded Assertions (2-3 days)
+
+**Goal:** Support more assertion types for realistic testing.
+
+| Task | Description |
+|------|-------------|
+| Regex assertions | `body matches r"Snow: \d+ in"` |
+| JSON assertions | `body.json.sites[0] == "bear_lake"` |
+| Header assertions | `header "Content-Type" contains "text/html"` |
+| Negation | `body not contains "error"` |
+
+```yaml
+# More expressive tests
+Feature: Snow Display
+  test "shows formatted data":
+    request: GET /?site=bear_lake
+    assert:
+      - status: 200
+      - body matches r"Snow Depth: \d+(\.\d+)? inches"
+      - body not contains "Error"
+      - header "Content-Type" contains "text/html"
+```
+
+**Deliverable:** Richer assertion vocabulary.
+
+**Test:** Write more precise tests for snowgauge.
+
+---
+
+### Milestone 5: Output Polish (1-2 days)
+
+**Goal:** Make output clear, helpful, and actionable.
+
+| Task | Description |
+|------|-------------|
+| Colored output | Green for pass, red for fail |
+| Failure details | Show expected vs actual |
+| Intent location | Link failures to intent file line numbers |
+| Summary stats | "3/4 features passing, 78% coverage" |
+
+```bash
+# Target: helpful failure output
+[FAIL] Feature: Snow Chart (1/2 tests passed)
+
+  ✓ GET / returns status 200
+  ✗ body contains "canvas"
+  
+    Expected: body to contain "canvas"
+    Actual:   "<div class='chart'>..." (no canvas element)
+    
+    Intent: snowgauge.intent:34 (Snow Chart)
+    Hint: Consider using <canvas> element for chart rendering
+```
+
+**Deliverable:** Professional-quality CLI output.
+
+**Test:** Show a failure to someone unfamiliar - can they understand it?
+
+---
+
+### Milestone 6: Code Annotations (2-3 days)
+
+**Goal:** Parse `@implements` annotations from NTNT code.
+
+| Task | Description |
+|------|-------------|
+| Comment parser | Extract `// @implements:` from source |
+| Link to intent | Map annotations to feature IDs |
+| Validate IDs | Warn on typos/missing features |
+| Basic coverage | "3/5 features have implementations" |
+
+```ntnt
+// This annotation is now meaningful:
+// @implements: feature.site_selection
+fn home_handler(req) {
+    // ...
+}
+```
+
+```bash
+$ ntnt intent coverage snowgauge.tnt
+
+Feature Coverage:
+  ✓ site_selection  → home_handler()
+  ✓ snow_display    → home_handler()
+  ✗ chart           → (no implementation found)
+```
+
+**Deliverable:** `ntnt intent coverage` shows which features have code.
+
+**Test:** Annotate snowgauge functions, see coverage report.
+
+---
+
+### Milestone 7: `ntnt intent init` (2-3 days)
+
+**Goal:** Generate code scaffolding from intent.
+
+| Task | Description |
+|------|-------------|
+| Template generation | Create function stubs from features |
+| Data scaffolding | Create maps/structs from data schemas |
+| TODO comments | Mark what needs implementation |
+| Import generation | Add necessary stdlib imports |
+
+```bash
+$ ntnt intent init snowgauge.intent
+
+Generated: snowgauge.tnt
+
+  Created scaffolding:
+  - sites map (3 entries, URLs marked TODO)
+  - home_handler() stub
+  - fetch_snow_data() stub
+  
+  Next: Implement TODOs, then run `ntnt intent check`
+```
+
+**Deliverable:** Generate working skeleton from intent.
+
+**Test:** Init from intent, implement TODOs, verify check passes.
+
+---
+
+### Milestone 8: `ntnt intent watch` (1-2 days)
+
+**Goal:** Continuous verification during development.
+
+| Task | Description |
+|------|-------------|
+| File watcher | Detect changes to .tnt and .intent files |
+| Debouncing | Don't spam checks on rapid saves |
+| Incremental output | Show what changed, not full report |
+| Server restart | Restart app when code changes |
+
+```bash
+$ ntnt intent watch snowgauge.tnt
+
+Watching for changes... (Ctrl+C to stop)
+
+[12:34:56] ✓ All checks passed
+[12:35:12] ✗ Feature "chart" failing - body missing "canvas"
+[12:35:45] ✓ All checks passed
+```
+
+**Deliverable:** Live feedback loop during development.
+
+**Test:** Edit code while watch runs, see immediate feedback.
+
+---
+
+### Milestone 9: Data Validation (2-3 days)
+
+**Goal:** Verify data structures match intent schemas.
+
+| Task | Description |
+|------|-------------|
+| Find data definitions | Locate `let sites = map {...}` in code |
+| Extract structure | Parse map keys, list items, etc. |
+| Compare to intent | Check required keys present |
+| Report gaps | "Missing key: copeland_lake" |
+
+```yaml
+# Intent defines expected data
+Data: sites
+  type: map
+  required_keys: [bear_lake, wild_basin, copeland_lake]
+```
+
+```bash
+$ ntnt intent check snowgauge.tnt
+
+Data Validation:
+  sites:
+    ✓ bear_lake present
+    ✓ wild_basin present
+    ✗ copeland_lake missing
+```
+
+**Deliverable:** Static data validation without running the app.
+
+**Test:** Remove a site from snowgauge, see validation fail.
+
+---
+
+### Milestone 10: `ntnt intent diff` (1-2 days)
+
+**Goal:** Show gaps between intent and implementation.
+
+| Task | Description |
+|------|-------------|
+| Collect intent requirements | All features, data, constraints |
+| Analyze implementation | What exists in code |
+| Compute diff | What's missing, what's extra |
+| Actionable output | "Add X" or "Intent missing for Y" |
+
+```bash
+$ ntnt intent diff snowgauge.tnt
+
+Intent vs Implementation
+
+Missing in Code:
+  - feature.chart (no @implements found)
+  - data.sites.copeland_lake
+
+Extra in Code (not in intent):
+  - fn debug_handler() (consider adding to intent or removing)
+
+Suggestions:
+  1. Add @implements: feature.chart to render_chart()
+  2. Add copeland_lake to sites map
+  3. Either document debug_handler in intent or remove it
+```
+
+**Deliverable:** Clear gap analysis between intent and code.
+
+**Test:** Intentionally misalign intent and code, see diff.
+
+---
+
+### Summary: Phase 1 Roadmap
+
+| Milestone | Description | Days | Cumulative |
+|-----------|-------------|------|------------|
+| M0 | POC Preparation | 1-2 | 1-2 |
+| M1 | Intent Parser | 2-3 | 3-5 |
+| M2 | HTTP Test Runner | 3-4 | 6-9 |
+| **M3** | **POC Validation** | **1-2** | **7-11** |
+| M4 | Expanded Assertions | 2-3 | 9-14 |
+| M5 | Output Polish | 1-2 | 10-16 |
+| M6 | Code Annotations | 2-3 | 12-19 |
+| M7 | `ntnt intent init` | 2-3 | 14-22 |
+| M8 | `ntnt intent watch` | 1-2 | 15-24 |
+| M9 | Data Validation | 2-3 | 17-27 |
+| M10 | `ntnt intent diff` | 1-2 | 18-29 |
+
+**Key checkpoint: Milestone 3 (POC Validation)**
+
+After M3 (~1-2 weeks), you'll have enough to answer:
+- Does writing intent-first feel natural?
+- Does the feedback loop help?
+- Is this worth building out further?
+
+If yes → Continue to M4+
+If no → Pivot or abandon before investing more time
+
+---
+
+### Phase 2+ (Future, if POC succeeds)
+
+| Phase | Features | Estimate |
+|-------|----------|----------|
+| **Phase 2** | Browser automation, DOM assertions, visual regression | 3-4 weeks |
+| **Phase 3** | LLM visual verification, accessibility testing | 2-3 weeks |
+| **Phase 4** | Intent history, changelog generation, archaeology | 2-3 weeks |
+| **Phase 5** | IDE integration (LSP), first-class @implements syntax | 3-4 weeks |
+| **Phase 6** | Standalone tool extraction, multi-language support | 4-6 weeks |
+
+**Total for full vision: 4-6 months**
+
+But the POC in 1-2 weeks will tell you if it's worth it.
 
 ---
 
@@ -2892,15 +3243,386 @@ The goal isn't 100% annotation coverage—it's that every piece of code has a cl
 
 ---
 
+## Intent History and Changelog Generation
+
+Intent changes over time tell the story of your product. Unlike code diffs, intent diffs are inherently human-meaningful - they describe _what changed about the product_, not how the implementation changed.
+
+### Why Track Intent History?
+
+1. **Understand evolution** - "When did we add the 60-day chart? What did it replace?"
+2. **Debug regressions** - "What was the intent when this feature worked?"
+3. **Onboard new team members** - "Why does this feature work this way?"
+4. **Generate changelogs** - Automatically produce release notes from intent changes
+5. **Audit trail** - "Who changed this requirement and when?"
+
+### Git-Based Intent Versioning
+
+Intent files are versioned with git like everything else, but we provide tools to navigate intent-specific history:
+
+```bash
+# View intent history for a specific feature
+$ ntnt intent history feature.snow_chart
+
+Intent History: feature.snow_chart
+
+2026-01-14 (current)
+  description: "30-day snow depth chart with daily granularity"
+  test: "body contains canvas with 30 data points"
+  changed_by: Josh
+  commit: a1b2c3d
+
+2026-01-10
+  description: "7-day snow depth chart"
+  test: "body contains canvas with 7 data points"
+  changed_by: Agent (Copilot)
+  commit: e4f5g6h
+
+2026-01-05 (created)
+  description: "Snow depth visualization"
+  test: "body contains chart element"
+  changed_by: Josh
+  commit: i7j8k9l
+```
+
+### Viewing Intent at a Point in Time
+
+```bash
+# Show intent file as of a specific date
+$ ntnt intent show --at 2026-01-10
+
+# Show intent file as of a specific commit/tag
+$ ntnt intent show --at v1.0.0
+
+# Compare intent between two points
+$ ntnt intent diff v1.0.0 v2.0.0
+
+Intent Changes: v1.0.0 → v2.0.0
+
+ADDED Features:
+  + feature.export_data
+    "Users can export snow data as CSV"
+
+  + feature.multi_site_comparison
+    "Compare snow depth across multiple sites"
+
+MODIFIED Features:
+  ~ feature.snow_chart
+    - "7-day snow depth chart"
+    + "30-day snow depth chart with daily granularity"
+
+  ~ constraint.refresh_rate
+    - "Data refreshes every hour"
+    + "Data refreshes every 15 minutes"
+
+REMOVED Features:
+  - feature.legacy_text_view
+    "Plain text snow depth display"
+
+Data Changes:
+  + data.export_formats: [csv, json]
+  ~ data.sites: added "copeland_lake"
+```
+
+### Blame for Intent
+
+See who set the current intent for each feature:
+
+```bash
+$ ntnt intent blame snowgauge.intent
+
+## Features
+
+### Site Selection                          # Josh, 2026-01-05, "Initial feature"
+id: site_selection                          # Josh, 2026-01-05
+description: "User can select..."           # Josh, 2026-01-08, "Clarified wording"
+test:
+  - request: GET /                          # Agent, 2026-01-06, "Added test"
+  - assert: body contains "Bear Lake"       # Agent, 2026-01-06
+
+### Snow Chart                              # Josh, 2026-01-05, "Initial feature"
+id: snow_chart                              # Josh, 2026-01-05
+description: "30-day snow depth chart"      # Josh, 2026-01-14, "Extended from 7 days"
+```
+
+### Automatic Changelog Generation
+
+The killer feature: generate human-readable changelogs from intent diffs.
+
+```bash
+# Generate changelog between versions
+$ ntnt intent changelog v1.0.0 v2.0.0
+
+# Output: CHANGELOG.md format
+## [2.0.0] - 2026-01-14
+
+### Added
+- **Export Data**: Users can now export snow data as CSV or JSON format
+- **Multi-Site Comparison**: Compare snow depth across multiple monitoring sites
+- New monitoring site: Copeland Lake
+
+### Changed
+- **Snow Chart**: Extended from 7 days to 30 days of historical data
+- **Data Refresh**: Now updates every 15 minutes (was hourly)
+
+### Removed
+- Legacy text-only view (replaced by responsive chart)
+```
+
+```bash
+# Generate changelog for all changes since last release
+$ ntnt intent changelog --since-tag v1.2.0
+
+# Generate changelog for recent commits
+$ ntnt intent changelog --since "2 weeks ago"
+
+# Output in different formats
+$ ntnt intent changelog v1.0.0 v2.0.0 --format markdown
+$ ntnt intent changelog v1.0.0 v2.0.0 --format json
+$ ntnt intent changelog v1.0.0 v2.0.0 --format slack  # Slack-formatted message
+$ ntnt intent changelog v1.0.0 v2.0.0 --format html   # For release pages
+```
+
+### Changelog with Context
+
+Include additional context from commit messages and intent annotations:
+
+```yaml
+# In intent file, you can annotate changes:
+
+### Snow Chart
+id: snow_chart
+description: "30-day snow depth chart with daily granularity"
+# @changed 2026-01-14: Extended from 7 days per user feedback
+# @rationale: Users wanted to see monthly trends for trip planning
+# @breaking: Old bookmarks to 7-day view will show 30-day instead
+```
+
+Generated changelog includes this context:
+
+```markdown
+### Changed
+
+- **Snow Chart**: Extended from 7 days to 30 days of historical data
+  - _Rationale_: Users wanted to see monthly trends for trip planning
+  - _Note_: Old bookmarks to 7-day view will show 30-day view instead
+```
+
+### Release Notes Generation
+
+Go beyond changelogs - generate full release notes:
+
+```bash
+$ ntnt intent release-notes v2.0.0 --style friendly
+
+# Output:
+# SnowGauge 2.0 Release Notes
+
+Hey snow lovers! 🎿 We've got some great updates for you:
+
+## What's New
+
+**See More History** - The snow chart now shows 30 days of data instead
+of just 7. Perfect for planning that trip and seeing the trends!
+
+**Export Your Data** - Want the raw numbers? Now you can download snow
+depth data as CSV or JSON. Great for you data nerds out there.
+
+**Compare Sites** - Can't decide between Bear Lake and Wild Basin? Now
+you can compare snow depth across multiple sites side by side.
+
+## Improvements
+
+**Faster Updates** - Data now refreshes every 15 minutes instead of hourly.
+More up-to-date info for your powder planning!
+
+**New Site** - Added Copeland Lake to the monitoring network.
+
+## Removed
+
+**Text-Only View** - We removed the old text-only display. The new chart
+is responsive and works great on all devices!
+
+---
+Thanks for using SnowGauge! Questions? Feedback? Let us know.
+```
+
+### Semantic Versioning Suggestions
+
+Analyze intent changes to suggest version bumps:
+
+```bash
+$ ntnt intent version-bump-suggestion --since v1.2.0
+
+Analyzing intent changes since v1.2.0...
+
+Changes detected:
+  - 2 new features added
+  - 1 feature modified (non-breaking)
+  - 1 feature removed (BREAKING)
+  - 1 constraint changed
+
+Recommendation: MAJOR version bump (v2.0.0)
+
+Reason: Breaking change detected
+  - Removed: feature.legacy_text_view
+
+If the removed feature was deprecated and communicated:
+  Consider: MINOR version bump (v1.3.0)
+```
+
+### Intent Change Notifications
+
+Get notified when intent changes in ways that matter:
+
+```yaml
+# In .ntnt/config.yaml
+
+intent:
+  notifications:
+    # Notify on any feature removal
+    on_feature_removed:
+      slack: "#product-updates"
+
+    # Notify on constraint changes (might affect SLAs)
+    on_constraint_changed:
+      email: "ops-team@company.com"
+
+    # Notify on breaking changes
+    on_breaking_change:
+      slack: "#engineering"
+      require_approval: true
+```
+
+### Historical Intent Verification
+
+Verify current code against historical intent (useful for understanding regressions):
+
+```bash
+# Check if current code passes the intent from v1.0.0
+$ ntnt intent check snowgauge.tnt --against v1.0.0
+
+Checking against intent from v1.0.0...
+
+Results:
+  [PASS] feature.site_selection (unchanged intent)
+  [PASS] feature.snow_display (unchanged intent)
+  [FAIL] feature.snow_chart
+         Intent v1.0.0: "7-day chart"
+         Current code: Shows 30 days
+         Note: Intent was updated in v2.0.0
+
+  [N/A]  feature.export_data (didn't exist in v1.0.0)
+
+This is expected - intent has evolved since v1.0.0.
+```
+
+### Intent Archaeology
+
+For long-running projects, understand the full history of a concept:
+
+```bash
+$ ntnt intent archaeology "chart"
+
+Searching intent history for "chart"...
+
+Timeline:
+─────────────────────────────────────────────────────
+2026-01-05  feature.snow_visualization (created)
+            "Display snow depth data"
+
+2026-01-07  feature.snow_visualization → feature.snow_chart (renamed)
+            "Show snow depth as a visual chart"
+
+2026-01-08  feature.snow_chart (modified)
+            Added: test assertions for canvas element
+
+2026-01-10  feature.snow_chart (modified)
+            Changed: "5-day chart" → "7-day chart"
+            Reason: "Users wanted more history"
+
+2026-01-14  feature.snow_chart (modified)
+            Changed: "7-day chart" → "30-day chart"
+            Reason: "Extended for monthly trend analysis"
+─────────────────────────────────────────────────────
+
+Related changes:
+  - 2026-01-12: Added feature.chart_export (related to snow_chart)
+  - 2026-01-14: Added constraint.chart_performance
+```
+
+### Integration with CI/CD
+
+Automatically generate changelog as part of release process:
+
+```yaml
+# GitHub Actions example
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history for intent tracking
+
+      - name: Generate Changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^)
+          ntnt intent changelog $PREV_TAG ${{ github.ref_name }} \
+            --format markdown > RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          body_path: RELEASE_NOTES.md
+```
+
+### The Feedback Loop
+
+Intent history creates a powerful feedback loop:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    INTENT FEEDBACK LOOP                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. INTENT AUTHORED                                              │
+│     Human writes intent in .intent file                         │
+│     "30-day snow chart for trend analysis"                      │
+│                                                                  │
+│  2. INTENT IMPLEMENTED                                          │
+│     Agent builds to satisfy intent                              │
+│     Code passes intent verification                             │
+│                                                                  │
+│  3. INTENT SHIPPED                                              │
+│     Version tagged, changelog generated automatically           │
+│     Users see: "Snow chart now shows 30 days"                   │
+│                                                                  │
+│  4. INTENT RECORDED                                             │
+│     Git history preserves when/why/who for this intent         │
+│     Discoverable by future humans and agents                    │
+│                                                                  │
+│  5. INTENT EVOLVED                                              │
+│     Next change builds on this history                          │
+│     "Based on feedback, extend to 90 days..."                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The intent file isn't just documentation or tests - it's the **living history of what you meant to build**, automatically tracked and infinitely useful.
+
+---
+
 ## Future Possibilities
 
 ### Intent Visualization
 
 Visual representation of intent relationships - a dashboard showing which features pass/fail.
-
-### Intent Diffing Across Versions
-
-Track how intent evolves over time with history commands.
 
 ### Cross-Project Intent Patterns
 
@@ -2909,6 +3631,226 @@ Reusable intent templates for common patterns (web API, CRUD app, etc.).
 ### AI-Assisted Intent Refinement
 
 Agent suggests missing intents based on code analysis.
+
+### Universal IDD: Beyond NTNT
+
+The initial implementation of IDD is deeply integrated into NTNT. This is intentional - proving the concept with the best possible developer experience. However, the long-term vision is to make IDD available to any language.
+
+#### Phase 1: NTNT-Native (Current Plan)
+
+IDD as a first-class NTNT feature:
+
+```ntnt
+// First-class syntax, not comments
+@implements(feature.site_selection)
+fn get_site(req) {
+    // Compile-time verification of intent ID
+    // IDE autocomplete for intent IDs
+    // Jump-to-definition from annotation to intent file
+}
+```
+
+**Benefits of starting native:**
+- Best possible proof-of-concept
+- Compile-time intent verification
+- Deep IDE integration
+- Competitive differentiator for NTNT
+- Faster iteration (one codebase)
+
+#### Phase 2: Extract Standalone Tool
+
+Once IDD is proven in NTNT, extract a language-agnostic CLI:
+
+```bash
+# Standalone tool works with any language
+idd check --lang python myapp.py
+idd check --lang typescript src/
+idd check --lang go ./...
+idd check --lang rust src/
+
+# Same intent file format for all languages
+idd init myproject.intent
+idd changelog v1.0.0 v2.0.0
+```
+
+**Annotation styles per language:**
+
+```python
+# Python - comment-based
+# @implements: feature.site_selection
+def get_site(request):
+    pass
+```
+
+```typescript
+// TypeScript - JSDoc-based
+/** @implements feature.site_selection */
+function getSite(request: Request) {
+    // ...
+}
+```
+
+```go
+// Go - comment-based
+// @implements: feature.site_selection
+func GetSite(r *http.Request) {
+    // ...
+}
+```
+
+```rust
+// Rust - attribute macro (if deep integration desired)
+#[implements("feature.site_selection")]
+fn get_site(req: Request) {
+    // ...
+}
+```
+
+#### Phase 3: Hybrid Architecture
+
+Maintain both for optimal experience per language:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    HYBRID ARCHITECTURE                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────────┐     ┌─────────────────────────────────┐   │
+│  │   NTNT Native   │     │   IDD Standalone Tool            │   │
+│  │                 │     │                                   │   │
+│  │ - First-class   │     │ - Works with any language        │   │
+│  │   @implements   │     │ - Comment-based annotations      │   │
+│  │ - Compile-time  │     │ - Language adapters:             │   │
+│  │   verification  │     │   - Python                       │   │
+│  │ - IDE integration│    │   - TypeScript                   │   │
+│  │ - Best experience│    │   - Go, Rust, Java, etc.         │   │
+│  │                 │     │   - NTNT (via adapter too)       │   │
+│  └────────┬────────┘     └──────────────┬──────────────────┘   │
+│           │                              │                      │
+│           └──────────────┬───────────────┘                      │
+│                          ▼                                      │
+│              ┌─────────────────────┐                           │
+│              │   Shared .intent    │                           │
+│              │   File Format       │                           │
+│              │                     │                           │
+│              │   Identical syntax  │                           │
+│              │   for all languages │                           │
+│              └─────────────────────┘                           │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Capability Comparison
+
+| Capability | NTNT Native | Standalone Tool |
+|------------|-------------|-----------------|
+| Parse `.intent` files | ✓ Full | ✓ Full |
+| HTTP test execution | ✓ Full | ✓ Full |
+| Browser automation | ✓ Full | ✓ Full |
+| LLM visual verification | ✓ Full | ✓ Full |
+| Changelog generation | ✓ Full | ✓ Full |
+| Find `@implements` | AST-based (accurate) | Regex-based (good enough) |
+| Typo detection | Compile-time | Runtime (`idd check`) |
+| IDE integration | Deep (LSP) | Shallow (generic plugin) |
+| Coverage analysis | Semantic | Syntactic |
+
+#### Transpilation Option
+
+Alternative approach: generate native test code from intent files.
+
+```bash
+# Generate test files from intent
+idd generate myapp.intent --target pytest    # → test_intent.py
+idd generate myapp.intent --target jest      # → intent.test.ts
+idd generate myapp.intent --target go-test   # → intent_test.go
+```
+
+**Pros:**
+- Uses existing test infrastructure
+- No runtime IDD dependency
+- Familiar test output
+
+**Cons:**
+- Generated code can drift from intent
+- Loses dynamic capabilities (LLM verification harder)
+- Two sources of truth
+
+#### Polyglot Projects
+
+One intent file can span multiple languages:
+
+```yaml
+# myapp.intent
+# Single intent file for full-stack application
+
+Meta:
+  name: MyApp
+  components:
+    frontend: typescript  # React app
+    backend: python       # FastAPI
+    scripts: ntnt         # Automation scripts
+
+### Feature: User Authentication
+id: user_auth
+description: "Users can sign in with email/password"
+
+test "login flow":
+  # Tests frontend
+  browser:
+    - navigate "/login"
+    - fill "#email" with "test@example.com"
+    - fill "#password" with "secret"
+    - click "#submit"
+    - wait_for_navigation
+    - url == "/dashboard"
+
+test "login API":
+  # Tests backend
+  http POST "/api/auth/login"
+    body: {"email": "test@example.com", "password": "secret"}
+  expect:
+    - status: 200
+    - body.token exists
+
+test "token validation script":
+  # Tests NTNT script
+  run: validate_token.tnt --token "{token}"
+  expect:
+    - exit_code: 0
+    - stdout contains "valid"
+```
+
+#### Why Start NTNT-Native?
+
+1. **Prove the concept** - If IDD doesn't work great with deep integration, it won't work well as a shallow tool
+
+2. **Competitive advantage** - "The first language designed for intent-driven development"
+
+3. **Extract later is easier** - Going from integrated → standalone is simpler than the reverse
+
+4. **Quality bar** - Native implementation sets the standard for what IDD should feel like
+
+5. **Dogfooding** - Using IDD to build NTNT validates the approach
+
+#### Migration Path for Users
+
+When standalone tool is ready:
+
+```bash
+# Existing NTNT project - nothing changes
+ntnt intent check myapp.tnt
+
+# New Python project - use standalone tool
+idd init myproject.intent
+idd check --lang python src/
+
+# Mixed project - both work together
+ntnt intent check backend.tnt      # NTNT native
+idd check --lang typescript src/   # Standalone for TS frontend
+# Both use the same myproject.intent file
+```
+
+The intent file format is the constant - implementation languages can vary.
 
 ---
 
