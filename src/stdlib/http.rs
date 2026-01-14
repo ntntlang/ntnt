@@ -13,7 +13,7 @@ use base64::Engine;
 type Result<T> = std::result::Result<T, IntentError>;
 
 /// Convert reqwest Response to Intent Value
-fn response_to_value(status: u16, headers: &reqwest::header::HeaderMap, body: String) -> Value {
+fn response_to_value(status: u16, headers: &reqwest::header::HeaderMap, body: String, final_url: &str, original_url: &str) -> Value {
     let mut response_map = HashMap::new();
     
     // Status code
@@ -54,6 +54,12 @@ fn response_to_value(status: u16, headers: &reqwest::header::HeaderMap, body: St
     // ok flag
     response_map.insert("ok".to_string(), Value::Bool(status >= 200 && status < 300));
     
+    // Final URL after redirects
+    response_map.insert("url".to_string(), Value::String(final_url.to_string()));
+    
+    // Whether the request was redirected
+    response_map.insert("redirected".to_string(), Value::Bool(final_url != original_url));
+    
     Value::Map(response_map)
 }
 
@@ -64,9 +70,10 @@ fn http_get(url: &str) -> Result<Value> {
         Ok(response) => {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
+            let final_url = response.url().to_string();
             match response.text() {
                 Ok(body) => {
-                    let resp_value = response_to_value(status, &headers, body);
+                    let resp_value = response_to_value(status, &headers, body, &final_url, url);
                     Ok(Value::EnumValue {
                         enum_name: "Result".to_string(),
                         variant: "Ok".to_string(),
@@ -99,9 +106,10 @@ fn http_post(url: &str, body: &str, content_type: Option<&str>) -> Result<Value>
         Ok(response) => {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
+            let final_url = response.url().to_string();
             match response.text() {
                 Ok(resp_body) => {
-                    let resp_value = response_to_value(status, &headers, resp_body);
+                    let resp_value = response_to_value(status, &headers, resp_body, &final_url, url);
                     Ok(Value::EnumValue {
                         enum_name: "Result".to_string(),
                         variant: "Ok".to_string(),
@@ -133,9 +141,10 @@ fn http_put(url: &str, body: &str) -> Result<Value> {
         Ok(response) => {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
+            let final_url = response.url().to_string();
             match response.text() {
                 Ok(resp_body) => {
-                    let resp_value = response_to_value(status, &headers, resp_body);
+                    let resp_value = response_to_value(status, &headers, resp_body, &final_url, url);
                     Ok(Value::EnumValue {
                         enum_name: "Result".to_string(),
                         variant: "Ok".to_string(),
@@ -164,9 +173,10 @@ fn http_delete(url: &str) -> Result<Value> {
         Ok(response) => {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
+            let final_url = response.url().to_string();
             match response.text() {
                 Ok(body) => {
-                    let resp_value = response_to_value(status, &headers, body);
+                    let resp_value = response_to_value(status, &headers, body, &final_url, url);
                     Ok(Value::EnumValue {
                         enum_name: "Result".to_string(),
                         variant: "Ok".to_string(),
@@ -198,9 +208,10 @@ fn http_patch(url: &str, body: &str) -> Result<Value> {
         Ok(response) => {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
+            let final_url = response.url().to_string();
             match response.text() {
                 Ok(resp_body) => {
-                    let resp_value = response_to_value(status, &headers, resp_body);
+                    let resp_value = response_to_value(status, &headers, resp_body, &final_url, url);
                     Ok(Value::EnumValue {
                         enum_name: "Result".to_string(),
                         variant: "Ok".to_string(),
@@ -229,8 +240,9 @@ fn http_head(url: &str) -> Result<Value> {
         Ok(response) => {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
+            let final_url = response.url().to_string();
             // HEAD has no body
-            let resp_value = response_to_value(status, &headers, String::new());
+            let resp_value = response_to_value(status, &headers, String::new(), &final_url, url);
             Ok(Value::EnumValue {
                 enum_name: "Result".to_string(),
                 variant: "Ok".to_string(),
@@ -290,13 +302,66 @@ fn http_request(opts: &HashMap<String, Value>) -> Result<Value> {
         request = request.timeout(std::time::Duration::from_secs(*timeout as u64));
     }
     
+    // Add cache control
+    if let Some(Value::String(cache)) = opts.get("cache") {
+        request = match cache.as_str() {
+            "no-store" => request.header("Cache-Control", "no-store"),
+            "no-cache" => request.header("Cache-Control", "no-cache").header("Pragma", "no-cache"),
+            "reload" => request.header("Cache-Control", "no-cache").header("Pragma", "no-cache"),
+            "force-cache" => request.header("Cache-Control", "max-stale=31536000"),
+            "only-if-cached" => request.header("Cache-Control", "only-if-cached"),
+            _ => request, // "default" or unknown - no special headers
+        };
+    }
+    
+    // Add referrer and referrerPolicy
+    let referrer_policy = opts.get("referrerPolicy")
+        .and_then(|v| if let Value::String(s) = v { Some(s.as_str()) } else { None })
+        .unwrap_or("strict-origin-when-cross-origin");
+    
+    if let Some(Value::String(referrer)) = opts.get("referrer") {
+        // Apply referrer based on policy
+        let should_send = match referrer_policy {
+            "no-referrer" => false,
+            "origin" | "strict-origin" => true,
+            "same-origin" => {
+                // Check if same origin
+                let ref_origin = referrer.split('/').take(3).collect::<Vec<_>>().join("/");
+                let url_origin = url.split('/').take(3).collect::<Vec<_>>().join("/");
+                ref_origin == url_origin
+            },
+            _ => true, // default, unsafe-url, origin-when-cross-origin, strict-origin-when-cross-origin
+        };
+        
+        if should_send {
+            let ref_value = match referrer_policy {
+                "origin" | "strict-origin" => {
+                    // Send only origin (scheme + host)
+                    referrer.split('/').take(3).collect::<Vec<_>>().join("/") + "/"
+                },
+                "origin-when-cross-origin" | "strict-origin-when-cross-origin" => {
+                    let ref_origin = referrer.split('/').take(3).collect::<Vec<_>>().join("/");
+                    let url_origin = url.split('/').take(3).collect::<Vec<_>>().join("/");
+                    if ref_origin == url_origin {
+                        referrer.clone() // Same origin - send full URL
+                    } else {
+                        ref_origin + "/" // Cross-origin - send only origin
+                    }
+                },
+                _ => referrer.clone(), // unsafe-url, same-origin - send full URL
+            };
+            request = request.header("Referer", ref_value);
+        }
+    }
+    
     match request.send() {
         Ok(response) => {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
+            let final_url = response.url().to_string();
             match response.text() {
                 Ok(body) => {
-                    let resp_value = response_to_value(status, &headers, body);
+                    let resp_value = response_to_value(status, &headers, body, &final_url, &url);
                     Ok(Value::EnumValue {
                         enum_name: "Result".to_string(),
                         variant: "Ok".to_string(),
@@ -443,9 +508,10 @@ fn http_basic_auth(url: &str, username: &str, password: &str) -> Result<Value> {
         Ok(response) => {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
+            let final_url = response.url().to_string();
             match response.text() {
                 Ok(body) => {
-                    let resp_value = response_to_value(status, &headers, body);
+                    let resp_value = response_to_value(status, &headers, body, &final_url, url);
                     Ok(Value::EnumValue {
                         enum_name: "Result".to_string(),
                         variant: "Ok".to_string(),
@@ -489,9 +555,10 @@ fn http_post_form(url: &str, form_data: &HashMap<String, Value>) -> Result<Value
         Ok(response) => {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
+            let final_url = response.url().to_string();
             match response.text() {
                 Ok(body) => {
-                    let resp_value = response_to_value(status, &headers, body);
+                    let resp_value = response_to_value(status, &headers, body, &final_url, url);
                     Ok(Value::EnumValue {
                         enum_name: "Result".to_string(),
                         variant: "Ok".to_string(),
@@ -612,9 +679,10 @@ fn http_upload(url: &str, file_path: &str, field_name: &str) -> Result<Value> {
         Ok(response) => {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
+            let final_url = response.url().to_string();
             match response.text() {
                 Ok(body) => {
-                    let mut resp_value = response_to_value(status, &headers, body);
+                    let mut resp_value = response_to_value(status, &headers, body, &final_url, url);
                     // Add the filename to the response for convenience
                     if let Value::Map(ref mut map) = resp_value {
                         map.insert("filename".to_string(), Value::String(file_name));
@@ -735,10 +803,63 @@ fn http_request_with_cookies(opts: &HashMap<String, Value>) -> Result<Value> {
         request = request.timeout(std::time::Duration::from_secs(*timeout as u64));
     }
     
+    // Add cache control
+    if let Some(Value::String(cache)) = opts.get("cache") {
+        request = match cache.as_str() {
+            "no-store" => request.header("Cache-Control", "no-store"),
+            "no-cache" => request.header("Cache-Control", "no-cache").header("Pragma", "no-cache"),
+            "reload" => request.header("Cache-Control", "no-cache").header("Pragma", "no-cache"),
+            "force-cache" => request.header("Cache-Control", "max-stale=31536000"),
+            "only-if-cached" => request.header("Cache-Control", "only-if-cached"),
+            _ => request, // "default" or unknown - no special headers
+        };
+    }
+    
+    // Add referrer and referrerPolicy
+    let referrer_policy = opts.get("referrerPolicy")
+        .and_then(|v| if let Value::String(s) = v { Some(s.as_str()) } else { None })
+        .unwrap_or("strict-origin-when-cross-origin");
+    
+    if let Some(Value::String(referrer)) = opts.get("referrer") {
+        // Apply referrer based on policy
+        let should_send = match referrer_policy {
+            "no-referrer" => false,
+            "origin" | "strict-origin" => true,
+            "same-origin" => {
+                // Check if same origin
+                let ref_origin = referrer.split('/').take(3).collect::<Vec<_>>().join("/");
+                let url_origin = url.split('/').take(3).collect::<Vec<_>>().join("/");
+                ref_origin == url_origin
+            },
+            _ => true, // default, unsafe-url, origin-when-cross-origin, strict-origin-when-cross-origin
+        };
+        
+        if should_send {
+            let ref_value = match referrer_policy {
+                "origin" | "strict-origin" => {
+                    // Send only origin (scheme + host)
+                    referrer.split('/').take(3).collect::<Vec<_>>().join("/") + "/"
+                },
+                "origin-when-cross-origin" | "strict-origin-when-cross-origin" => {
+                    let ref_origin = referrer.split('/').take(3).collect::<Vec<_>>().join("/");
+                    let url_origin = url.split('/').take(3).collect::<Vec<_>>().join("/");
+                    if ref_origin == url_origin {
+                        referrer.clone() // Same origin - send full URL
+                    } else {
+                        ref_origin + "/" // Cross-origin - send only origin
+                    }
+                },
+                _ => referrer.clone(), // unsafe-url, same-origin - send full URL
+            };
+            request = request.header("Referer", ref_value);
+        }
+    }
+    
     match request.send() {
         Ok(response) => {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
+            let final_url = response.url().to_string();
             
             // Extract cookies from response
             let mut response_cookies = HashMap::new();
@@ -756,7 +877,7 @@ fn http_request_with_cookies(opts: &HashMap<String, Value>) -> Result<Value> {
             
             match response.text() {
                 Ok(body) => {
-                    let mut resp_value = response_to_value(status, &headers, body);
+                    let mut resp_value = response_to_value(status, &headers, body, &final_url, &url);
                     // Add cookies to response
                     if let Value::Map(ref mut map) = resp_value {
                         if !response_cookies.is_empty() {

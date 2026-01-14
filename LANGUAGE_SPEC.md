@@ -785,6 +785,8 @@ match fetch(map {
 | `ok` | Bool | `true` if status is 200-299 |
 | `headers` | Map | Response headers |
 | `body` | String | Response body content |
+| `url` | String | Final URL after redirects |
+| `redirected` | Bool | `true` if request was redirected |
 
 **Request Options (for `request()` and `fetch()`):**
 | Option | Type | Description |
@@ -795,6 +797,9 @@ match fetch(map {
 | `body` | String | Request body |
 | `timeout` | Int | Timeout in seconds |
 | `cookies` | Map | Cookies to send (fetch only) |
+| `cache` | String | Cache mode: "default", "no-store", "no-cache", "reload", "force-cache", "only-if-cached" |
+| `referrer` | String | URL to send as Referer header |
+| `referrerPolicy` | String | "no-referrer", "origin", "same-origin", "strict-origin", "origin-when-cross-origin", "strict-origin-when-cross-origin" (default), "unsafe-url" |
 
 ### HTTP Server (`std/http/server`)
 

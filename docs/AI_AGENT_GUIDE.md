@@ -380,8 +380,10 @@ match fetch("https://api.example.com") {
     Err(e) => print("Error: {e}"),
 }
 
-// Response object has: status, status_text, ok, headers, body
+// Response object has: status, status_text, ok, headers, body, url, redirected
 // response.ok is true for status 200-299
+// response.url is the final URL after any redirects
+// response.redirected is true if the request was redirected
 
 // Using helper functions
 let response = unwrap(fetch("https://api.example.com"))

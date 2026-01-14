@@ -266,12 +266,22 @@ match fetch("https://api.example.com") {
         response.ok           // Bool: true if status 200-299
         response.headers      // Map: response headers
         response.body         // String: response body
+        response.url          // String: final URL after redirects
+        response.redirected   // Bool: true if request was redirected
     },
     Err(e) => print("Error: " + e)
 }
 
 // With timeout (seconds)
 fetch(map { "url": "https://...", "timeout": 30 })
+
+// With cache control and referrer
+fetch(map {
+    "url": "https://api.example.com",
+    "cache": "no-cache",
+    "referrer": "https://myapp.com/page",
+    "referrerPolicy": "strict-origin"
+})
 ```
 
 ### Common imports
