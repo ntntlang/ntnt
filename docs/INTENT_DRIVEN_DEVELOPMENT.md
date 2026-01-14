@@ -20,10 +20,11 @@
 7. [The Workflow](#the-workflow)
 8. [Human Experience](#human-experience)
 9. [Agent Experience](#agent-experience)
-10. [Code Integration](#code-integration)
-11. [Implementation Plan](#implementation-plan)
-12. [Open Questions](#open-questions)
-13. [Future Possibilities](#future-possibilities)
+10. [Team Collaboration](#team-collaboration)
+11. [Code Integration](#code-integration)
+12. [Implementation Plan](#implementation-plan)
+13. [Open Questions](#open-questions)
+14. [Future Possibilities](#future-possibilities)
 
 ---
 
@@ -36,6 +37,46 @@ Intent-Driven Development (IDD) is a paradigm where **human intent becomes execu
 3. **Both can evolve together** - When requirements change, intent updates first, then code follows
 
 NTNT attempts to be the first language where **intent is code**.
+
+---
+
+## The Problem
+
+### Current State of Human-Agent Collaboration
+
+The typical development cycle with AI looks like this:
+
+1. Human: "Build me a an app that shows precipitation over the last 24 hours"
+2. Agent: _builds something based on assumptions_
+3. Human: "No, I wanted it to show the last 30 days"
+4. Agent: _rebuilds with new assumption_
+5. Human: "Wait, also add location selection"
+6. Agent: _patches it in, maybe breaks something_
+7. ... endless back and forth ...
+
+### The Core Problems
+
+| Issue                     | Impact                                       |
+| ------------------------- | -------------------------------------------- |
+| Intent emerges over time  | Humans evolve their thinking and desires     |
+| Intent mixed with extras  | Resulting code may contain extraneous bits   |
+| Intent is scattered       | Chat history, code comments, human's mind    |
+| No verification           | Agent cannot prove code matches intent       |
+| Requirements drift        | Original intent gets lost in iterations      |
+| No single source of truth | Human and agent have different mental models |
+| Stale documentation       | README does not match actual behavior        |
+
+### A Proposed Solution
+
+A feedback loop where intent drives implementation and verification proves correctness:
+
+```
+INTENT (contract) --> CODE (implementation) --> VERIFICATION (proof)
+     ^                                               |
+     |                                               |
+     +-----------------------------------------------+
+                    Feedback Loop
+```
 
 ---
 
@@ -76,7 +117,7 @@ def test_location_selection():
     assert response.status_code == 200
     assert "Denver" in response.text
 
-def test_invalid_site_falls_back():
+def test_invalid_location_falls_back():
     response = client.get("/?location=invalid")
     assert response.status_code == 200
     assert "Denver" in response.text  # Falls back to default
@@ -85,9 +126,9 @@ def test_invalid_site_falls_back():
 **IDD Intent (human writes this):**
 
 ```
-### Feature: Site Selection
+### Feature: Location Selection
 
-Users can select which site to view via URL parameter.
+Users can select which location to view via URL parameter.
 
 Behavior:
 - ?location=<key> selects the location
@@ -149,46 +190,6 @@ IDD doesn't replace TDD - it operates at a different level:
 - **TDD** handles the bottom layer: "Does this function handle edge cases correctly?"
 
 An agent might still use TDD practices when implementing complex functions. IDD just ensures the overall app matches human intent.
-
----
-
-## The Problem
-
-### Current State of Human-Agent Collaboration
-
-The typical development cycle with AI looks like this:
-
-1. Human: "Build me a an app that shows precipitation over the last 24 hours"
-2. Agent: _builds something based on assumptions_
-3. Human: "No, I wanted it to show the last 30 days"
-4. Agent: _rebuilds with new assumption_
-5. Human: "Wait, also add location selection"
-6. Agent: _patches it in, maybe breaks something_
-7. ... endless back and forth ...
-
-### The Core Problems
-
-| Issue                     | Impact                                       |
-| ------------------------- | -------------------------------------------- |
-| Intent emerges over time  | Humans evolve their thinking and desires     |
-| Intent mixed with extras  | Resulting code may contain extraneous bits   |
-| Intent is scattered       | Chat history, code comments, human's mind    |
-| No verification           | Agent cannot prove code matches intent       |
-| Requirements drift        | Original intent gets lost in iterations      |
-| No single source of truth | Human and agent have different mental models |
-| Stale documentation       | README does not match actual behavior        |
-
-### A Proposed Solution
-
-A feedback loop where intent drives implementation and verification proves correctness:
-
-```
-INTENT (contract) --> CODE (implementation) --> VERIFICATION (proof)
-     ^                                               |
-     |                                               |
-     +-----------------------------------------------+
-                    Feedback Loop
-```
 
 ---
 
@@ -629,6 +630,550 @@ Feature: chart
 
 ---
 
+## Test Execution Mechanics
+
+How does `ntnt intent check` actually determine pass or fail? The verification engine uses different strategies based on program type and what's being tested.
+
+### Program Type Detection
+
+The engine auto-detects the program type from the intent file or code:
+
+```yaml
+# Intent file can declare type explicitly
+Meta:
+  type: http-server    # or: cli, library, script, worker, daemon
+```
+
+If not declared, the engine infers type:
+- Imports `std/http_server` → HTTP server
+- Has `fn main()` with args → CLI tool
+- Exports public functions only → Library
+- Has `fn main()` without args → Script
+- Imports `std/concurrent` with workers → Background worker
+
+### Function/Unit Tests (Libraries, Utilities)
+
+For libraries and pure functions, the engine calls functions directly:
+
+```yaml
+Feature: CSV Parsing
+  description: Parse CSV data into structured records
+  test:
+    - call: parse_csv("name,age\nAlice,30")
+      assert:
+        - result[0]["name"] == "Alice"
+        - result[0]["age"] == "30"
+        - len(result) == 1
+    
+    - call: parse_csv("")
+      assert:
+        - result == []
+        
+    - call: parse_csv("invalid\ndata,missing")
+      assert:
+        - throws: ParseError
+```
+
+Engine executes:
+```
+1. Import module
+2. Call parse_csv("name,age\nAlice,30")
+3. Check result[0]["name"] == "Alice" ✓
+4. Check result[0]["age"] == "30" ✓
+5. Check len(result) == 1 ✓
+6. Report: PASS (3/3 assertions)
+```
+
+### CLI Tests (Command-Line Tools)
+
+For CLI applications, the engine runs the program with arguments and checks output:
+
+```yaml
+Feature: File Search
+  description: Find files matching a pattern
+  test:
+    - run: search "*.txt" ./testdir
+      assert:
+        - exit_code: 0
+        - stdout contains "found 3 files"
+        - stdout contains "notes.txt"
+        
+    - run: search "*.xyz" ./testdir
+      assert:
+        - exit_code: 0
+        - stdout contains "found 0 files"
+        
+    - run: search "*.txt" ./nonexistent
+      assert:
+        - exit_code: 1
+        - stderr contains "directory not found"
+```
+
+Engine executes:
+```
+1. Create temp test directory with fixtures
+2. Run: ntnt run program.tnt search "*.txt" ./testdir
+3. Capture stdout, stderr, exit code
+4. Check exit_code == 0 ✓
+5. Check "found 3 files" in stdout ✓
+6. Report: PASS
+```
+
+### Script Tests (Data Processing, Automation)
+
+For scripts that process data or perform tasks:
+
+```yaml
+Feature: Data Migration
+  description: Convert old format to new format
+  test:
+    - run_with_input:
+        stdin: '{"legacy": true, "value": 42}'
+      assert:
+        - stdout is_json
+        - stdout.json.migrated == true
+        - stdout.json.data.value == 42
+        
+    - run_with_files:
+        input: "testdata/old_format.json"
+        output: "testdata/expected_new.json"
+      assert:
+        - output_matches_expected
+```
+
+### HTTP Server Tests
+
+For web applications, the engine starts the server and makes requests:
+
+```yaml
+Feature: Site Selection
+  description: User can select a monitoring site
+  test:
+    - request: GET /
+      assert:
+        - status: 200
+        - body contains "Bear Lake"
+        - body contains "Wild Basin"
+        
+    - request: POST /select
+      body: "site=bear_lake"
+      assert:
+        - status: 302
+        - header "Location" == "/dashboard"
+```
+
+Engine executes:
+```
+1. Start server on random port
+2. GET http://localhost:54321/
+3. Check response.status == 200 ✓
+4. Check "Bear Lake" in body ✓
+5. Shutdown server
+6. Report: PASS
+```
+
+### Background Worker Tests
+
+For workers, daemons, and long-running processes:
+
+```yaml
+Feature: Queue Processor
+  description: Process jobs from a queue
+  test:
+    - start_worker
+      with_queue: [job1, job2, job3]
+      wait_until: queue_empty
+      timeout: 5s
+      assert:
+        - processed_count == 3
+        - error_count == 0
+        
+    - start_worker
+      with_queue: [valid_job, invalid_job, valid_job]
+      wait_until: queue_empty
+      assert:
+        - processed_count == 2
+        - error_count == 1
+        - error_log contains "invalid_job"
+```
+
+### Database Operation Tests
+
+For code that interacts with databases:
+
+```yaml
+Feature: User Registration
+  description: Create new user accounts
+  test:
+    - call: register_user("alice@test.com", "Alice")
+      with_db: test_database
+      assert:
+        - result.id > 0
+        - query("SELECT * FROM users WHERE email = 'alice@test.com'").count == 1
+        
+    - call: register_user("alice@test.com", "Duplicate")
+      with_db: test_database
+      assert:
+        - throws: DuplicateEmailError
+```
+
+Database tests automatically:
+- Use a test database or transactions
+- Roll back changes after each test
+- Provide query assertions
+
+### File System Tests
+
+For code that reads/writes files:
+
+```yaml
+Feature: Log Rotation
+  description: Rotate logs when they exceed size limit
+  test:
+    - setup_files:
+        "app.log": "x" * 1000000  # 1MB file
+      call: rotate_logs("app.log", max_size: 500000)
+      assert:
+        - file_exists("app.log.1")
+        - file_size("app.log") < 500000
+        
+    - setup_files:
+        "app.log": "small content"
+      call: rotate_logs("app.log", max_size: 500000)
+      assert:
+        - not file_exists("app.log.1")  # No rotation needed
+```
+
+File tests automatically:
+- Create temp directories
+- Set up fixture files
+- Clean up after tests
+
+### Common Assertion Types
+
+These assertions work across all test types:
+
+**Value assertions**
+```yaml
+assert:
+  - result == expected          # Exact equality
+  - result != bad_value         # Inequality
+  - result > 0                  # Numeric comparison
+  - result contains "substring" # String/list contains
+  - result matches r"\d+"       # Regex match
+  - result is_empty             # Empty check
+  - len(result) == 5            # Length check
+```
+
+**Type assertions**
+```yaml
+assert:
+  - result is_string
+  - result is_int
+  - result is_list
+  - result is_map
+  - result is_json              # Valid JSON string
+  - result is_none              # None/null value
+```
+
+**Error assertions**
+```yaml
+assert:
+  - throws: ErrorType           # Specific error
+  - throws                      # Any error
+  - not throws                  # No error (success)
+  - error_message contains "invalid"
+```
+
+**Timing assertions**
+```yaml
+assert:
+  - duration < 100ms            # Performance check
+  - duration > 0ms              # Actually ran
+```
+
+### Data Schema Validation
+
+For data structures defined in the intent:
+
+```yaml
+Data: sites
+  type: map
+  required_keys: [bear_lake, wild_basin, copeland_lake]
+  value_type: string (URL format)
+```
+
+Engine executes:
+```
+1. Find "sites" definition in code
+2. Extract keys: ["bear_lake", "wild_basin"]
+3. Compare: missing "copeland_lake"
+4. Report: WARN - missing required key
+```
+
+### Constraint Tests
+
+For non-functional requirements:
+
+**Static analysis** (no runtime needed):
+```yaml
+Constraint: Single File
+  verify: all code in one .tnt file
+  
+# Engine: Count .tnt files, check == 1
+```
+
+**Runtime analysis**:
+```yaml
+Constraint: Fast Startup
+  verify: program starts in under 100ms
+  
+# Engine: Time startup, check < 100ms
+```
+
+**Resource analysis**:
+```yaml
+Constraint: Memory Efficient
+  verify: peak memory under 50MB
+  
+# Engine: Monitor memory during test run
+```
+
+### Mock and Simulation
+
+For testing error handling and edge cases:
+
+```bash
+$ ntnt intent check myapp.tnt --mock
+```
+
+Engine can simulate:
+- Network failures (timeouts, connection refused)
+- External API errors (500s, rate limits)
+- File system issues (permission denied, disk full)
+- Database failures (connection lost, constraint violations)
+
+```yaml
+Feature: Graceful Degradation
+  test:
+    - call: fetch_weather()
+      mock:
+        http("api.weather.com"): timeout
+      assert:
+        - result == default_weather
+        - log contains "API timeout, using cached data"
+```
+
+### Test Isolation
+
+Each test runs in isolation:
+- Fresh program instance per test
+- No shared state between tests
+- Database tests use transactions (rolled back)
+- File tests use temp directories (cleaned up)
+- Environment variables reset between tests
+
+### Parallel Execution
+
+For speed, independent tests run in parallel:
+
+```bash
+$ ntnt intent check app.tnt --parallel
+
+Running 12 tests across 4 workers...
+[====================================] 100%
+
+Results: 12/12 passed (2.3s)
+```
+
+### Failure Output
+
+When tests fail, the engine provides actionable output:
+
+```
+[FAIL] Feature: CSV Parsing (2/3 tests passed)
+
+  ✓ parse_csv with valid data returns records
+  ✓ parse_csv with empty string returns []
+  ✗ parse_csv with invalid data throws ParseError
+  
+    Expected: throws ParseError
+    Actual:   returned [{"data": "missing"}] (no error)
+    
+    Hint: Intent says "invalid CSV should throw ParseError"
+          but implementation silently handles malformed data.
+    
+    Intent location: csvlib.intent:23 (CSV Parsing)
+    Code location:   csvlib.tnt:45 (parse_csv)
+```
+
+---
+
+## Handling Undocumented Code
+
+Not every line of code maps to a feature. The system handles this gracefully.
+
+### Default Behavior: Warn, Don't Fail
+
+Code without `@implements` or `@supports` annotations is **allowed but flagged**:
+
+```
+$ ntnt intent coverage snowgauge.tnt
+
+Code Linkage Report
+
+Linked (documented purpose):
+  ✓ home_handler          @implements: feature.site_selection
+  ✓ fetch_snow_data       @implements: feature.snow_display
+  ✓ render_chart          @implements: feature.chart
+
+Unlinked (review recommended):
+  ? extract_snotel_name   No annotation - consider @utility or @supports
+  ? parse_csv_row         No annotation - consider @utility or @supports
+  ? format_inches         No annotation - consider @utility or @supports
+
+Coverage: 50% (3/6 functions)
+Status: PASS with warnings
+```
+
+Key points:
+- **Doesn't fail the build** - unlinked code is allowed
+- **Generates warnings** - so it's visible for review
+- **Suggests actions** - add annotation or review if needed
+
+### Suppressing Warnings
+
+For intentionally undocumented code, use markers:
+
+```ntnt
+// @utility - helper function, no specific feature
+fn format_inches(value: Float) -> String {
+    return str(round(value, 1)) + "\""
+}
+
+// @internal - implementation detail, not user-facing
+fn parse_csv_row(line: String) -> List[String] {
+    return split(line, ",")
+}
+
+// @deprecated - legacy code, will be removed
+fn old_snow_parser(data: String) -> Map {
+    // ...
+}
+```
+
+These markers tell the coverage tool "I know this isn't linked, and that's intentional."
+
+### Coverage Report Categories
+
+The full coverage report shows:
+
+```
+$ ntnt intent coverage snowgauge.tnt --detailed
+
+═══════════════════════════════════════════════════
+  Intent Coverage Report: snowgauge.tnt
+═══════════════════════════════════════════════════
+
+FEATURE IMPLEMENTATIONS (@implements: feature.*)
+──────────────────────────────────────────────────
+  ✓ home_handler        → feature.site_selection
+  ✓ fetch_snow_data     → feature.snow_display  
+  ✓ render_chart        → feature.chart
+  
+SUPPORTING CODE (@supports: *)
+──────────────────────────────────────────────────
+  ✓ log_request         → feature.site_selection, feature.snow_display
+  ✓ db_pool             → infra.database
+
+UTILITY CODE (@utility)
+──────────────────────────────────────────────────
+  ○ format_inches       (documented as utility)
+  ○ parse_csv_row       (documented as utility)
+
+UNLINKED CODE (needs review)
+──────────────────────────────────────────────────
+  ? extract_snotel_name   Line 45 - no annotation
+  ? validate_input        Line 89 - no annotation
+  
+──────────────────────────────────────────────────
+Summary:
+  Feature coverage:  100% (3/3)
+  Code linkage:      75% (6/8 functions documented)
+  Unlinked:          2 functions need review
+  
+Status: PASS (warnings present)
+```
+
+### Configuration Options
+
+Control strictness via config:
+
+```yaml
+# .ntnt/config.yaml
+
+intent:
+  # How to handle unlinked code
+  unlinked_code: warn    # warn (default), allow, deny
+  
+  # Minimum coverage threshold
+  min_coverage: 80%      # Fail if below this
+  
+  # Require all public functions to be linked
+  require_public_linked: true
+  
+  # Ignore patterns (never warn about these)
+  ignore_patterns:
+    - "*_test"           # Test helpers
+    - "debug_*"          # Debug functions
+```
+
+### Strictness Levels
+
+Different projects need different strictness:
+
+**Relaxed** (prototyping, learning):
+```yaml
+intent:
+  unlinked_code: allow
+  min_coverage: 0%
+```
+
+**Standard** (most projects):
+```yaml
+intent:
+  unlinked_code: warn
+  min_coverage: 50%
+```
+
+**Strict** (production, compliance):
+```yaml
+intent:
+  unlinked_code: deny
+  min_coverage: 90%
+  require_public_linked: true
+```
+
+### Why Not Require Everything?
+
+Some code legitimately has no feature mapping:
+- Generic utilities (string formatting, math helpers)
+- Framework boilerplate (setup, teardown)
+- Generated code (scaffolding)
+- Debug/development helpers
+
+Requiring annotations for everything would:
+- Create friction for simple changes
+- Generate meaningless annotations ("this formats a string")
+- Discourage refactoring into small functions
+
+The **warn by default** approach balances:
+- Visibility (you know what's not linked)
+- Pragmatism (doesn't block legitimate code)
+- Intentionality (you can document if needed)
+
+---
+
 ## The Workflow
 
 ### Phase 1: Collaborative Intent Design
@@ -761,6 +1306,234 @@ Day 3: "Actually, change that..."
 
 ---
 
+## Team Collaboration
+
+IDD isn't just about human-agent collaboration—it fundamentally changes how **humans collaborate with each other** on software teams.
+
+### The Clarity Problem
+
+Most software projects suffer from fuzzy requirements:
+
+- **Product managers** write user stories that engineers interpret differently
+- **Stakeholders** have expectations that never get documented
+- **Engineers** make assumptions that don't match business needs
+- **QA** tests against their understanding, which may differ from everyone else's
+
+The result: endless meetings, rework, and "that's not what I meant."
+
+### How IDD Forces Clarity
+
+The intent file requires you to answer hard questions **upfront**:
+
+| Vague Requirement | Intent Forces You to Specify |
+|-------------------|------------------------------|
+| "Users can filter results" | Filter by what? Which fields? Multiple filters? Default state? |
+| "Fast performance" | What's fast? Under what load? Measured how? |
+| "Mobile-friendly" | Responsive? Native? What breakpoints? Touch targets? |
+| "Handle errors gracefully" | Which errors? What message? Retry? Fallback? |
+
+You can't write a testable assertion for "fast performance." You CAN write one for "GET /api/users returns within 200ms for 1000 concurrent users."
+
+### Role-by-Role Impact
+
+#### Product Managers
+
+**Before IDD:**
+```
+User Story: As a user, I want to select my location so I can see local data.
+
+Acceptance Criteria:
+- User can select location
+- Shows local data
+```
+
+**With IDD:**
+```intent
+### Feature: Location Selection
+id: location_selection
+Priority: Must Have
+
+Users select their location to see locally-relevant weather data.
+
+Behavior:
+- Dropdown shows all available locations (sorted alphabetically)
+- Selection persists in URL as ?location=<key>
+- Invalid/missing location falls back to "denver" (not error page)
+- Current location highlighted in dropdown
+
+Tests:
+- GET /?location=boulder -> 200, contains "Boulder"
+- GET /?location=invalid -> 200, contains "Denver"
+- GET / -> 200, contains "Denver"
+```
+
+**The difference:** PM must think through edge cases (invalid location), defaults, persistence, and UI behavior. No ambiguity for engineers to interpret.
+
+**Benefits for PMs:**
+- Forces complete thinking before development starts
+- Creates a reviewable artifact stakeholders can approve
+- Reduces "that's not what I meant" moments
+- Provides clear acceptance criteria that aren't subjective
+
+#### Stakeholders (Executives, Clients, Business Owners)
+
+**Before IDD:**
+- Review PRDs full of jargon
+- See demos and say "that's not right"
+- Can't verify the software meets requirements without using it
+- Trust that engineers interpreted requirements correctly
+
+**With IDD:**
+```
+$ ntnt intent check app.tnt
+
+Features:
+  ✅ Location Selection (4/4 tests)
+  ✅ Weather Display (3/3 tests)
+  ✅ 7-Day Forecast (2/2 tests)
+  
+All requirements verified.
+```
+
+**Benefits for stakeholders:**
+- Readable intent file serves as living documentation
+- Verification report proves requirements are met
+- Don't need to understand code to trust the software
+- Can review and edit requirements directly (it's just text)
+
+#### Software Engineers
+
+**Before IDD:**
+- Interpret vague requirements
+- Make assumptions, hope they're right
+- Get requirements changed mid-sprint
+- Argue about what "done" means
+
+**With IDD:**
+- Clear, testable requirements before coding starts
+- Know exactly when a feature is complete (tests pass)
+- Push back on vague requirements: "What should the test be?"
+- Automated verification = confidence to refactor
+
+**Benefits for engineers:**
+- Less time in meetings clarifying requirements
+- Unambiguous definition of "done"
+- Refactor fearlessly—intent tests catch regressions
+- Focus on implementation, not interpretation
+
+#### QA / Testers
+
+**Before IDD:**
+- Write test cases from their interpretation of requirements
+- Discover edge cases during testing that were never specified
+- "Is this a bug or a feature?" debates
+
+**With IDD:**
+- Intent file IS the test specification
+- Edge cases must be specified upfront
+- No ambiguity about expected behavior
+- Can focus on exploratory testing beyond the intent
+
+### Team Dynamics Transformation
+
+#### Fewer "Lost in Translation" Moments
+
+Traditional flow:
+```
+Stakeholder → PM → Jira Ticket → Engineer → Code → QA → Bug?
+     ↓          ↓         ↓           ↓
+  (interpretation at each step, meaning drifts)
+```
+
+IDD flow:
+```
+Stakeholder + PM + Engineer → Intent File → Code → Verification
+                                  ↓
+                         (single source of truth)
+```
+
+#### Conversations Happen Earlier
+
+Without IDD, hard conversations happen during code review or QA:
+- "That's not what I meant"
+- "We didn't think about that case"
+- "This requirement is impossible"
+
+With IDD, these conversations happen during intent review:
+- "Can we actually test 'fast performance'? Let's define it."
+- "What happens if the API is down? We need to specify."
+- "This feature is too complex—can we split it?"
+
+#### The Intent Review Meeting
+
+New team ritual: **Intent Review** (replaces requirements review)
+
+1. PM drafts intent file
+2. Team reviews together (PM, engineer, QA, stakeholder)
+3. Discussion focuses on testable assertions:
+   - "Can we verify this?"
+   - "What are the edge cases?"
+   - "Is this priority right?"
+4. Everyone agrees before coding starts
+5. Intent file is committed—it's now the contract
+
+**Result:** Alignment happens before work begins, not during firefighting.
+
+### The Glossary as Shared Language
+
+The Glossary section of the intent file creates **shared vocabulary**:
+
+```intent
+## Glossary
+
+Location: A geographic area with its own weather data (e.g., "Boulder", "Denver")
+
+Active Location: The currently selected location, shown in the header
+
+Default Location: "Denver" - used when no location specified or invalid location given
+
+Weather Data: Temperature, conditions, humidity, wind for a location
+```
+
+**Why this matters:**
+- No more "when you say X, do you mean Y?"
+- New team members learn domain language quickly
+- Agents understand the business domain
+- Reduces miscommunication across roles
+
+### Accountability and Traceability
+
+Intent file + git = clear accountability:
+
+```bash
+$ git log --oneline intent/app.intent
+
+a1b2c3d PM: Add "offline mode" feature (stakeholder request)
+d4e5f6g Eng: Clarify cache invalidation behavior
+g7h8i9j PM: Remove "dark mode" (descoped for v1)
+j0k1l2m Team: Initial intent for weather app
+```
+
+- Every requirement change is tracked
+- Know who added/changed what requirement
+- No "who decided this?" mysteries
+- Audit trail for compliance if needed
+
+### Impact Summary
+
+| Before IDD | With IDD |
+|------------|----------|
+| Requirements interpreted differently by each person | Single source of truth everyone references |
+| Edge cases discovered during testing | Edge cases specified upfront |
+| "Done" is subjective | "Done" = all intent tests pass |
+| Documentation is separate artifact that gets stale | Intent file IS documentation, always current |
+| Stakeholders trust but can't verify | Stakeholders can run verification themselves |
+| Hard conversations happen late (expensive) | Hard conversations happen early (cheap) |
+| Engineers guess at PM's intent | Engineers implement explicit specifications |
+| QA writes tests from their interpretation | Intent file IS the test specification |
+
+---
+
 ## Code Integration
 
 ### @implements Annotations
@@ -787,11 +1560,275 @@ let sites = map {
 }
 ```
 
+### Intent Identifiers
+
+Each intent item has a **stable identifier** that links to code annotations.
+
+#### Identifier Format
+
+```
+<type>.<id>
+
+Types:
+  feature.   - Features from ## Features section
+  data.      - Schemas/instances from ## Data section
+  constraint. - Constraints from ## Constraints section
+```
+
+#### How IDs Are Assigned
+
+**Option A: Explicit IDs (Recommended)**
+
+Intent file explicitly declares the ID:
+
+```intent
+### Feature: Site Selection
+id: site_selection
+Priority: Must Have
+
+Users can select which site to view...
+```
+
+The `id:` field is the stable identifier. The human-readable name can change freely.
+
+**Option B: Derived IDs (Fallback)**
+
+If no explicit `id:` is provided, derive from the name:
+1. Take the feature name after "Feature: " (e.g., "Site Selection")
+2. Lowercase it
+3. Replace spaces with underscores
+4. Remove special characters
+
+"Site Selection" → `site_selection`
+"30-Day Chart" → `30_day_chart`
+
+#### What Happens When Names Change?
+
+| Scenario | With Explicit ID | With Derived ID |
+|----------|------------------|-----------------|
+| Rename "Site Selection" to "Location Picker" | No code changes needed (id stays `site_selection`) | Must update all `@implements: feature.site_selection` annotations |
+| Add new feature | Add new `id:` | Works automatically |
+| Typo fix in name | No impact | Breaks all links |
+
+**Recommendation:** Always use explicit IDs for stability. The human-readable name is for humans; the ID is for machines.
+
+#### Validation on Name Change
+
+When `ntnt intent check` runs and detects a derived ID changed:
+
+```
+$ ntnt intent check app.tnt
+
+WARNING: Intent ID may have changed
+  "Site Selection" → "Location Picker"
+  Old ID: feature.site_selection
+  New ID: feature.location_picker
+  
+  3 annotations reference old ID:
+    - app.tnt:15  @implements: feature.site_selection
+    - app.tnt:42  @implements: feature.site_selection
+    - app.tnt:78  @implements: feature.site_selection
+
+  Options:
+    1. Add explicit id: site_selection to preserve links
+    2. Update annotations to feature.location_picker
+    3. Run: ntnt intent rename site_selection location_picker
+```
+
+#### The Rename Command
+
+```bash
+$ ntnt intent rename feature.site_selection feature.location_picker
+
+Updated 3 annotations in app.tnt
+Updated intent file with explicit id: location_picker
+```
+
 ### Benefits of Annotations
 
 1. **Traceability**: Know which code implements which intent
 2. **Coverage**: Find unlinked code that might be dead
 3. **Refactoring safety**: Know what intent an edit might affect
+
+### Utility Code and Shared Infrastructure
+
+Not all code maps directly to a single feature. IDD accommodates several patterns:
+
+#### Pattern 1: Utility Functions (No Annotation Needed)
+
+General-purpose helpers don't need `@implements` annotations:
+
+```ntnt
+// No annotation - this is a pure utility function
+fn format_date(timestamp) {
+    return format(timestamp, "YYYY-MM-DD")
+}
+
+// No annotation - generic CSV parsing
+fn parse_csv_row(line) {
+    return split(line, ",")
+}
+
+// No annotation - string helper
+fn slugify(text) {
+    return replace(to_lower(text), " ", "_")
+}
+```
+
+**Rule of thumb:** If a function could be copy-pasted into a completely different app and still make sense, it's a utility and doesn't need an annotation.
+
+#### Pattern 2: Multiple Features (Multiple Annotations)
+
+When code implements multiple features, list them all:
+
+```ntnt
+// @implements: feature.snow_display
+// @implements: feature.chart
+// @implements: feature.data_export
+fn home_handler(req) {
+    let data = fetch_snow_data(req)
+    
+    // This one handler serves all three features
+    return html(render_page(data))
+}
+```
+
+#### Pattern 3: Shared Infrastructure (Use `infra.` Type)
+
+For code that supports multiple features but isn't a utility, use the `infra.` type:
+
+```ntnt
+// @implements: infra.data_fetching
+fn fetch_snow_data(site_key) {
+    let url = sites[site_key].url
+    return fetch(url).body
+}
+
+// @implements: infra.error_handling
+fn handle_api_error(error) {
+    log_error(error)
+    return html(error_page())
+}
+
+// @implements: infra.caching
+let cache = map {}
+fn get_cached(key, fetch_fn) {
+    if !has_key(cache, key) {
+        cache[key] = fetch_fn()
+    }
+    return cache[key]
+}
+```
+
+Define infrastructure in the intent file:
+
+```intent
+## Infrastructure
+
+### Infra: Data Fetching
+id: data_fetching
+
+Centralized data fetching from SNOTEL API.
+
+Used by: feature.snow_display, feature.chart, feature.comparison
+
+---
+
+### Infra: Error Handling
+id: error_handling
+
+Graceful handling of API failures and invalid input.
+
+Used by: All features
+```
+
+#### Pattern 4: Indirect Support (Use `supports.` Annotation)
+
+When code doesn't directly implement a feature but is required by it:
+
+```ntnt
+// @supports: feature.chart
+fn calculate_trend(data_points) {
+    // This doesn't render the chart, but the chart needs it
+    let sum = 0
+    for point in data_points {
+        sum = sum + point.value
+    }
+    return sum / len(data_points)
+}
+
+// @supports: feature.snow_display
+// @supports: feature.comparison
+fn extract_site_name(csv_header) {
+    // Parsing helper used by display features
+    return trim(split(csv_header, "#")[1])
+}
+```
+
+The difference:
+- `@implements` = "This code IS the feature"
+- `@supports` = "This code is used BY the feature"
+
+#### Coverage Report with Code Categories
+
+The coverage report distinguishes between code types:
+
+```
+$ ntnt intent coverage app.tnt
+
+Intent Coverage Report
+═══════════════════════════════════════════════════════
+
+Features:
+  site_selection     ✅ Implemented    get_site_from_params()
+  snow_display       ✅ Implemented    home_handler()
+  chart              ✅ Implemented    home_handler(), render_chart()
+
+Infrastructure:
+  data_fetching      ✅ Implemented    fetch_snow_data()
+  error_handling     ✅ Implemented    handle_api_error()
+
+Supporting Code (has @supports):
+  calculate_trend()        → feature.chart
+  extract_site_name()      → feature.snow_display, feature.comparison
+
+Utility Code (no annotation, expected):
+  format_date()
+  parse_csv_row()
+  slugify()
+
+Unlinked Code (review these):
+  mysterious_function()    ← Consider adding annotation or removing
+  old_handler()            ← Possibly dead code?
+
+═══════════════════════════════════════════════════════
+Feature Coverage:   100% (3/3)
+Infra Coverage:     100% (2/2)
+Code Linkage:       85% (17/20 functions linked or utility)
+```
+
+#### When to Use What
+
+| Code Type | Annotation | Example |
+|-----------|------------|---------|
+| Directly implements a feature | `@implements: feature.X` | Route handlers, main logic |
+| Implements multiple features | Multiple `@implements` | Shared handlers |
+| Shared infrastructure | `@implements: infra.X` | Caching, logging, auth |
+| Helper used by features | `@supports: feature.X` | Calculations, parsing |
+| Generic utility | None | Date formatting, string helpers |
+| Dead code | None (flagged in report) | Old functions to remove |
+
+#### The "Unlinked Code" Question
+
+When coverage reports show unlinked code, ask:
+
+1. **Is it a utility?** → Leave it unannotated, it's fine
+2. **Does it support a feature?** → Add `@supports`
+3. **Is it infrastructure?** → Add `@implements: infra.X`
+4. **Is it dead code?** → Delete it
+5. **Is it a missing feature?** → Add feature to intent file
+
+The goal isn't 100% annotation coverage—it's that every piece of code has a clear reason to exist.
 
 ---
 
