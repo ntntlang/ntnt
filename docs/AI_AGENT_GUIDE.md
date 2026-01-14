@@ -182,14 +182,14 @@ Use \{{ and \}} to output literal double braces.
 
 **Template String Rules:**
 
-| Syntax                   | Result                       |
-| ------------------------ | ---------------------------- |
-| `{{expr}}`               | Interpolate expression       |
-| `{ ... }`                | Literal (CSS/JS safe)        |
-| `{{#for x in arr}}...{{/for}}` | Loop over array        |
-| `{{#if cond}}...{{/if}}` | Conditional                  |
-| `{{#if cond}}...{{#else}}...{{/if}}` | If-else            |
-| `\{{` and `\}}`          | Literal `{{` and `}}`        |
+| Syntax                               | Result                 |
+| ------------------------------------ | ---------------------- |
+| `{{expr}}`                           | Interpolate expression |
+| `{ ... }`                            | Literal (CSS/JS safe)  |
+| `{{#for x in arr}}...{{/for}}`       | Loop over array        |
+| `{{#if cond}}...{{/if}}`             | Conditional            |
+| `{{#if cond}}...{{#else}}...{{/if}}` | If-else                |
+| `\{{` and `\}}`                      | Literal `{{` and `}}`  |
 
 ### 6. Truthy/Falsy Values
 

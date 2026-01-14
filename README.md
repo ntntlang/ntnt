@@ -44,6 +44,8 @@ ntnt --help              # See all commands
 ntnt repl                # Interactive REPL
 ntnt validate examples/  # Check for errors (JSON output)
 ntnt inspect api.tnt     # Project structure as JSON
+ntnt test api.tnt --get /users --post /users --body 'name=Alice'
+                         # Test HTTP endpoints automatically
 ```
 
 ## Why NTNT?
@@ -215,6 +217,7 @@ Every web application needs these. NTNT includes them:
 | HTTP Client    | `std/http`        | fetch, axios, got, node-fetch, ky      |
 | PostgreSQL     | `std/db/postgres` | pg, postgres.js, Prisma, Drizzle, Knex |
 | JSON           | `std/json`        | Built-in                               |
+| CSV            | `std/csv`         | csv-parse, papaparse, fast-csv         |
 | Time/Timezones | `std/time`        | moment, dayjs, date-fns, Luxon         |
 | Crypto         | `std/crypto`      | crypto, bcrypt, uuid libraries         |
 
@@ -298,12 +301,9 @@ One import. It works. The decision is made.
 - **File-Based Routing**: `routes()` for convention-over-configuration (routes/, lib/, middleware/ auto-discovery)
 - **Agent Tooling**: `ntnt inspect` (JSON introspection), `ntnt validate` (pre-run error checking)
 - **PostgreSQL**: `std/db/postgres` (connect, query, execute, transactions)
+- **CSV**: `std/csv` (parse, stringify with headers support)
 
-**238 passing tests** | **Version 0.1.8**
-
-**Next Up**: Phase 6 - Testing framework, contract-based test generation, intent annotations
-
-See [ROADMAP.md](ROADMAP.md) for the full 10-phase implementation plan.
+**Version 0.1.9** | See [ROADMAP.md](ROADMAP.md) for the complete 10-phase implementation plan.
 
 ## File Extension
 
@@ -613,6 +613,54 @@ let query = r#"
 "#;
 ```
 
+## Template Strings
+
+Triple-quoted template strings are perfect for HTML templates with dynamic content. They use `{{}}` for interpolation (CSS-safe—single `{}` pass through unchanged):
+
+```ntnt
+let name = "Alice"
+let items = ["apple", "banana", "cherry"]
+
+let page = """
+<!DOCTYPE html>
+<style>
+    h1 { color: blue; }
+</style>
+<body>
+    <h1>Hello, {{name}}!</h1>
+    <ul>
+    {{#for item in items}}
+        <li>{{item}}</li>
+    {{/for}}
+    </ul>
+</body>
+"""
+```
+
+**Template Features:**
+
+| Syntax | Description |
+|--------|-------------|
+| `{{expr}}` | Interpolate expression |
+| `{ ... }` | Literal braces (CSS/JS safe) |
+| `{{#for x in arr}}...{{/for}}` | Loop over array |
+| `{{#if cond}}...{{/if}}` | Conditional |
+| `{{#if cond}}...{{#else}}...{{/if}}` | If-else |
+| `\{{` and `\}}` | Literal `{{` and `}}` |
+
+```ntnt
+let logged_in = true
+let nav = """
+<nav>
+{{#if logged_in}}
+    <a href="/profile">Profile</a>
+{{#else}}
+    <a href="/login">Login</a>
+{{/if}}
+</nav>
+"""
+```
+
 ## Trait Bounds
 
 Constrain generic type parameters to types implementing specific traits:
@@ -728,10 +776,11 @@ math.log10(x)  // Base-10 log
 math.exp(x)    // e^x
 ```
 
-**std/collections** - Array utilities
+**std/collections** - Array and map utilities
 
 ```ntnt
 import { push, pop, first, last, reverse, slice, concat, is_empty } from "std/collections"
+import { keys, values, entries, has_key } from "std/collections"
 
 let arr = [1, 2, 3]
 let arr2 = push(arr, 4)        // [1, 2, 3, 4]
@@ -741,6 +790,21 @@ let sub = slice(arr2, 1, 3)    // [2, 3]
 match first(arr) {
     Some(v) => print("First: " + str(v)),
     None => print("Empty array")
+}
+
+// Map iteration
+let scores = map { "alice": 100, "bob": 85 }
+for key in keys(scores) {
+    print(key)                 // "alice", "bob"
+}
+for val in values(scores) {
+    print(val)                 // 100, 85
+}
+for entry in entries(scores) {
+    print(entry[0] + ": " + str(entry[1]))
+}
+if has_key(scores, "alice") {
+    print("Found alice!")
 }
 ```
 
@@ -858,6 +922,33 @@ match parse("[1, 2, 3]") {
     Ok(arr) => print(len(arr)),  // 3
     Err(e) => print("Error")
 }
+```
+
+**std/csv** - CSV parsing and stringification
+
+```ntnt
+import { parse, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
+
+// Parse CSV string (returns array of arrays)
+let csv_data = "name,age\nAlice,30\nBob,25"
+let rows = parse(csv_data)
+// rows = [["name", "age"], ["Alice", "30"], ["Bob", "25"]]
+
+// Parse with headers (returns array of maps)
+let records = parse_with_headers(csv_data)
+// records = [map { "name": "Alice", "age": "30" }, map { "name": "Bob", "age": "25" }]
+
+// Stringify array of arrays to CSV
+let data = [["name", "score"], ["Alice", "100"], ["Bob", "85"]]
+let csv_str = stringify(data)
+// "name,score\nAlice,100\nBob,85"
+
+// Stringify array of maps with headers
+let users = [
+    map { "name": "Alice", "age": "30" },
+    map { "name": "Bob", "age": "25" }
+]
+let csv_with_headers = stringify_with_headers(users, ["name", "age"])
 ```
 
 **std/time** - Time and date operations
@@ -998,23 +1089,25 @@ NTNT bridges the gap between AI's speed and consistency with human judgment and 
 
 ### Standard Library (import required)
 
-| Module            | Functions                                                      |
-| ----------------- | -------------------------------------------------------------- |
-| `std/string`      | split, join, trim, replace, contains, starts_with, ends_with   |
-|                   | to_upper, to_lower, char_at, substring                         |
-| `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E |
-| `std/collections` | push, pop, first, last, reverse, slice, concat, is_empty       |
-| `std/env`         | get_env, args, cwd                                             |
-| `std/fs`          | read_file, write_file, exists, mkdir, remove, readdir          |
-| `std/path`        | join, dirname, basename, extension, resolve, normalize         |
-| `std/json`        | parse, stringify, stringify_pretty                             |
-| `std/time`        | now, sleep, elapsed, format_timestamp, duration_secs           |
-| `std/crypto`      | sha256, hmac_sha256, uuid, random_bytes, hex_encode            |
-| `std/url`         | parse, encode, decode, build_query, join                       |
-| `std/http`        | get, post, put, delete, request, get_json, post_json           |
-| `std/http/server` | text, html, json, status, redirect + get, post, put, listen    |
-| `std/db/postgres` | connect, query, query_one, execute, begin, commit, rollback    |
-| `std/concurrent`  | channel, send, recv, try_recv, recv_timeout, close, sleep_ms   |
+| Module            | Functions                                                          |
+| ----------------- | ------------------------------------------------------------------ |
+| `std/string`      | split, join, trim, replace, contains, starts_with, ends_with       |
+|                   | to_upper, to_lower, char_at, substring                             |
+| `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E     |
+| `std/collections` | push, pop, first, last, reverse, slice, concat, is_empty           |
+|                   | keys, values, entries, has_key                                     |
+| `std/env`         | get_env, args, cwd                                                 |
+| `std/fs`          | read_file, write_file, exists, mkdir, remove, readdir              |
+| `std/path`        | join, dirname, basename, extension, resolve, normalize             |
+| `std/json`        | parse, stringify, stringify_pretty                                 |
+| `std/csv`         | parse, parse_with_headers, stringify, stringify_with_headers       |
+| `std/time`        | now, sleep, elapsed, format_timestamp, duration_secs               |
+| `std/crypto`      | sha256, hmac_sha256, uuid, random_bytes, hex_encode                |
+| `std/url`         | parse, encode, decode, build_query, parse_query, join              |
+| `std/http`        | get, post, put, delete, request, get_json, post_json               |
+| `std/http/server` | text, html, json, status, redirect + get, post, put, listen        |
+| `std/db/postgres` | connect, query, query_one, execute, begin, commit, rollback        |
+| `std/concurrent`  | channel, send, recv, try_recv, recv_timeout, close, sleep_ms       |
 
 ## PostgreSQL Database
 

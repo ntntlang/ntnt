@@ -105,16 +105,17 @@ let page = """
 
 **Template String Features:**
 
-| Syntax                   | Description                    |
-| ------------------------ | ------------------------------ |
-| `{{expr}}`               | Interpolate expression         |
-| `{ ... }`                | Literal braces (CSS/JS safe)   |
-| `{{#for x in arr}}...{{/for}}` | Loop over array          |
-| `{{#if cond}}...{{/if}}` | Conditional                    |
-| `{{#if cond}}...{{#else}}...{{/if}}` | If-else              |
-| `\{{` and `\}}`          | Literal `{{` and `}}`          |
+| Syntax                               | Description                  |
+| ------------------------------------ | ---------------------------- |
+| `{{expr}}`                           | Interpolate expression       |
+| `{ ... }`                            | Literal braces (CSS/JS safe) |
+| `{{#for x in arr}}...{{/for}}`       | Loop over array              |
+| `{{#if cond}}...{{/if}}`             | Conditional                  |
+| `{{#if cond}}...{{#else}}...{{/if}}` | If-else                      |
+| `\{{` and `\}}`                      | Literal `{{` and `}}`        |
 
 **Template Loops:**
+
 ```ntnt
 let users = ["Alice", "Bob", "Charlie"]
 let list = """
@@ -127,6 +128,7 @@ let list = """
 ```
 
 **Template Conditionals:**
+
 ```ntnt
 let logged_in = true
 let nav = """

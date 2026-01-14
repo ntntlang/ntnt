@@ -46,6 +46,12 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Defer statement
 - [x] Map literals with field access (dot notation)
 - [x] String interpolation and raw strings
+- [x] Template strings (`"""..."""` with `{{}}` interpolation, for loops, conditionals)
+- [x] Map iteration functions (`keys()`, `values()`, `entries()`, `has_key()`)
+- [x] Nested map inference (nested maps don't require `map` keyword inside `map {}`)
+- [x] Truthy/falsy values (0 is truthy, empty strings/arrays/maps are falsy)
+- [x] CSV parsing (`std/csv`)
+- [x] `ntnt test` command for HTTP endpoint testing
 
 ---
 
@@ -165,6 +171,13 @@ trait Comparable {
 - [x] Raw strings: `r"SELECT * FROM users"` and `r#"..."#`
 - [x] Range syntax: `0..10`, `0..=10`
 - [x] For-in loops: `for item in items { }`
+- [x] Nested map inference: `map { "a": { "b": 1 } }` (no inner `map` keyword needed)
+- [x] Map iteration: `keys(map)`, `values(map)`, `entries(map)`, `has_key(map, key)`
+- [x] Truthy/falsy values: 0 is truthy, empty strings/arrays/maps are falsy, None is falsy
+- [x] Template strings: `"""..."""` with `{{expr}}` interpolation (CSS-safe)
+  - `{{#for x in items}}...{{/for}}` for loops
+  - `{{#if cond}}...{{#else}}...{{/if}}` for conditionals
+  - `\{{` and `\}}` for literal double braces
 
 ```ntnt
 fn process_file(path: String) -> Result<Data, Error> {
@@ -419,8 +432,20 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] `std/json`: parse, stringify, stringify_pretty
 - [x] `std/time`: now, now_millis, now_nanos, sleep, elapsed, format_timestamp, duration_secs, duration_millis
 - [x] `std/crypto`: sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode
-- [x] `std/url`: parse, encode, encode_component, decode, build_query, join
+- [x] `std/url`: parse, encode, encode_component, decode, build_query, parse_query, join
 - [x] `std/http`: get, post, put, delete, patch, head, request, get_json, post_json
+- [x] `std/csv`: parse, parse_with_headers, stringify, stringify_with_headers
+
+### 5.8 CLI & Testing Tools ✅ COMPLETE
+
+- [x] `ntnt run` - Execute NTNT files
+- [x] `ntnt lint` / `ntnt validate` - Pre-run error checking with JSON output
+- [x] `ntnt inspect` - JSON introspection for agents (functions, routes, imports)
+- [x] `ntnt test` - HTTP endpoint testing (start server, make requests, validate responses)
+  - `--get /path`, `--post /path`, `--put /path`, `--delete /path`
+  - `--body 'key=value'` for form data
+  - `--verbose` for detailed output
+  - Automatic server startup and shutdown
 
 **Phase 5 Deliverables:**
 
@@ -432,8 +457,12 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] Hot-reload on file changes (mtime-based, no dependencies)
 - [x] `ntnt inspect` - JSON introspection for agents
 - [x] `ntnt validate` - Pre-run error checking
+- [x] `ntnt test` - HTTP endpoint testing (auto start/stop server)
 - [x] PostgreSQL database driver (`std/db/postgres`)
-- [x] JSON, time, crypto, URL utilities
+- [x] JSON, time, crypto, URL, CSV utilities
+- [x] Template strings with `{{}}` interpolation
+- [x] Map iteration functions (`keys`, `values`, `entries`, `has_key`)
+- [x] Truthy/falsy value semantics
 
 ---
 
