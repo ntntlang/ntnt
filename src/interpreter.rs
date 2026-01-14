@@ -586,6 +586,22 @@ impl Interpreter {
             },
         );
 
+        // Trunc (truncate toward zero)
+        self.environment.borrow_mut().define(
+            "trunc".to_string(),
+            Value::NativeFunction {
+                name: "trunc".to_string(),
+                arity: 1,
+                func: |args| {
+                    match &args[0] {
+                        Value::Int(n) => Ok(Value::Int(*n)),
+                        Value::Float(f) => Ok(Value::Int(f.trunc() as i64)),
+                        _ => Err(IntentError::TypeError("trunc() requires a number".to_string())),
+                    }
+                },
+            },
+        );
+
         // Square root
         self.environment.borrow_mut().define(
             "sqrt".to_string(),

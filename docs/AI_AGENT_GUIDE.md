@@ -414,7 +414,9 @@ print(response.body)      // ERROR if fetch() returned Err
 | `max(a, b)`                                         | Maximum of two values       |
 | `sqrt(x)`                                           | Square root                 |
 | `pow(base, exp)`                                    | Exponentiation              |
-| `round(x)`, `floor(x)`, `ceil(x)`                   | Rounding                    |
+| `round(x)`, `floor(x)`, `ceil(x)`, `trunc(x)`       | Rounding functions          |
+| `sign(x)`                                           | Sign (-1, 0, or 1)          |
+| `clamp(x, min, max)`                                | Clamp to range              |
 | `Some(v)`, `None`                                   | Option constructors         |
 | `Ok(v)`, `Err(e)`                                   | Result constructors         |
 | `unwrap(x)`, `unwrap_or(x, default)`                | Unwrap helpers              |
@@ -450,6 +452,10 @@ import { parse, stringify, stringify_pretty } from "std/json"
 
 // CSV
 import { parse, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
+
+// Math (trig, log, random)
+import { sin, cos, tan, atan2, log, exp, PI, E } from "std/math"
+import { random, random_int, random_range } from "std/math"
 
 // Time
 import { now, format, add_days, add_months } from "std/time"

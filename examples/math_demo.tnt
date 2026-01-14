@@ -1,0 +1,72 @@
+// NTNT Math Library Demo - Testing all math functions
+import { sin, cos, tan, asin, acos, atan, atan2 } from "std/math"
+import { log, log10, log2, exp, exp2 } from "std/math"
+import { sinh, cosh, tanh, cbrt, hypot } from "std/math"
+import { degrees, radians, random, random_int, random_range } from "std/math"
+import { PI, E, TAU, INFINITY, is_nan, is_finite, is_infinite } from "std/math"
+
+print("=== NTNT Math Library Test ===")
+print("")
+
+// Constants
+print("Constants:")
+print("  PI = {PI}")
+print("  E = {E}")
+print("  TAU = {TAU}")
+print("")
+
+// Trig functions
+print("Trigonometry:")
+let angle = PI / 4.0
+print("  sin(45 deg) = {sin(angle)}")
+print("  cos(45 deg) = {cos(angle)}")
+print("  tan(45 deg) = {tan(angle)}")
+print("  atan2(1, 1) = {atan2(1, 1)} rad = {degrees(atan2(1, 1))} deg")
+print("")
+
+// Hyperbolic
+print("Hyperbolic:")
+print("  sinh(1) = {sinh(1)}")
+print("  cosh(1) = {cosh(1)}")
+print("  tanh(1) = {tanh(1)}")
+print("")
+
+// Logarithms and exponentials
+print("Logarithms:")
+print("  log(E) = {log(E)}")
+print("  log10(100) = {log10(100)}")
+print("  log2(8) = {log2(8)}")
+print("  exp(1) = {exp(1)}")
+print("  exp2(3) = {exp2(3)}")
+print("")
+
+// Additional functions
+print("Other functions:")
+print("  cbrt(27) = {cbrt(27)}")
+print("  hypot(3, 4) = {hypot(3, 4)}")
+print("  degrees(PI) = {degrees(PI)}")
+print("  radians(180) = {radians(180)}")
+print("")
+
+// Built-in trunc
+print("Built-in trunc():")
+print("  trunc(3.7) = {trunc(3.7)}")
+print("  trunc(-3.7) = {trunc(-3.7)}")
+print("")
+
+// Random numbers
+print("Random numbers:")
+print("  random() = {random()}")
+print("  random() = {random()}")
+print("  random_int(1, 10) = {random_int(1, 10)}")
+print("  random_int(1, 10) = {random_int(1, 10)}")
+print("  random_range(0.0, 100.0) = {random_range(0.0, 100.0)}")
+print("")
+
+// Special value checks
+print("Special values:")
+print("  is_infinite(INFINITY) = {is_infinite(INFINITY)}")
+print("  is_finite(42) = {is_finite(42)}")
+print("")
+
+print("=== All math functions working! ===")

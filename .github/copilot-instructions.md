@@ -237,7 +237,7 @@ execute(db, "INSERT INTO users (age) VALUES ($1)", [age])
 
 ### Built-in (no import)
 
-`print`, `len`, `str`, `int`, `float`, `abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `Some`, `None`, `Ok`, `Err`, `unwrap`, `unwrap_or`, `is_some`, `is_none`, `is_ok`, `is_err`
+`print`, `len`, `str`, `int`, `float`, `abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `trunc`, `sign`, `clamp`, `Some`, `None`, `Ok`, `Err`, `unwrap`, `unwrap_or`, `is_some`, `is_none`, `is_ok`, `is_err`
 
 ### Environment Variables
 
@@ -296,6 +296,7 @@ import { connect, query, execute, close } from "std/db/postgres"
 import { read_file, write_file, exists } from "std/fs"
 import { parse, stringify } from "std/json"
 import { parse, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
+import { sin, cos, tan, atan2, log, exp, random, random_int, PI, E } from "std/math"
 import { now, format } from "std/time"
 import { get_env } from "std/env"
 import { channel, send, recv } from "std/concurrent"
