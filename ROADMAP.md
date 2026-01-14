@@ -947,6 +947,32 @@ fn handle_request(req: Request) -> Response {
 
 These features are valuable but not essential for the initial release:
 
+### Pipeline Operator (`|>`)
+
+Functional-style data transformation chaining (like Elixir, F#, OCaml):
+
+```ntnt
+// Current (nested, reads inside-out)
+let result = filter(map(split(data, "\n"), trim), fn(x) { len(x) > 0 })
+
+// With pipeline (linear, reads left-to-right)
+let result = data
+    |> split("\n")
+    |> map(trim)
+    |> filter(fn(x) { len(x) > 0 })
+```
+
+**Why it helps:**
+- Linear data flow (reads like English)
+- Easier to insert/remove transformation steps
+- Self-documenting for agents and humans
+- Ideal for CSV/JSON processing, HTTP request chains
+
+**Implementation notes:**
+- `x |> f` desugars to `f(x)`
+- `x |> f(a, b)` desugars to `f(x, a, b)` (first argument insertion)
+- Low implementation effort (parser change + AST node)
+
 ### Session Types
 
 - Protocol definitions for typed communication
