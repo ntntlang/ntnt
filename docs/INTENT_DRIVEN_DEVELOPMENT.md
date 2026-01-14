@@ -641,10 +641,11 @@ The engine auto-detects the program type from the intent file or code:
 ```yaml
 # Intent file can declare type explicitly
 Meta:
-  type: http-server    # or: cli, library, script, worker, daemon
+  type: http-server # or: cli, library, script, worker, daemon
 ```
 
 If not declared, the engine infers type:
+
 - Imports `std/http_server` → HTTP server
 - Has `fn main()` with args → CLI tool
 - Exports public functions only → Library
@@ -664,17 +665,18 @@ Feature: CSV Parsing
         - result[0]["name"] == "Alice"
         - result[0]["age"] == "30"
         - len(result) == 1
-    
+
     - call: parse_csv("")
       assert:
         - result == []
-        
+
     - call: parse_csv("invalid\ndata,missing")
       assert:
         - throws: ParseError
 ```
 
 Engine executes:
+
 ```
 1. Import module
 2. Call parse_csv("name,age\nAlice,30")
@@ -697,12 +699,12 @@ Feature: File Search
         - exit_code: 0
         - stdout contains "found 3 files"
         - stdout contains "notes.txt"
-        
+
     - run: search "*.xyz" ./testdir
       assert:
         - exit_code: 0
         - stdout contains "found 0 files"
-        
+
     - run: search "*.txt" ./nonexistent
       assert:
         - exit_code: 1
@@ -710,6 +712,7 @@ Feature: File Search
 ```
 
 Engine executes:
+
 ```
 1. Create temp test directory with fixtures
 2. Run: ntnt run program.tnt search "*.txt" ./testdir
@@ -733,7 +736,7 @@ Feature: Data Migration
         - stdout is_json
         - stdout.json.migrated == true
         - stdout.json.data.value == 42
-        
+
     - run_with_files:
         input: "testdata/old_format.json"
         output: "testdata/expected_new.json"
@@ -754,7 +757,7 @@ Feature: Site Selection
         - status: 200
         - body contains "Bear Lake"
         - body contains "Wild Basin"
-        
+
     - request: POST /select
       body: "site=bear_lake"
       assert:
@@ -763,6 +766,7 @@ Feature: Site Selection
 ```
 
 Engine executes:
+
 ```
 1. Start server on random port
 2. GET http://localhost:54321/
@@ -787,7 +791,7 @@ Feature: Queue Processor
       assert:
         - processed_count == 3
         - error_count == 0
-        
+
     - start_worker
       with_queue: [valid_job, invalid_job, valid_job]
       wait_until: queue_empty
@@ -810,7 +814,7 @@ Feature: User Registration
       assert:
         - result.id > 0
         - query("SELECT * FROM users WHERE email = 'alice@test.com'").count == 1
-        
+
     - call: register_user("alice@test.com", "Duplicate")
       with_db: test_database
       assert:
@@ -818,6 +822,7 @@ Feature: User Registration
 ```
 
 Database tests automatically:
+
 - Use a test database or transactions
 - Roll back changes after each test
 - Provide query assertions
@@ -836,7 +841,7 @@ Feature: Log Rotation
       assert:
         - file_exists("app.log.1")
         - file_size("app.log") < 500000
-        
+
     - setup_files:
         "app.log": "small content"
       call: rotate_logs("app.log", max_size: 500000)
@@ -845,6 +850,7 @@ Feature: Log Rotation
 ```
 
 File tests automatically:
+
 - Create temp directories
 - Set up fixture files
 - Clean up after tests
@@ -854,42 +860,46 @@ File tests automatically:
 These assertions work across all test types:
 
 **Value assertions**
+
 ```yaml
 assert:
-  - result == expected          # Exact equality
-  - result != bad_value         # Inequality
-  - result > 0                  # Numeric comparison
+  - result == expected # Exact equality
+  - result != bad_value # Inequality
+  - result > 0 # Numeric comparison
   - result contains "substring" # String/list contains
-  - result matches r"\d+"       # Regex match
-  - result is_empty             # Empty check
-  - len(result) == 5            # Length check
+  - result matches r"\d+" # Regex match
+  - result is_empty # Empty check
+  - len(result) == 5 # Length check
 ```
 
 **Type assertions**
+
 ```yaml
 assert:
   - result is_string
   - result is_int
   - result is_list
   - result is_map
-  - result is_json              # Valid JSON string
-  - result is_none              # None/null value
+  - result is_json # Valid JSON string
+  - result is_none # None/null value
 ```
 
 **Error assertions**
+
 ```yaml
 assert:
-  - throws: ErrorType           # Specific error
-  - throws                      # Any error
-  - not throws                  # No error (success)
+  - throws: ErrorType # Specific error
+  - throws # Any error
+  - not throws # No error (success)
   - error_message contains "invalid"
 ```
 
 **Timing assertions**
+
 ```yaml
 assert:
-  - duration < 100ms            # Performance check
-  - duration > 0ms              # Actually ran
+  - duration < 100ms # Performance check
+  - duration > 0ms # Actually ran
 ```
 
 ### Data Schema Validation
@@ -904,6 +914,7 @@ Data: sites
 ```
 
 Engine executes:
+
 ```
 1. Find "sites" definition in code
 2. Extract keys: ["bear_lake", "wild_basin"]
@@ -916,26 +927,29 @@ Engine executes:
 For non-functional requirements:
 
 **Static analysis** (no runtime needed):
+
 ```yaml
 Constraint: Single File
   verify: all code in one .tnt file
-  
+
 # Engine: Count .tnt files, check == 1
 ```
 
 **Runtime analysis**:
+
 ```yaml
 Constraint: Fast Startup
   verify: program starts in under 100ms
-  
+
 # Engine: Time startup, check < 100ms
 ```
 
 **Resource analysis**:
+
 ```yaml
 Constraint: Memory Efficient
   verify: peak memory under 50MB
-  
+
 # Engine: Monitor memory during test run
 ```
 
@@ -948,6 +962,7 @@ $ ntnt intent check myapp.tnt --mock
 ```
 
 Engine can simulate:
+
 - Network failures (timeouts, connection refused)
 - External API errors (500s, rate limits)
 - File system issues (permission denied, disk full)
@@ -967,6 +982,7 @@ Feature: Graceful Degradation
 ### Test Isolation
 
 Each test runs in isolation:
+
 - Fresh program instance per test
 - No shared state between tests
 - Database tests use transactions (rolled back)
@@ -996,16 +1012,953 @@ When tests fail, the engine provides actionable output:
   ✓ parse_csv with valid data returns records
   ✓ parse_csv with empty string returns []
   ✗ parse_csv with invalid data throws ParseError
-  
+
     Expected: throws ParseError
     Actual:   returned [{"data": "missing"}] (no error)
-    
+
     Hint: Intent says "invalid CSV should throw ParseError"
           but implementation silently handles malformed data.
-    
+
     Intent location: csvlib.intent:23 (CSV Parsing)
     Code location:   csvlib.tnt:45 (parse_csv)
 ```
+
+---
+
+## Visual and Interactive Testing
+
+Many NTNT apps serve web frontends that include third-party technologies: HTML/CSS, JavaScript frameworks (React, Vue, Alpine.js), data visualization (Chart.js, D3.js, Three.js), video, WebGL, and more. These can't be tested with simple string assertions like `body contains "canvas"`. You need to verify:
+
+- "Does the chart actually render correctly?"
+- "Is the layout responsive on mobile?"
+- "Does the animation feel smooth?"
+- "Is the color scheme accessible?"
+
+### Multi-Layer Testing Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    INTENT TESTING LAYERS                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Layer 4: LLM Visual Verification (AI interprets screenshots)   │
+│     "Does this look like a snow depth chart?"                   │
+│     "Is the error message user-friendly?"                       │
+│                                                                  │
+│  Layer 3: Browser Automation (Puppeteer/Playwright)             │
+│     Click buttons, fill forms, measure performance              │
+│     Screenshot comparison, accessibility audits                  │
+│                                                                  │
+│  Layer 2: DOM Assertions (Structure verification)               │
+│     Element exists, has attributes, computed styles             │
+│                                                                  │
+│  Layer 1: HTTP Response (Current implementation)                │
+│     Status codes, headers, body content                         │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Layer 2: DOM Assertions
+
+Test the structure and properties of rendered HTML:
+
+```yaml
+Feature: Snow Chart
+  id: snow_chart
+
+  test "chart container exists":
+    request: GET /
+    browser:
+      - element "#snow-chart" exists
+      - element "#snow-chart" has_tag "canvas"
+      - element "#snow-chart" has_attribute "width"
+
+  test "chart has data":
+    request: GET /
+    browser:
+      - element ".chart-legend" exists
+      - elements ".data-point" count >= 30
+
+  test "responsive layout":
+    request: GET /
+    browser:
+      - viewport 375x667  # iPhone SE
+      - element "#snow-chart" width <= 375
+      - element ".nav-menu" is_visible false  # Collapsed on mobile
+    browser:
+      - viewport 1920x1080  # Desktop
+      - element ".nav-menu" is_visible true
+```
+
+**Implementation:** Uses headless browser (Puppeteer/Playwright) to render page and query DOM.
+
+### Layer 3: Browser Automation
+
+Test interactive behavior:
+
+```yaml
+Feature: Site Selection
+  id: site_selection
+
+  test "dropdown interaction":
+    request: GET /
+    browser:
+      - click "#site-selector"
+      - wait_for "#dropdown-menu" is_visible
+      - click "option[value='wild_basin']"
+      - wait_for_navigation
+      - url contains "?site=wild_basin"
+      - element "#site-name" text_content == "Wild Basin"
+
+  test "form submission":
+    request: GET /contact
+    browser:
+      - fill "#name" with "Alice"
+      - fill "#email" with "alice@example.com"
+      - fill "#message" with "Hello!"
+      - click "#submit-btn"
+      - wait_for ".success-message" is_visible
+      - element ".success-message" text_content contains "Thank you"
+
+  test "keyboard navigation":
+    request: GET /
+    browser:
+      - press "Tab" 3 times
+      - focused_element has_id "site-selector"
+      - press "Enter"
+      - element "#dropdown-menu" is_visible
+
+  test "animation performance":
+    request: GET /
+    browser:
+      - start_tracing
+      - click "#animate-btn"
+      - wait 2 seconds
+      - stop_tracing
+      - frame_rate >= 30  # Smooth animation
+      - largest_contentful_paint < 2500ms
+```
+
+### Layer 3.5: Accessibility Testing
+
+Built-in accessibility verification:
+
+```yaml
+Constraint: Accessibility
+  id: accessibility
+
+  test "WCAG compliance":
+    request: GET /
+    browser:
+      accessibility_audit:
+        - color_contrast >= 4.5  # WCAG AA
+        - all_images_have_alt true
+        - all_inputs_have_labels true
+        - heading_hierarchy valid
+        - no_empty_links true
+
+  test "screen reader friendly":
+    request: GET /
+    browser:
+      - element "#main-content" has_attribute "role" == "main"
+      - element "#nav" has_attribute "aria-label"
+      - elements "button" all_have_attribute "aria-label" or text_content
+
+  test "keyboard accessible":
+    request: GET /
+    browser:
+      - tab_order_matches ["#skip-link", "#nav", "#site-selector", "#main-content"]
+      - all_interactive_elements focusable
+      - no_keyboard_traps
+```
+
+### Layer 4: LLM Visual Verification
+
+Use AI to interpret visual output and verify subjective qualities:
+
+```yaml
+Feature: Snow Chart
+  id: snow_chart
+
+  test "chart renders correctly":
+    request: GET /
+    browser:
+      - screenshot "#snow-chart" as "chart.png"
+    llm_verify "chart.png":
+      prompt: |
+        This should be a line chart showing snow depth over time.
+        Verify:
+        - There is a line chart visible
+        - X-axis shows dates
+        - Y-axis shows depth in inches
+        - The line has data points (not empty)
+        - Colors are visible and distinguishable
+      confidence: 0.85  # Require 85% confidence
+
+  test "error state looks correct":
+    mock: SNOTEL returns 500
+    request: GET /
+    browser:
+      - screenshot "body" as "error.png"
+    llm_verify "error.png":
+      prompt: |
+        This should show a user-friendly error state.
+        Verify:
+        - There is an error message visible
+        - The message is polite/helpful (not technical jargon)
+        - The page layout is intact (not broken)
+        - There's a way to retry or go back
+      confidence: 0.80
+
+  test "mobile layout is usable":
+    request: GET /
+    browser:
+      - viewport 375x667
+      - screenshot "body" as "mobile.png"
+    llm_verify "mobile.png":
+      prompt: |
+        This should be a mobile-friendly layout.
+        Verify:
+        - Content is not cut off or overflowing
+        - Text is readable (not too small)
+        - Buttons/links are tap-friendly (not tiny)
+        - No horizontal scrolling required
+        - Navigation is accessible (hamburger menu or similar)
+      confidence: 0.80
+```
+
+### How LLM Verification Works
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   LLM VISUAL VERIFICATION                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. CAPTURE                                                      │
+│     Browser renders page → Screenshot taken → PNG/JPEG           │
+│                                                                  │
+│  2. PREPARE                                                      │
+│     Intent prompt + Screenshot → Multimodal LLM request          │
+│                                                                  │
+│  3. ANALYZE                                                      │
+│     LLM (GPT-4V, Claude Vision, Gemini) inspects image          │
+│     Returns: { "pass": true/false, "confidence": 0.92,          │
+│                "observations": [...], "issues": [...] }          │
+│                                                                  │
+│  4. DECIDE                                                       │
+│     if confidence >= threshold AND pass == true:                 │
+│         TEST PASSES                                              │
+│     else:                                                        │
+│         TEST FAILS with observations                             │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Example LLM interaction:**
+
+```json
+// Request to LLM
+{
+  "model": "gpt-4-vision-preview",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "image_url",
+          "image_url": { "url": "data:image/png;base64,..." }
+        },
+        {
+          "type": "text",
+          "text": "This should be a line chart showing snow depth over time. Verify: [criteria from intent]. Respond with JSON: {pass: bool, confidence: float, observations: string[], issues: string[]}"
+        }
+      ]
+    }
+  ]
+}
+
+// Response from LLM
+{
+  "pass": true,
+  "confidence": 0.94,
+  "observations": [
+    "Line chart is visible with blue line",
+    "X-axis shows dates from Dec 15 to Jan 14",
+    "Y-axis shows 'Snow Depth (inches)' with scale 0-60",
+    "Approximately 30 data points visible",
+    "Legend shows 'Bear Lake' label"
+  ],
+  "issues": []
+}
+```
+
+### Visual Regression Testing
+
+Compare screenshots over time to catch unintended changes:
+
+```yaml
+Constraint: Visual Consistency
+  id: visual_consistency
+
+  test "homepage hasn't changed unexpectedly":
+    request: GET /
+    browser:
+      - screenshot "body" as "current.png"
+    visual_diff "current.png" against "baseline/homepage.png":
+      threshold: 0.05  # Allow 5% pixel difference
+      ignore_regions: [".timestamp", ".dynamic-ad"]
+
+  test "chart style is consistent":
+    request: GET /
+    browser:
+      - screenshot "#snow-chart" as "chart-current.png"
+    visual_diff "chart-current.png" against "baseline/chart.png":
+      threshold: 0.10  # Charts may vary slightly with data
+
+# Update baseline when intentional changes are made:
+# ntnt intent update-baseline snow_chart
+```
+
+### Testing Third-Party Frameworks
+
+Specific patterns for common frameworks:
+
+```yaml
+# Chart.js
+Feature: Interactive Chart
+  id: interactive_chart
+
+  test "Chart.js initializes":
+    request: GET /
+    browser:
+      - wait_for_js "window.snowChart !== undefined"
+      - js_eval "window.snowChart.data.datasets.length" == 1
+      - js_eval "window.snowChart.data.labels.length" >= 30
+
+  test "chart tooltip works":
+    request: GET /
+    browser:
+      - hover "#snow-chart" at 50% 50%
+      - wait_for ".chartjs-tooltip" is_visible
+      - element ".chartjs-tooltip" text_content matches r"\d+ inches"
+```
+
+```yaml
+# Three.js / WebGL
+Feature: 3D Visualization
+  id: 3d_visualization
+
+  test "WebGL renders":
+    request: GET /3d-view
+    browser:
+      - wait_for_js "window.scene !== undefined"
+      - js_eval "window.renderer.info.render.triangles" > 0
+      - screenshot "#canvas-3d" as "3d-render.png"
+    llm_verify "3d-render.png":
+      prompt: |
+        This should show a 3D terrain visualization.
+        Verify:
+        - 3D perspective is visible (not flat)
+        - Terrain/mountain shapes are rendered
+        - Colors indicate elevation (snow on peaks)
+      confidence: 0.75  # 3D is harder to verify
+
+  test "3D interaction":
+    request: GET /3d-view
+    browser:
+      - drag "#canvas-3d" from 50%,50% to 70%,30%
+      - wait 500ms
+      - screenshot "#canvas-3d" as "rotated.png"
+    visual_diff "rotated.png" against "3d-render.png":
+      should_differ: true  # Rotation should change the view
+      min_difference: 0.20
+```
+
+```yaml
+# Video Player
+Feature: Video Player
+  id: video_player
+
+  test "video loads and plays":
+    request: GET /tutorial
+    browser:
+      - element "video" exists
+      - element "video" has_attribute "src"
+      - js_eval "document.querySelector('video').readyState" >= 2
+      - click "video"  # Play
+      - wait 2 seconds
+      - js_eval "document.querySelector('video').currentTime" > 0
+      - js_eval "document.querySelector('video').paused" == false
+```
+
+### Frontend Performance Testing
+
+Measure Core Web Vitals and performance metrics:
+
+```yaml
+Constraint: Performance
+  id: frontend_performance
+
+  test "page loads quickly":
+    request: GET /
+    browser:
+      performance:
+        - first_contentful_paint < 1500ms
+        - largest_contentful_paint < 2500ms
+        - time_to_interactive < 3000ms
+        - cumulative_layout_shift < 0.1
+
+  test "chart renders efficiently":
+    request: GET /
+    browser:
+      - start_profiling
+      - wait_for "#snow-chart canvas"
+      - stop_profiling
+      profile:
+        - js_heap_size < 50MB
+        - dom_nodes < 1000
+        - js_execution_time < 500ms
+
+  test "no memory leaks":
+    request: GET /
+    browser:
+      - js_eval "performance.memory.usedJSHeapSize" as initial_memory
+      - repeat 5:
+          - navigate "/about"
+          - navigate "/"
+      - js_eval "performance.memory.usedJSHeapSize" as final_memory
+      - assert final_memory < initial_memory * 1.5  # Max 50% growth
+```
+
+### Configuration for Visual Testing
+
+```yaml
+# In myapp.intent
+
+Test Configuration:
+  visual_testing:
+    browser: chromium # or firefox, webkit
+    headless: true
+    viewport: 1280x720 # Default viewport
+
+    # LLM provider for visual verification
+    llm_provider: openai
+    llm_model: gpt-4-vision-preview
+    llm_confidence_threshold: 0.80
+
+    # Baseline management
+    baseline_dir: "./test/baselines"
+    auto_update_baselines: false
+
+    # Screenshot settings
+    screenshot_format: png
+    screenshot_full_page: false
+
+    # Performance budgets
+    performance:
+      max_fcp: 1500ms
+      max_lcp: 2500ms
+      max_tti: 3000ms
+      max_cls: 0.1
+```
+
+### CLI Commands for Visual Testing
+
+```bash
+# Run all tests including visual
+$ ntnt intent check myapp.tnt --visual
+
+# Run only visual tests
+$ ntnt intent check myapp.tnt --only visual
+
+# Update visual baselines after intentional changes
+$ ntnt intent update-baseline homepage
+$ ntnt intent update-baseline --all
+
+# Run with visible browser (debugging)
+$ ntnt intent check myapp.tnt --visual --headed
+
+# Generate visual test report with screenshots
+$ ntnt intent check myapp.tnt --visual --report ./test-report/
+
+# Skip LLM verification (faster, less thorough)
+$ ntnt intent check myapp.tnt --visual --no-llm
+```
+
+### Cost and Performance Considerations
+
+LLM visual verification has tradeoffs:
+
+| Aspect          | Consideration                                                                             |
+| --------------- | ----------------------------------------------------------------------------------------- |
+| **Cost**        | Each LLM vision call costs ~$0.01-0.03. Budget-conscious projects can limit LLM tests.    |
+| **Speed**       | LLM calls add 2-5 seconds per test. Run with `--no-llm` for fast feedback.                |
+| **Reliability** | LLM responses can vary. Use confidence thresholds and multiple checks for critical tests. |
+| **Privacy**     | Screenshots sent to LLM provider. Use `llm_provider: local` for sensitive UIs.            |
+
+**Recommended strategy:**
+
+- Use DOM assertions (Layer 2) for most tests - fast, deterministic
+- Use LLM verification (Layer 4) for subjective/complex visuals - error states, overall UX
+- Run full visual tests in CI, quick tests locally
+- Cache LLM responses for unchanged screenshots
+
+### What This Enables
+
+With visual and interactive testing, intent files can express subjective UX qualities:
+
+```yaml
+Feature: User Dashboard
+  id: user_dashboard
+  description: "A clean, modern dashboard for viewing personal stats"
+
+  # Traditional assertions
+  test "data loads":
+    request: GET /dashboard
+    assert:
+      - status: 200
+      - body contains_json_path "$.stats.visits"
+
+  # DOM structure
+  test "layout is correct":
+    browser:
+      - element ".dashboard-grid" exists
+      - elements ".stat-card" count == 4
+      - element ".chart-container" has_child "canvas"
+
+  # Interactive behavior
+  test "date picker works":
+    browser:
+      - click "#date-range"
+      - click ".preset-last-30-days"
+      - wait_for ".chart-container" content_changes
+
+  # Subjective UX quality (LLM)
+  test "dashboard looks professional":
+    browser:
+      - screenshot "body" as "dashboard.png"
+    llm_verify "dashboard.png":
+      prompt: |
+        This should be a professional-looking analytics dashboard.
+        Verify:
+        - Clean, modern design (not cluttered)
+        - Data visualizations are clear and readable
+        - Consistent color scheme
+        - Proper spacing and alignment
+        - No obvious UI bugs (overlapping elements, cut-off text)
+      confidence: 0.80
+```
+
+**The human can now say "I want a professional-looking dashboard" and the system can actually verify that intent** - something impossible with traditional testing.
+
+---
+
+## Beyond "Clean and Modern": Concrete UI/UX Intent
+
+### The Problem with Aesthetic Adjectives
+
+Vague terms like "clean," "modern," "professional," and "user-friendly" are **exactly the kind of intent that leads to bad AI-generated UIs**. The agent thinks it's doing great because:
+
+- It added rounded corners and drop shadows → "modern" ✓
+- It used a blue color scheme → "professional" ✓
+- It centered everything → "clean" ✓
+
+But what you actually got was:
+
+- 40% of the screen consumed by UI chrome and decorations
+- Important data buried below the fold
+- Exceptions indistinguishable from normal values
+- Equal visual weight given to everything
+- No clear information hierarchy
+
+**The LLM verifier has the same problem** - it will happily confirm that the dashboard "looks modern" because it matches the LLM's generic mental model of "modern."
+
+### The Solution: Specific, Testable UI Intent
+
+Instead of aesthetic adjectives, express **concrete requirements** about:
+
+1. **Data hierarchy** - What's most important?
+2. **Spatial priority** - Where should attention go first?
+3. **Exception handling** - How are anomalies surfaced?
+4. **Content-to-chrome ratio** - How much space for actual data?
+5. **Information density** - How much data per viewport?
+
+### Intent File: UI/UX Section
+
+Add a dedicated UI/UX section to your intent file:
+
+```yaml
+## UI/UX
+
+### Information Hierarchy
+# What data matters most? List in priority order.
+
+Primary (must be visible without scrolling):
+  - current_snow_depth: "The single most important number - largest text on page"
+  - trend_direction: "Is it increasing or decreasing? Show arrow or indicator"
+  - last_updated: "When was this data captured?"
+
+Secondary (visible but not emphasized):
+  - 7_day_chart: "Sparkline or small chart showing recent trend"
+  - site_name: "Which site is selected"
+
+Tertiary (available on demand):
+  - 30_day_history: "Full chart, can scroll to see"
+  - raw_data_table: "Detailed numbers, expandable"
+  - data_source_info: "Where does this come from?"
+
+### Exception Highlighting
+# How should anomalies be surfaced?
+
+Exceptions:
+  - value_above_threshold:
+      condition: "snow_depth > 48 inches"
+      treatment: "Yellow background, show warning icon"
+  - value_extreme:
+      condition: "snow_depth > 72 inches"
+      treatment: "Red background, prominent alert"
+  - data_stale:
+      condition: "last_updated > 6 hours ago"
+      treatment: "Gray out data, show 'Data may be outdated' warning"
+  - no_data:
+      condition: "API returned no data"
+      treatment: "Clear message, not an error page - show last known value"
+
+### Layout Principles
+# How should space be used?
+
+Spatial Rules:
+  - above_fold: "Primary data visible without scrolling on 768px viewport"
+  - content_ratio: "At least 70% of viewport is actual data, not UI chrome"
+  - whitespace: "Adequate breathing room, but not excessive padding"
+  - navigation: "Minimal - site selector only, no elaborate nav bars"
+
+### Anti-Patterns
+# What should be explicitly avoided?
+
+Avoid:
+  - hero_sections: "No large header images or welcome banners"
+  - decorative_elements: "No icons/graphics that don't convey information"
+  - equal_emphasis: "Not everything should look the same"
+  - hidden_data: "Don't put essential data in tooltips or modals"
+  - style_over_substance: "No drop shadows, gradients, or effects that don't serve function"
+```
+
+### Tests That Verify Concrete Intent
+
+Now the LLM verifier has specific criteria instead of vibes:
+
+```yaml
+Feature: Dashboard Layout
+  id: dashboard_layout
+
+  test "primary data is prominent":
+    request: GET /dashboard
+    browser:
+      - screenshot "body" as "dashboard.png"
+    llm_verify "dashboard.png":
+      prompt: |
+        Verify information hierarchy:
+        1. Is there a large, prominent number showing current snow depth?
+           It should be the largest text element on the page.
+        2. Is there a clear trend indicator (arrow, +/-, or similar)?
+        3. Is the "last updated" timestamp visible without scrolling?
+
+        FAIL if: Snow depth is same size as other text, or buried in a table,
+                 or requires scrolling to see.
+      confidence: 0.90
+
+  test "content-to-chrome ratio":
+    request: GET /dashboard
+    browser:
+      - viewport 1280x720
+      - screenshot "body" as "full.png"
+    llm_verify "full.png":
+      prompt: |
+        Analyze space usage:
+        1. What percentage of the visible area is actual DATA vs UI elements?
+           (headers, nav bars, decorative elements, excessive padding)
+        2. Is there a large hero section or banner taking up space?
+        3. Are there decorative graphics that don't convey information?
+
+        PASS if: At least 70% of viewport is data/content
+        FAIL if: UI chrome, padding, or decorations dominate the view
+      confidence: 0.85
+
+  test "exceptions are highlighted":
+    # Simulate high snow condition
+    mock: snow_depth = 60
+    request: GET /dashboard
+    browser:
+      - screenshot "body" as "exception.png"
+    llm_verify "exception.png":
+      prompt: |
+        The snow depth value (60 inches) exceeds the warning threshold (48 inches).
+        Verify:
+        1. Is the snow depth number visually distinct? (different color, background, icon)
+        2. Is there a warning indicator visible?
+        3. Does the exception stand out from normal values?
+
+        FAIL if: The high value looks identical to normal values
+      confidence: 0.85
+
+  test "no decorative bloat":
+    request: GET /dashboard
+    browser:
+      - screenshot "body" as "dashboard.png"
+    llm_verify "dashboard.png":
+      prompt: |
+        Check for unnecessary visual elements:
+        1. Are there decorative icons that don't convey data?
+        2. Is there a large hero image or welcome banner?
+        3. Are there drop shadows, gradients, or visual effects?
+        4. Is there excessive rounded corners or card styling?
+
+        PASS if: Design is minimal and functional
+        FAIL if: Decorative elements consume significant space or attention
+      confidence: 0.80
+```
+
+### DOM-Based Layout Verification
+
+Combine LLM checks with deterministic DOM assertions:
+
+```yaml
+test "data appears above fold":
+  request: GET /dashboard
+  browser:
+    - viewport 1280x768
+    - element "#snow-depth-value" is_visible
+    - element "#snow-depth-value" bounding_box: top < 400 # In upper half of viewport
+    - element "#snow-depth-value" font_size >= 32px
+    - element "#trend-indicator" is_visible
+    - element "#last-updated" is_visible
+
+test "minimal navigation":
+  request: GET /dashboard
+  browser:
+    - element "nav" height < 80px # Not a giant nav bar
+    - elements "nav a" count <= 5 # Not too many nav items
+    - not element ".hero" # No hero sections
+    - not element ".banner" # No banners
+
+test "content ratio":
+  request: GET /dashboard
+  browser:
+    - viewport 1280x720
+    # Main content area should be most of the viewport
+    - element "main" bounding_box: width >= 900
+        height >= 500
+    # Header should be minimal
+    - element "header" height < 100
+```
+
+### Style Reference: Showing What You Mean
+
+For truly specific intent, include reference examples:
+
+```yaml
+## UI/UX
+
+### Style Reference
+
+Good Examples (emulate these):
+  - url: "https://example.com/minimal-dashboard.png"
+    what_i_like: |
+      - Single prominent metric at top
+      - Sparkline charts, not full charts
+      - No sidebar, just top nav
+      - Data table is compact, not styled
+
+  - url: "https://example.com/data-dense-ui.png"
+    what_i_like: |
+      - High information density
+      - Small fonts for secondary data
+      - Color only for exceptions
+      - No decorative elements
+
+Bad Examples (avoid these):
+  - url: "https://example.com/over-designed-dashboard.png"
+    what_to_avoid: |
+      - Giant cards with drop shadows
+      - Icons next to every label
+      - Gradient backgrounds
+      - Equal sizing for all metrics
+
+  - url: "https://example.com/low-density-ui.png"
+    what_to_avoid: |
+      - Huge padding everywhere
+      - One metric per card
+      - Scroll required for basic info
+      - Style over substance
+```
+
+The LLM verifier can then compare against these references:
+
+```yaml
+test "matches style intent":
+  request: GET /dashboard
+  browser:
+    - screenshot "body" as "dashboard.png"
+  llm_verify "dashboard.png":
+    reference_good: ["minimal-dashboard.png", "data-dense-ui.png"]
+    reference_bad: ["over-designed-dashboard.png", "low-density-ui.png"]
+    prompt: |
+      Compare this dashboard to the reference images.
+      It should be MORE like the good examples and LESS like the bad examples.
+
+      Key criteria from the intent:
+      - High information density
+      - Minimal decorative styling
+      - Clear data hierarchy (one metric prominent)
+      - Exceptions visually distinct
+
+      Score similarity to good examples (0-100): ?
+      Score similarity to bad examples (0-100): ?
+
+      PASS if: good_score > 70 AND bad_score < 30
+    confidence: 0.85
+```
+
+### The Taste Problem
+
+Even with specific intent, "taste" is hard to define. Some strategies:
+
+**1. Iterative Refinement**
+
+```yaml
+## UI/UX
+
+### Learned Preferences
+# Updated as human provides feedback
+
+Previous Feedback:
+  - iteration_1: "Too much padding, cards too large"
+  - iteration_2: "Better, but the chart dominates - make it smaller"
+  - iteration_3: "Good density, but exceptions not visible enough"
+
+Current Rules (derived from feedback):
+  - padding: "8px max between elements"
+  - cards: "No cards - use subtle borders or none"
+  - charts: "Sparkline size (100px height max) unless expanded"
+  - exceptions: "Red text + icon, not just color"
+```
+
+**2. Component-Level Approval**
+
+Instead of approving/rejecting whole pages, approve components:
+
+```yaml
+## UI/UX
+
+### Approved Components
+# Human-approved patterns to reuse
+
+MetricDisplay:
+  approved: true
+  screenshot: "components/metric-display-approved.png"
+  rules: |
+    - Large number (32px+)
+    - Unit below in smaller text
+    - Trend arrow to right
+    - No background/card
+
+DataTable:
+  approved: true
+  screenshot: "components/data-table-approved.png"
+  rules: |
+    - Compact rows (32px height)
+    - Alternating backgrounds (subtle)
+    - No borders between cells
+    - Header row is bold, same size
+
+SparklineChart:
+  approved: true
+  screenshot: "components/sparkline-approved.png"
+  rules: |
+    - 100px wide, 40px tall
+    - Single color line
+    - No axes, no labels
+    - Hover shows value
+```
+
+**3. Constraint-Based Design**
+
+Express intent as constraints rather than aesthetics:
+
+```yaml
+## UI/UX
+
+### Hard Constraints
+# These are measurable and must pass
+
+Layout:
+  - viewport_768_shows: ["snow_depth", "trend", "last_updated"]
+  - max_scroll_to_essential: 0px # No scrolling for essential data
+  - header_height: "<= 60px"
+  - nav_items: "<= 3"
+  - sidebar: "none"
+
+Typography:
+  - primary_metric_size: ">= 48px"
+  - secondary_text_size: "14-16px"
+  - font_weights_used: "<= 2" # Regular and bold only
+  - font_families_used: "1" # Single font family
+
+Spacing:
+  - max_padding: "16px"
+  - max_margin: "24px"
+  - max_gap: "16px"
+
+Color:
+  - colors_used: "<= 5" # Not a rainbow
+  - decorative_colors: "0" # Color only for meaning
+  - exception_color: "distinct from normal"
+
+Elements:
+  - drop_shadows: "0"
+  - gradients: "0"
+  - border_radius: "<= 4px"
+  - decorative_icons: "0"
+```
+
+These constraints can be verified deterministically:
+
+```yaml
+test "typography constraints":
+  request: GET /dashboard
+  browser:
+    - element "#snow-depth-value" font_size >= 48px
+    - elements "body *" max_font_size <= 64px # Not absurdly large
+    - elements "body *" distinct_font_families <= 1
+    - elements "body *" distinct_font_weights <= 2
+
+test "spacing constraints":
+  request: GET /dashboard
+  browser:
+    - elements "*" max_padding <= 16px
+    - elements "*" max_margin <= 24px
+
+test "no decorative styling":
+  request: GET /dashboard
+  browser:
+    - elements "*" box_shadow == "none"
+    - elements "*" background_image == "none"
+    - elements "*" border_radius <= 4px
+```
+
+### Summary: From Vibes to Verification
+
+| Bad Intent (Vibes)         | Good Intent (Verifiable)                                       |
+| -------------------------- | -------------------------------------------------------------- |
+| "Clean design"             | "Content-to-chrome ratio >= 70%"                               |
+| "Modern look"              | "No drop shadows, gradients, or decorative elements"           |
+| "User-friendly"            | "Primary data visible without scrolling on 768px viewport"     |
+| "Professional"             | "Consistent font family, <= 2 font weights, <= 5 colors"       |
+| "Highlight important data" | "Snow depth >= 48px font size, exceptions have red background" |
+| "Good spacing"             | "Max padding 16px, max margin 24px"                            |
+
+The key insight: **Every aesthetic preference can be decomposed into concrete, testable constraints.** The intent file is where you do that decomposition, not where you use subjective adjectives.
 
 ---
 
@@ -1037,6 +1990,7 @@ Status: PASS with warnings
 ```
 
 Key points:
+
 - **Doesn't fail the build** - unlinked code is allowed
 - **Generates warnings** - so it's visible for review
 - **Suggests actions** - add annotation or review if needed
@@ -1078,9 +2032,9 @@ $ ntnt intent coverage snowgauge.tnt --detailed
 FEATURE IMPLEMENTATIONS (@implements: feature.*)
 ──────────────────────────────────────────────────
   ✓ home_handler        → feature.site_selection
-  ✓ fetch_snow_data     → feature.snow_display  
+  ✓ fetch_snow_data     → feature.snow_display
   ✓ render_chart        → feature.chart
-  
+
 SUPPORTING CODE (@supports: *)
 ──────────────────────────────────────────────────
   ✓ log_request         → feature.site_selection, feature.snow_display
@@ -1095,13 +2049,13 @@ UNLINKED CODE (needs review)
 ──────────────────────────────────────────────────
   ? extract_snotel_name   Line 45 - no annotation
   ? validate_input        Line 89 - no annotation
-  
+
 ──────────────────────────────────────────────────
 Summary:
   Feature coverage:  100% (3/3)
   Code linkage:      75% (6/8 functions documented)
   Unlinked:          2 functions need review
-  
+
 Status: PASS (warnings present)
 ```
 
@@ -1114,18 +2068,18 @@ Control strictness via config:
 
 intent:
   # How to handle unlinked code
-  unlinked_code: warn    # warn (default), allow, deny
-  
+  unlinked_code: warn # warn (default), allow, deny
+
   # Minimum coverage threshold
-  min_coverage: 80%      # Fail if below this
-  
+  min_coverage: 80% # Fail if below this
+
   # Require all public functions to be linked
   require_public_linked: true
-  
+
   # Ignore patterns (never warn about these)
   ignore_patterns:
-    - "*_test"           # Test helpers
-    - "debug_*"          # Debug functions
+    - "*_test" # Test helpers
+    - "debug_*" # Debug functions
 ```
 
 ### Strictness Levels
@@ -1133,6 +2087,7 @@ intent:
 Different projects need different strictness:
 
 **Relaxed** (prototyping, learning):
+
 ```yaml
 intent:
   unlinked_code: allow
@@ -1140,6 +2095,7 @@ intent:
 ```
 
 **Standard** (most projects):
+
 ```yaml
 intent:
   unlinked_code: warn
@@ -1147,6 +2103,7 @@ intent:
 ```
 
 **Strict** (production, compliance):
+
 ```yaml
 intent:
   unlinked_code: deny
@@ -1157,17 +2114,20 @@ intent:
 ### Why Not Require Everything?
 
 Some code legitimately has no feature mapping:
+
 - Generic utilities (string formatting, math helpers)
 - Framework boilerplate (setup, teardown)
 - Generated code (scaffolding)
 - Debug/development helpers
 
 Requiring annotations for everything would:
+
 - Create friction for simple changes
 - Generate meaningless annotations ("this formats a string")
 - Discourage refactoring into small functions
 
 The **warn by default** approach balances:
+
 - Visibility (you know what's not linked)
 - Pragmatism (doesn't block legitimate code)
 - Intentionality (you can document if needed)
@@ -1325,12 +2285,12 @@ The result: endless meetings, rework, and "that's not what I meant."
 
 The intent file requires you to answer hard questions **upfront**:
 
-| Vague Requirement | Intent Forces You to Specify |
-|-------------------|------------------------------|
+| Vague Requirement          | Intent Forces You to Specify                                   |
+| -------------------------- | -------------------------------------------------------------- |
 | "Users can filter results" | Filter by what? Which fields? Multiple filters? Default state? |
-| "Fast performance" | What's fast? Under what load? Measured how? |
-| "Mobile-friendly" | Responsive? Native? What breakpoints? Touch targets? |
-| "Handle errors gracefully" | Which errors? What message? Retry? Fallback? |
+| "Fast performance"         | What's fast? Under what load? Measured how?                    |
+| "Mobile-friendly"          | Responsive? Native? What breakpoints? Touch targets?           |
+| "Handle errors gracefully" | Which errors? What message? Retry? Fallback?                   |
 
 You can't write a testable assertion for "fast performance." You CAN write one for "GET /api/users returns within 200ms for 1000 concurrent users."
 
@@ -1339,6 +2299,7 @@ You can't write a testable assertion for "fast performance." You CAN write one f
 #### Product Managers
 
 **Before IDD:**
+
 ```
 User Story: As a user, I want to select my location so I can see local data.
 
@@ -1348,6 +2309,7 @@ Acceptance Criteria:
 ```
 
 **With IDD:**
+
 ```intent
 ### Feature: Location Selection
 id: location_selection
@@ -1370,6 +2332,7 @@ Tests:
 **The difference:** PM must think through edge cases (invalid location), defaults, persistence, and UI behavior. No ambiguity for engineers to interpret.
 
 **Benefits for PMs:**
+
 - Forces complete thinking before development starts
 - Creates a reviewable artifact stakeholders can approve
 - Reduces "that's not what I meant" moments
@@ -1378,12 +2341,14 @@ Tests:
 #### Stakeholders (Executives, Clients, Business Owners)
 
 **Before IDD:**
+
 - Review PRDs full of jargon
 - See demos and say "that's not right"
 - Can't verify the software meets requirements without using it
 - Trust that engineers interpreted requirements correctly
 
 **With IDD:**
+
 ```
 $ ntnt intent check app.tnt
 
@@ -1391,11 +2356,12 @@ Features:
   ✅ Location Selection (4/4 tests)
   ✅ Weather Display (3/3 tests)
   ✅ 7-Day Forecast (2/2 tests)
-  
+
 All requirements verified.
 ```
 
 **Benefits for stakeholders:**
+
 - Readable intent file serves as living documentation
 - Verification report proves requirements are met
 - Don't need to understand code to trust the software
@@ -1404,18 +2370,21 @@ All requirements verified.
 #### Software Engineers
 
 **Before IDD:**
+
 - Interpret vague requirements
 - Make assumptions, hope they're right
 - Get requirements changed mid-sprint
 - Argue about what "done" means
 
 **With IDD:**
+
 - Clear, testable requirements before coding starts
 - Know exactly when a feature is complete (tests pass)
 - Push back on vague requirements: "What should the test be?"
 - Automated verification = confidence to refactor
 
 **Benefits for engineers:**
+
 - Less time in meetings clarifying requirements
 - Unambiguous definition of "done"
 - Refactor fearlessly—intent tests catch regressions
@@ -1424,11 +2393,13 @@ All requirements verified.
 #### QA / Testers
 
 **Before IDD:**
+
 - Write test cases from their interpretation of requirements
 - Discover edge cases during testing that were never specified
 - "Is this a bug or a feature?" debates
 
 **With IDD:**
+
 - Intent file IS the test specification
 - Edge cases must be specified upfront
 - No ambiguity about expected behavior
@@ -1439,6 +2410,7 @@ All requirements verified.
 #### Fewer "Lost in Translation" Moments
 
 Traditional flow:
+
 ```
 Stakeholder → PM → Jira Ticket → Engineer → Code → QA → Bug?
      ↓          ↓         ↓           ↓
@@ -1446,6 +2418,7 @@ Stakeholder → PM → Jira Ticket → Engineer → Code → QA → Bug?
 ```
 
 IDD flow:
+
 ```
 Stakeholder + PM + Engineer → Intent File → Code → Verification
                                   ↓
@@ -1455,11 +2428,13 @@ Stakeholder + PM + Engineer → Intent File → Code → Verification
 #### Conversations Happen Earlier
 
 Without IDD, hard conversations happen during code review or QA:
+
 - "That's not what I meant"
 - "We didn't think about that case"
 - "This requirement is impossible"
 
 With IDD, these conversations happen during intent review:
+
 - "Can we actually test 'fast performance'? Let's define it."
 - "What happens if the API is down? We need to specify."
 - "This feature is too complex—can we split it?"
@@ -1496,6 +2471,7 @@ Weather Data: Temperature, conditions, humidity, wind for a location
 ```
 
 **Why this matters:**
+
 - No more "when you say X, do you mean Y?"
 - New team members learn domain language quickly
 - Agents understand the business domain
@@ -1521,16 +2497,16 @@ j0k1l2m Team: Initial intent for weather app
 
 ### Impact Summary
 
-| Before IDD | With IDD |
-|------------|----------|
-| Requirements interpreted differently by each person | Single source of truth everyone references |
-| Edge cases discovered during testing | Edge cases specified upfront |
-| "Done" is subjective | "Done" = all intent tests pass |
-| Documentation is separate artifact that gets stale | Intent file IS documentation, always current |
-| Stakeholders trust but can't verify | Stakeholders can run verification themselves |
-| Hard conversations happen late (expensive) | Hard conversations happen early (cheap) |
-| Engineers guess at PM's intent | Engineers implement explicit specifications |
-| QA writes tests from their interpretation | Intent file IS the test specification |
+| Before IDD                                          | With IDD                                     |
+| --------------------------------------------------- | -------------------------------------------- |
+| Requirements interpreted differently by each person | Single source of truth everyone references   |
+| Edge cases discovered during testing                | Edge cases specified upfront                 |
+| "Done" is subjective                                | "Done" = all intent tests pass               |
+| Documentation is separate artifact that gets stale  | Intent file IS documentation, always current |
+| Stakeholders trust but can't verify                 | Stakeholders can run verification themselves |
+| Hard conversations happen late (expensive)          | Hard conversations happen early (cheap)      |
+| Engineers guess at PM's intent                      | Engineers implement explicit specifications  |
+| QA writes tests from their interpretation           | Intent file IS the test specification        |
 
 ---
 
@@ -1594,6 +2570,7 @@ The `id:` field is the stable identifier. The human-readable name can change fre
 **Option B: Derived IDs (Fallback)**
 
 If no explicit `id:` is provided, derive from the name:
+
 1. Take the feature name after "Feature: " (e.g., "Site Selection")
 2. Lowercase it
 3. Replace spaces with underscores
@@ -1604,11 +2581,11 @@ If no explicit `id:` is provided, derive from the name:
 
 #### What Happens When Names Change?
 
-| Scenario | With Explicit ID | With Derived ID |
-|----------|------------------|-----------------|
+| Scenario                                     | With Explicit ID                                   | With Derived ID                                                   |
+| -------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------- |
 | Rename "Site Selection" to "Location Picker" | No code changes needed (id stays `site_selection`) | Must update all `@implements: feature.site_selection` annotations |
-| Add new feature | Add new `id:` | Works automatically |
-| Typo fix in name | No impact | Breaks all links |
+| Add new feature                              | Add new `id:`                                      | Works automatically                                               |
+| Typo fix in name                             | No impact                                          | Breaks all links                                                  |
 
 **Recommendation:** Always use explicit IDs for stability. The human-readable name is for humans; the ID is for machines.
 
@@ -1623,7 +2600,7 @@ WARNING: Intent ID may have changed
   "Site Selection" → "Location Picker"
   Old ID: feature.site_selection
   New ID: feature.location_picker
-  
+
   3 annotations reference old ID:
     - app.tnt:15  @implements: feature.site_selection
     - app.tnt:42  @implements: feature.site_selection
@@ -1687,7 +2664,7 @@ When code implements multiple features, list them all:
 // @implements: feature.data_export
 fn home_handler(req) {
     let data = fetch_snow_data(req)
-    
+
     // This one handler serves all three features
     return html(render_page(data))
 }
@@ -1766,6 +2743,7 @@ fn extract_site_name(csv_header) {
 ```
 
 The difference:
+
 - `@implements` = "This code IS the feature"
 - `@supports` = "This code is used BY the feature"
 
@@ -1809,14 +2787,14 @@ Code Linkage:       85% (17/20 functions linked or utility)
 
 #### When to Use What
 
-| Code Type | Annotation | Example |
-|-----------|------------|---------|
-| Directly implements a feature | `@implements: feature.X` | Route handlers, main logic |
-| Implements multiple features | Multiple `@implements` | Shared handlers |
-| Shared infrastructure | `@implements: infra.X` | Caching, logging, auth |
-| Helper used by features | `@supports: feature.X` | Calculations, parsing |
-| Generic utility | None | Date formatting, string helpers |
-| Dead code | None (flagged in report) | Old functions to remove |
+| Code Type                     | Annotation               | Example                         |
+| ----------------------------- | ------------------------ | ------------------------------- |
+| Directly implements a feature | `@implements: feature.X` | Route handlers, main logic      |
+| Implements multiple features  | Multiple `@implements`   | Shared handlers                 |
+| Shared infrastructure         | `@implements: infra.X`   | Caching, logging, auth          |
+| Helper used by features       | `@supports: feature.X`   | Calculations, parsing           |
+| Generic utility               | None                     | Date formatting, string helpers |
+| Dead code                     | None (flagged in report) | Old functions to remove         |
 
 #### The "Unlinked Code" Question
 
