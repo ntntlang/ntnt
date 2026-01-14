@@ -12,17 +12,18 @@
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
-2. [The Problem](#the-problem)
-3. [Design Goals](#design-goals)
-4. [The Intent File Format](#the-intent-file-format)
-5. [CLI Commands](#cli-commands)
-6. [The Workflow](#the-workflow)
-7. [Human Experience](#human-experience)
-8. [Agent Experience](#agent-experience)
-9. [Code Integration](#code-integration)
-10. [Implementation Plan](#implementation-plan)
-11. [Open Questions](#open-questions)
-12. [Future Possibilities](#future-possibilities)
+2. [How IDD Differs from TDD](#how-idd-differs-from-test-driven-development-tdd)
+3. [The Problem](#the-problem)
+4. [Design Goals](#design-goals)
+5. [The Intent File Format](#the-intent-file-format)
+6. [CLI Commands](#cli-commands)
+7. [The Workflow](#the-workflow)
+8. [Human Experience](#human-experience)
+9. [Agent Experience](#agent-experience)
+10. [Code Integration](#code-integration)
+11. [Implementation Plan](#implementation-plan)
+12. [Open Questions](#open-questions)
+13. [Future Possibilities](#future-possibilities)
 
 ---
 
@@ -34,7 +35,120 @@ Intent-Driven Development (IDD) is a paradigm where **human intent becomes execu
 2. **Agents can execute** - Structured assertions that verify the code matches intent
 3. **Both can evolve together** - When requirements change, intent updates first, then code follows
 
-This is the killer feature of NTNT - making it the first language where **intent is code**.
+NTNT attempts to be the first language where **intent is code**.
+
+---
+
+## How IDD Differs from Test-Driven Development (TDD)
+
+Test-Driven Development already exists and is widely practiced. Why do we need something new?
+
+### TDD: What It Is
+
+In TDD, developers:
+
+1. Write a failing test first
+2. Write code to make the test pass
+3. Refactor while keeping tests green
+
+TDD is excellent for **code quality** and **developer confidence**.
+
+### The Gap TDD Leaves
+
+| Aspect               | TDD                                | IDD                                      |
+| -------------------- | ---------------------------------- | ---------------------------------------- |
+| **Written by**       | Developers                         | Humans + Agents collaboratively          |
+| **Written in**       | Code (Python, JavaScript, etc.)    | Natural language + structured assertions |
+| **Readable by**      | Developers only                    | Anyone                                   |
+| **Answers**          | "Does the code work?"              | "Does the code do what I wanted?"        |
+| **Abstraction**      | Implementation details             | Business intent                          |
+| **Owns the spec**    | Tests ARE the spec (but in code)   | Intent IS the spec (in English)          |
+| **Documentation**    | Tests != docs (separate artifacts) | Intent = living documentation            |
+| **AI collaboration** | Not designed for agents            | Explicitly designed for human-agent work |
+
+### A Concrete Example
+
+**TDD Test (developer writes this):**
+
+```python
+def test_location_selection():
+    response = client.get("/?location=denver")
+    assert response.status_code == 200
+    assert "Denver" in response.text
+
+def test_invalid_site_falls_back():
+    response = client.get("/?location=invalid")
+    assert response.status_code == 200
+    assert "Denver" in response.text  # Falls back to default
+```
+
+**IDD Intent (human writes this):**
+
+```
+### Feature: Site Selection
+
+Users can select which site to view via URL parameter.
+
+Behavior:
+- ?location=<key> selects the location
+- Invalid keys fall back to default (Denver)
+
+Tests:
+- GET /?location=denver -> 200, contains "denver"
+- GET /?location=invalid -> 200, contains "denver"
+```
+
+### What IDD Solves That TDD Doesn't
+
+1. **The "Why" Problem**
+
+   - TDD tests say _what_ should happen
+   - IDD intent explains _why_ it should happen
+   - A test named `test_location_selection` doesn't explain the feature; intent does
+
+2. **The Audience Problem**
+
+   - TDD requires code literacy to understand the spec
+   - IDD lets non-technical stakeholders read and edit requirements
+   - Product managers can review intent files; they can't review pytest files
+
+3. **The AI Collaboration Problem**
+
+   - TDD assumes a human developer writes both tests and code
+   - IDD explicitly separates "what I want" (human) from "how to build it" (agent)
+   - Agents can verify their work against intent without human re-review
+
+4. **The Documentation Problem**
+
+   - TDD tests become stale documentation (or aren't documentation at all)
+   - IDD intent IS the documentation, always verified against code
+   - No separate README that drifts from reality
+
+5. **The Evolution Problem**
+   - In TDD, changing requirements means rewriting tests (developer work)
+   - In IDD, changing requirements means editing plain text (human work)
+   - The agent handles translating new intent into new code
+
+### IDD and TDD Can Coexist
+
+IDD doesn't replace TDD - it operates at a different level:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  INTENT (human-readable, business requirements)         │  ← IDD
+├─────────────────────────────────────────────────────────┤
+│  INTEGRATION TESTS (API contracts, end-to-end)          │  ← IDD generates these
+├─────────────────────────────────────────────────────────┤
+│  UNIT TESTS (implementation details, edge cases)        │  ← TDD lives here
+├─────────────────────────────────────────────────────────┤
+│  CODE (the actual implementation)                       │
+└─────────────────────────────────────────────────────────┘
+```
+
+- **IDD** handles the top layer: "Does this app do what the human wanted?"
+- **TDD** handles the bottom layer: "Does this function handle edge cases correctly?"
+
+An agent might still use TDD practices when implementing complex functions. IDD just ensures the overall app matches human intent.
 
 ---
 
@@ -44,11 +158,11 @@ This is the killer feature of NTNT - making it the first language where **intent
 
 The typical development cycle with AI looks like this:
 
-1. Human: "Build me a snow gauge app"
+1. Human: "Build me a an app that shows precipitation over the last 24 hours"
 2. Agent: _builds something based on assumptions_
 3. Human: "No, I wanted it to show the last 30 days"
 4. Agent: _rebuilds with new assumption_
-5. Human: "Wait, also add site selection"
+5. Human: "Wait, also add location selection"
 6. Agent: _patches it in, maybe breaks something_
 7. ... endless back and forth ...
 
@@ -56,13 +170,15 @@ The typical development cycle with AI looks like this:
 
 | Issue                     | Impact                                       |
 | ------------------------- | -------------------------------------------- |
+| Intent emerges over time  | Humans evolve their thinking and desires     |
+| Intent mixed with extras  | Resulting code may contain extraneous bits   |
 | Intent is scattered       | Chat history, code comments, human's mind    |
 | No verification           | Agent cannot prove code matches intent       |
 | Requirements drift        | Original intent gets lost in iterations      |
 | No single source of truth | Human and agent have different mental models |
 | Stale documentation       | README does not match actual behavior        |
 
-### What We Want Instead
+### A Proposed Solution
 
 A feedback loop where intent drives implementation and verification proves correctness:
 
