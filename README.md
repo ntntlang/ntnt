@@ -13,7 +13,7 @@ cargo build --release
 cargo install --path . --locked
 ```
 
-## File Extension
+### File Extension
 
 NTNT uses `.tnt` for source files.
 

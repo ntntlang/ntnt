@@ -621,37 +621,181 @@ pub fn get_user(id: String) -> User {
 
 ## Phase 8: Performance & Compilation
 
-**Goal:** Production-ready performance.
+**Goal:** Production-ready performance through progressive compilation strategies.
 
-### 8.1 Bytecode Compiler
+### Current Architecture
 
-- [ ] NTNT bytecode format (NBC)
-- [ ] Bytecode interpreter (10-50x faster than tree-walking)
-- [ ] Bytecode serialization/loading
-- [ ] Debug info preservation
+```
+NTNT Source (.tnt)
+       ↓
+    Lexer (src/lexer.rs)         ✅ Reusable
+       ↓
+    Parser (src/parser.rs)       ✅ Reusable
+       ↓
+      AST (src/ast.rs)           ✅ Reusable
+       ↓
+  Interpreter (src/interpreter.rs)  ← Tree-walking (current, slowest)
+       ↓
+    Result
+```
 
-### 8.2 Optimizations
+### Compilation Roadmap
 
-- [ ] Constant folding
+| Approach | Effort | Speedup | When |
+|----------|--------|---------|------|
+| Tree-walking Interpreter | ✅ Done | Baseline | Current |
+| Bytecode VM | 2-4 weeks | 10-50x | Phase 8.1 |
+| Native Compilation (Cranelift/LLVM) | 2-3 months | 100-1000x | Phase 8.4 |
+
+### What Can Be Reused
+
+| Component | Reusable? | Notes |
+|-----------|-----------|-------|
+| Lexer | ✅ 100% | Tokens don't change |
+| Parser | ✅ 100% | AST structure stays same |
+| AST | ✅ 100% | Core data structures |
+| Type System | ✅ 100% | Expansion for optimization |
+| Interpreter | ❌ Replaced | Becomes compiler/codegen |
+| Stdlib | ⚠️ Partial | Need native implementations |
+
+### 8.1 Bytecode VM (First Target)
+
+**Goal:** 10-50x performance improvement with moderate effort.
+
+- [ ] Design NTNT bytecode format (NBC)
+- [ ] Implement bytecode compiler (`src/compiler.rs`)
+- [ ] Implement stack-based VM (`src/vm.rs`)
+- [ ] Bytecode serialization/loading (`.tnc` files)
+- [ ] Debug info preservation for stack traces
+- [ ] Keep interpreter for REPL (faster startup)
+
+```rust
+// Example bytecode instructions
+enum OpCode {
+    LoadConst(usize),      // Push constant onto stack
+    LoadVar(String),       // Push variable value
+    StoreVar(String),      // Pop and store to variable
+    Add, Sub, Mul, Div,    // Arithmetic
+    Eq, Lt, Gt, Le, Ge,    // Comparison
+    Call(usize),           // Call function with N args
+    Return,                // Return from function
+    Jump(usize),           // Unconditional jump
+    JumpIfFalse(usize),    // Conditional jump
+    MakeArray(usize),      // Create array from N stack values
+    MakeMap(usize),        // Create map from N key-value pairs
+    GetField(String),      // Map/struct field access
+    SetField(String),      // Map/struct field assignment
+}
+```
+
+**CLI Integration:**
+```bash
+ntnt compile app.tnt        # Compile to bytecode (.tnc)
+ntnt run app.tnc            # Run bytecode directly
+ntnt run app.tnt            # Auto-compile and run (caches .tnc)
+```
+
+### 8.2 VM Optimizations
+
+- [ ] Constant folding at compile time
 - [ ] Dead code elimination
 - [ ] Inline caching for method calls
-- [ ] Escape analysis
+- [ ] Escape analysis for stack allocation
 - [ ] Contract elision in release builds (configurable)
+- [ ] Hot path detection and optimization
 
 ### 8.3 Memory Management
 
 - [ ] Reference counting with cycle detection
 - [ ] Memory pools for hot paths
 - [ ] String interning
+- [ ] Small string optimization
+- [ ] Arena allocators for request handling
 
-### 8.4 Static Type Checking
+### 8.4 Native Compilation (Future)
+
+**Goal:** Native machine code for maximum performance (100-1000x faster than interpreter).
+
+#### Option A: Cranelift Backend (Recommended)
+```
+AST → Cranelift IR → Native Machine Code
+```
+- Simpler API than LLVM
+- Good optimization passes
+- Used by rustc (experimental) and Wasmtime
+- Estimated effort: 1-2 months
+
+```rust
+// Using cranelift crate
+use cranelift::prelude::*;
+use cranelift_module::Module;
+
+fn compile_function(ast: &Function, module: &mut Module) {
+    let mut func = Function::new();
+    let mut builder = FunctionBuilder::new(&mut func, &mut ctx);
+    
+    // Generate Cranelift IR from AST
+    for stmt in &ast.body {
+        compile_statement(stmt, &mut builder);
+    }
+}
+```
+
+#### Option B: LLVM Backend
+```
+AST → LLVM IR → LLVM Optimizer → Native Machine Code
+```
+- Best-in-class optimizations
+- Used by Rust, Swift, Julia, Clang
+- More complex API
+- Estimated effort: 2-3 months
+
+```rust
+// Using inkwell (LLVM Rust bindings)
+use inkwell::context::Context;
+use inkwell::builder::Builder;
+
+fn compile_to_llvm(ast: &Module) -> inkwell::module::Module {
+    let context = Context::create();
+    let module = context.create_module("ntnt");
+    let builder = context.create_builder();
+    
+    // Generate LLVM IR from AST
+}
+```
+
+#### Option C: Transpile to Rust (Creative Alternative)
+```
+AST → Rust Source Code → cargo build → Native Binary
+```
+- Leverage Rust's optimizer for free
+- Easier debugging (human-readable output)
+- Estimated effort: 2-4 weeks
+
+```ntnt
+// NTNT source
+fn add(a: Int, b: Int) -> Int { a + b }
+
+// Generated Rust
+fn add(a: i64, b: i64) -> i64 { a + b }
+```
+
+**CLI Integration:**
+```bash
+ntnt build app.tnt              # Compile to native binary
+ntnt build app.tnt --release    # Optimized build
+./app                           # Run native binary directly
+```
+
+### 8.5 Static Type Checking
 
 - [ ] Full type inference
 - [ ] Flow-sensitive typing
 - [ ] Exhaustive type checking at compile time
 - [ ] Helpful error messages with suggestions
+- [ ] Type narrowing in conditionals and match
 
-### 8.5 Advanced Type System Features
+### 8.6 Advanced Type System Features
 
 - [ ] Associated types in traits
 - [ ] Where clauses for complex constraints
@@ -660,13 +804,22 @@ pub fn get_user(id: String) -> User {
 - [ ] Contravariant preconditions, covariant postconditions
 - [ ] Error context/wrapping: `result.context("message")?`
 
+### 8.7 Runtime Library (for Native Compilation)
+
+Native compilation requires re-implementing stdlib in the target:
+
+- [ ] Core runtime (memory, strings, arrays, maps)
+- [ ] I/O operations (file system, HTTP)
+- [ ] Database drivers (PostgreSQL bindings)
+- [ ] Concurrency primitives (threads, channels)
+
 **Deliverables:**
 
-- Bytecode compiler and VM
-- 10-50x performance improvement
+- Bytecode compiler and VM (10-50x speedup)
 - Static type checker
 - Advanced type system
 - Optimized memory management
+- Native compilation path (100-1000x speedup)
 
 ---
 
@@ -786,12 +939,6 @@ fn handle_request(req: Request) -> Response {
 
 These features are valuable but not essential for the initial release:
 
-### Native Compilation
-
-- LLVM or Cranelift backend
-- Ahead-of-time compilation
-- Sub-millisecond startup
-
 ### Session Types
 
 - Protocol definitions for typed communication
@@ -892,7 +1039,8 @@ The current HTTP server uses `tiny_http` which is simple and reliable but uses `
 ## Success Metrics
 
 - **Time to First App:** Hello World web API in < 30 minutes
-- **Performance:** Within 5x of Go for web workloads (bytecode), within 2x with native compilation (future)
+- **Performance (Bytecode VM):** Within 5x of Go for web workloads
+- **Performance (Native):** Within 2x of Go with Cranelift/LLVM backend
 - **Safety:** Zero contract violations reach production
 - **AI Compatibility:** 95%+ of AI-generated code compiles on first try
 - **Developer Satisfaction:** Tooling comparable to Go/Rust
@@ -968,4 +1116,4 @@ pub fn main() {
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: January 2026 (v0.1.8)_
+_Last updated: January 2026 (v0.1.9)_
