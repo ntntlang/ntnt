@@ -963,12 +963,14 @@ let result = data
 ```
 
 **Why it helps:**
+
 - Linear data flow (reads like English)
 - Easier to insert/remove transformation steps
 - Self-documenting for agents and humans
 - Ideal for CSV/JSON processing, HTTP request chains
 
 **Implementation notes:**
+
 - `x |> f` desugars to `f(x)`
 - `x |> f(a, b)` desugars to `f(x, a, b)` (first argument insertion)
 - Low implementation effort (parser change + AST node)

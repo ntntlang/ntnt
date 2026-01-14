@@ -45,22 +45,22 @@ This is the killer feature of NTNT - making it the first language where **intent
 The typical development cycle with AI looks like this:
 
 1. Human: "Build me a snow gauge app"
-2. Agent: *builds something based on assumptions*
+2. Agent: _builds something based on assumptions_
 3. Human: "No, I wanted it to show the last 30 days"
-4. Agent: *rebuilds with new assumption*
+4. Agent: _rebuilds with new assumption_
 5. Human: "Wait, also add site selection"
-6. Agent: *patches it in, maybe breaks something*
+6. Agent: _patches it in, maybe breaks something_
 7. ... endless back and forth ...
 
 ### The Core Problems
 
-| Issue | Impact |
-|-------|--------|
-| Intent is scattered | Chat history, code comments, human's mind |
-| No verification | Agent cannot prove code matches intent |
-| Requirements drift | Original intent gets lost in iterations |
+| Issue                     | Impact                                       |
+| ------------------------- | -------------------------------------------- |
+| Intent is scattered       | Chat history, code comments, human's mind    |
+| No verification           | Agent cannot prove code matches intent       |
+| Requirements drift        | Original intent gets lost in iterations      |
 | No single source of truth | Human and agent have different mental models |
-| Stale documentation | README does not match actual behavior |
+| Stale documentation       | README does not match actual behavior        |
 
 ### What We Want Instead
 
@@ -80,32 +80,32 @@ INTENT (contract) --> CODE (implementation) --> VERIFICATION (proof)
 
 ### For Humans
 
-| Goal | Description |
-|------|-------------|
-| **Readable** | Intent files should read like plain English requirements |
-| **Trustworthy** | If the intent check passes, my app does what I asked |
-| **Easy to modify** | Changing requirements = editing text, not debugging code |
-| **Fun** | Feels like having a conversation, not writing formal specs |
-| **Empowering** | Non-technical humans can meaningfully participate |
+| Goal               | Description                                                |
+| ------------------ | ---------------------------------------------------------- |
+| **Readable**       | Intent files should read like plain English requirements   |
+| **Trustworthy**    | If the intent check passes, my app does what I asked       |
+| **Easy to modify** | Changing requirements = editing text, not debugging code   |
+| **Fun**            | Feels like having a conversation, not writing formal specs |
+| **Empowering**     | Non-technical humans can meaningfully participate          |
 
 ### For Agents
 
-| Goal | Description |
-|------|-------------|
+| Goal            | Description                                      |
+| --------------- | ------------------------------------------------ |
 | **Unambiguous** | Clear success/failure criteria for every feature |
-| **Parseable** | Structured format that maps directly to tests |
-| **Complete** | Everything needed to implement without guessing |
-| **Verifiable** | Can prove implementation matches intent |
-| **Efficient** | Don't waste cycles on misunderstood requirements |
+| **Parseable**   | Structured format that maps directly to tests    |
+| **Complete**    | Everything needed to implement without guessing  |
+| **Verifiable**  | Can prove implementation matches intent          |
+| **Efficient**   | Don't waste cycles on misunderstood requirements |
 
 ### For Both
 
-| Goal | Description |
-|------|-------------|
-| **Single source of truth** | One file that both human and agent reference |
-| **Living documentation** | Intent file IS the spec, always current |
-| **Collaborative** | Easy for human and agent to co-author |
-| **Evolvable** | Requirements change? Update intent, re-verify |
+| Goal                       | Description                                   |
+| -------------------------- | --------------------------------------------- |
+| **Single source of truth** | One file that both human and agent reference  |
+| **Living documentation**   | Intent file IS the spec, always current       |
+| **Collaborative**          | Easy for human and agent to co-author         |
+| **Evolvable**              | Requirements change? Update intent, re-verify |
 
 ---
 
@@ -119,6 +119,7 @@ The `.intent` file format must balance two tensions:
 2. **Flexible** (natural language) vs **Precise** (testable assertions)
 
 **Solution:** A hybrid format with clearly separated sections:
+
 - Prose sections for human understanding
 - Structured sections for machine verification
 
@@ -139,16 +140,18 @@ myapp.intent
 ### Section Details
 
 #### Meta Section
+
 Basic project information for tracking.
 
 ```yaml
 app: snowgauge
 version: 0.1.0
-status: active  # active | draft | deprecated
+status: active # active | draft | deprecated
 updated: 2026-01-13
 ```
 
 #### Purpose Section (Human-Focused)
+
 Free-form prose describing what the app is for. Agents read this for context but don't parse it strictly.
 
 ```
@@ -161,6 +164,7 @@ Primary use case: Morning check before deciding where to ski
 ```
 
 #### Glossary Section (Shared Understanding)
+
 Define domain terms so human and agent share vocabulary.
 
 ```
@@ -168,13 +172,14 @@ SNOTEL: Snow Telemetry - USDA automated weather stations that measure snowpack
 
 Snow Depth: Total height of accumulated snow on the ground, measured in inches
 
-SWE (Snow Water Equivalent): The amount of water contained in the snowpack 
+SWE (Snow Water Equivalent): The amount of water contained in the snowpack
 if melted, in inches
 
 New Snow: Snow accumulation in the last 24 hours, calculated as depth change
 ```
 
 #### Data Section (Machine-Parseable)
+
 Define schemas and data structures the app works with.
 
 ```
@@ -195,6 +200,7 @@ Represents a SNOTEL weather station.
 ```
 
 #### Features Section (Testable)
+
 Each feature has a description AND testable assertions.
 
 ```
@@ -210,12 +216,13 @@ Behavior:
 
 Tests:
 - GET /?site=bear_lake -> 200, contains "Bear Lake"
-- GET /?site=wild_basin -> 200, contains "Wild Basin"  
+- GET /?site=wild_basin -> 200, contains "Wild Basin"
 - GET /?site=invalid -> 200, contains "Bear Lake" (fallback)
 - GET / -> 200, contains "Bear Lake" (default)
 ```
 
 #### Constraints Section
+
 Rules and limitations the app must follow.
 
 ```
@@ -229,6 +236,7 @@ Behavior: Show user-friendly error message.
 ```
 
 #### Non-Requirements Section
+
 Explicitly state what is OUT of scope.
 
 ```
@@ -431,6 +439,7 @@ Summary: 2/3 features passing | Coverage: 78%
 ```
 
 Exit codes:
+
 - 0 = All tests pass
 - 1 = One or more tests fail
 - 2 = Intent file parse error
@@ -530,6 +539,7 @@ Generated: snowgauge.tnt with stubs
 ```
 
 Agent generates initial code structure with:
+
 - Data structures matching schemas
 - Function stubs for each feature
 - TODO comments linked to intent items
@@ -545,6 +555,7 @@ Agent implements features one by one. Each save triggers verification. Agent see
 ### Phase 4: Human Review
 
 Human reviews by looking at:
+
 1. The intent file (readable requirements)
 2. The verification output (proof it works)
 
@@ -557,6 +568,7 @@ Human: "Actually, I want 60 days of data, not 30"
 ```
 
 Workflow:
+
 1. Update intent file: "X-axis: Date (last 60 days)"
 2. Run `ntnt intent check` - fails
 3. Agent updates code
@@ -624,12 +636,12 @@ Day 3: "Actually, change that..."
 
 ### What Agents Get That They Don't Have Today
 
-| Today | With IDD |
-|-------|----------|
-| Vague requirements | Testable assertions |
-| Hope it's right | Prove it's right |
-| Redo on misunderstanding | Clear spec upfront |
-| Documentation separate | Intent IS documentation |
+| Today                    | With IDD                |
+| ------------------------ | ----------------------- |
+| Vague requirements       | Testable assertions     |
+| Hope it's right          | Prove it's right        |
+| Redo on misunderstanding | Clear spec upfront      |
+| Documentation separate   | Intent IS documentation |
 
 ---
 
@@ -671,29 +683,29 @@ let sites = map {
 
 ### Phase 1: Core (2-3 weeks)
 
-| Component | Description | Effort |
-|-----------|-------------|--------|
-| Intent parser | Parse .intent files | 3-4 days |
-| HTTP test runner | Run GET/POST assertions | 3-4 days |
-| `ntnt intent check` | Basic verification | 2-3 days |
-| Output formatting | Clear pass/fail display | 1-2 days |
+| Component           | Description             | Effort   |
+| ------------------- | ----------------------- | -------- |
+| Intent parser       | Parse .intent files     | 3-4 days |
+| HTTP test runner    | Run GET/POST assertions | 3-4 days |
+| `ntnt intent check` | Basic verification      | 2-3 days |
+| Output formatting   | Clear pass/fail display | 1-2 days |
 
 ### Phase 2: Tooling (2 weeks)
 
-| Component | Description | Effort |
-|-----------|-------------|--------|
-| `ntnt intent init` | Code scaffolding | 3-4 days |
-| `ntnt intent watch` | File watching | 2-3 days |
-| `ntnt intent coverage` | Coverage report | 2-3 days |
-| `ntnt intent diff` | Gap analysis | 2-3 days |
+| Component              | Description      | Effort   |
+| ---------------------- | ---------------- | -------- |
+| `ntnt intent init`     | Code scaffolding | 3-4 days |
+| `ntnt intent watch`    | File watching    | 2-3 days |
+| `ntnt intent coverage` | Coverage report  | 2-3 days |
+| `ntnt intent diff`     | Gap analysis     | 2-3 days |
 
 ### Phase 3: Polish (1-2 weeks)
 
-| Component | Description | Effort |
-|-----------|-------------|--------|
-| @implements parser | Code annotations | 2-3 days |
-| Schema validation | Data structure checks | 3-4 days |
-| Error messages | Helpful failure output | 2-3 days |
+| Component          | Description            | Effort   |
+| ------------------ | ---------------------- | -------- |
+| @implements parser | Code annotations       | 2-3 days |
+| Schema validation  | Data structure checks  | 3-4 days |
+| Error messages     | Helpful failure output | 2-3 days |
 
 **Total estimate: 5-7 weeks**
 
@@ -704,10 +716,12 @@ let sites = map {
 ### Format Questions
 
 1. **Markdown-based or custom syntax?**
+
    - Markdown: More familiar, better tooling
    - Custom: More precise, less ambiguous
 
 2. **How to handle complex assertions?**
+
    - Regex patterns?
    - JSON path queries?
    - Custom DSL?
@@ -719,10 +733,12 @@ let sites = map {
 ### Scope Questions
 
 4. **Should intent include implementation hints?**
+
    - "Use Chart.js" vs "Show a chart"
    - More prescription = less flexibility
 
 5. **How strict should verification be?**
+
    - Exact string match vs contains?
    - Required fields vs nice-to-have?
 
@@ -734,6 +750,7 @@ let sites = map {
 ### Workflow Questions
 
 7. **Who owns the intent file?**
+
    - Human only?
    - Agent can suggest changes?
    - Collaborative editing?
@@ -768,11 +785,12 @@ Agent suggests missing intents based on code analysis.
 
 Intent-Driven Development transforms the human-agent collaboration from:
 
-**Before:** "Build me X" -> *builds something* -> "No, I meant Y" -> *rebuilds* -> repeat
+**Before:** "Build me X" -> _builds something_ -> "No, I meant Y" -> _rebuilds_ -> repeat
 
 **After:** Intent file -> verified implementation -> confident deployment
 
 The .intent file becomes:
+
 - **For humans**: Plain English requirements they can read and edit
 - **For agents**: Testable assertions they can verify against
 - **For both**: A single source of truth that evolves with the project
@@ -781,4 +799,4 @@ This is what makes NTNT truly "AI-native" - not just a language agents can write
 
 ---
 
-*This document is a living design. Let's continue refining it together.*
+_This document is a living design. Let's continue refining it together._
