@@ -572,3 +572,75 @@ print(page)
     assert!(stdout.contains("<h1>Test</h1>"), "Should interpolate in multiline content");
     assert!(stdout.contains("<html>"), "Should preserve HTML tags");
 }
+
+#[test]
+fn test_get_key_with_two_args() {
+    let code = r#"
+import { get_key } from "std/collections"
+let data = map { "name": "Alice", "age": 30 }
+
+// Get existing key - returns Some
+let name = get_key(data, "name")
+print(name)
+
+// Get missing key - returns None
+let missing = get_key(data, "missing")
+print(missing)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "get_key() with 2 args should work");
+    assert!(stdout.contains("Some(Alice)") || stdout.contains("Option::Some(Alice)"), "Should return Some for existing key");
+    assert!(stdout.contains("None") || stdout.contains("Option::None"), "Should return None for missing key");
+}
+
+#[test]
+fn test_get_key_with_default() {
+    let code = r#"
+import { get_key } from "std/collections"
+let data = map { "name": "Alice" }
+
+// Get existing key with default - returns value
+let name = get_key(data, "name", "Unknown")
+print(name)
+
+// Get missing key with default - returns default
+let city = get_key(data, "city", "Boston")
+print(city)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "get_key() with default should work");
+    assert!(stdout.contains("Alice"), "Should return value for existing key");
+    assert!(stdout.contains("Boston"), "Should return default for missing key");
+}
+
+#[test]
+fn test_null_coalesce_operator() {
+    let code = r#"
+import { get_key } from "std/collections"
+let data = map { "name": "Alice" }
+
+// ?? unwraps Some value
+let name = get_key(data, "name") ?? "Default"
+print(name)
+
+// ?? returns right side for None
+let city = get_key(data, "city") ?? "Unknown"
+print(city)
+
+// ?? with built-in None
+let x = None
+let result = x ?? "Fallback"
+print(result)
+
+// ?? with Some
+let y = Some(42)
+let val = y ?? 0
+print(val)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "?? operator should work");
+    assert!(stdout.contains("Alice"), "Should unwrap Some to Alice");
+    assert!(stdout.contains("Unknown"), "Should return default for None");
+    assert!(stdout.contains("Fallback"), "Should return fallback for explicit None");
+    assert!(stdout.contains("42"), "Should unwrap Some(42)");
+}

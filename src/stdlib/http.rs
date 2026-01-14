@@ -788,14 +788,17 @@ fn http_request_with_cookies(opts: &HashMap<String, Value>) -> Result<Value> {
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
     
-    // get(url) -> Result<Response, Error> - HTTP GET request
-    module.insert("get".to_string(), Value::NativeFunction {
-        name: "get".to_string(),
+    // fetch(url) or fetch(options) -> Result<Response, Error>
+    // - fetch("https://...") - Simple GET request (like browser fetch with just URL)
+    // - fetch(map { "url": "...", "method": "POST", ... }) - Full request with cookies/headers
+    module.insert("fetch".to_string(), Value::NativeFunction {
+        name: "fetch".to_string(),
         arity: 1,
         func: |args| {
             match &args[0] {
                 Value::String(url) => http_get(url),
-                _ => Err(IntentError::TypeError("get() requires a URL string".to_string())),
+                Value::Map(opts) => http_request_with_cookies(opts),
+                _ => Err(IntentError::TypeError("fetch() requires a URL string or options map".to_string())),
             }
         },
     });
@@ -942,18 +945,6 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::String(url), Value::String(file_path), Value::String(field_name)) => 
                     http_upload(url, file_path, field_name),
                 _ => Err(IntentError::TypeError("upload() requires URL, file path, and field name strings".to_string())),
-            }
-        },
-    });
-    
-    // fetch(options) -> Result<Response, Error> - Full HTTP request with cookies/auth support
-    module.insert("fetch".to_string(), Value::NativeFunction {
-        name: "fetch".to_string(),
-        arity: 1,
-        func: |args| {
-            match &args[0] {
-                Value::Map(opts) => http_request_with_cookies(opts),
-                _ => Err(IntentError::TypeError("fetch() requires an options map".to_string())),
             }
         },
     });

@@ -641,22 +641,22 @@ NTNT Source (.tnt)
 
 ### Compilation Roadmap
 
-| Approach | Effort | Speedup | When |
-|----------|--------|---------|------|
-| Tree-walking Interpreter | ✅ Done | Baseline | Current |
-| Bytecode VM | 2-4 weeks | 10-50x | Phase 8.1 |
+| Approach                            | Effort     | Speedup   | When      |
+| ----------------------------------- | ---------- | --------- | --------- |
+| Tree-walking Interpreter            | ✅ Done    | Baseline  | Current   |
+| Bytecode VM                         | 2-4 weeks  | 10-50x    | Phase 8.1 |
 | Native Compilation (Cranelift/LLVM) | 2-3 months | 100-1000x | Phase 8.4 |
 
 ### What Can Be Reused
 
-| Component | Reusable? | Notes |
-|-----------|-----------|-------|
-| Lexer | ✅ 100% | Tokens don't change |
-| Parser | ✅ 100% | AST structure stays same |
-| AST | ✅ 100% | Core data structures |
-| Type System | ✅ 100% | Expansion for optimization |
-| Interpreter | ❌ Replaced | Becomes compiler/codegen |
-| Stdlib | ⚠️ Partial | Need native implementations |
+| Component   | Reusable?   | Notes                       |
+| ----------- | ----------- | --------------------------- |
+| Lexer       | ✅ 100%     | Tokens don't change         |
+| Parser      | ✅ 100%     | AST structure stays same    |
+| AST         | ✅ 100%     | Core data structures        |
+| Type System | ✅ 100%     | Expansion for optimization  |
+| Interpreter | ❌ Replaced | Becomes compiler/codegen    |
+| Stdlib      | ⚠️ Partial  | Need native implementations |
 
 ### 8.1 Bytecode VM (First Target)
 
@@ -689,6 +689,7 @@ enum OpCode {
 ```
 
 **CLI Integration:**
+
 ```bash
 ntnt compile app.tnt        # Compile to bytecode (.tnc)
 ntnt run app.tnc            # Run bytecode directly
@@ -717,9 +718,11 @@ ntnt run app.tnt            # Auto-compile and run (caches .tnc)
 **Goal:** Native machine code for maximum performance (100-1000x faster than interpreter).
 
 #### Option A: Cranelift Backend (Recommended)
+
 ```
 AST → Cranelift IR → Native Machine Code
 ```
+
 - Simpler API than LLVM
 - Good optimization passes
 - Used by rustc (experimental) and Wasmtime
@@ -733,7 +736,7 @@ use cranelift_module::Module;
 fn compile_function(ast: &Function, module: &mut Module) {
     let mut func = Function::new();
     let mut builder = FunctionBuilder::new(&mut func, &mut ctx);
-    
+
     // Generate Cranelift IR from AST
     for stmt in &ast.body {
         compile_statement(stmt, &mut builder);
@@ -742,9 +745,11 @@ fn compile_function(ast: &Function, module: &mut Module) {
 ```
 
 #### Option B: LLVM Backend
+
 ```
 AST → LLVM IR → LLVM Optimizer → Native Machine Code
 ```
+
 - Best-in-class optimizations
 - Used by Rust, Swift, Julia, Clang
 - More complex API
@@ -759,15 +764,17 @@ fn compile_to_llvm(ast: &Module) -> inkwell::module::Module {
     let context = Context::create();
     let module = context.create_module("ntnt");
     let builder = context.create_builder();
-    
+
     // Generate LLVM IR from AST
 }
 ```
 
 #### Option C: Transpile to Rust (Creative Alternative)
+
 ```
 AST → Rust Source Code → cargo build → Native Binary
 ```
+
 - Leverage Rust's optimizer for free
 - Easier debugging (human-readable output)
 - Estimated effort: 2-4 weeks
@@ -781,6 +788,7 @@ fn add(a: i64, b: i64) -> i64 { a + b }
 ```
 
 **CLI Integration:**
+
 ```bash
 ntnt build app.tnt              # Compile to native binary
 ntnt build app.tnt --release    # Optimized build
@@ -1116,4 +1124,4 @@ pub fn main() {
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: January 2026 (v0.1.9)_
+_Last updated: January 2026 (v0.1.10)_

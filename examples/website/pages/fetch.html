@@ -75,7 +75,7 @@
       <div class="dot green"></div>
     </div>
     <pre><code>fn fetch_page(req) {
-    match get("https://meowfacts.herokuapp.com/") {
+    match fetch("https://meowfacts.herokuapp.com/") {
         Ok(response) => {
             let data = parse(response.body)
             let fact = data.data[0]

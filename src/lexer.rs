@@ -143,6 +143,7 @@ pub enum TokenKind {
     Arrow,          // ->
     FatArrow,       // =>
     Question,       // ?
+    QuestionQuestion, // ??
     At,             // @
     Hash,           // #
     Ampersand,      // &
@@ -995,7 +996,14 @@ impl<'a> Lexer<'a> {
                 }
             }
             ';' => Token::new(TokenKind::Semicolon, start_line, start_column, ";".into()),
-            '?' => Token::new(TokenKind::Question, start_line, start_column, "?".into()),
+            '?' => {
+                if self.peek() == Some(&'?') {
+                    self.advance();
+                    Token::new(TokenKind::QuestionQuestion, start_line, start_column, "??".into())
+                } else {
+                    Token::new(TokenKind::Question, start_line, start_column, "?".into())
+                }
+            }
             '@' => Token::new(TokenKind::At, start_line, start_column, "@".into()),
             '#' => Token::new(TokenKind::Hash, start_line, start_column, "#".into()),
             

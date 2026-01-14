@@ -155,7 +155,7 @@ Before making changes to an NTNT project, use `ntnt inspect` to understand:
 - `std/url` - encode, decode, parse_query, build_query
 - `std/env` - get_env, load_env, args, cwd
 - `std/collections` - push, pop, map, filter, reduce
-- `std/http` - get, post, put, delete, get_json
+- `std/http` - fetch, post, put, delete, get_json
 - `std/http_server` - listen, get, post, json, html
 - `std/db/postgres` - connect, query, execute, close
 - `std/fs` - read_file, write_file, exists, mkdir

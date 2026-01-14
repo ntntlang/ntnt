@@ -12,7 +12,7 @@
 import { html, text, json, not_found } from "std/http/server"
 import { read_file, exists } from "std/fs"
 import { replace } from "std/string"
-import { get } from "std/http"
+import { fetch } from "std/http"
 import { parse } from "std/json"
 import { get_env } from "std/env"
 
@@ -101,7 +101,7 @@ fn examples_page(req) {
 //   CAT_API_URL="https://api.example.com" ntnt run examples/website.tnt
 fn fetch_page(req) {
     // Fetch cat fact from external API (URL from env var)
-    match get(CAT_API_URL) {
+    match fetch(CAT_API_URL) {
         Ok(response) => {
             match parse(response.body) {
                 Ok(data) => {
@@ -151,7 +151,7 @@ fn api_status(req) {
 
 // API endpoint that returns raw cat fact JSON
 fn api_cat_fact(req) {
-    match get(CAT_API_URL) {
+    match fetch(CAT_API_URL) {
         Ok(response) => {
             match parse(response.body) {
                 Ok(data) => {

@@ -873,7 +873,7 @@ impl Parser {
     }
 
     fn assignment(&mut self) -> Result<Expression> {
-        let expr = self.or()?;
+        let expr = self.null_coalesce()?;
         
         if self.match_token(&[TokenKind::Assign]) {
             let value = self.assignment()?;
@@ -881,6 +881,21 @@ impl Parser {
                 target: Box::new(expr),
                 value: Box::new(value),
             });
+        }
+        
+        Ok(expr)
+    }
+    
+    fn null_coalesce(&mut self) -> Result<Expression> {
+        let mut expr = self.or()?;
+        
+        while self.match_token(&[TokenKind::QuestionQuestion]) {
+            let right = self.or()?;
+            expr = Expression::Binary {
+                left: Box::new(expr),
+                operator: BinaryOp::NullCoalesce,
+                right: Box::new(right),
+            };
         }
         
         Ok(expr)

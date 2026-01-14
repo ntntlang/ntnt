@@ -298,7 +298,7 @@ fn print_repl_help() {
     println!("  {}      - std/time: now, sleep, elapsed, format_timestamp", "Time".cyan());
     println!("  {}    - std/crypto: sha256, hmac_sha256, uuid, random_bytes", "Crypto".cyan());
     println!("  {}       - std/url: parse, encode, decode, build_query, join", "URL".cyan());
-    println!("  {}      - std/http: get, post, put, delete, request, get_json", "HTTP".cyan());
+    println!("  {}      - std/http: fetch, post, put, delete, request, get_json", "HTTP".cyan());
     println!();
     println!("{}", "Basic Examples:".yellow().bold());
     println!("  {}           - Variable binding", "let x = 42;".cyan());
@@ -799,7 +799,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
             "common_imports": {
                 "std/string": ["split", "join", "trim", "replace", "contains", "starts_with", "ends_with"],
                 "std/collections": ["push", "pop", "map", "filter", "reduce", "first", "last"],
-                "std/http": ["get", "post", "put", "delete", "get_json", "post_json"],
+                "std/http": ["fetch", "post", "put", "delete", "get_json", "post_json"],
                 "std/http_server": ["listen", "get", "post", "json", "html", "text", "redirect", "serve_static"],
                 "std/fs": ["read_file", "write_file", "exists", "mkdir", "readdir"],
                 "std/json": ["parse", "stringify", "stringify_pretty"],

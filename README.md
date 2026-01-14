@@ -294,14 +294,14 @@ Every web application needs these. NTNT includes them:
 - Time operations: `std/time` (now, sleep, format_timestamp)
 - Cryptography: `std/crypto` (sha256, hmac_sha256, uuid, random_bytes)
 - URL utilities: `std/url` (parse, encode, decode, build_query)
-- HTTP Client: `std/http` (get, post, put, delete, request with headers/auth)
+- HTTP Client: `std/http` (fetch, post, put, delete, request with headers/auth)
 - **HTTP Server**: `std/http/server` (routing, middleware, static files, contract-verified endpoints)
 - **File-Based Routing**: `routes()` for convention-over-configuration (routes/, lib/, middleware/ auto-discovery)
 - **Agent Tooling**: `ntnt inspect` (JSON introspection), `ntnt validate` (pre-run error checking)
 - **PostgreSQL**: `std/db/postgres` (connect, query, execute, transactions)
 - **CSV**: `std/csv` (parse, stringify with headers support)
 
-**Version 0.1.9** | See [ROADMAP.md](ROADMAP.md) for the complete 10-phase implementation plan.
+**Version 0.1.10** | See [ROADMAP.md](ROADMAP.md) for the complete 10-phase implementation plan.
 
 ## Example
 
@@ -774,7 +774,7 @@ math.exp(x)    // e^x
 
 ```ntnt
 import { push, pop, first, last, reverse, slice, concat, is_empty } from "std/collections"
-import { keys, values, entries, has_key } from "std/collections"
+import { keys, values, entries, has_key, get_key } from "std/collections"
 
 let arr = [1, 2, 3]
 let arr2 = push(arr, 4)        // [1, 2, 3, 4]
@@ -800,6 +800,15 @@ for entry in entries(scores) {
 if has_key(scores, "alice") {
     print("Found alice!")
 }
+
+// Safe map access with get_key
+let name = get_key(scores, "alice")           // Some(100)
+let missing = get_key(scores, "charlie")      // None
+let withDefault = get_key(scores, "charlie", 0)  // 0 (default)
+
+// Use ?? operator to unwrap or provide default
+let score = get_key(scores, "alice") ?? 0     // 100
+let other = get_key(scores, "charlie") ?? 0   // 0
 ```
 
 **std/env** - Environment access
@@ -1089,7 +1098,7 @@ NTNT bridges the gap between AI's speed and consistency with human judgment and 
 |                   | to_upper, to_lower, char_at, substring                         |
 | `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E |
 | `std/collections` | push, pop, first, last, reverse, slice, concat, is_empty       |
-|                   | keys, values, entries, has_key                                 |
+|                   | keys, values, entries, has_key, get_key                        |
 | `std/env`         | get_env, args, cwd                                             |
 | `std/fs`          | read_file, write_file, exists, mkdir, remove, readdir          |
 | `std/path`        | join, dirname, basename, extension, resolve, normalize         |
@@ -1098,7 +1107,7 @@ NTNT bridges the gap between AI's speed and consistency with human judgment and 
 | `std/time`        | now, sleep, elapsed, format_timestamp, duration_secs           |
 | `std/crypto`      | sha256, hmac_sha256, uuid, random_bytes, hex_encode            |
 | `std/url`         | parse, encode, decode, build_query, parse_query, join          |
-| `std/http`        | get, post, put, delete, request, get_json, post_json           |
+| `std/http`        | fetch, post, put, delete, request, get_json, post_json         |
 | `std/http/server` | text, html, json, status, redirect + get, post, put, listen    |
 | `std/db/postgres` | connect, query, query_one, execute, begin, commit, rollback    |
 | `std/concurrent`  | channel, send, recv, try_recv, recv_timeout, close, sleep_ms   |

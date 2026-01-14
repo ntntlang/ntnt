@@ -170,6 +170,40 @@ push(arr, item)   // Correct
 "hello".len()     // Wrong
 ```
 
+### Safe Map Access with get_key
+
+Use `get_key()` for safe map access instead of direct indexing:
+
+```ntnt
+import { get_key, has_key } from "std/collections"
+
+let params = map { "name": "Alice" }
+
+// With 2 args: returns Option (Some or None)
+let name = get_key(params, "name")       // Some("Alice")
+let age = get_key(params, "age")         // None
+
+// With 3 args: returns value or default
+let name = get_key(params, "name", "Unknown")  // "Alice"
+let age = get_key(params, "age", 0)            // 0
+```
+
+### Null Coalescing Operator (??)
+
+Use `??` to provide a default when a value is `None`:
+
+```ntnt
+import { get_key } from "std/collections"
+
+// ?? unwraps Some values or returns the right side for None
+let name = get_key(params, "name") ?? "Anonymous"
+let age = get_key(params, "age") ?? 0
+
+// Works with any Option value
+let user = get_env("USER") ?? "guest"
+let first = first(items) ?? default_item
+```
+
 ## HTTP POST/Form Handling
 
 Use `parse_query()` from `std/url` to parse form data:
@@ -225,8 +259,8 @@ let db_url = match get_env("DATABASE_URL") {
 ```ntnt
 import { split, join, trim, replace } from "std/string"
 import { encode, decode, parse_query, build_query } from "std/url"
-import { push, pop, keys, values, entries, has_key } from "std/collections"
-import { get, post, get_json } from "std/http"
+import { push, pop, keys, values, entries, has_key, get_key } from "std/collections"
+import { fetch, post, get_json } from "std/http"
 import { listen, get, post, json, html } from "std/http_server"
 import { connect, query, execute, close } from "std/db/postgres"
 import { read_file, write_file, exists } from "std/fs"

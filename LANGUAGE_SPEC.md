@@ -1,6 +1,6 @@
 # NTNT Language Specification
 
-## Version 0.1.8
+## Version 0.1.10
 
 This document specifies the syntax, semantics, and core features of the NTNT programming language.
 
@@ -542,7 +542,7 @@ close(ch)
 import { split, join, trim } from "std/string"
 
 // Import with alias
-import { get as http_get } from "std/http"
+import { fetch as http_fetch } from "std/http"
 
 // Import entire module
 import "std/math" as math
@@ -678,11 +678,11 @@ let tzs = list_timezones()  // ["UTC", "America/New_York", "Asia/Tokyo", ...]
 ### HTTP Client (`std/http`)
 
 ```ntnt
-import { get, post, put, delete, patch, head, request, fetch } from "std/http"
+import { fetch, post, put, delete, patch, head, request } from "std/http"
 import { get_json, post_json, post_form, basic_auth, download, upload } from "std/http"
 
-// Simple GET
-match get("https://api.example.com/data") {
+// Simple GET (fetch)
+match fetch("https://api.example.com/data") {
     Ok(response) => print(response.body),
     Err(e) => print("Error: " + e)
 }
@@ -756,7 +756,7 @@ match fetch(map {
 **HTTP Functions:**
 | Function | Description |
 |----------|-------------|
-| `get(url)` | Simple GET request |
+| `fetch(url)` | Simple GET request |
 | `post(url, body)` | POST with text body |
 | `put(url, body)` | PUT request |
 | `delete(url)` | DELETE request |

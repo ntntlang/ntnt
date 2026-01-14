@@ -1820,6 +1820,22 @@ impl Interpreter {
                         let rhs = self.eval_expression(right)?;
                         return Ok(Value::Bool(rhs.is_truthy()));
                     }
+                    BinaryOp::NullCoalesce => {
+                        // Return unwrapped left if it's Some, otherwise evaluate and return right
+                        match &lhs {
+                            Value::EnumValue { enum_name, variant, values } 
+                                if enum_name == "Option" && variant == "Some" => {
+                                // Unwrap the Some value
+                                return Ok(values.first().cloned().unwrap_or(Value::Unit));
+                            }
+                            Value::EnumValue { enum_name, variant, .. } 
+                                if enum_name == "Option" && variant == "None" => {
+                                return self.eval_expression(right);
+                            }
+                            // For non-Option values, return as-is (like JavaScript's ??)
+                            _ => return Ok(lhs),
+                        }
+                    }
                     _ => {}
                 }
 
@@ -3058,6 +3074,7 @@ impl Interpreter {
                     BinaryOp::Ge => ">=",
                     BinaryOp::And => "&&",
                     BinaryOp::Or => "||",
+                    BinaryOp::NullCoalesce => "??",
                 };
                 format!("{} {} {}", Self::format_expression(left), op_str, Self::format_expression(right))
             }
@@ -5281,7 +5298,7 @@ c")
     fn test_std_http_module_exists() {
         // Verify the HTTP module can be imported
         let result = eval(r#"
-            import { get, post, put, delete, patch, head, request, get_json, post_json } from "std/http"
+            import { fetch, post, put, delete, patch, head, request, get_json, post_json } from "std/http"
             "module loaded"
         "#).unwrap();
         if let Value::String(s) = result {
@@ -5292,11 +5309,11 @@ c")
     }
     
     #[test]
-    fn test_std_http_get_invalid_url() {
+    fn test_std_http_fetch_invalid_url() {
         // Test error handling for invalid URL
         let result = eval(r#"
-            import { get } from "std/http"
-            match get("not-a-valid-url") {
+            import { fetch } from "std/http"
+            match fetch("not-a-valid-url") {
                 Ok(resp) => "unexpected success",
                 Err(e) => "got error as expected",
             }
@@ -5368,7 +5385,7 @@ c")
     fn test_std_http_new_functions_exist() {
         // Test that all new HTTP functions exist and are callable
         let result = eval(r#"
-            import { basic_auth, post_form, download, upload, fetch } from "std/http"
+            import { fetch, basic_auth, post_form, download, upload } from "std/http"
             
             // Test that basic_auth returns a Result (will fail with invalid URL)
             let auth_result = basic_auth("invalid://test", "user", "pass")

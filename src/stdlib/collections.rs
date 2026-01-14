@@ -235,5 +235,53 @@ pub fn init() -> HashMap<String, Value> {
         },
     });
     
+    // get_key(map, key) -> Option<Value> - Safe map access, returns None if key missing
+    // get_key(map, key, default) -> Value - Returns default if key missing
+    module.insert("get_key".to_string(), Value::NativeFunction {
+        name: "get_key".to_string(),
+        arity: 0, // Variable arity: 2 or 3 arguments
+        func: |args| {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(IntentError::TypeError(
+                    "get_key() requires 2 or 3 arguments: get_key(map, key) or get_key(map, key, default)".to_string()
+                ));
+            }
+            
+            match (&args[0], &args[1]) {
+                (Value::Map(map), Value::String(key)) => {
+                    match map.get(key) {
+                        Some(value) => {
+                            if args.len() == 3 {
+                                // With default: return the value directly
+                                Ok(value.clone())
+                            } else {
+                                // Without default: return Some(value)
+                                Ok(Value::EnumValue {
+                                    enum_name: "Option".to_string(),
+                                    variant: "Some".to_string(),
+                                    values: vec![value.clone()],
+                                })
+                            }
+                        }
+                        None => {
+                            if args.len() == 3 {
+                                // With default: return the default value
+                                Ok(args[2].clone())
+                            } else {
+                                // Without default: return None
+                                Ok(Value::EnumValue {
+                                    enum_name: "Option".to_string(),
+                                    variant: "None".to_string(),
+                                    values: vec![],
+                                })
+                            }
+                        }
+                    }
+                }
+                _ => Err(IntentError::TypeError("get_key() requires a map and string key".to_string())),
+            }
+        },
+    });
+    
     module
 }

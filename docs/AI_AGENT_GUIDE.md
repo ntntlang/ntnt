@@ -289,7 +289,7 @@ NTNT uses JavaScript-style imports with quoted paths and `/` separators:
 ```ntnt
 // ✅ CORRECT - NTNT import syntax
 import { split, join, trim } from "std/string"
-import { get, post } from "std/http"
+import { fetch, post } from "std/http"
 import "std/math" as math
 import { readFile as read } from "std/fs"
 
@@ -369,13 +369,13 @@ Always handle `Result` and `Option` types explicitly:
 
 ```ntnt
 // ✅ CORRECT - Pattern match or use helpers
-match get("https://api.example.com") {
+match fetch("https://api.example.com") {
     Ok(response) => print(response.body),
     Err(e) => print("Error: {e}"),
 }
 
 // Using helper functions
-let response = unwrap(get("https://api.example.com"))
+let response = unwrap(fetch("https://api.example.com"))
 let value = unwrap_or(optional_value, "default")
 
 if is_ok(result) {
@@ -383,8 +383,8 @@ if is_ok(result) {
 }
 
 // ❌ WRONG - Treating Result as direct value
-let response = get("https://api.example.com")
-print(response.body)      // ERROR if get() returned Err
+let response = fetch("https://api.example.com")
+print(response.body)      // ERROR if fetch() returned Err
 ```
 
 ## Standard Library Quick Reference
@@ -423,7 +423,7 @@ import { push, pop, first, last, reverse, slice, concat, is_empty } from "std/co
 import { keys, values, entries, has_key } from "std/collections"  // Map iteration
 
 // HTTP client
-import { get, post, put, delete, get_json, post_json } from "std/http"
+import { fetch, post, put, delete, get_json, post_json } from "std/http"
 
 // HTTP server
 import { listen, get, post, json, html, text, redirect, serve_static, routes } from "std/http_server"
@@ -543,7 +543,7 @@ execute(db, "INSERT INTO users (age) VALUES ($1)", [int(form["age"])])  // Works
 
 ```ntnt
 import { parse, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
-import { get } from "std/http"
+import { fetch } from "std/http"
 
 // Parse CSV into array of arrays
 let csv_data = "name,age,city\nAlice,30,NYC\nBob,25,LA"
@@ -673,7 +673,7 @@ let msg = recv(ch)
 
 ```ntnt
 fn fetch_user(id: String) -> Result<User, String> {
-    let response = get("https://api.example.com/users/{id}")
+    let response = fetch("https://api.example.com/users/{id}")
 
     match response {
         Ok(r) => {

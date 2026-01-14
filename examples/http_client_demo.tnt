@@ -1,7 +1,7 @@
 // HTTP Client Demo - Showcasing all HTTP client features in NTNT
 // Run with: ntnt examples/http_client_demo.tnt
 
-import { get, post, put, patch, head, get_json, post_json, post_form, basic_auth, request, fetch } from "std/http"
+import { fetch, post, put, patch, head, get_json, post_json, post_form, basic_auth, request } from "std/http"
 import { repeat } from "std/string"
 
 fn main() {
@@ -11,7 +11,7 @@ fn main() {
     // 1. Basic GET request
     print("")
     print("📥 1. Basic GET Request")
-    match get("https://httpbin.org/get") {
+    match fetch("https://httpbin.org/get") {
         Ok(response) => {
             print("  Status: ")
             print(response.status)

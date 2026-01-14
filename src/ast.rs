@@ -334,6 +334,9 @@ pub enum BinaryOp {
     // Logical
     And,
     Or,
+    
+    // Null coalescing
+    NullCoalesce,
 }
 
 /// Unary operators

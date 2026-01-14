@@ -1,7 +1,7 @@
 // HTTP Client Example
 // Demonstrates std/http module for making HTTP requests
 
-import { get, post, get_json, post_json, request } from "std/http"
+import { fetch, post, get_json, post_json, request } from "std/http"
 import { stringify } from "std/json"
 
 print("=== HTTP Client Demo ===")
@@ -11,7 +11,7 @@ print("")
 print("--- Basic GET Request ---")
 print("Fetching from httpbin.org/get...")
 
-match get("https://httpbin.org/get") {
+match fetch("https://httpbin.org/get") {
     Ok(response) => {
         print("Status: ")
         print(response.status)
