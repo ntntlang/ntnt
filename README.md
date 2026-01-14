@@ -13,6 +13,10 @@ cargo build --release
 cargo install --path . --locked
 ```
 
+## File Extension
+
+NTNT uses `.tnt` for source files.
+
 ### Hello World
 
 ```bash
@@ -112,7 +116,7 @@ Agents and humans agree via contracts on the intended functionality of the code.
 - **For humans**: Contracts serve as executable documentation. You can understand what a function expects and guarantees at a glance.
 - **For HTTP APIs**: A failed precondition automatically returns 400 Bad Request. A failed postcondition returns 500 Internal Server Error. The contract _is_ the validation layer.
 
-### Radically Simple
+### Simple Syntax with Selected Native Features
 
 A JSON API endpoint in NTNT:
 
@@ -126,8 +130,6 @@ get("/users/{id}", |req| json(map {
 
 listen(3000)
 ```
-
-One file. No package.json, no tsconfig, no node_modules, no dependency decisions. Write the code, run it.
 
 **The same endpoint in Go:**
 
@@ -219,8 +221,6 @@ Every web application needs these. NTNT includes them:
 | Time/Timezones | `std/time`        | moment, dayjs, date-fns, Luxon         |
 | Crypto         | `std/crypto`      | crypto, bcrypt, uuid libraries         |
 
-One import. It works. The decision is made.
-
 ### The Downsides
 
 **Performance**: NTNT is interpreted, not compiled. It handles hundreds of requests per second comfortably—enough for most web applications—but it's not suitable for compute-intensive workloads, real-time systems, or high-frequency trading.
@@ -302,10 +302,6 @@ One import. It works. The decision is made.
 - **CSV**: `std/csv` (parse, stringify with headers support)
 
 **Version 0.1.9** | See [ROADMAP.md](ROADMAP.md) for the complete 10-phase implementation plan.
-
-## File Extension
-
-NTNT uses `.tnt` for source files.
 
 ## Example
 
