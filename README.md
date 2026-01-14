@@ -93,7 +93,7 @@ ntnt inspect api.tnt --json
 
 ### Contracts as First-Class Citizens
 
-Contracts aren't a library or an annotation—they're part of the language syntax:
+Contracts are part of the language syntax:
 
 ```ntnt
 fn withdraw(amount: Int) -> Int
@@ -106,7 +106,7 @@ fn withdraw(amount: Int) -> Int
 }
 ```
 
-This changes how both agents and humans interact with code:
+Agents and humans agree via contracts on the intended functionality of the code.
 
 - **For agents**: Contracts are machine-readable specifications. An agent can read `requires amount > 0` and know exactly what inputs are valid without analyzing the implementation.
 - **For humans**: Contracts serve as executable documentation. You can understand what a function expects and guarantees at a glance.
@@ -204,8 +204,6 @@ def get_user(id: str):
 Plus: `requirements.txt`, `uvicorn` server, virtual environment, and `pip install fastapi uvicorn`.
 
 ---
-
-NTNT isn't simpler because it's less capable—it's simpler because the decisions are already made. One HTTP server. One way to return JSON. One command to run it.
 
 ### Batteries Included
 
@@ -639,14 +637,14 @@ let page = """
 
 **Template Features:**
 
-| Syntax | Description |
-|--------|-------------|
-| `{{expr}}` | Interpolate expression |
-| `{ ... }` | Literal braces (CSS/JS safe) |
-| `{{#for x in arr}}...{{/for}}` | Loop over array |
-| `{{#if cond}}...{{/if}}` | Conditional |
-| `{{#if cond}}...{{#else}}...{{/if}}` | If-else |
-| `\{{` and `\}}` | Literal `{{` and `}}` |
+| Syntax                               | Description                  |
+| ------------------------------------ | ---------------------------- |
+| `{{expr}}`                           | Interpolate expression       |
+| `{ ... }`                            | Literal braces (CSS/JS safe) |
+| `{{#for x in arr}}...{{/for}}`       | Loop over array              |
+| `{{#if cond}}...{{/if}}`             | Conditional                  |
+| `{{#if cond}}...{{#else}}...{{/if}}` | If-else                      |
+| `\{{` and `\}}`                      | Literal `{{` and `}}`        |
 
 ```ntnt
 let logged_in = true
@@ -1089,25 +1087,25 @@ NTNT bridges the gap between AI's speed and consistency with human judgment and 
 
 ### Standard Library (import required)
 
-| Module            | Functions                                                          |
-| ----------------- | ------------------------------------------------------------------ |
-| `std/string`      | split, join, trim, replace, contains, starts_with, ends_with       |
-|                   | to_upper, to_lower, char_at, substring                             |
-| `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E     |
-| `std/collections` | push, pop, first, last, reverse, slice, concat, is_empty           |
-|                   | keys, values, entries, has_key                                     |
-| `std/env`         | get_env, args, cwd                                                 |
-| `std/fs`          | read_file, write_file, exists, mkdir, remove, readdir              |
-| `std/path`        | join, dirname, basename, extension, resolve, normalize             |
-| `std/json`        | parse, stringify, stringify_pretty                                 |
-| `std/csv`         | parse, parse_with_headers, stringify, stringify_with_headers       |
-| `std/time`        | now, sleep, elapsed, format_timestamp, duration_secs               |
-| `std/crypto`      | sha256, hmac_sha256, uuid, random_bytes, hex_encode                |
-| `std/url`         | parse, encode, decode, build_query, parse_query, join              |
-| `std/http`        | get, post, put, delete, request, get_json, post_json               |
-| `std/http/server` | text, html, json, status, redirect + get, post, put, listen        |
-| `std/db/postgres` | connect, query, query_one, execute, begin, commit, rollback        |
-| `std/concurrent`  | channel, send, recv, try_recv, recv_timeout, close, sleep_ms       |
+| Module            | Functions                                                      |
+| ----------------- | -------------------------------------------------------------- |
+| `std/string`      | split, join, trim, replace, contains, starts_with, ends_with   |
+|                   | to_upper, to_lower, char_at, substring                         |
+| `std/math`        | sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E |
+| `std/collections` | push, pop, first, last, reverse, slice, concat, is_empty       |
+|                   | keys, values, entries, has_key                                 |
+| `std/env`         | get_env, args, cwd                                             |
+| `std/fs`          | read_file, write_file, exists, mkdir, remove, readdir          |
+| `std/path`        | join, dirname, basename, extension, resolve, normalize         |
+| `std/json`        | parse, stringify, stringify_pretty                             |
+| `std/csv`         | parse, parse_with_headers, stringify, stringify_with_headers   |
+| `std/time`        | now, sleep, elapsed, format_timestamp, duration_secs           |
+| `std/crypto`      | sha256, hmac_sha256, uuid, random_bytes, hex_encode            |
+| `std/url`         | parse, encode, decode, build_query, parse_query, join          |
+| `std/http`        | get, post, put, delete, request, get_json, post_json           |
+| `std/http/server` | text, html, json, status, redirect + get, post, put, listen    |
+| `std/db/postgres` | connect, query, query_one, execute, begin, commit, rollback    |
+| `std/concurrent`  | channel, send, recv, try_recv, recv_timeout, close, sleep_ms   |
 
 ## PostgreSQL Database
 
