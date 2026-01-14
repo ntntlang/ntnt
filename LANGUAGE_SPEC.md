@@ -683,7 +683,13 @@ import { get_json, post_json, post_form, basic_auth, download, upload } from "st
 
 // Simple GET (fetch)
 match fetch("https://api.example.com/data") {
-    Ok(response) => print(response.body),
+    Ok(response) => {
+        if response.ok {
+            print(response.body)
+        } else {
+            print("HTTP " + str(response.status) + ": " + response.status_text)
+        }
+    },
     Err(e) => print("Error: " + e)
 }
 
@@ -770,6 +776,25 @@ match fetch(map {
 | `upload(url, path, field)` | Multipart file upload |
 | `request(opts)` | Full control (method, headers, timeout) |
 | `fetch(opts)` | Full control + cookies |
+
+**Response Object Properties:**
+| Property | Type | Description |
+|----------|------|-------------|
+| `status` | Int | HTTP status code (200, 404, etc.) |
+| `status_text` | String | Status message ("OK", "Not Found", etc.) |
+| `ok` | Bool | `true` if status is 200-299 |
+| `headers` | Map | Response headers |
+| `body` | String | Response body content |
+
+**Request Options (for `request()` and `fetch()`):**
+| Option | Type | Description |
+|--------|------|-------------|
+| `url` | String | Request URL (required) |
+| `method` | String | HTTP method (GET, POST, etc.) |
+| `headers` | Map | Request headers |
+| `body` | String | Request body |
+| `timeout` | Int | Timeout in seconds |
+| `cookies` | Map | Cookies to send (fetch only) |
 
 ### HTTP Server (`std/http/server`)
 

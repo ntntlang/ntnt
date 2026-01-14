@@ -370,9 +370,18 @@ Always handle `Result` and `Option` types explicitly:
 ```ntnt
 // ✅ CORRECT - Pattern match or use helpers
 match fetch("https://api.example.com") {
-    Ok(response) => print(response.body),
+    Ok(response) => {
+        if response.ok {
+            print(response.body)
+        } else {
+            print("HTTP " + str(response.status) + ": " + response.status_text)
+        }
+    },
     Err(e) => print("Error: {e}"),
 }
+
+// Response object has: status, status_text, ok, headers, body
+// response.ok is true for status 200-299
 
 // Using helper functions
 let response = unwrap(fetch("https://api.example.com"))

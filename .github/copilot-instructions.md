@@ -254,6 +254,26 @@ let db_url = match get_env("DATABASE_URL") {
 }
 ```
 
+### HTTP Response Object
+
+The `fetch()` and other HTTP functions return a `Result<Response, Error>`. The response object has:
+
+```ntnt
+match fetch("https://api.example.com") {
+    Ok(response) => {
+        response.status       // Int: 200, 404, etc.
+        response.status_text  // String: "OK", "Not Found", etc.
+        response.ok           // Bool: true if status 200-299
+        response.headers      // Map: response headers
+        response.body         // String: response body
+    },
+    Err(e) => print("Error: " + e)
+}
+
+// With timeout (seconds)
+fetch(map { "url": "https://...", "timeout": 30 })
+```
+
 ### Common imports
 
 ```ntnt

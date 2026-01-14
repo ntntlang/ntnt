@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "ntnt"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "base64 0.21.7",
