@@ -1,0 +1,836 @@
+// ntnt-lang.org - Official website for the NTNT Programming Language
+// @implements: feature.static_assets
+
+import { html } from "std/http/server"
+
+// CSS styles
+let CSS = """
+:root {
+    --teal: #137EA2;
+    --orange: #F1993F;
+    --indigo: #2C2A74;
+    --navy: #192F52;
+    --yellow: #FCDD83;
+    --cyan: #20DDE3;
+    --bg: #fafbfc;
+    --text: #1a1a2e;
+    --text-muted: #5a5a7a;
+    --code-bg: #f4f4f8;
+    --border: #e1e4e8;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+}
+
+a {
+    color: var(--teal);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+.header {
+    background: var(--navy);
+    padding: 1rem 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.logo {
+    width: 48px;
+    height: 48px;
+    border-radius: 8px;
+}
+
+.header h1 {
+    color: white;
+    font-size: 1.5rem;
+    font-weight: 600;
+}
+
+.nav {
+    display: flex;
+    gap: 2rem;
+}
+
+.nav a {
+    color: rgba(255,255,255,0.9);
+    font-weight: 500;
+    transition: color 0.2s;
+}
+
+.nav a:hover {
+    color: var(--cyan);
+    text-decoration: none;
+}
+
+.main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+.hero {
+    text-align: center;
+    padding: 4rem 2rem;
+    background: linear-gradient(135deg, var(--navy) 0%, var(--indigo) 100%);
+    color: white;
+    margin: -2rem -2rem 2rem -2rem;
+}
+
+.hero h2 {
+    font-size: 3rem;
+    margin-bottom: 1rem;
+    font-weight: 700;
+}
+
+.hero .tagline {
+    font-size: 1.25rem;
+    opacity: 0.9;
+    max-width: 700px;
+    margin: 0 auto 2rem auto;
+}
+
+.cta-button {
+    display: inline-block;
+    background: var(--orange);
+    color: white;
+    padding: 1rem 2.5rem;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 1.1rem;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.cta-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(241, 153, 63, 0.4);
+    text-decoration: none;
+}
+
+.warning {
+    background: var(--yellow);
+    color: var(--navy);
+    padding: 1rem 1.5rem;
+    border-radius: 8px;
+    margin: 2rem 0;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.section {
+    margin: 4rem 0;
+}
+
+.section h3 {
+    font-size: 2rem;
+    color: var(--navy);
+    margin-bottom: 1.5rem;
+    font-weight: 600;
+}
+
+.section-subtitle {
+    color: var(--text-muted);
+    font-size: 1.1rem;
+    margin-bottom: 2rem;
+}
+
+.features {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.5rem;
+    margin-top: 2rem;
+}
+
+.feature-card {
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    transition: box-shadow 0.2s, transform 0.2s;
+}
+
+.feature-card:hover {
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    transform: translateY(-2px);
+}
+
+.feature-card h4 {
+    color: var(--indigo);
+    font-size: 1.25rem;
+    margin-bottom: 0.75rem;
+}
+
+.feature-card p {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    overflow-x: auto;
+    font-family: 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+code {
+    font-family: 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+    background: var(--code-bg);
+    padding: 0.2rem 0.4rem;
+    border-radius: 4px;
+    font-size: 0.9em;
+}
+
+pre code {
+    background: none;
+    padding: 0;
+}
+
+.footer {
+    background: var(--navy);
+    color: rgba(255,255,255,0.7);
+    padding: 2rem;
+    text-align: center;
+    margin-top: 4rem;
+}
+
+.footer a {
+    color: var(--cyan);
+}
+
+.why-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+    gap: 2rem;
+    margin-top: 2rem;
+}
+
+.why-item {
+    background: white;
+    border-left: 4px solid var(--teal);
+    padding: 1.5rem;
+    border-radius: 0 8px 8px 0;
+}
+
+.why-item h4 {
+    color: var(--navy);
+    margin-bottom: 0.5rem;
+}
+
+.learn-section {
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2rem;
+    margin: 2rem 0;
+}
+
+.learn-section h4 {
+    color: var(--indigo);
+    font-size: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+.step {
+    margin: 1.5rem 0;
+}
+
+.step-number {
+    display: inline-block;
+    background: var(--teal);
+    color: white;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 28px;
+    font-weight: 600;
+    margin-right: 0.75rem;
+}
+
+.blog-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.blog-card {
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    transition: box-shadow 0.2s;
+}
+
+.blog-card:hover {
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+
+.blog-card h4 {
+    color: var(--navy);
+    font-size: 1.25rem;
+    margin-bottom: 0.5rem;
+}
+
+.blog-card h4 a {
+    color: inherit;
+}
+
+.blog-meta {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    margin-bottom: 0.75rem;
+}
+
+.blog-excerpt {
+    color: var(--text-muted);
+}
+
+.blog-post {
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2rem;
+}
+
+.blog-post h2 {
+    color: var(--navy);
+    font-size: 2rem;
+    margin-bottom: 0.5rem;
+}
+
+.blog-post .content {
+    margin-top: 2rem;
+}
+
+.blog-post .content h3 {
+    color: var(--indigo);
+    margin-top: 2rem;
+    margin-bottom: 1rem;
+}
+
+.blog-post .content p {
+    margin-bottom: 1rem;
+}
+
+.blog-post .content ul,
+.blog-post .content ol {
+    margin: 1rem 0 1rem 2rem;
+}
+
+.back-link {
+    display: inline-block;
+    margin-bottom: 1.5rem;
+    color: var(--teal);
+}
+
+@media (max-width: 768px) {
+    .header {
+        flex-direction: column;
+        gap: 1rem;
+    }
+    
+    .hero h2 {
+        font-size: 2rem;
+    }
+    
+    .hero {
+        padding: 2rem 1rem;
+    }
+    
+    .main {
+        padding: 1rem;
+    }
+    
+    .features {
+        grid-template-columns: 1fr;
+    }
+    
+    .why-grid {
+        grid-template-columns: 1fr;
+    }
+}
+"""
+
+// Layout wrapper
+fn wrap_page(content) {
+    let head = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The NTNT Programming Language</title>
+    <style>"""
+    
+    let mid = """</style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-left">
+            <a href="/"><img src="/assets/ntnt-logo-lofi-square.png" alt="NTNT Logo" class="logo"></a>
+            <h1>NTNT</h1>
+        </div>
+        <nav class="nav">
+            <a href="/">Home</a>
+            <a href="/learn">Learn</a>
+            <a href="/blog">Blog</a>
+            <a href="https://github.com/ntntlang/ntnt">GitHub</a>
+        </nav>
+    </header>
+    
+    <main class="main">
+"""
+    
+    let foot = """
+    </main>
+    
+    <footer class="footer">
+        <p>NTNT Programming Language - <a href="https://github.com/ntntlang/ntnt">GitHub</a> - MIT License</p>
+    </footer>
+</body>
+</html>"""
+    
+    return head + CSS + mid + content + foot
+}
+
+// Logger middleware
+fn logger(req) {
+    print("[" + req.method + "] " + req.path)
+    return ()
+}
+
+use_middleware(logger)
+
+// ===========================================
+// Homepage
+// ===========================================
+// @implements: feature.homepage
+fn home_page(req) {
+    let content = """
+<section class="hero">
+    <h2>The NTNT Programming Language</h2>
+    <p class="tagline">
+        An experimental Agent-Native language where human intent becomes executable specification.
+        AI agents implement. The system verifies. Full traceability from requirement to code.
+    </p>
+    <a href="https://github.com/ntntlang/ntnt" class="cta-button">Get Started</a>
+</section>
+
+<div class="warning">
+    <span>&#9888;</span>
+    <span><strong>Experimental:</strong> NTNT is a research language exploring AI-assisted development. It is not ready for production use. APIs will change. Features are incomplete.</span>
+</div>
+
+<section class="section">
+    <h3>Why NTNT?</h3>
+    <p class="section-subtitle">Traditional languages were designed for humans typing code. As AI agents generate software, the requirements shift.</p>
+    
+    <div class="why-grid">
+        <div class="why-item">
+            <h4>Intent-Driven Development</h4>
+            <p>Write what your software should do in plain language <code>.intent</code> files. Annotate your code with <code>@implements</code>. Run <code>ntnt intent check</code> to verify they match. Full traceability from requirement to implementation.</p>
+        </div>
+        <div class="why-item">
+            <h4>Contracts as Specification</h4>
+            <p>Preconditions, postconditions, and invariants are part of the syntax. Agents read them as machine-readable specs. Humans read them as documentation. HTTP routes get automatic validation.</p>
+        </div>
+        <div class="why-item">
+            <h4>Agent-Native Tooling</h4>
+            <p><code>ntnt inspect</code> outputs JSON describing every function, route, and contract. Agents understand codebases in a single call. No parsing, no guessing.</p>
+        </div>
+        <div class="why-item">
+            <h4>Batteries Included</h4>
+            <p>HTTP server, HTTP client, PostgreSQL, JSON, CSV, file I/O, crypto, time. No package manager, no dependency decisions. Just import and use.</p>
+        </div>
+    </div>
+</section>
+
+<section class="section">
+    <h3>What It Looks Like</h3>
+    <p class="section-subtitle">A complete web API in NTNT:</p>
+    
+    <pre><code>// api.tnt
+import \{ json \} from "std/http/server"
+import \{ connect, query \} from "std/db/postgres"
+
+let db = connect("postgres://localhost/myapp")
+
+fn get_user(id: Int) -&gt; Map
+    requires id &gt; 0
+    ensures result["id"] == id
+\{
+    return query(db, "SELECT * FROM users WHERE id = $1", [id])[0]
+\}
+
+// @implements: feature.user_api
+get(r"/users/\{id\}", get_user_handler)
+
+listen(3000)</code></pre>
+</section>
+
+<section class="section">
+    <h3>Key Features</h3>
+    
+    <div class="features">
+        <div class="feature-card">
+            <h4>Intent Files</h4>
+            <p>Describe features in natural language. The system verifies your code implements them correctly.</p>
+        </div>
+        <div class="feature-card">
+            <h4>Design by Contract</h4>
+            <p><code>requires</code>, <code>ensures</code>, and <code>invariant</code> syntax built into the language.</p>
+        </div>
+        <div class="feature-card">
+            <h4>Machine Introspection</h4>
+            <p><code>ntnt inspect</code> gives agents structured JSON about your entire codebase.</p>
+        </div>
+        <div class="feature-card">
+            <h4>HTTP Server</h4>
+            <p>Built-in routing, middleware, static files. Contract violations become proper HTTP errors.</p>
+        </div>
+        <div class="feature-card">
+            <h4>PostgreSQL</h4>
+            <p>Native PostgreSQL support with parameterized queries and transactions.</p>
+        </div>
+        <div class="feature-card">
+            <h4>Single Binary</h4>
+            <p>No runtime dependencies. Compile and run anywhere.</p>
+        </div>
+    </div>
+</section>
+
+<section class="section" style="text-align: center;">
+    <h3>Ready to Explore?</h3>
+    <p class="section-subtitle">Check out the documentation and try NTNT for yourself.</p>
+    <a href="/learn" class="cta-button" style="background: var(--teal);">Learn NTNT</a>
+</section>
+"""
+    
+    return html(wrap_page(content))
+}
+
+// ===========================================
+// Learn Page
+// ===========================================
+// @implements: feature.learn_page
+fn learn_page(req) {
+    let content = """
+<h2 style="margin-bottom: 0.5rem;">Learn NTNT</h2>
+<p style="color: var(--text-muted); margin-bottom: 2rem;">Get started with the NTNT programming language.</p>
+
+<div class="learn-section">
+    <h4>Quick Start</h4>
+    
+    <div class="step">
+        <span class="step-number">1</span>
+        <strong>Clone and build</strong>
+    </div>
+    <pre><code>git clone https://github.com/ntntlang/ntnt.git
+cd ntnt
+cargo build --release
+cargo install --path . --locked</code></pre>
+    
+    <div class="step">
+        <span class="step-number">2</span>
+        <strong>Hello World</strong>
+    </div>
+    <pre><code>echo 'print("Hello, World!")' &gt; hello.tnt
+ntnt run hello.tnt</code></pre>
+    
+    <div class="step">
+        <span class="step-number">3</span>
+        <strong>A Web API</strong>
+    </div>
+    <pre><code>// api.tnt
+import \{ json \} from "std/http/server"
+
+fn hello(req) \{
+    return json(map \{ "message": "Hello!" \})
+\}
+
+get("/", hello)
+listen(3000)</code></pre>
+    <pre><code>ntnt run api.tnt
+# Visit http://localhost:3000</code></pre>
+</div>
+
+<div class="learn-section">
+    <h4>Intent-Driven Development</h4>
+    <p style="margin-bottom: 1.5rem;">IDD bridges human requirements and AI implementation with verifiable traceability.</p>
+    
+    <div class="step">
+        <span class="step-number">1</span>
+        <strong>Write an intent file</strong>
+    </div>
+    <pre><code># myapp.intent
+
+feature user_api \{
+    description: "REST API for user management"
+    route: GET /users/\{id\}
+    
+    assertions:
+        - returns status 200
+        - body contains "id"
+\}</code></pre>
+    
+    <div class="step">
+        <span class="step-number">2</span>
+        <strong>Annotate your implementation</strong>
+    </div>
+    <pre><code>// @implements: feature.user_api
+fn get_user(req) \{
+    return json(map \{ "id": req.params.id, "name": "Alice" \})
+\}
+
+get(r"/users/\{id\}", get_user)</code></pre>
+    
+    <div class="step">
+        <span class="step-number">3</span>
+        <strong>Verify with intent check</strong>
+    </div>
+    <pre><code>ntnt intent check myapp.tnt
+
+# Feature: user_api
+#   OK GET /users/\{id\} returns status 200
+#   OK body contains "id"
+# 1/1 features passing (2/2 assertions)</code></pre>
+</div>
+
+<div class="learn-section">
+    <h4>Design by Contract</h4>
+    <p style="margin-bottom: 1.5rem;">Contracts are executable specifications. Agents read them as machine-readable specs. Humans read them as documentation.</p>
+    
+    <pre><code>fn withdraw(amount: Int) -&gt; Int
+    requires amount &gt; 0
+    requires amount &lt;= self.balance
+    ensures result &gt;= 0
+\{
+    self.balance = self.balance - amount
+    return self.balance
+\}
+
+// In HTTP routes, contract violations become proper errors:
+// - Failed precondition: 400 Bad Request
+// - Failed postcondition: 500 Internal Server Error</code></pre>
+</div>
+
+<div class="learn-section">
+    <h4>CLI Commands</h4>
+    
+    <table style="width: 100%; border-collapse: collapse;">
+        <tr style="border-bottom: 1px solid var(--border);">
+            <td style="padding: 0.75rem 0;"><code>ntnt run file.tnt</code></td>
+            <td style="padding: 0.75rem 0;">Run a program</td>
+        </tr>
+        <tr style="border-bottom: 1px solid var(--border);">
+            <td style="padding: 0.75rem 0;"><code>ntnt lint file.tnt</code></td>
+            <td style="padding: 0.75rem 0;">Check for syntax errors</td>
+        </tr>
+        <tr style="border-bottom: 1px solid var(--border);">
+            <td style="padding: 0.75rem 0;"><code>ntnt validate file.tnt</code></td>
+            <td style="padding: 0.75rem 0;">Validate with JSON output</td>
+        </tr>
+        <tr style="border-bottom: 1px solid var(--border);">
+            <td style="padding: 0.75rem 0;"><code>ntnt inspect file.tnt</code></td>
+            <td style="padding: 0.75rem 0;">JSON introspection for agents</td>
+        </tr>
+        <tr style="border-bottom: 1px solid var(--border);">
+            <td style="padding: 0.75rem 0;"><code>ntnt intent check file.tnt</code></td>
+            <td style="padding: 0.75rem 0;">Verify intent implementation</td>
+        </tr>
+        <tr style="border-bottom: 1px solid var(--border);">
+            <td style="padding: 0.75rem 0;"><code>ntnt intent coverage file.tnt</code></td>
+            <td style="padding: 0.75rem 0;">Show intent coverage</td>
+        </tr>
+        <tr>
+            <td style="padding: 0.75rem 0;"><code>ntnt test file.tnt --get /path</code></td>
+            <td style="padding: 0.75rem 0;">Test HTTP endpoints</td>
+        </tr>
+    </table>
+</div>
+
+<div class="learn-section">
+    <h4>Documentation</h4>
+    
+    <ul style="list-style: none; padding: 0;">
+        <li style="padding: 0.75rem 0; border-bottom: 1px solid var(--border);">
+            <a href="https://github.com/ntntlang/ntnt/blob/main/LANGUAGE_SPEC.md"><strong>Language Specification</strong></a>
+            <p style="color: var(--text-muted); margin-top: 0.25rem;">Complete syntax and semantics reference</p>
+        </li>
+        <li style="padding: 0.75rem 0; border-bottom: 1px solid var(--border);">
+            <a href="https://github.com/ntntlang/ntnt/blob/main/ARCHITECTURE.md"><strong>Architecture</strong></a>
+            <p style="color: var(--text-muted); margin-top: 0.25rem;">System design and component overview</p>
+        </li>
+        <li style="padding: 0.75rem 0; border-bottom: 1px solid var(--border);">
+            <a href="https://github.com/ntntlang/ntnt/blob/main/whitepaper.md"><strong>Whitepaper</strong></a>
+            <p style="color: var(--text-muted); margin-top: 0.25rem;">Technical specification and motivation</p>
+        </li>
+        <li style="padding: 0.75rem 0;">
+            <a href="https://github.com/ntntlang/ntnt/blob/main/ROADMAP.md"><strong>Roadmap</strong></a>
+            <p style="color: var(--text-muted); margin-top: 0.25rem;">Implementation phases and future plans</p>
+        </li>
+    </ul>
+</div>
+"""
+    
+    return html(wrap_page(content))
+}
+
+// ===========================================
+// Blog List
+// ===========================================
+// @implements: feature.blog_list
+fn blog_list_page(req) {
+    let content = """
+<h2 style="margin-bottom: 0.5rem;">Blog</h2>
+<p style="color: var(--text-muted); margin-bottom: 2rem;">News, tutorials, and updates about NTNT.</p>
+
+<div class="blog-list">
+    <div class="blog-card">
+        <h4><a href="/blog/welcome">Welcome to the NTNT Blog</a></h4>
+        <div class="blog-meta">January 15, 2026 - NTNT Team</div>
+        <p class="blog-excerpt">Introducing the NTNT programming language and Intent-Driven Development.</p>
+    </div>
+    <div class="blog-card">
+        <h4><a href="/blog/idd-explained">Intent-Driven Development Explained</a></h4>
+        <div class="blog-meta">January 10, 2026 - NTNT Team</div>
+        <p class="blog-excerpt">A deep dive into how IDD bridges human requirements and AI implementation.</p>
+    </div>
+</div>
+"""
+    
+    return html(wrap_page(content))
+}
+
+// ===========================================
+// Blog Posts
+// ===========================================
+// @implements: feature.blog_post
+fn blog_post_page(req) {
+    let slug = req.params.slug
+    
+    if slug == "welcome" {
+        let content = """
+<a href="/blog" class="back-link">&larr; Back to Blog</a>
+
+<article class="blog-post">
+    <h2>Welcome to the NTNT Blog</h2>
+    <div class="blog-meta" style="margin-bottom: 2rem;">January 15, 2026 - NTNT Team</div>
+    
+    <div class="content">
+        <p>Welcome to the official blog for the NTNT programming language!</p>
+        
+        <p>NTNT (pronounced "Intent") is an experimental programming language designed for AI-assisted software development. It introduces Intent-Driven Development (IDD), where human requirements become executable specifications that AI agents implement and the system verifies.</p>
+        
+        <h3>What Makes NTNT Different?</h3>
+        
+        <p>Traditional programming languages were designed for humans typing code character by character. As AI agents become capable of generating software, the requirements shift:</p>
+        
+        <ul>
+            <li><strong>Agents need structured validation</strong> - machine-readable contracts and introspection</li>
+            <li><strong>Humans need intent clarity</strong> - understand what code should do without reading every line</li>
+            <li><strong>Both need traceability</strong> - connect requirements to implementation</li>
+        </ul>
+        
+        <h3>Getting Started</h3>
+        
+        <p>Check out the <a href="/learn">Learn</a> page to get started with NTNT, or visit our <a href="https://github.com/ntntlang/ntnt">GitHub repository</a> for the source code and documentation.</p>
+        
+        <p>Remember: NTNT is experimental and not ready for production use. We are exploring ideas at the intersection of programming languages and AI assistance.</p>
+    </div>
+</article>
+"""
+        return html(wrap_page(content))
+    }
+    
+    if slug == "idd-explained" {
+        let content = """
+<a href="/blog" class="back-link">&larr; Back to Blog</a>
+
+<article class="blog-post">
+    <h2>Intent-Driven Development Explained</h2>
+    <div class="blog-meta" style="margin-bottom: 2rem;">January 10, 2026 - NTNT Team</div>
+    
+    <div class="content">
+        <p>Intent-Driven Development (IDD) is a methodology where human requirements are written as structured intent files, code is annotated with implementation markers, and the system verifies that implementations match their intents.</p>
+        
+        <h3>The IDD Workflow</h3>
+        
+        <p>IDD follows a simple cycle:</p>
+        
+        <ol>
+            <li><strong>Human writes intent</strong> - Describe what the software should do in a <code>.intent</code> file</li>
+            <li><strong>Agent implements</strong> - AI generates code with <code>@implements</code> annotations</li>
+            <li><strong>System verifies</strong> - <code>ntnt intent check</code> confirms the implementation matches</li>
+            <li><strong>Human reviews</strong> - Approve, refine intent, or request changes</li>
+        </ol>
+        
+        <h3>Why Intent Files?</h3>
+        
+        <p>Intent files serve multiple purposes:</p>
+        
+        <ul>
+            <li>They are human-readable specifications that do not require reading code</li>
+            <li>They are machine-parseable, so agents know exactly what to build</li>
+            <li>They create a permanent record of requirements separate from implementation</li>
+            <li>They enable automatic verification that code does what it should</li>
+        </ul>
+        
+        <h3>Traceability</h3>
+        
+        <p>Every function can be traced back to its intent. Run <code>ntnt intent coverage</code> to see which intents have implementations and which are missing. This makes it easy to audit a codebase and understand its purpose.</p>
+    </div>
+</article>
+"""
+        return html(wrap_page(content))
+    }
+    
+    // 404
+    let content = """
+<h2>Post Not Found</h2>
+<p style="margin: 2rem 0;">The blog post you are looking for does not exist.</p>
+<a href="/blog" class="cta-button" style="background: var(--teal);">Back to Blog</a>
+"""
+    return html(wrap_page(content))
+}
+
+// ===========================================
+// Routes
+// ===========================================
+get("/", home_page)
+get("/learn", learn_page)
+get("/blog", blog_list_page)
+get(r"/blog/{slug}", blog_post_page)
+
+// Static files
+serve_static("/assets", "examples/ntnt-lang-org/assets")
+
+print("NTNT Language website running at http://localhost:8080")
+listen(8080)

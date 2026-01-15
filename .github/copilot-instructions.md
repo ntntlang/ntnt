@@ -14,17 +14,43 @@ ntnt run myfile.tnt     # Only after lint passes
 ntnt test server.tnt --get /api/status --post /users --body 'name=Alice'
 ```
 
-## 🎯 Intent-Driven Development Workflow
+## 🎯 Intent-Driven Development (IDD) - COLLABORATIVE Workflow
 
-When projects have `.intent` files, follow this workflow:
+**CRITICAL: IDD is a collaborative process.** The intent file is a shared artifact developed TOGETHER with the user before implementation.
 
-### 1. Generate Scaffolding from Intent
+### Phase 1: Draft and Present Intent (STOP FOR USER INPUT)
+
+When user asks to build something using IDD:
+
+1. **Draft the `.intent` file** based on requirements
+2. **STOP and present it to the user** - do NOT proceed to implementation
+3. **Ask clarifying questions** about requirements
+4. **Wait for user approval** before implementing
+
+Example response pattern:
+
+```
+"Here's a draft intent file based on your requirements:
+
+[show intent file]
+
+**Questions before I implement:**
+- [clarifying question 1]
+- [clarifying question 2]
+
+Let me know your thoughts and I'll refine this before starting implementation."
+```
+
+### Phase 2: Implement (After User Approval)
+
+Only after user approves the intent:
 
 ```bash
+# Generate scaffolding from intent
 ntnt intent init project.intent
 ```
 
-### 2. Add @implements Annotations
+Add `@implements` annotations to link code to features:
 
 ```ntnt
 // @implements: feature.user_login
@@ -38,15 +64,27 @@ fn validate_email(email) {
 }
 ```
 
-### 3. Verify Against Intent
+### Phase 3: Verify (MANDATORY Before Declaring Success)
+
+**ALWAYS run these before saying "done":**
 
 ```bash
-# Run intent tests
-ntnt intent check server.tnt
-
-# Check coverage
-ntnt intent coverage server.tnt
+ntnt lint server.tnt           # Check syntax
+ntnt intent check server.tnt   # Verify against intent
+ntnt intent coverage server.tnt # Show coverage
 ```
+
+### IDD Workflow Summary
+
+| Step | Action                       | User Input Required |
+| ---- | ---------------------------- | ------------------- |
+| 1    | Draft `.intent` file         | No                  |
+| 2    | **Present to user**          | **YES - STOP**      |
+| 3    | Refine based on feedback     | Yes                 |
+| 4    | User approves                | **YES**             |
+| 5    | Implement with `@implements` | No                  |
+| 6    | Run `ntnt intent check`      | No                  |
+| 7    | Present results              | No                  |
 
 ### Annotation Reference
 
@@ -335,7 +373,7 @@ import { split, join, trim, replace } from "std/string"
 import { encode, decode, parse_query, build_query } from "std/url"
 import { push, pop, keys, values, entries, has_key, get_key } from "std/collections"
 import { fetch, post, get_json } from "std/http"
-import { listen, get, post, json, html } from "std/http_server"
+import { json, html, text, redirect, status } from "std/http/server"  // ONLY response builders!
 import { connect, query, execute, close } from "std/db/postgres"
 import { read_file, write_file, exists } from "std/fs"
 import { parse, stringify } from "std/json"
@@ -344,6 +382,66 @@ import { sin, cos, tan, atan2, log, exp, random, random_int, PI, E } from "std/m
 import { now, format } from "std/time"
 import { get_env } from "std/env"
 import { channel, send, recv } from "std/concurrent"
+```
+
+## HTTP Server - Global Builtins vs Module Exports
+
+**CRITICAL:** HTTP routing functions are GLOBAL BUILTINS. Only response builders need importing.
+
+| Function                    | Type           | Import Needed?              |
+| --------------------------- | -------------- | --------------------------- |
+| `get(pattern, handler)`     | Global builtin | **No**                      |
+| `post(pattern, handler)`    | Global builtin | **No**                      |
+| `put(pattern, handler)`     | Global builtin | **No**                      |
+| `delete(pattern, handler)`  | Global builtin | **No**                      |
+| `listen(port)`              | Global builtin | **No**                      |
+| `serve_static(prefix, dir)` | Global builtin | **No**                      |
+| `use_middleware(fn)`        | Global builtin | **No**                      |
+| `json(data)`                | Module export  | **Yes** - `std/http/server` |
+| `html(content)`             | Module export  | **Yes** - `std/http/server` |
+| `text(content)`             | Module export  | **Yes** - `std/http/server` |
+| `redirect(url)`             | Module export  | **Yes** - `std/http/server` |
+
+### HTTP Server Example
+
+```ntnt
+// ONLY import response builders - routing functions are global builtins!
+import { json, html } from "std/http/server"
+
+// Named handler functions (required - no inline lambdas)
+fn get_user(req) {
+    let user_id = req.params["id"]
+    return json(map { "id": user_id })
+}
+
+fn home_page(req) {
+    return html("<h1>Welcome</h1>")
+}
+
+// Routes - global builtins, no import needed
+// MUST use raw strings r"..." for patterns with {param}
+get("/", home_page)
+get(r"/users/{id}", get_user)
+
+// Static files and server start - also global builtins
+serve_static("/static", "./public")
+listen(8080)
+```
+
+### ❌ Common HTTP Server Mistakes
+
+```ntnt
+// ❌ WRONG - Do NOT import routing functions (they're global builtins)
+import { listen, get, post } from "std/http/server"  // ERROR!
+import { listen, get, post } from "std/http_server"  // ERROR! (wrong path)
+
+// ❌ WRONG - No inline lambdas in route handlers
+get(r"/users/{id}", |req| { ... })      // Parser error!
+get(r"/users/{id}", fn(req) { ... })    // Parser error!
+
+// ✅ CORRECT - Use named functions
+fn handler(req) { ... }
+get(r"/users/{id}", handler)
 ```
 
 ## Full Reference

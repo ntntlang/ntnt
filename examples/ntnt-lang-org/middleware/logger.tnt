@@ -1,0 +1,10 @@
+// Logger middleware
+// @utility
+
+export fn logger(req, next) {
+    let start = now()
+    let response = next(req)
+    let elapsed = now() - start
+    print("[{req.method}] {req.path} - {response.status} ({elapsed}ms)")
+    return response
+}

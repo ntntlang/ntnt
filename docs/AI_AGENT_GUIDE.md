@@ -17,31 +17,77 @@ ntnt run myfile.tnt
 ntnt test server.tnt --get /api/status --post /users --body 'name=Alice&age=25'
 ```
 
-## 🎯 Intent-Driven Development Workflow
+## 🎯 Intent-Driven Development (IDD) - COLLABORATIVE Workflow
 
-When working on NTNT projects with `.intent` files, use this workflow:
+**CRITICAL: IDD is a collaborative process between human and AI.** The intent file is a shared artifact that must be developed TOGETHER before any implementation begins.
 
-### 1. Check Intent Before Implementation
+### Phase 1: Draft and Present Intent (DO NOT SKIP)
+
+When the user asks to build something using IDD:
+
+1. **Draft the `.intent` file** based on user requirements
+2. **STOP and present it to the user** for review - do NOT proceed to implementation
+3. **Discuss and refine** the intent with the user
+4. Only after user approval, proceed to Phase 2
+
+````markdown
+# Example: Present intent to user BEFORE implementing
+
+"Here's the draft intent file based on your requirements:
+
+```intent
+# myproject.intent
+
+feature user_authentication {
+    description: "User login and registration system"
+
+    route: POST /register
+    assertions:
+        - returns status 200 on success
+        - returns status 400 on validation error
+        - body contains "user_id"
+
+    route: POST /login
+    assertions:
+        - returns status 200 with valid credentials
+        - returns status 401 with invalid credentials
+}
+
+constraint rate_limiting {
+    description: "Prevent brute force attacks"
+    applies_to: [feature.user_authentication]
+}
+```
+````
+
+**Questions for refinement:**
+
+- Should registration require email verification?
+- What rate limit threshold makes sense (e.g., 5 attempts per minute)?
+- Should we add password reset functionality?
+
+Let me know your thoughts before I start implementing."
+
+````
+
+### Phase 2: Generate Scaffolding (After User Approval)
 
 ```bash
-# See what needs to be built
-cat project.intent
-
-# Generate scaffolding from intent
+# Generate scaffolding from the approved intent
 ntnt intent init project.intent
-```
+````
 
-### 2. Add @implements Annotations
+### Phase 3: Implement with Annotations
 
-Link your code to intent features with annotations:
+Link your code to intent features with `@implements` annotations:
 
 ```ntnt
-// @implements: feature.user_registration
+// @implements: feature.user_authentication
 fn register_user(req) {
     // Implementation here
 }
 
-// @implements: feature.login
+// @implements: feature.user_authentication
 // @supports: constraint.rate_limiting
 fn login(req) {
     // Implementation here
@@ -49,38 +95,52 @@ fn login(req) {
 
 // @utility
 fn hash_password(password) {
-    // Helper function
+    // Helper function (not linked to a feature)
 }
 ```
 
-### 3. Verify Implementation Matches Intent
+### Phase 4: Verify Implementation
+
+**ALWAYS run these commands before declaring success:**
 
 ```bash
 # Run all intent tests
 ntnt intent check server.tnt
 
 # Example output:
-# Feature: User Registration
-#   ✓ POST /register returns status 200
-#   ✓ body contains "success"
+# Feature: User Authentication
+#   ✓ POST /register returns status 200 on success
+#   ✓ POST /login returns status 200 with valid credentials
 #
 # 1/1 features passing (2/2 assertions)
 ```
 
-### 4. Check Coverage
-
 ```bash
-# See which features have implementations
+# Check coverage
 ntnt intent coverage server.tnt
 
 # Example output:
-# ✓ User Registration (feature.user_registration)
+# ✓ User Authentication (feature.user_authentication)
 #     └─ server.tnt:12 in fn register_user
+#     └─ server.tnt:28 in fn login
 # ✗ Password Reset (feature.password_reset)
 #     └─ No implementation found
 #
 # [████████████████░░░░░░░░░░░░░░] 50.0% coverage (1/2 features)
 ```
+
+### IDD Workflow Summary
+
+| Step | Action                       | Human Input Required |
+| ---- | ---------------------------- | -------------------- |
+| 1    | Draft `.intent` file         | No                   |
+| 2    | **Present intent to user**   | **YES - STOP HERE**  |
+| 3    | Refine based on feedback     | Yes                  |
+| 4    | User approves intent         | **YES**              |
+| 5    | Generate scaffolding         | No                   |
+| 6    | Implement with `@implements` | No                   |
+| 7    | Run `ntnt intent check`      | No                   |
+| 8    | Present results to user      | No                   |
 
 ### Annotation Types
 
@@ -517,8 +577,9 @@ import { keys, values, entries, has_key } from "std/collections"  // Map iterati
 // HTTP client
 import { fetch, post, put, delete, get_json, post_json } from "std/http"
 
-// HTTP server
-import { listen, get, post, json, html, text, redirect, serve_static, routes } from "std/http_server"
+// HTTP server - ONLY response builders need importing
+// NOTE: get(), post(), listen(), serve_static(), use_middleware() are GLOBAL BUILTINS (no import needed)
+import { json, html, text, redirect, status } from "std/http/server"
 
 // PostgreSQL database
 import { connect, query, execute, close } from "std/db/postgres"
@@ -548,26 +609,81 @@ import { channel, send, recv, sleep_ms } from "std/concurrent"
 
 ## HTTP Server Patterns
 
-```ntnt
-import { listen, get, post, json, html, serve_static, routes } from "std/http_server"
+### Global Builtins vs Module Exports
 
-// Basic route with raw string pattern
-get(r"/users/{id}", fn(req) {
+**CRITICAL:** HTTP routing functions are GLOBAL BUILTINS. Only response builders need importing.
+
+| Function                    | Type           | Import Needed?              |
+| --------------------------- | -------------- | --------------------------- |
+| `get(pattern, handler)`     | Global builtin | No                          |
+| `post(pattern, handler)`    | Global builtin | No                          |
+| `put(pattern, handler)`     | Global builtin | No                          |
+| `delete(pattern, handler)`  | Global builtin | No                          |
+| `patch(pattern, handler)`   | Global builtin | No                          |
+| `listen(port)`              | Global builtin | No                          |
+| `serve_static(prefix, dir)` | Global builtin | No                          |
+| `use_middleware(fn)`        | Global builtin | No                          |
+| `json(data)`                | Module export  | **Yes** - `std/http/server` |
+| `html(content)`             | Module export  | **Yes** - `std/http/server` |
+| `text(content)`             | Module export  | **Yes** - `std/http/server` |
+| `redirect(url)`             | Module export  | **Yes** - `std/http/server` |
+| `status(code, body)`        | Module export  | **Yes** - `std/http/server` |
+
+### Basic HTTP Server Example
+
+```ntnt
+// ONLY import response builders - routing functions are global
+import { json, html } from "std/http/server"
+
+// Define handler functions (named functions required, no inline lambdas)
+fn get_user(req) {
     let user_id = req.params["id"]
     return json(map { "id": user_id })
-})
+}
 
-// POST with JSON body
-post(r"/users", fn(req) {
-    let body = req.json()
-    return json(map { "created": true, "user": body })
-})
+fn create_user(req) {
+    let body = parse_query(req.body)
+    return json(map { "created": true, "name": body["name"] })
+}
 
-// Static files
+// Routes use global builtins - no import needed
+// MUST use raw strings r"..." for patterns with {param}
+get(r"/users/{id}", get_user)
+post("/users", create_user)
+
+// Static files - global builtin
 serve_static("/static", "./public")
 
-// Start server
+// Start server - global builtin
 listen(8080)
+```
+
+### ❌ WRONG - Do NOT import routing functions
+
+```ntnt
+// ❌ WRONG - These will fail!
+import { listen, get, post } from "std/http/server"  // ERROR: not exported
+import { listen, get, post } from "std/http_server"  // ERROR: wrong module path
+```
+
+### ❌ WRONG - No inline lambdas in route handlers
+
+```ntnt
+// ❌ WRONG - Inline lambdas cause parser errors
+get(r"/users/{id}", |req| {
+    return json(map { "id": req.params["id"] })
+})
+
+// ❌ WRONG - fn(req) inline also doesn't work
+get(r"/users/{id}", fn(req) {
+    return json(map { "id": req.params["id"] })
+})
+
+// ✅ CORRECT - Use named functions
+fn get_user(req) {
+    return json(map { "id": req.params["id"] })
+}
+get(r"/users/{id}", get_user)
 ```
 
 ### HTTP Request Object Properties

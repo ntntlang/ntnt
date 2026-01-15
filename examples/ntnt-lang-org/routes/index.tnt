@@ -1,0 +1,112 @@
+// Homepage route handler
+// @implements: feature.homepage
+
+import { html } from "std/http/server"
+
+export fn home_handler(req) {
+    let content = """
+<section class="hero">
+    <h2>The NTNT Programming Language</h2>
+    <p class="tagline">
+        An experimental Agent-Native language where human intent becomes executable specification.
+        AI agents implement. The system verifies. Full traceability from requirement to code.
+    </p>
+    <a href="https://github.com/ntntlang/ntnt" class="cta-button">Get Started</a>
+</section>
+
+<div class="warning">
+    <span class="warning-icon">⚠️</span>
+    <span><strong>Experimental:</strong> NTNT is a research language exploring AI-assisted development. It is not ready for production use. APIs will change. Features are incomplete.</span>
+</div>
+
+<section class="section">
+    <h3>Why NTNT?</h3>
+    <p class="section-subtitle">Traditional languages were designed for humans typing code. As AI agents generate software, the requirements shift.</p>
+    
+    <div class="why-grid">
+        <div class="why-item">
+            <h4>Intent-Driven Development</h4>
+            <p>Write what your software should do in plain language <code>.intent</code> files. Annotate your code with <code>@implements</code>. Run <code>ntnt intent check</code> to verify they match. Full traceability from requirement to implementation.</p>
+        </div>
+        <div class="why-item">
+            <h4>Contracts as Specification</h4>
+            <p>Preconditions, postconditions, and invariants are part of the syntax. Agents read them as machine-readable specs. Humans read them as documentation. HTTP routes get automatic validation.</p>
+        </div>
+        <div class="why-item">
+            <h4>Agent-Native Tooling</h4>
+            <p><code>ntnt inspect</code> outputs JSON describing every function, route, and contract. Agents understand codebases in a single call. No parsing, no guessing.</p>
+        </div>
+        <div class="why-item">
+            <h4>Batteries Included</h4>
+            <p>HTTP server, HTTP client, PostgreSQL, JSON, CSV, file I/O, crypto, time. No package manager, no dependency decisions. Just import and use.</p>
+        </div>
+    </div>
+</section>
+
+<section class="section">
+    <h3>What It Looks Like</h3>
+    <p class="section-subtitle">A complete web API in NTNT:</p>
+    
+    <pre><code>// api.tnt
+import { json } from "std/http/server"
+import { connect, query } from "std/db/postgres"
+
+let db = connect("postgres://localhost/myapp")
+
+// Contract specifies the function's requirements
+fn get_user(id: Int) -> Map
+    requires id > 0
+    ensures result["id"] == id
+{
+    return query(db, "SELECT * FROM users WHERE id = $1", [id])[0]
+}
+
+// @implements: feature.user_api
+get("/users/{id}", |req| {
+    let user = get_user(int(req.params.id))
+    return json(user)
+})
+
+listen(3000)</code></pre>
+</section>
+
+<section class="section">
+    <h3>Key Features</h3>
+    
+    <div class="features">
+        <div class="feature-card">
+            <h4>🎯 Intent Files</h4>
+            <p>Describe features in natural language. The system verifies your code implements them correctly.</p>
+        </div>
+        <div class="feature-card">
+            <h4>📋 Design by Contract</h4>
+            <p><code>requires</code>, <code>ensures</code>, and <code>invariant</code> syntax built into the language.</p>
+        </div>
+        <div class="feature-card">
+            <h4>🔍 Machine Introspection</h4>
+            <p><code>ntnt inspect</code> gives agents structured JSON about your entire codebase.</p>
+        </div>
+        <div class="feature-card">
+            <h4>🌐 HTTP Server</h4>
+            <p>Built-in routing, middleware, static files. Contract violations become proper HTTP errors.</p>
+        </div>
+        <div class="feature-card">
+            <h4>🐘 PostgreSQL</h4>
+            <p>Native PostgreSQL support with parameterized queries and transactions.</p>
+        </div>
+        <div class="feature-card">
+            <h4>⚡ Single Binary</h4>
+            <p>No runtime dependencies. Compile and run anywhere.</p>
+        </div>
+    </div>
+</section>
+
+<section class="section" style="text-align: center;">
+    <h3>Ready to Explore?</h3>
+    <p class="section-subtitle">Check out the documentation and try NTNT for yourself.</p>
+    <a href="/learn" class="cta-button" style="background: var(--teal);">Learn NTNT</a>
+</section>
+"""
+    
+    return html(content)
+}
