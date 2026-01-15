@@ -1257,6 +1257,95 @@ $ ntnt intent check myproject.tnt
 
 ---
 
+## Live Intent Preview
+
+### The Problem with Raw Intent Files
+
+The `.intent` format is optimized for machine parsing and testing—but humans deserve a better review experience. Even though intent files are written in natural language, reading YAML-like structure with indentation, IDs, and assertion syntax can feel tedious.
+
+**Intent files should be:**
+- Great for agents (parseable, testable) ✅
+- Great for humans (enjoyable to review) ❌ ← We need to fix this
+
+### The Solution: Live Preview Server
+
+```bash
+$ ntnt intent preview server.intent --port 3000
+
+🌐 Live preview: http://localhost:3000
+👀 Watching server.intent for changes...
+```
+
+This starts a local server that renders your intent file as a beautiful, interactive HTML page. When you save changes to the `.intent` file, the browser **automatically refreshes**.
+
+### What You See
+
+Instead of reading this:
+
+```yaml
+Feature: User Login
+  id: feature.user_login
+  description: "Allows users to authenticate with email/password"
+  test:
+    - request: POST /login
+      body: '{"email": "test@example.com", "password": "secret"}'
+      assert:
+        - status: 200
+        - body contains "token"
+```
+
+You see a beautifully rendered card:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  🔐 User Login                                         feature  │
+│                                                                 │
+│  Allows users to authenticate with email/password               │
+│                                                                 │
+│  Acceptance Criteria:                                           │
+│  ✓ POST /login → 200 with authentication token                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### The Collaborative Review Workflow
+
+This transforms how humans and agents collaborate on intent:
+
+```
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│   VS Code        │     │   Terminal       │     │   Browser        │
+│                  │     │                  │     │                  │
+│  server.intent   │     │  ntnt intent     │     │  Beautiful       │
+│  ─────────────   │────▶│  preview ...     │────▶│  live preview    │
+│  [editing]       │     │                  │     │                  │
+│                  │     │  Watching...     │     │  Auto-updates!   │
+└──────────────────┘     └──────────────────┘     └──────────────────┘
+        │                                                  │
+        │              Save file (⌘S)                      │
+        └──────────────────────────────────────────────────┘
+                         Instant refresh
+```
+
+**Step-by-step:**
+
+1. Agent drafts `.intent` file based on requirements
+2. Human opens live preview in browser (side-by-side with editor)
+3. Human reads the beautiful preview and gives feedback ("Add X", "Remove Y")
+4. Agent updates `.intent` file
+5. Preview instantly refreshes—human sees the changes immediately
+6. Repeat until human says "looks good!"
+7. Agent implements with `ntnt intent init`
+
+### Future Features
+
+- **Feature history timeline** - View how each feature evolved over time
+- **Removed feature archive** - Browse features that were removed (nothing is lost)
+- **Implementation status** - Show which features have `@implements` annotations
+- **Team comments** - Inline commenting for async review (like Google Docs)
+- **Shareable URLs** - Send preview links to stakeholders for approval
+
+---
+
 ## Human Experience
 
 ### What Makes It Fun

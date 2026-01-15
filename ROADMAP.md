@@ -569,13 +569,48 @@ fn home_handler(req) {
 - [ ] Visual regression (screenshot comparison)
 - [ ] LLM visual verification for subjective qualities
 
+### 6.9 Live Intent Preview
+
+**Goal:** Make intent review enjoyable for humans, not just parseable for machines.
+
+The `.intent` format is optimized for machine parsing and testing, but humans deserve a better review experience. This feature provides a beautiful, live-updating HTML preview of intent files.
+
+- [ ] `ntnt intent preview <file.intent>` - Start live preview server
+- [ ] Rich HTML rendering with feature cards and visual hierarchy
+- [ ] WebSocket-based live reload (instant updates on file save)
+- [ ] Feature history timeline - view evolution of each feature over time
+- [ ] Removed feature archive - browse features that were removed
+- [ ] Implementation status indicators (linked to `@implements` annotations)
+- [ ] Collapsible test case details
+- [ ] Shareable URLs for team review
+
+```bash
+# Start live preview
+$ ntnt intent preview server.intent --port 3000
+
+🌐 Live preview: http://localhost:3000
+👀 Watching server.intent for changes...
+
+# Browser auto-refreshes when you save the .intent file
+```
+
+**Workflow:** Human and AI collaborate on intent in real-time:
+1. AI drafts `.intent` file
+2. Human opens live preview in browser (side-by-side with editor)
+3. Human comments on changes needed
+4. AI updates `.intent` file
+5. Preview instantly refreshes
+6. Repeat until human approves
+7. AI implements with `ntnt intent init`
+
 **Phase 6 Deliverables:**
 
 - `.intent` file format and parser
-- `ntnt intent check|init|coverage|diff|watch` commands
+- `ntnt intent check|init|coverage|diff|watch|preview` commands
 - `@implements` annotation system
 - Test execution engine for HTTP servers
 - Intent history and changelog generation
+- Live preview server with WebSocket hot-reload
 - Applied to `snowgauge.tnt` and other examples
 
 ---
