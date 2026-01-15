@@ -42,14 +42,19 @@ a:hover {
 }
 
 .header {
-    background: var(--navy);
+    background: rgba(25, 47, 82, 0.7);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
     padding: 1rem 2rem;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    position: sticky;
+    position: fixed;
     top: 0;
+    left: 0;
+    right: 0;
     z-index: 100;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .header-left {
@@ -90,14 +95,17 @@ a:hover {
     max-width: 1200px;
     margin: 0 auto;
     padding: 2rem;
+    padding-top: 5rem;
 }
 
 .hero {
     text-align: center;
-    padding: 4rem 2rem;
+    padding: 8rem 2rem 5rem 2rem;
     background: linear-gradient(135deg, var(--navy) 0%, var(--indigo) 100%);
     color: white;
-    margin: -2rem -2rem 2rem -2rem;
+    width: 100vw;
+    margin-left: calc(-50vw + 50%);
+    position: relative;
 }
 
 .hero h2 {

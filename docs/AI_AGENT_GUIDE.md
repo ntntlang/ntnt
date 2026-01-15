@@ -25,40 +25,78 @@ ntnt test server.tnt --get /api/status --post /users --body 'name=Alice&age=25'
 
 When the user asks to build something using IDD:
 
-1. **Draft the `.intent` file** based on user requirements
+1. **Draft the `.intent` file** based on user requirements (use correct format below!)
 2. **STOP and present it to the user** for review - do NOT proceed to implementation
 3. **Discuss and refine** the intent with the user
 4. Only after user approval, proceed to Phase 2
 
-````markdown
+### Intent File Format (CRITICAL - Use This Exact Format!)
+
+**File must be named to match the .tnt file** (e.g., `server.intent` for `server.tnt`).
+
+```intent
+# Project Name
+# Description of the project
+# Run: ntnt intent check server.tnt
+
+## Overview
+Brief description of what this project does.
+
+## Design
+- Design decision 1
+- Design decision 2
+
+---
+
+Feature: Feature Name
+  id: feature.feature_id
+  description: "Human-readable description of this feature"
+  test:
+    - request: GET /path
+      assert:
+        - status: 200
+        - body contains "expected text"
+        - body contains "another expected text"
+
+Feature: Another Feature
+  id: feature.another_feature
+  description: "Description of this feature"
+  content:
+    - What this feature includes
+    - More details
+  test:
+    - request: GET /another-path
+      assert:
+        - status: 200
+        - body contains "something"
+    - request: POST /api/data
+      body: '{"key": "value"}'
+      assert:
+        - status: 201
+        - body contains "created"
+
+---
+
+Constraint: Constraint Name
+  description: "Description of the constraint"
+  applies_to: [feature.feature_id, feature.another_feature]
+```
+
+**Key format rules:**
+
+- Use `Feature:` (capitalized) followed by the feature name
+- `id:` must be `feature.<snake_case_id>` - used for `@implements` annotations
+- `test:` contains HTTP test assertions
+- `request:` specifies HTTP method and path
+- `assert:` is a list of assertions (status codes, body contains)
+- Separate sections with `---`
+
+```markdown
 # Example: Present intent to user BEFORE implementing
 
 "Here's the draft intent file based on your requirements:
 
-```intent
-# myproject.intent
-
-feature user_authentication {
-    description: "User login and registration system"
-
-    route: POST /register
-    assertions:
-        - returns status 200 on success
-        - returns status 400 on validation error
-        - body contains "user_id"
-
-    route: POST /login
-    assertions:
-        - returns status 200 with valid credentials
-        - returns status 401 with invalid credentials
-}
-
-constraint rate_limiting {
-    description: "Prevent brute force attacks"
-    applies_to: [feature.user_authentication]
-}
-```
-````
+[show the intent file using the format above]
 
 **Questions for refinement:**
 
@@ -67,15 +105,14 @@ constraint rate_limiting {
 - Should we add password reset functionality?
 
 Let me know your thoughts before I start implementing."
-
-````
+```
 
 ### Phase 2: Generate Scaffolding (After User Approval)
 
 ```bash
-# Generate scaffolding from the approved intent
-ntnt intent init project.intent
-````
+# Generate scaffolding from the approved intent (creates .tnt stub file)
+ntnt intent init project.intent -o server.tnt
+```
 
 ### Phase 3: Implement with Annotations
 
@@ -104,29 +141,19 @@ fn hash_password(password) {
 **ALWAYS run these commands before declaring success:**
 
 ```bash
-# Run all intent tests
-ntnt intent check server.tnt
-
-# Example output:
-# Feature: User Authentication
-#   ✓ POST /register returns status 200 on success
-#   ✓ POST /login returns status 200 with valid credentials
-#
-# 1/1 features passing (2/2 assertions)
+ntnt lint server.tnt           # Check syntax first
+ntnt intent check server.tnt   # Verify against intent (auto-finds server.intent)
+ntnt intent coverage server.tnt # Show coverage
 ```
 
-```bash
-# Check coverage
-ntnt intent coverage server.tnt
+Example output from `ntnt intent check`:
 
-# Example output:
-# ✓ User Authentication (feature.user_authentication)
-#     └─ server.tnt:12 in fn register_user
-#     └─ server.tnt:28 in fn login
-# ✗ Password Reset (feature.password_reset)
-#     └─ No implementation found
-#
-# [████████████████░░░░░░░░░░░░░░] 50.0% coverage (1/2 features)
+```
+Feature: User Authentication
+  ✓ POST /register returns status 200 on success
+  ✓ POST /login returns status 200 with valid credentials
+
+1/1 features passing (2/2 assertions)
 ```
 
 ### IDD Workflow Summary

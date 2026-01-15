@@ -29,23 +29,69 @@ This prevents wasted debugging time on parser errors.
 | 2    | **Present to user**          | **YES - STOP**      |
 | 3    | Refine based on feedback     | Yes                 |
 | 4    | User approves                | **YES**             |
-| 5    | Implement with `@implements` | No                  |
-| 6    | Run `ntnt intent check`      | No                  |
-| 7    | Present results              | No                  |
+| 5    | Run `ntnt intent init`       | No                  |
+| 6    | Implement with `@implements` | No                  |
+| 7    | Run `ntnt intent check`      | No                  |
+| 8    | Present results              | No                  |
 
 ### Phase 1: Draft and Present Intent (DO NOT SKIP)
 
 When user asks to build something using IDD:
 
-1. Draft the `.intent` file based on requirements
+1. Draft the `.intent` file based on requirements (use correct format below!)
 2. **STOP and present it to the user** - do NOT proceed to implementation
 3. Ask clarifying questions
 4. Wait for user approval before implementing
 
+### Intent File Format (CRITICAL!)
+
+**File must be named to match the .tnt file** (e.g., `server.intent` for `server.tnt`).
+
+```intent
+# Project Name
+# Run: ntnt intent check server.tnt
+
+## Overview
+Brief description of what this project does.
+
+---
+
+Feature: Feature Name
+  id: feature.feature_id
+  description: "Human-readable description"
+  test:
+    - request: GET /path
+      assert:
+        - status: 200
+        - body contains "expected text"
+
+Feature: Another Feature
+  id: feature.another_feature
+  description: "Description"
+  test:
+    - request: POST /api/data
+      body: '{"key": "value"}'
+      assert:
+        - status: 201
+
+---
+
+Constraint: Constraint Name
+  description: "Description of the constraint"
+  applies_to: [feature.feature_id, feature.another_feature]
+```
+
+**Key rules:**
+
+- Use `Feature:` (capitalized) followed by feature name
+- `id:` must be `feature.<snake_case_id>` - used for `@implements`
+- `test:` contains HTTP test assertions
+- Separate sections with `---`
+
 ### Phase 2: Implement (After Approval)
 
 ```bash
-ntnt intent init project.intent  # Generate scaffolding
+ntnt intent init project.intent -o server.tnt  # Generate scaffolding
 ```
 
 Add `@implements` annotations:
@@ -64,7 +110,7 @@ fn validate_email(email) { ... }
 
 ```bash
 ntnt lint server.tnt           # Check syntax
-ntnt intent check server.tnt   # Verify against intent
+ntnt intent check server.tnt   # Verify against intent (auto-finds server.intent)
 ntnt intent coverage server.tnt # Show coverage
 ```
 
