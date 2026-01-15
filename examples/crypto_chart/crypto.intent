@@ -1,0 +1,65 @@
+# Cryptocurrency Price Chart - Intent Document
+
+## Features
+
+Feature: Crypto Price Chart
+  id: feature.crypto_chart
+  description: "Display an interactive line chart showing Bitcoin price over the last 7 days"
+  test:
+    - request: GET /
+      assert:
+        - status: 200
+        - body contains "Bitcoin Price"
+        - body contains 'id="chart"'
+        - body contains "Last 7 Days"
+
+Feature: CoinGecko API Integration
+  id: feature.api_integration
+  description: "Fetch cryptocurrency price data from CoinGecko public API"
+  test:
+    - request: GET /
+      assert:
+        - status: 200
+        - body contains "const prices"
+        - body matches r"\[\[17\d{11},\d+\.?\d*\]"
+
+Feature: Chart Rendering
+  id: feature.chart_render
+  description: "Transform API data into Chart.js format and render interactive chart"
+  test:
+    - request: GET /
+      assert:
+        - status: 200
+        - body contains "Chart.js"
+        - body contains "#ff8c00"
+        - body contains "type: 'line'"
+        - body contains "tension:"
+        - body contains "BTC/USD"
+
+Feature: Error Handling
+  id: feature.error_handling
+  description: "Display user-friendly error messages when API fails"
+  notes: "This is tested by the match/Result handling in code, but hard to test via HTTP without mocking"
+
+## Constraints
+
+Constraint: No API Key Required
+  id: constraint.no_api_key
+  description: "Use only public APIs that don't require authentication"
+  rationale: "Simplifies deployment and demo setup"
+  test:
+    - request: GET /
+      assert:
+        - status: 200
+
+Constraint: Single File App
+  id: constraint.single_file
+  description: "Entire application in one crypto.tnt file"
+  rationale: "Easy to understand and run for demo purposes"
+
+## Implementation Notes
+
+- Use CoinGecko API (no auth required, rate limit: 10-50 calls/min)
+- Use Chart.js from CDN for charting
+- Server runs on port 8080
+- Use NTNT template strings for HTML

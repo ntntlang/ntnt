@@ -161,6 +161,31 @@ let nav = """
 - Functions: `fn(T1, T2) -> T3`
 - Ranges: `Range` (from `..` and `..=` expressions)
 
+### Union Types
+
+Union types allow a value to be one of several types:
+
+```ntnt
+// Function accepting multiple types
+fn stringify(value: String | Int | Bool) -> String {
+    return str(value)
+}
+
+stringify("hello")  // works
+stringify(42)       // works
+stringify(true)     // works
+
+// Useful for flexible APIs
+fn process(input: String | [String]) {
+    // Handle both single string and array of strings
+}
+
+// Multiple union parameters
+fn format(key: String | Int, value: String | Int | Bool) -> String {
+    return str(key) + ": " + str(value)
+}
+```
+
 ### Map Literals and Nested Inference
 
 Top-level maps require the `map` keyword. Nested maps inside a `map {}` are automatically inferred.

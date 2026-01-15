@@ -1,6 +1,6 @@
 # NTNT Language for VS Code
 
-Syntax highlighting and language support for the [NTNT programming language](https://github.com/joshcramer/ntnt) (pronounced "Intent").
+Syntax highlighting and language support for the [NTNT programming language](https://github.com/ntntlang/ntnt) (pronounced "Intent").
 
 ## Features
 
@@ -112,7 +112,7 @@ code --install-extension ntnt-lang-0.1.0.vsix
 
 ## Contributing
 
-Contributions are welcome! Please see the [main NTNT repository](https://github.com/joshcramer/ntnt) for guidelines.
+Contributions are welcome! Please see the [main NTNT repository](https://github.com/ntntlang/ntnt) for guidelines.
 
 ## License
 

@@ -9,7 +9,7 @@ All notable changes to the NTNT Language extension will be documented in this fi
 - Renamed from "Intent Language" to "NTNT Language"
 - Single file extension: `.tnt` (replacing `.intent` and `.itn`)
 - Updated language ID from `intent` to `ntnt`
-- Updated repository URL to github.com/joshcramer/ntnt
+- Updated repository URL to github.com/ntntlang/ntnt
 
 ## [0.1.0] - 2026-01-05
 

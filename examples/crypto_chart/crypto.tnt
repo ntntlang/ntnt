@@ -1,0 +1,277 @@
+// Auto-generated from intent file
+// Intent: examples/crypto_chart/crypto.intent
+// 
+// Cryptocurrency Price Chart - displays Bitcoin price over last 7 days
+
+import { html } from "std/http/server"
+import { fetch } from "std/http"
+import { parse, stringify } from "std/json"
+import { has_key } from "std/collections"
+
+// =============================================================================
+// Routes
+// =============================================================================
+
+// @implements: feature.crypto_chart
+// @implements: feature.api_integration
+// @implements: feature.chart_render
+// @implements: feature.error_handling
+// @supports: constraint.no_api_key
+// @supports: constraint.single_file
+fn crypto_chart(req) {
+    // Fetch Bitcoin price data from CoinGecko API (no auth required)
+    let api_url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=7"
+
+    // CoinGecko requires a descriptive User-Agent header
+    let options = map {
+        "url": api_url,
+        "method": "GET",
+        "headers": map {
+            "User-Agent": "NTNT Crypto Chart Demo/1.0"
+        }
+    }
+
+    let response = fetch(options)
+    
+    match response {
+        Ok(res) => {
+            // Check HTTP status code
+            if res.status != 200 {
+                return html("""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 2rem auto;
+            padding: 2rem;
+            text-align: center;
+        }
+        h1 {
+            color: #d32f2f;
+        }
+        p {
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <h1>Bitcoin data retrieval failed</h1>
+    <p>API returned status {{str(res.status)}}. Please try again later.</p>
+</body>
+</html>
+            """)
+            }
+
+            // Parse JSON response
+            match parse(res.body) {
+                Ok(data) => {
+                    // Check if response has prices data
+                    if !has_key(data, "prices") {
+                        return html("""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 2rem auto;
+            padding: 2rem;
+            text-align: center;
+        }
+        h1 {
+            color: #d32f2f;
+        }
+        p {
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <h1>Bitcoin data retrieval failed</h1>
+    <p>API rate limit exceeded or data unavailable. Please try again later.</p>
+</body>
+</html>
+            """)
+                    }
+
+                    let prices = data["prices"]  // Array of [timestamp, price] tuples
+
+                    // Return HTML with Chart.js visualization
+                    return html("""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bitcoin Price Chart</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .chart-container {
+            background: white;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        canvas {
+            max-height: 400px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Bitcoin Price (Last 7 Days)</h1>
+    <div class="chart-container">
+        <canvas id="chart"></canvas>
+    </div>
+    <script>
+        // Transform API data for Chart.js
+        const prices = {{stringify(prices)}};
+
+        // Convert timestamps to readable dates (X-axis labels)
+        const labels = prices.map(p => {
+            const date = new Date(p[0]);
+            return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        });
+        
+        // Extract price values (Y-axis data)
+        const values = prices.map(p => p[1]);
+        
+        // Create chart
+        new Chart(document.getElementById('chart'), {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'BTC/USD',
+                    data: values,
+                    borderColor: '#ff8c00',      // Dark orange
+                    backgroundColor: 'rgba(255, 140, 0, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,                // Smooth curve
+                    fill: true,
+                    pointRadius: 3,
+                    pointHoverRadius: 5
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: true,
+                plugins: {
+                    legend: {
+                        display: true,
+                        position: 'top'
+                    },
+                    title: {
+                        display: false
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        ticks: {
+                            callback: function(value) {
+                                return '$' + value.toLocaleString();
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
+            """)
+                },
+                Err(e) => {
+                    // Handle JSON parse error
+                    return html("""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 2rem auto;
+            padding: 2rem;
+            text-align: center;
+        }
+        h1 {
+            color: #d32f2f;
+        }
+        p {
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <h1>Bitcoin data retrieval failed</h1>
+    <p>Failed to parse API response. Please try again later.</p>
+</body>
+</html>
+            """)
+                }
+            }
+        },
+        Err(e) => {
+            // Display error message when API fails
+            return html("""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            max-width: 600px;
+            margin: 2rem auto;
+            padding: 2rem;
+            text-align: center;
+        }
+        h1 {
+            color: #d32f2f;
+        }
+        p {
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <h1>Bitcoin data retrieval failed</h1>
+    <p>Unable to fetch cryptocurrency data. Please try again later.</p>
+</body>
+</html>
+            """)
+        }
+    }
+}
+
+get(r"/", crypto_chart)
+
+listen(8080)
+

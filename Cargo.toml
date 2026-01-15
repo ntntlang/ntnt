@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["NTNT Language Team"]
 description = "NTNT (Intent) - A programming language designed for AI-driven development"
 license = "MIT"
-repository = "https://github.com/joshcramer/ntnt"
+repository = "https://github.com/ntntlang/ntnt"
 
 [dependencies]
 # Core utilities
