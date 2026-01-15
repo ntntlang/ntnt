@@ -569,13 +569,13 @@ fn home_handler(req) {
 - [ ] Visual regression (screenshot comparison)
 - [ ] LLM visual verification for subjective qualities
 
-### 6.9 Live Intent Preview
+### 6.9 Intent Studio
 
-**Goal:** Make intent review enjoyable for humans, not just parseable for machines.
+**Goal:** A collaborative workspace where humans and agents develop intent together.
 
-The `.intent` format is optimized for machine parsing and testing, but humans deserve a better review experience. This feature provides a beautiful, live-updating HTML preview of intent files.
+The `.intent` format is optimized for machine parsing and testing, but humans deserve a better experience when creating and refining intent. Intent Studio provides a beautiful, live-updating HTML view that makes intent development feel like a creative collaboration, not a chore.
 
-- [ ] `ntnt intent preview <file.intent>` - Start live preview server
+- [ ] `ntnt intent studio <file.intent>` - Start the intent studio server
 - [ ] Rich HTML rendering with feature cards and visual hierarchy
 - [ ] WebSocket-based live reload (instant updates on file save)
 - [ ] Feature history timeline - view evolution of each feature over time
@@ -585,32 +585,33 @@ The `.intent` format is optimized for machine parsing and testing, but humans de
 - [ ] Shareable URLs for team review
 
 ```bash
-# Start live preview
-$ ntnt intent preview server.intent --port 3000
+# Start intent studio
+$ ntnt intent studio server.intent --port 3000
 
-🌐 Live preview: http://localhost:3000
+🎨 Intent Studio: http://localhost:3000
 👀 Watching server.intent for changes...
 
 # Browser auto-refreshes when you save the .intent file
 ```
 
 **Workflow:** Human and AI collaborate on intent in real-time:
-1. AI drafts `.intent` file
-2. Human opens live preview in browser (side-by-side with editor)
-3. Human comments on changes needed
-4. AI updates `.intent` file
-5. Preview instantly refreshes
-6. Repeat until human approves
-7. AI implements with `ntnt intent init`
+
+1. Create or open an existing `.intent` file (`ntnt intent init` or edit directly)
+2. Start the studio: `ntnt intent studio server.intent`
+3. Human opens studio in browser (side-by-side with editor)
+4. Human and AI collaborate—discussing, adding, removing, refining features
+5. AI updates `.intent` file, studio instantly refreshes
+6. Repeat until human says "looks good!"
+7. AI implements the code with `@implements` annotations
 
 **Phase 6 Deliverables:**
 
 - `.intent` file format and parser
-- `ntnt intent check|init|coverage|diff|watch|preview` commands
+- `ntnt intent check|init|coverage|diff|watch|studio` commands
 - `@implements` annotation system
 - Test execution engine for HTTP servers
 - Intent history and changelog generation
-- Live preview server with WebSocket hot-reload
+- Intent Studio with WebSocket hot-reload for collaborative intent development
 - Applied to `snowgauge.tnt` and other examples
 
 ---

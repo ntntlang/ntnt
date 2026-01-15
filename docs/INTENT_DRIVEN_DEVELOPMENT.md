@@ -511,10 +511,11 @@ The engine auto-detects the program type from the intent file or code:
 ```yaml
 # Intent file can declare type explicitly
 Meta:
-  type: http-server  # or: cli, library, script, worker, daemon
+  type: http-server # or: cli, library, script, worker, daemon
 ```
 
 If not declared, the engine infers type:
+
 - Imports `std/http_server` → HTTP server
 - Has `fn main()` with args → CLI tool
 - Exports public functions only → Library
@@ -524,6 +525,7 @@ If not declared, the engine infers type:
 ### Engine Execution Flow
 
 **For HTTP Servers:**
+
 ```
 1. Start server on random port
 2. GET http://localhost:54321/
@@ -534,6 +536,7 @@ If not declared, the engine infers type:
 ```
 
 **For Libraries/Functions:**
+
 ```
 1. Import module
 2. Call parse_csv("name,age\nAlice,30")
@@ -544,6 +547,7 @@ If not declared, the engine infers type:
 ```
 
 **For CLI Tools:**
+
 ```
 1. Create temp test directory with fixtures
 2. Run: ntnt run program.tnt search "*.txt" ./testdir
@@ -554,6 +558,7 @@ If not declared, the engine infers type:
 ```
 
 **For Database Operations:**
+
 ```
 1. Begin transaction (or use test database)
 2. Call register_user("alice@test.com", "Alice")
@@ -569,42 +574,46 @@ If not declared, the engine infers type:
 These assertions work across all test types:
 
 **Value assertions:**
+
 ```yaml
 assert:
-  - result == expected          # Exact equality
-  - result != bad_value         # Inequality
-  - result > 0                  # Numeric comparison
+  - result == expected # Exact equality
+  - result != bad_value # Inequality
+  - result > 0 # Numeric comparison
   - result contains "substring" # String/list contains
-  - result matches r"\d+"       # Regex match
-  - result is_empty             # Empty check
-  - len(result) == 5            # Length check
+  - result matches r"\d+" # Regex match
+  - result is_empty # Empty check
+  - len(result) == 5 # Length check
 ```
 
 **Type assertions:**
+
 ```yaml
 assert:
   - result is_string
   - result is_int
   - result is_list
   - result is_map
-  - result is_json              # Valid JSON string
-  - result is_none              # None/null value
+  - result is_json # Valid JSON string
+  - result is_none # None/null value
 ```
 
 **Error assertions:**
+
 ```yaml
 assert:
-  - throws: ErrorType           # Specific error
-  - throws                      # Any error
-  - not throws                  # No error (success)
+  - throws: ErrorType # Specific error
+  - throws # Any error
+  - not throws # No error (success)
   - error_message contains "invalid"
 ```
 
 **Timing assertions:**
+
 ```yaml
 assert:
-  - duration < 100ms            # Performance check
-  - response_time < 2000ms      # HTTP response time
+  - duration < 100ms # Performance check
+  - response_time < 2000ms # HTTP response time
 ```
 
 ### Data Schema Validation
@@ -619,6 +628,7 @@ Data: sites
 ```
 
 Engine executes:
+
 ```
 1. Find "sites" definition in code
 2. Extract keys: ["bear_lake", "wild_basin"]
@@ -629,6 +639,7 @@ Engine executes:
 ### Test Isolation
 
 Each test runs in isolation:
+
 - Fresh program instance per test
 - No shared state between tests
 - Database tests use transactions (rolled back)
@@ -644,6 +655,7 @@ $ ntnt intent check myapp.tnt --mock
 ```
 
 Engine can simulate:
+
 - Network failures (timeouts, connection refused)
 - External API errors (500s, rate limits)
 - File system issues (permission denied, disk full)
@@ -1257,26 +1269,27 @@ $ ntnt intent check myproject.tnt
 
 ---
 
-## Live Intent Preview
+## Intent Studio
 
 ### The Problem with Raw Intent Files
 
-The `.intent` format is optimized for machine parsing and testing—but humans deserve a better review experience. Even though intent files are written in natural language, reading YAML-like structure with indentation, IDs, and assertion syntax can feel tedious.
+The `.intent` format is optimized for machine parsing and testing—but humans deserve a better experience when creating and refining intent. Even though intent files are written in natural language, reading YAML-like structure with indentation, IDs, and assertion syntax can feel tedious.
 
 **Intent files should be:**
-- Great for agents (parseable, testable) ✅
-- Great for humans (enjoyable to review) ❌ ← We need to fix this
 
-### The Solution: Live Preview Server
+- Great for agents (parseable, testable) ✅
+- Great for humans (enjoyable to develop) ❌ ← We need to fix this
+
+### The Solution: Intent Studio
 
 ```bash
-$ ntnt intent preview server.intent --port 3000
+$ ntnt intent studio server.intent --port 3000
 
-🌐 Live preview: http://localhost:3000
+🎨 Intent Studio: http://localhost:3000
 👀 Watching server.intent for changes...
 ```
 
-This starts a local server that renders your intent file as a beautiful, interactive HTML page. When you save changes to the `.intent` file, the browser **automatically refreshes**.
+Intent Studio is a collaborative workspace where humans and agents develop intent together. It renders your `.intent` file as a beautiful, interactive HTML page. When you save changes, the browser **automatically refreshes**—making it feel like you're designing intent in real-time.
 
 ### What You See
 
@@ -1307,7 +1320,7 @@ You see a beautifully rendered card:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### The Collaborative Review Workflow
+### The Collaborative Development Workflow
 
 This transforms how humans and agents collaborate on intent:
 
@@ -1315,9 +1328,9 @@ This transforms how humans and agents collaborate on intent:
 ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
 │   VS Code        │     │   Terminal       │     │   Browser        │
 │                  │     │                  │     │                  │
-│  server.intent   │     │  ntnt intent     │     │  Beautiful       │
-│  ─────────────   │────▶│  preview ...     │────▶│  live preview    │
-│  [editing]       │     │                  │     │                  │
+│  server.intent   │     │  ntnt intent     │     │  Intent Studio   │
+│  ─────────────   │────▶│  studio ...      │────▶│  ────────────    │
+│  [editing]       │     │                  │     │  Beautiful UI    │
 │                  │     │  Watching...     │     │  Auto-updates!   │
 └──────────────────┘     └──────────────────┘     └──────────────────┘
         │                                                  │
@@ -1328,13 +1341,15 @@ This transforms how humans and agents collaborate on intent:
 
 **Step-by-step:**
 
-1. Agent drafts `.intent` file based on requirements
-2. Human opens live preview in browser (side-by-side with editor)
-3. Human reads the beautiful preview and gives feedback ("Add X", "Remove Y")
-4. Agent updates `.intent` file
-5. Preview instantly refreshes—human sees the changes immediately
+1. Create or open an existing `.intent` file (`ntnt intent init` for new projects)
+2. Start the studio: `ntnt intent studio server.intent`
+3. Human opens studio in browser (side-by-side with editor)
+4. Human and agent collaborate—discussing, adding, removing, refining features
+5. Agent updates `.intent` file, studio instantly refreshes
 6. Repeat until human says "looks good!"
-7. Agent implements with `ntnt intent init`
+7. Agent implements the code with `@implements` annotations
+
+This works for both **new intent development** and **modifying existing intent**.
 
 ### Future Features
 
