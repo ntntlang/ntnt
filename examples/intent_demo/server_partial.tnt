@@ -1,0 +1,29 @@
+import { html, json, text } from "std/http/server"
+
+// Partial implementation - missing API endpoint
+
+// @implements: feature.home
+fn home(req) {
+    return html("""
+    <!DOCTYPE html>
+    <html>
+    <head><title>Test Server</title></head>
+    <body>
+        <h1>Welcome to the Test Server</h1>
+        <p>This is a simple test page.</p>
+    </body>
+    </html>
+    """)
+}
+
+// @implements: feature.about
+fn about(req) {
+    return html("<h1>About Us</h1>")
+}
+
+// NOTE: feature.api_status is NOT implemented
+
+get(r"/", home)
+get(r"/about", about)
+
+listen(8080)

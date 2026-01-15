@@ -10,7 +10,7 @@ The current implementation is a tree-walking interpreter written in Rust:
 
 ```
 src/
-├── main.rs          # CLI entry point (run, repl, inspect, validate commands)
+├── main.rs          # CLI entry point (run, repl, inspect, validate, intent commands)
 ├── lib.rs           # Library exports
 ├── lexer.rs         # Tokenizer for NTNT source code
 ├── parser.rs        # Recursive descent parser → AST
@@ -19,6 +19,7 @@ src/
 ├── contracts.rs     # Contract checking, old() value storage
 ├── types.rs         # Type definitions and type checking
 ├── error.rs         # Error types and formatting
+├── intent.rs        # Intent-Driven Development module
 └── stdlib/          # Standard library modules
     ├── mod.rs       # Module registry
     ├── string.rs    # std/string
@@ -96,7 +97,8 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 
 ### Tooling
 
-- **CLI**: `ntnt run <file>`, `ntnt repl`, `ntnt check`, `ntnt parse`, `ntnt lex`, `ntnt test`, `ntnt inspect`, `ntnt validate` commands
+- **CLI**: `ntnt run <file>`, `ntnt repl`, `ntnt check`, `ntnt parse`, `ntnt lex`, `ntnt test`, `ntnt inspect`, `ntnt validate`, `ntnt intent` commands
+- **Intent-Driven Development**: `ntnt intent check` (verify against intent), `ntnt intent coverage` (show feature implementations), `ntnt intent init` (generate scaffolding)
 - **Agent Introspection**: `ntnt inspect` outputs JSON describing project structure (functions, routes, middleware, static dirs, file-based routing)
 - **Pre-Run Validation**: `ntnt validate` checks syntax and detects unused imports with JSON output
 - **File-Based Routing**: `routes()` function auto-discovers routes from directory structure, lib/ modules, and middleware/
@@ -169,18 +171,19 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 
 ## Future Extensions
 
-**Completed (Phases 1-5):**
+**Completed (Phases 1-6):**
 
 - HTTP server with contract-verified endpoints ✅
 - PostgreSQL database with transactions ✅
 - Go-style concurrency with channels ✅
 - File-based routing with hot reload ✅
 - Agent introspection (`ntnt inspect`) ✅
+- Intent-Driven Development (`ntnt intent check|coverage|init`) ✅
 
 **Planned:**
 
-- Testing framework with contract-based test generation (Phase 6)
-- LSP server for IDE integration (Phase 7)
+- Testing framework with contract-based test generation (Phase 7)
+- LSP server for IDE integration (Phase 8)
 - Package manager with registry (Phase 7)
 - Bytecode compiler for performance (Phase 8)
 - Native compilation via LLVM/Cranelift (Phase 8)

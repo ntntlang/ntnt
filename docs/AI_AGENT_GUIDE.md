@@ -2,7 +2,7 @@
 
 This document provides critical syntax rules and patterns for AI agents generating NTNT code. Following these rules will prevent common errors and produce idiomatic code.
 
-## ⚠️ MANDATORY Workflow: Always Lint/Test Before Run
+## ⚠️ MANDATORY Workflow: Lint, Test, and Verify Intent
 
 **Before running ANY `.tnt` file, validate it first:**
 
@@ -16,6 +16,85 @@ ntnt run myfile.tnt
 # For HTTP servers - test automatically without manual curl
 ntnt test server.tnt --get /api/status --post /users --body 'name=Alice&age=25'
 ```
+
+## 🎯 Intent-Driven Development Workflow
+
+When working on NTNT projects with `.intent` files, use this workflow:
+
+### 1. Check Intent Before Implementation
+
+```bash
+# See what needs to be built
+cat project.intent
+
+# Generate scaffolding from intent
+ntnt intent init project.intent
+```
+
+### 2. Add @implements Annotations
+
+Link your code to intent features with annotations:
+
+```ntnt
+// @implements: feature.user_registration
+fn register_user(req) {
+    // Implementation here
+}
+
+// @implements: feature.login
+// @supports: constraint.rate_limiting
+fn login(req) {
+    // Implementation here
+}
+
+// @utility
+fn hash_password(password) {
+    // Helper function
+}
+```
+
+### 3. Verify Implementation Matches Intent
+
+```bash
+# Run all intent tests
+ntnt intent check server.tnt
+
+# Example output:
+# Feature: User Registration
+#   ✓ POST /register returns status 200
+#   ✓ body contains "success"
+#
+# 1/1 features passing (2/2 assertions)
+```
+
+### 4. Check Coverage
+
+```bash
+# See which features have implementations
+ntnt intent coverage server.tnt
+
+# Example output:
+# ✓ User Registration (feature.user_registration)
+#     └─ server.tnt:12 in fn register_user
+# ✗ Password Reset (feature.password_reset)
+#     └─ No implementation found
+#
+# [████████████████░░░░░░░░░░░░░░] 50.0% coverage (1/2 features)
+```
+
+### Annotation Types
+
+| Annotation                | Purpose                 | Example                               |
+| ------------------------- | ----------------------- | ------------------------------------- |
+| `@implements: feature.X`  | Links code to a feature | `// @implements: feature.login`       |
+| `@supports: constraint.X` | Links to a constraint   | `// @supports: constraint.rate_limit` |
+| `@utility`                | Marks helper functions  | `// @utility`                         |
+| `@internal`               | Internal implementation | `// @internal`                        |
+| `@infrastructure`         | Config/setup code       | `// @infrastructure`                  |
+
+---
+
+## Lint Commands
 
 The `ntnt lint` command catches common mistakes like:
 

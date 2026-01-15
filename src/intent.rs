@@ -113,6 +113,51 @@ pub struct IntentCheckResult {
     pub feature_results: Vec<FeatureResult>,
 }
 
+/// An annotation found in source code linking to intent
+#[derive(Debug, Clone)]
+pub struct Annotation {
+    pub kind: AnnotationKind,
+    pub id: String,
+    pub file: String,
+    pub line: usize,
+    pub function_name: Option<String>,
+}
+
+/// Types of annotations
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnnotationKind {
+    /// @implements: feature.X - This code implements a feature
+    Implements,
+    /// @supports: constraint.X - This code supports a constraint
+    Supports,
+    /// @utility - Utility function
+    Utility,
+    /// @internal - Internal implementation detail
+    Internal,
+    /// @infrastructure - Infrastructure code
+    Infrastructure,
+}
+
+/// Coverage report showing which features have implementations
+#[derive(Debug)]
+pub struct CoverageReport {
+    pub intent_file: String,
+    pub source_files: Vec<String>,
+    pub features: Vec<FeatureCoverage>,
+    pub total_features: usize,
+    pub covered_features: usize,
+    pub coverage_percent: f64,
+}
+
+/// Coverage for a single feature
+#[derive(Debug)]
+pub struct FeatureCoverage {
+    pub feature_id: String,
+    pub feature_name: String,
+    pub covered: bool,
+    pub implementations: Vec<Annotation>,
+}
+
 impl IntentFile {
     /// Parse an intent file from a path
     pub fn parse(path: &Path) -> Result<Self, IntentError> {
@@ -676,6 +721,371 @@ pub fn find_intent_file(ntnt_path: &Path) -> Option<std::path::PathBuf> {
     }
     
     None
+}
+
+/// Parse annotations from NTNT source code
+/// 
+/// Looks for comments like:
+/// - `// @implements: feature.site_selection`
+/// - `// @supports: constraint.valid_email`
+/// - `// @utility`
+/// - `// @internal`
+/// - `// @infrastructure`
+pub fn parse_annotations(source: &str, file_path: &str) -> Vec<Annotation> {
+    let mut annotations = Vec::new();
+    let lines: Vec<&str> = source.lines().collect();
+    
+    for (line_num, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        
+        // Look for annotation comments
+        if trimmed.starts_with("// @") {
+            let annotation_str = trimmed.trim_start_matches("// @");
+            
+            // Look ahead to find the next function declaration
+            let mut function_name: Option<String> = None;
+            for future_line in lines.iter().skip(line_num + 1) {
+                let future_trimmed = future_line.trim();
+                // Skip empty lines, comments
+                if future_trimmed.is_empty() || future_trimmed.starts_with("//") {
+                    continue;
+                }
+                // Found a function declaration
+                if future_trimmed.starts_with("fn ") {
+                    let rest = future_trimmed.trim_start_matches("fn ");
+                    if let Some(paren_idx) = rest.find('(') {
+                        function_name = Some(rest[..paren_idx].trim().to_string());
+                    }
+                }
+                // Stop looking after first non-comment/empty line
+                break;
+            }
+            
+            if let Some(ann) = parse_single_annotation(annotation_str, file_path, line_num + 1, &function_name) {
+                annotations.push(ann);
+            }
+        }
+    }
+    
+    annotations
+}
+
+/// Parse a single annotation from its string content
+fn parse_single_annotation(
+    annotation_str: &str,
+    file_path: &str,
+    line: usize,
+    function_name: &Option<String>,
+) -> Option<Annotation> {
+    // @implements: feature.X
+    if annotation_str.starts_with("implements:") {
+        let id = annotation_str.trim_start_matches("implements:").trim().to_string();
+        return Some(Annotation {
+            kind: AnnotationKind::Implements,
+            id,
+            file: file_path.to_string(),
+            line,
+            function_name: function_name.clone(),
+        });
+    }
+    
+    // @supports: constraint.X
+    if annotation_str.starts_with("supports:") {
+        let id = annotation_str.trim_start_matches("supports:").trim().to_string();
+        return Some(Annotation {
+            kind: AnnotationKind::Supports,
+            id,
+            file: file_path.to_string(),
+            line,
+            function_name: function_name.clone(),
+        });
+    }
+    
+    // @utility
+    if annotation_str == "utility" || annotation_str.starts_with("utility ") {
+        return Some(Annotation {
+            kind: AnnotationKind::Utility,
+            id: String::new(),
+            file: file_path.to_string(),
+            line,
+            function_name: function_name.clone(),
+        });
+    }
+    
+    // @internal
+    if annotation_str == "internal" || annotation_str.starts_with("internal ") {
+        return Some(Annotation {
+            kind: AnnotationKind::Internal,
+            id: String::new(),
+            file: file_path.to_string(),
+            line,
+            function_name: function_name.clone(),
+        });
+    }
+    
+    // @infrastructure
+    if annotation_str == "infrastructure" || annotation_str.starts_with("infrastructure ") {
+        return Some(Annotation {
+            kind: AnnotationKind::Infrastructure,
+            id: String::new(),
+            file: file_path.to_string(),
+            line,
+            function_name: function_name.clone(),
+        });
+    }
+    
+    None
+}
+
+/// Generate a coverage report for an intent file against source files
+pub fn generate_coverage_report(
+    intent: &IntentFile,
+    source_files: &[(String, String)], // (path, content)
+) -> CoverageReport {
+    // Parse all annotations from all source files
+    let mut all_annotations: Vec<Annotation> = Vec::new();
+    let mut file_paths: Vec<String> = Vec::new();
+    
+    for (path, content) in source_files {
+        let annotations = parse_annotations(content, path);
+        all_annotations.extend(annotations);
+        file_paths.push(path.clone());
+    }
+    
+    // Build coverage for each feature
+    let mut features: Vec<FeatureCoverage> = Vec::new();
+    let mut covered_count = 0;
+    
+    for feature in &intent.features {
+        let feature_id = feature.id.clone().unwrap_or_else(|| {
+            // Generate ID from name if not specified
+            feature.name.to_lowercase().replace(' ', "_")
+        });
+        
+        // Find all annotations that implement this feature
+        let implementations: Vec<Annotation> = all_annotations.iter()
+            .filter(|a| {
+                a.kind == AnnotationKind::Implements && 
+                (a.id == feature_id || a.id == format!("feature.{}", feature_id))
+            })
+            .cloned()
+            .collect();
+        
+        let covered = !implementations.is_empty();
+        if covered {
+            covered_count += 1;
+        }
+        
+        features.push(FeatureCoverage {
+            feature_id,
+            feature_name: feature.name.clone(),
+            covered,
+            implementations,
+        });
+    }
+    
+    let total = intent.features.len();
+    let coverage_percent = if total > 0 {
+        (covered_count as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+    
+    CoverageReport {
+        intent_file: intent.source_path.clone(),
+        source_files: file_paths,
+        features,
+        total_features: total,
+        covered_features: covered_count,
+        coverage_percent,
+    }
+}
+
+/// Print coverage report
+pub fn print_coverage_report(report: &CoverageReport) {
+    println!();
+    println!("{}", "=== Intent Coverage Report ===".cyan().bold());
+    println!();
+    println!("Intent: {}", report.intent_file.green());
+    println!("Source files: {}", report.source_files.len());
+    println!();
+    
+    for fc in &report.features {
+        let status = if fc.covered {
+            "✓".green()
+        } else {
+            "✗".red()
+        };
+        
+        println!("{} {} ({})", status, fc.feature_name.bold(), fc.feature_id.dimmed());
+        
+        if fc.covered {
+            for ann in &fc.implementations {
+                let func_info = ann.function_name.as_ref()
+                    .map(|f| format!(" in fn {}", f))
+                    .unwrap_or_default();
+                println!("    {} {}:{}{}",
+                    "└─".dimmed(),
+                    ann.file,
+                    ann.line,
+                    func_info.dimmed()
+                );
+            }
+        } else {
+            println!("    {} {}", "└─".dimmed(), "No implementation found".yellow());
+        }
+    }
+    
+    println!();
+    
+    // Summary bar
+    let bar_width = 30;
+    let filled = (report.coverage_percent / 100.0 * bar_width as f64) as usize;
+    let empty = bar_width - filled;
+    let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(empty));
+    
+    let summary = format!(
+        "{} {:.1}% coverage ({}/{} features)",
+        bar,
+        report.coverage_percent,
+        report.covered_features,
+        report.total_features
+    );
+    
+    if report.coverage_percent >= 80.0 {
+        println!("{}", summary.green().bold());
+    } else if report.coverage_percent >= 50.0 {
+        println!("{}", summary.yellow().bold());
+    } else {
+        println!("{}", summary.red().bold());
+    }
+}
+
+/// Generate initial code scaffolding from an intent file
+pub fn generate_scaffolding(intent: &IntentFile) -> String {
+    let mut output = String::new();
+    
+    output.push_str("// Auto-generated from intent file\n");
+    output.push_str(&format!("// Intent: {}\n", intent.source_path));
+    output.push_str("// \n");
+    output.push_str("// TODO: Implement the features defined in the intent file\n\n");
+    
+    output.push_str("import { html, json, text, status } from \"std/http/server\"\n\n");
+    
+    // Generate stubs for each feature
+    for feature in &intent.features {
+        let feature_id = feature.id.clone().unwrap_or_else(|| {
+            feature.name.to_lowercase().replace(' ', "_")
+        });
+        
+        // Add feature comment block
+        output.push_str(&format!("// =============================================================================\n"));
+        output.push_str(&format!("// Feature: {}\n", feature.name));
+        if let Some(ref desc) = feature.description {
+            output.push_str(&format!("// {}\n", desc));
+        }
+        output.push_str(&format!("// =============================================================================\n\n"));
+        
+        // Generate handler for each test's route
+        let mut seen_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
+        
+        for test in &feature.tests {
+            let route_key = format!("{} {}", test.method, test.path);
+            if seen_routes.contains(&route_key) {
+                continue;
+            }
+            seen_routes.insert(route_key);
+            
+            // Generate function name from path
+            let fn_name = generate_function_name(&test.path, &test.method);
+            
+            output.push_str(&format!("// @implements: {}\n", feature_id));
+            output.push_str(&format!("fn {}(req) {{\n", fn_name));
+            output.push_str("    // TODO: Implement this handler\n");
+            
+            // Add hints from assertions
+            output.push_str("    // Expected:\n");
+            for assertion in &test.assertions {
+                match assertion {
+                    Assertion::Status(code) => {
+                        output.push_str(&format!("    //   - Return status {}\n", code));
+                    }
+                    Assertion::BodyContains(text) => {
+                        output.push_str(&format!("    //   - Body should contain: \"{}\"\n", text));
+                    }
+                    Assertion::BodyNotContains(text) => {
+                        output.push_str(&format!("    //   - Body should NOT contain: \"{}\"\n", text));
+                    }
+                    Assertion::BodyMatches(pattern) => {
+                        output.push_str(&format!("    //   - Body should match: r\"{}\"\n", pattern));
+                    }
+                    Assertion::HeaderContains(name, value) => {
+                        output.push_str(&format!("    //   - Header \"{}\" should contain: \"{}\"\n", name, value));
+                    }
+                }
+            }
+            
+            output.push_str("    return text(\"Not implemented\")\n");
+            output.push_str("}\n\n");
+        }
+    }
+    
+    // Generate route registrations
+    output.push_str("// =============================================================================\n");
+    output.push_str("// Routes\n");
+    output.push_str("// =============================================================================\n\n");
+    
+    let mut seen_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    
+    for feature in &intent.features {
+        for test in &feature.tests {
+            let route_key = format!("{} {}", test.method, test.path);
+            if seen_routes.contains(&route_key) {
+                continue;
+            }
+            seen_routes.insert(route_key);
+            
+            let fn_name = generate_function_name(&test.path, &test.method);
+            let method_fn = test.method.to_lowercase();
+            
+            // Use raw string for paths with parameters
+            let path_str = if test.path.contains('{') {
+                format!("r\"{}\"", test.path)
+            } else {
+                format!("\"{}\"", test.path)
+            };
+            
+            output.push_str(&format!("{}({}, {})\n", method_fn, path_str, fn_name));
+        }
+    }
+    
+    output.push_str("\nlisten(8080)\n");
+    
+    output
+}
+
+/// Generate a function name from a route path and method
+fn generate_function_name(path: &str, method: &str) -> String {
+    let clean_path = path
+        .trim_start_matches('/')
+        .replace('/', "_")
+        .replace('{', "")
+        .replace('}', "")
+        .replace('?', "_query")
+        .replace('&', "_")
+        .replace('=', "_");
+    
+    let base = if clean_path.is_empty() {
+        "index".to_string()
+    } else {
+        clean_path
+    };
+    
+    if method == "GET" {
+        base
+    } else {
+        format!("{}_{}", base, method.to_lowercase())
+    }
 }
 
 #[cfg(test)]

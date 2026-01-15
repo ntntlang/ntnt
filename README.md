@@ -249,13 +249,14 @@ Every web application needs these. NTNT includes them:
 
 ---
 
-## Intent-Driven Development (Coming in Phase 6)
+## Intent-Driven Development
 
-NTNT is pioneering **Intent-Driven Development (IDD)**—a new paradigm where human intent becomes executable specification.
+NTNT pioneers **Intent-Driven Development (IDD)**—a paradigm where human intent becomes executable specification.
 
 ```yaml
 # snowgauge.intent
 Feature: Site Selection
+  id: feature.site_selection
   description: "Users can select from available monitoring sites"
   test:
     - request: GET /
@@ -263,6 +264,14 @@ Feature: Site Selection
         - status: 200
         - body contains "Bear Lake"
         - body contains "Wild Basin"
+```
+
+```ntnt
+// snowgauge.tnt
+// @implements: feature.site_selection
+fn home_handler(req) {
+    // ... implementation
+}
 ```
 
 ```bash
@@ -273,7 +282,14 @@ Feature: Site Selection
   ✓ body contains "Bear Lake"
   ✓ body contains "Wild Basin"
 
-2/2 features passing
+1/1 features passing (3/3 assertions)
+
+$ ntnt intent coverage snowgauge.tnt
+
+✓ Site Selection (feature.site_selection)
+    └─ snowgauge.tnt:5 in fn home_handler
+
+[██████████████████████████████] 100.0% coverage (1/1 features)
 ```
 
 **What IDD provides:**
@@ -348,15 +364,19 @@ Feature: Site Selection
 - **PostgreSQL**: `std/db/postgres` (connect, query, execute, transactions)
 - **CSV**: `std/csv` (parse, stringify with headers support)
 
-**Phase 6: Intent-Driven Development** 🚀 Next Up
+**Phase 6: Intent-Driven Development** � In Progress
 
-- `.intent` file format and parser
-- `ntnt intent check|init|coverage|diff|watch` commands
-- `@implements` annotation system for code traceability
-- Test execution engine for HTTP servers
-- Intent history and changelog generation
+- [x] `.intent` file format and parser
+- [x] `ntnt intent check` - Verify code matches intent
+- [x] `ntnt intent init` - Generate code scaffolding from intent
+- [x] `ntnt intent coverage` - Show which features have implementations
+- [x] `@implements` annotation system for code traceability
+- [x] Test execution engine for HTTP servers
+- [ ] `ntnt intent diff` - Gap analysis
+- [ ] `ntnt intent watch` - Continuous verification
+- [ ] Intent history and changelog generation
 
-**Version 0.1.10** | See [ROADMAP.md](ROADMAP.md) for the complete implementation plan.
+**Version 0.2.1** | See [ROADMAP.md](ROADMAP.md) for the complete implementation plan.
 
 ## Example
 

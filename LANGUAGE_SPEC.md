@@ -1,6 +1,6 @@
 # NTNT Language Specification
 
-## Version 0.1.10
+## Version 0.2.1
 
 This document specifies the syntax, semantics, and core features of the NTNT programming language.
 

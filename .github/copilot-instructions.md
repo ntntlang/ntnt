@@ -14,6 +14,50 @@ ntnt run myfile.tnt     # Only after lint passes
 ntnt test server.tnt --get /api/status --post /users --body 'name=Alice'
 ```
 
+## 🎯 Intent-Driven Development Workflow
+
+When projects have `.intent` files, follow this workflow:
+
+### 1. Generate Scaffolding from Intent
+
+```bash
+ntnt intent init project.intent
+```
+
+### 2. Add @implements Annotations
+
+```ntnt
+// @implements: feature.user_login
+fn login_handler(req) {
+    // Implementation
+}
+
+// @utility
+fn validate_email(email) {
+    // Helper function
+}
+```
+
+### 3. Verify Against Intent
+
+```bash
+# Run intent tests
+ntnt intent check server.tnt
+
+# Check coverage
+ntnt intent coverage server.tnt
+```
+
+### Annotation Reference
+
+- `// @implements: feature.X` - Links function to a feature
+- `// @supports: constraint.X` - Links to a constraint
+- `// @utility` - Helper function
+- `// @internal` - Internal implementation
+- `// @infrastructure` - Config/setup code
+
+---
+
 ## Mandatory Syntax Rules
 
 ### Map Literals

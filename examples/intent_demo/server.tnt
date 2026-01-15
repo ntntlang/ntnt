@@ -2,6 +2,7 @@ import { html, json, text } from "std/http/server"
 
 // Simple test server for IDD testing
 
+// @implements: feature.home
 fn home(req) {
     return html("""
     <!DOCTYPE html>
@@ -19,6 +20,7 @@ fn home(req) {
     """)
 }
 
+// @implements: feature.about
 fn about(req) {
     return html("""
     <!DOCTYPE html>
@@ -32,6 +34,7 @@ fn about(req) {
     """)
 }
 
+// @implements: feature.api_status
 fn api_status(req) {
     return json(map {
         "status": "ok",

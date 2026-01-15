@@ -511,19 +511,19 @@ Feature: Site Selection
 
 **Success criteria:** Use IDD to develop a new feature in snowgauge. Does it feel useful?
 
-### 6.2 Core Intent Commands
+### 6.2 Core Intent Commands ✅
 
-- [ ] `ntnt intent check <file.tnt>` - Verify code matches intent
-- [ ] `ntnt intent init <file.intent>` - Generate code scaffolding from intent
-- [ ] `ntnt intent coverage <file.tnt>` - Show which features have implementations
+- [x] `ntnt intent check <file.tnt>` - Verify code matches intent
+- [x] `ntnt intent init <file.intent>` - Generate code scaffolding from intent
+- [x] `ntnt intent coverage <file.tnt>` - Show which features have implementations
 - [ ] `ntnt intent diff <file.tnt>` - Gap analysis between intent and code
 
-### 6.3 Code Annotations
+### 6.3 Code Annotations ✅
 
-- [ ] `// @implements: feature.X` comment parsing
-- [ ] `// @supports: constraint.Y` for supporting code
-- [ ] `// @utility`, `// @internal`, `// @infrastructure` markers
-- [ ] Link annotations to intent items
+- [x] `// @implements: feature.X` comment parsing
+- [x] `// @supports: constraint.Y` for supporting code
+- [x] `// @utility`, `// @internal`, `// @infrastructure` markers
+- [x] Link annotations to intent items
 - [ ] Validate IDs exist in intent file
 
 ```ntnt

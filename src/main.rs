@@ -203,6 +203,40 @@ enum IntentCommands {
         #[arg(long = "verbose", short = 'v')]
         verbose: bool,
     },
+    /// Show implementation coverage of intent features
+    /// 
+    /// Analyzes source code for @implements annotations and shows
+    /// which features from the intent file have implementations.
+    /// 
+    /// Examples:
+    ///   ntnt intent coverage server.tnt
+    ///   ntnt intent coverage server.tnt --intent requirements.intent
+    Coverage {
+        /// The NTNT source file(s) to analyze
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        
+        /// Path to intent file (default: looks for <name>.intent)
+        #[arg(long = "intent", short = 'i')]
+        intent_file: Option<PathBuf>,
+    },
+    /// Generate code scaffolding from an intent file
+    /// 
+    /// Creates a new .tnt file with function stubs and route
+    /// registrations based on the intent specification.
+    /// 
+    /// Examples:
+    ///   ntnt intent init requirements.intent
+    ///   ntnt intent init requirements.intent -o server.tnt
+    Init {
+        /// The intent file to generate code from
+        #[arg(value_name = "INTENT_FILE")]
+        intent_file: PathBuf,
+        
+        /// Output file (default: prints to stdout)
+        #[arg(long = "output", short = 'o')]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -1655,6 +1689,12 @@ fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
         IntentCommands::Check { file, intent_file, port, verbose } => {
             run_intent_check_command(&file, intent_file.as_ref(), port, verbose)
         }
+        IntentCommands::Coverage { file, intent_file } => {
+            run_intent_coverage_command(&file, intent_file.as_ref())
+        }
+        IntentCommands::Init { intent_file, output } => {
+            run_intent_init_command(&intent_file, output.as_ref())
+        }
     }
 }
 
@@ -1710,6 +1750,80 @@ fn run_intent_check_command(
             anyhow::bail!("Intent check failed: {}", e);
         }
     }
+}
+
+/// Run the intent coverage command
+fn run_intent_coverage_command(
+    ntnt_path: &PathBuf,
+    intent_path: Option<&PathBuf>,
+) -> anyhow::Result<()> {
+    // Find the intent file
+    let intent_file_path = if let Some(path) = intent_path {
+        path.clone()
+    } else {
+        match intent::find_intent_file(ntnt_path) {
+            Some(path) => path,
+            None => {
+                let stem = ntnt_path.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                anyhow::bail!(
+                    "No intent file found. Create {}.intent or specify with --intent",
+                    stem
+                );
+            }
+        }
+    };
+    
+    // Parse intent file
+    let intent_file = intent::IntentFile::parse(&intent_file_path)
+        .map_err(|e| anyhow::anyhow!("Failed to parse intent file: {}", e))?;
+    
+    // Read source file(s)
+    let source_content = fs::read_to_string(ntnt_path)?;
+    let source_files = vec![(
+        ntnt_path.to_string_lossy().to_string(),
+        source_content,
+    )];
+    
+    // Generate and print coverage report
+    let report = intent::generate_coverage_report(&intent_file, &source_files);
+    intent::print_coverage_report(&report);
+    
+    // Exit with error if coverage is 0%
+    if report.covered_features == 0 && report.total_features > 0 {
+        std::process::exit(1);
+    }
+    
+    Ok(())
+}
+
+/// Run the intent init command
+fn run_intent_init_command(
+    intent_path: &PathBuf,
+    output_path: Option<&PathBuf>,
+) -> anyhow::Result<()> {
+    // Parse intent file
+    let intent_file = intent::IntentFile::parse(intent_path)
+        .map_err(|e| anyhow::anyhow!("Failed to parse intent file: {}", e))?;
+    
+    // Generate scaffolding
+    let scaffolding = intent::generate_scaffolding(&intent_file);
+    
+    // Output
+    if let Some(output) = output_path {
+        fs::write(output, &scaffolding)?;
+        println!("{}", format!("Generated {} from intent file", output.display()).green());
+        println!();
+        println!("Next steps:");
+        println!("  1. Implement the TODO functions in {}", output.display());
+        println!("  2. Run {} to verify", format!("ntnt intent check {}", output.display()).cyan());
+    } else {
+        // Print to stdout
+        println!("{}", scaffolding);
+    }
+    
+    Ok(())
 }
 
 /// Collect all .tnt files from a path (file or directory)
