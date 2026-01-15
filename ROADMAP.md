@@ -466,17 +466,141 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 
 ---
 
-## Phase 6: Testing & Intent Annotations
+## Phase 6: Intent-Driven Development (IDD)
 
-**Goal:** Comprehensive testing with AI-friendly intent tracking.
+**Status:** Next Up 🚀
 
-### 6.1 Test Framework
+**Goal:** Make NTNT the first language with native Intent-Driven Development—where human intent becomes executable specification.
+
+> See [docs/INTENT_DRIVEN_DEVELOPMENT.md](docs/INTENT_DRIVEN_DEVELOPMENT.md) for the complete design document.
+
+### What is IDD?
+
+Intent-Driven Development creates a **contract layer between human requirements and AI-generated code**. Instead of describing what you want and hoping the AI understands, you write a `.intent` file that is both:
+
+- **Human-readable requirements** - Plain English descriptions anyone can understand
+- **Machine-executable tests** - Assertions the system verifies automatically
+
+```yaml
+# snowgauge.intent
+Feature: Site Selection
+  id: feature.site_selection
+  description: "Users can select from available monitoring sites"
+  test:
+    - request: GET /
+      assert:
+        - status: 200
+        - body contains "Bear Lake"
+        - body contains "Wild Basin"
+```
+
+### 6.1 POC Validation (Go/No-Go Checkpoint) ⬅️ First Milestone
+
+**Goal:** Prove the concept works before full investment.
+
+- [ ] Intent file parser (YAML-based `.intent` files)
+- [ ] HTTP test runner (start server, make requests, check assertions)
+- [ ] Basic assertions (`status`, `body contains`, `body matches`)
+- [ ] `ntnt intent check` command
+- [ ] Apply to `snowgauge.tnt` example
+
+```bash
+# Target behavior
+$ ntnt intent check snowgauge.tnt
+
+Feature: Site Selection
+  ✓ GET / returns status 200
+  ✓ body contains "Bear Lake"
+  ✓ body contains "Wild Basin"
+
+2/2 features passing (5/5 assertions)
+```
+
+**Success criteria:** Use IDD to develop a new feature in snowgauge. Does it feel useful?
+
+### 6.2 Core Intent Commands
+
+- [ ] `ntnt intent check <file.tnt>` - Verify code matches intent
+- [ ] `ntnt intent init <file.intent>` - Generate code scaffolding from intent
+- [ ] `ntnt intent coverage <file.tnt>` - Show which features have implementations
+- [ ] `ntnt intent diff <file.tnt>` - Gap analysis between intent and code
+
+### 6.3 Code Annotations
+
+- [ ] `// @implements: feature.X` comment parsing
+- [ ] `// @supports: constraint.Y` for supporting code
+- [ ] `// @utility`, `// @internal`, `// @infrastructure` markers
+- [ ] Link annotations to intent items
+- [ ] Validate IDs exist in intent file
+
+```ntnt
+// @implements: feature.site_selection
+fn home_handler(req) {
+    // This function implements the site selection feature
+}
+```
+
+### 6.4 Expanded Assertions
+
+- [ ] Regex assertions: `body matches r"Snow: \d+ in"`
+- [ ] JSON assertions: `body.json.sites[0] == "bear_lake"`
+- [ ] Header assertions: `header "Content-Type" contains "text/html"`
+- [ ] Negation: `body not contains "error"`
+- [ ] Timing: `response_time < 2000ms`
+
+### 6.5 Test Execution for All Program Types
+
+- [ ] HTTP servers (primary focus)
+- [ ] CLI applications (`run:`, `exit_code:`, `stdout:`)
+- [ ] Library functions (`eval:`, `result:`)
+- [ ] Database operations (`verify_db:`, transactions)
+
+### 6.6 Developer Experience
+
+- [ ] `ntnt intent watch` - Continuous verification during development
+- [ ] Colored output (green/red for pass/fail)
+- [ ] Failure details with expected vs actual
+- [ ] Intent file line numbers in error messages
+- [ ] Parallel test execution
+
+### 6.7 Intent History & Changelog
+
+- [ ] `ntnt intent history <feature>` - View feature evolution
+- [ ] `ntnt intent changelog v1 v2` - Generate release notes from intent diffs
+- [ ] `ntnt intent archaeology "<term>"` - Search intent history
+
+### 6.8 Browser & Visual Testing (Future)
+
+- [ ] DOM assertions (element exists, visible, attributes)
+- [ ] Browser automation (click, fill, navigate)
+- [ ] Visual regression (screenshot comparison)
+- [ ] LLM visual verification for subjective qualities
+
+**Phase 6 Deliverables:**
+
+- `.intent` file format and parser
+- `ntnt intent check|init|coverage|diff|watch` commands
+- `@implements` annotation system
+- Test execution engine for HTTP servers
+- Intent history and changelog generation
+- Applied to `snowgauge.tnt` and other examples
+
+---
+
+## Phase 7: Testing Framework
+
+**Goal:** Comprehensive testing infrastructure complementing Intent-Driven Development.
+
+> IDD tests behavior at the feature level. This phase adds unit testing, mocking, and contract-based test generation for fine-grained code verification.
+
+### 7.1 Unit Test Framework
 
 - [ ] `#[test]` attribute for test functions
 - [ ] Test discovery and runner
 - [ ] Parallel test execution
 - [ ] `assert`, `assert_eq`, `assert_ne` macros
 - [ ] `#[should_panic]` for expected failures
+- [ ] Test filtering and tagging
 
 ```ntnt
 #[test]
@@ -493,61 +617,84 @@ fn test_invalid_email() {
 }
 ```
 
-### 6.2 Contract-Based Testing
+### 7.2 Contract-Based Test Generation
 
 - [ ] Auto-generate test cases from contracts
 - [ ] Property-based testing with contracts
 - [ ] Fuzzing with contract guidance
 - [ ] Contract coverage metrics
-
-### 6.3 Mocking & Test Utilities
-
-- [ ] Mock trait implementations
-- [ ] HTTP test client
-- [ ] Database test utilities
-- [ ] Test fixtures
-
-### 6.4 Intent Annotations (From Whitepaper)
-
-- [ ] `intent` blocks linking purpose to code
-- [ ] Intent registry and tracking
-- [ ] Intent coverage reports
-- [ ] AI verification of intent-implementation alignment
+- [ ] Edge case generation from `requires` clauses
 
 ```ntnt
-intent "Calculate shipping cost based on weight and destination" {
-    fn calculate_shipping(weight: Float, dest: String) -> Float
-        requires weight > 0
-        ensures result >= 0
-    {
-        let base = weight * 0.5
-        let zone_multiplier = get_zone_multiplier(dest)
-        return base * zone_multiplier
-    }
-}
+// Given this contract:
+fn divide(a: Int, b: Int) -> Int
+    requires b != 0
+    ensures result * b == a
+{ a / b }
 
-intent "Users must have valid email addresses" {
-    impl User {
-        invariant self.email.contains("@")
-        invariant self.email.contains(".")
-    }
+// Auto-generate tests:
+// - divide(10, 2) → 5 ✓
+// - divide(0, 1) → 0 ✓
+// - divide(5, 0) → precondition failure ✓
+// - divide(-10, -2) → 5 ✓ (negative handling)
+```
+
+### 7.3 Mocking & Test Utilities
+
+- [ ] Mock trait implementations
+- [ ] HTTP test client (complements IDD HTTP testing)
+- [ ] Database test utilities (test transactions, fixtures)
+- [ ] Test fixtures and factories
+- [ ] Snapshot testing
+
+```ntnt
+#[test]
+fn test_with_mock_db() {
+    let mock_db = MockDatabase.new()
+    mock_db.expect_query("SELECT * FROM users").returns([user1, user2])
+
+    let result = get_all_users(mock_db)
+    assert_eq(len(result), 2)
 }
+```
+
+### 7.4 Test Integration
+
+- [ ] `ntnt test` command (runs all tests)
+- [ ] `ntnt test --unit` (unit tests only)
+- [ ] `ntnt test --intent` (IDD tests only)
+- [ ] Coverage reports (combined unit + IDD)
+- [ ] CI/CD integration patterns
+
+```bash
+# Run all tests
+ntnt test
+
+# Run only unit tests
+ntnt test --unit
+
+# Run only IDD feature tests
+ntnt test --intent
+
+# Combined coverage report
+ntnt test --coverage
 ```
 
 **Deliverables:**
 
-- Test framework with discovery
+- `#[test]` attribute system
 - Contract-based test generation
 - Mocking framework
-- Intent annotation system
+- Test runner with filtering
+- Coverage reporting
 
 ---
 
-## Phase 7: Tooling & Developer Experience
+## Phase 8: Tooling & Developer Experience
 
 **Goal:** World-class developer experience with AI collaboration support.
 
-### 7.1 Language Server (LSP)
+### 8.1 Language Server (LSP)
 
 - [ ] Go to definition
 - [ ] Find references
@@ -557,7 +704,7 @@ intent "Users must have valid email addresses" {
 - [ ] Code actions (quick fixes)
 - [ ] Contract visualization
 
-### 7.2 Package Manager
+### 8.2 Package Manager
 
 - [ ] `ntnt.toml` project configuration
 - [ ] Package registry
@@ -573,7 +720,7 @@ ntnt test
 ntnt build --release
 ```
 
-### 7.3 Documentation Generator
+### 8.3 Documentation Generator
 
 - [ ] Doc comments (`///`)
 - [ ] Automatic API documentation
@@ -581,7 +728,7 @@ ntnt build --release
 - [ ] Example extraction and testing
 - [ ] NTNT documentation
 
-### 7.4 Human Approval Mechanisms (From Whitepaper)
+### 8.4 Human Approval Mechanisms (From Whitepaper)
 
 - [ ] `@requires_approval` annotations
 - [ ] Approval workflows in IDE
@@ -600,7 +747,7 @@ pub fn get_user(id: String) -> User {
 }
 ```
 
-### 7.5 Debugger
+### 8.5 Debugger
 
 - [ ] Breakpoints
 - [ ] Step debugging
@@ -619,7 +766,7 @@ pub fn get_user(id: String) -> User {
 
 ---
 
-## Phase 8: Performance & Compilation
+## Phase 9: Performance & Compilation
 
 **Goal:** Production-ready performance through progressive compilation strategies.
 
@@ -658,7 +805,7 @@ NTNT Source (.tnt)
 | Interpreter | ❌ Replaced | Becomes compiler/codegen    |
 | Stdlib      | ⚠️ Partial  | Need native implementations |
 
-### 8.1 Bytecode VM (First Target)
+### 9.1 Bytecode VM (First Target)
 
 **Goal:** 10-50x performance improvement with moderate effort.
 
@@ -696,7 +843,7 @@ ntnt run app.tnc            # Run bytecode directly
 ntnt run app.tnt            # Auto-compile and run (caches .tnc)
 ```
 
-### 8.2 VM Optimizations
+### 9.2 VM Optimizations
 
 - [ ] Constant folding at compile time
 - [ ] Dead code elimination
@@ -705,7 +852,7 @@ ntnt run app.tnt            # Auto-compile and run (caches .tnc)
 - [ ] Contract elision in release builds (configurable)
 - [ ] Hot path detection and optimization
 
-### 8.3 Memory Management
+### 9.3 Memory Management
 
 - [ ] Reference counting with cycle detection
 - [ ] Memory pools for hot paths
@@ -713,7 +860,7 @@ ntnt run app.tnt            # Auto-compile and run (caches .tnc)
 - [ ] Small string optimization
 - [ ] Arena allocators for request handling
 
-### 8.4 Native Compilation (Future)
+### 9.4 Native Compilation (Future)
 
 **Goal:** Native machine code for maximum performance (100-1000x faster than interpreter).
 
@@ -795,7 +942,7 @@ ntnt build app.tnt --release    # Optimized build
 ./app                           # Run native binary directly
 ```
 
-### 8.5 Static Type Checking
+### 9.5 Static Type Checking
 
 - [ ] Full type inference
 - [ ] Flow-sensitive typing
@@ -803,7 +950,7 @@ ntnt build app.tnt --release    # Optimized build
 - [ ] Helpful error messages with suggestions
 - [ ] Type narrowing in conditionals and match
 
-### 8.6 Advanced Type System Features
+### 9.6 Advanced Type System Features
 
 - [ ] Associated types in traits
 - [ ] Where clauses for complex constraints
@@ -812,7 +959,7 @@ ntnt build app.tnt --release    # Optimized build
 - [ ] Contravariant preconditions, covariant postconditions
 - [ ] Error context/wrapping: `result.context("message")?`
 
-### 8.7 Runtime Library (for Native Compilation)
+### 9.7 Runtime Library (for Native Compilation)
 
 Native compilation requires re-implementing stdlib in the target:
 
@@ -831,11 +978,11 @@ Native compilation requires re-implementing stdlib in the target:
 
 ---
 
-## Phase 9: AI Integration & Structured Edits
+## Phase 10: AI Integration & Structured Edits
 
 **Goal:** First-class AI development support—NTNT's key differentiator.
 
-### 9.1 Structured Edits (From Whitepaper)
+### 10.1 Structured Edits (From Whitepaper)
 
 - [ ] AST-based diff format
 - [ ] Semantic-preserving transformations
@@ -852,14 +999,14 @@ Edit {
 }
 ```
 
-### 9.2 AI Agent SDK
+### 10.2 AI Agent SDK
 
 - [ ] Agent communication protocol
 - [ ] Context provision API (give AI relevant code context)
 - [ ] Suggestion acceptance/rejection tracking
 - [ ] Learning from corrections
 
-### 9.3 Semantic Versioning Enforcement
+### 10.3 Semantic Versioning Enforcement
 
 - [ ] API signature tracking across versions
 - [ ] Automatic breaking change detection
@@ -872,7 +1019,7 @@ Edit {
 fn get_user(id: String) -> User { }
 ```
 
-### 9.4 Commit Rationale Generation
+### 10.4 Commit Rationale Generation
 
 - [ ] Structured commit metadata
 - [ ] Link commits to intents and requirements
@@ -888,25 +1035,25 @@ fn get_user(id: String) -> User { }
 
 ---
 
-## Phase 10: Deployment & Operations
+## Phase 11: Deployment & Operations
 
 **Goal:** Production deployment support.
 
-### 10.1 Build & Distribution
+### 11.1 Build & Distribution
 
 - [ ] Single binary compilation
 - [ ] Cross-compilation support
 - [ ] Minimal Docker image generation
 - [ ] Build profiles (dev, release, test)
 
-### 10.2 Configuration
+### 11.2 Configuration
 
 - [ ] Environment-based config
 - [ ] Config file support (TOML, JSON)
 - [ ] Secrets management patterns
 - [ ] Validation with contracts
 
-### 10.3 Observability
+### 11.3 Observability
 
 - [ ] Structured logging (`std/log`)
 - [ ] Metrics collection (Prometheus format)
@@ -927,7 +1074,7 @@ fn handle_request(req: Request) -> Response {
 }
 ```
 
-### 10.4 Graceful Lifecycle
+### 11.4 Graceful Lifecycle
 
 - [ ] Signal handling (SIGTERM, SIGINT)
 - [ ] Connection draining

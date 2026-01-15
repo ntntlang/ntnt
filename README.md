@@ -249,6 +249,53 @@ Every web application needs these. NTNT includes them:
 
 ---
 
+## Intent-Driven Development (Coming in Phase 6)
+
+NTNT is pioneering **Intent-Driven Development (IDD)**—a new paradigm where human intent becomes executable specification.
+
+```yaml
+# snowgauge.intent
+Feature: Site Selection
+  description: "Users can select from available monitoring sites"
+  test:
+    - request: GET /
+      assert:
+        - status: 200
+        - body contains "Bear Lake"
+        - body contains "Wild Basin"
+```
+
+```bash
+$ ntnt intent check snowgauge.tnt
+
+Feature: Site Selection
+  ✓ GET / returns status 200
+  ✓ body contains "Bear Lake"
+  ✓ body contains "Wild Basin"
+
+2/2 features passing
+```
+
+**What IDD provides:**
+
+- **Human-readable requirements** - Plain English descriptions anyone can understand
+- **Machine-executable tests** - Assertions the system verifies automatically
+- **Living documentation** - Always in sync because it IS the test suite
+- **Intent history** - Git-tracked evolution of what you meant to build
+
+**IDD vs TDD:**
+
+| Aspect               | TDD                     | IDD                         |
+| -------------------- | ----------------------- | --------------------------- |
+| **Answers**          | "Does the code work?"   | "Does it do what we meant?" |
+| **Written in**       | Code (pytest, Jest)     | Plain English + assertions  |
+| **Readable by**      | Developers only         | Anyone                      |
+| **AI collaboration** | Not designed for agents | Built for human-agent work  |
+
+> 📖 See [docs/INTENT_DRIVEN_DEVELOPMENT.md](docs/INTENT_DRIVEN_DEVELOPMENT.md) for the complete design document.
+
+---
+
 ## Current Status
 
 **Phase 1: Core Contract System** ✅ Complete
@@ -301,7 +348,15 @@ Every web application needs these. NTNT includes them:
 - **PostgreSQL**: `std/db/postgres` (connect, query, execute, transactions)
 - **CSV**: `std/csv` (parse, stringify with headers support)
 
-**Version 0.1.10** | See [ROADMAP.md](ROADMAP.md) for the complete 10-phase implementation plan.
+**Phase 6: Intent-Driven Development** 🚀 Next Up
+
+- `.intent` file format and parser
+- `ntnt intent check|init|coverage|diff|watch` commands
+- `@implements` annotation system for code traceability
+- Test execution engine for HTTP servers
+- Intent history and changelog generation
+
+**Version 0.1.10** | See [ROADMAP.md](ROADMAP.md) for the complete implementation plan.
 
 ## Example
 
@@ -1048,7 +1103,7 @@ NTNT bridges the gap between AI's speed and consistency with human judgment and 
 - [Whitepaper](whitepaper.md) - Complete technical specification and motivation
 - [Architecture](ARCHITECTURE.md) - System design and components
 - [Language Spec](LANGUAGE_SPEC.md) - Formal language definition
-- [Roadmap](ROADMAP.md) - 13-phase implementation plan for production web apps
+- [Roadmap](ROADMAP.md) - 11-phase implementation plan for production web apps
 
 ## Built-in Functions
 
