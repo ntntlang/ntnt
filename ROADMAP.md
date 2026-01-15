@@ -487,15 +487,15 @@ Feature: Site Selection
         - body contains "Wild Basin"
 ```
 
-### 6.1 POC Validation (Go/No-Go Checkpoint) ⬅️ First Milestone
+### 6.1 POC Validation (Go/No-Go Checkpoint) ✅
 
 **Goal:** Prove the concept works before full investment.
 
-- [ ] Intent file parser (YAML-based `.intent` files)
-- [ ] HTTP test runner (start server, make requests, check assertions)
-- [ ] Basic assertions (`status`, `body contains`, `body matches`)
-- [ ] `ntnt intent check` command
-- [ ] Apply to `snowgauge.tnt` example
+- [x] Intent file parser (YAML-based `.intent` files)
+- [x] HTTP test runner (start server, make requests, check assertions)
+- [x] Basic assertions (`status`, `body contains`, `body matches`)
+- [x] `ntnt intent check` command
+- [x] Apply to `snowgauge.tnt` example
 
 ```bash
 # Target behavior
@@ -535,15 +535,15 @@ fn home_handler(req) {
 
 ### 6.4 Expanded Assertions
 
-- [ ] Regex assertions: `body matches r"Snow: \d+ in"`
+- [x] Regex assertions: `body matches r"Snow: \d+ in"`
 - [ ] JSON assertions: `body.json.sites[0] == "bear_lake"`
-- [ ] Header assertions: `header "Content-Type" contains "text/html"`
-- [ ] Negation: `body not contains "error"`
+- [x] Header assertions: `header "Content-Type" contains "text/html"`
+- [x] Negation: `body not contains "error"`
 - [ ] Timing: `response_time < 2000ms`
 
 ### 6.5 Test Execution for All Program Types
 
-- [ ] HTTP servers (primary focus)
+- [x] HTTP servers (primary focus)
 - [ ] CLI applications (`run:`, `exit_code:`, `stdout:`)
 - [ ] Library functions (`eval:`, `result:`)
 - [ ] Database operations (`verify_db:`, transactions)
@@ -551,8 +551,8 @@ fn home_handler(req) {
 ### 6.6 Developer Experience
 
 - [ ] `ntnt intent watch` - Continuous verification during development
-- [ ] Colored output (green/red for pass/fail)
-- [ ] Failure details with expected vs actual
+- [x] Colored output (green/red for pass/fail)
+- [x] Failure details with expected vs actual
 - [ ] Intent file line numbers in error messages
 - [ ] Parallel test execution
 
