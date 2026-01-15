@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use colored::*;
+use serde::Serialize;
 
 use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
@@ -35,7 +36,7 @@ use crate::parser::Parser as IntentParser;
 use crate::error::IntentError;
 
 /// A single assertion within a test
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum Assertion {
     /// Check HTTP status code: `status: 200`
     Status(u16),
@@ -50,7 +51,7 @@ pub enum Assertion {
 }
 
 /// A single test case (HTTP request + assertions)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TestCase {
     pub method: String,
     pub path: String,
@@ -59,7 +60,7 @@ pub struct TestCase {
 }
 
 /// A feature/requirement with tests
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Feature {
     pub id: Option<String>,
     pub name: String,
@@ -68,14 +69,14 @@ pub struct Feature {
 }
 
 /// Parsed intent file
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct IntentFile {
     pub features: Vec<Feature>,
     pub source_path: String,
 }
 
 /// Result of running a single assertion
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AssertionResult {
     pub assertion: Assertion,
     pub passed: bool,
@@ -84,7 +85,7 @@ pub struct AssertionResult {
 }
 
 /// Result of running a test case
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TestResult {
     pub test: TestCase,
     pub passed: bool,
@@ -95,7 +96,7 @@ pub struct TestResult {
 }
 
 /// Result of running a feature
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct FeatureResult {
     pub feature: Feature,
     pub passed: bool,
@@ -628,6 +629,102 @@ fn run_assertions(
             }
         }
     }).collect()
+}
+
+/// Results from running tests against a live server (for Intent Studio)
+#[derive(Debug, Serialize)]
+pub struct LiveTestResults {
+    pub features: Vec<LiveFeatureResult>,
+    pub total_assertions: usize,
+    pub passed_assertions: usize,
+    pub failed_assertions: usize,
+}
+
+/// Result for a single feature in live testing
+#[derive(Debug, Serialize)]
+pub struct LiveFeatureResult {
+    pub feature_id: String,
+    pub feature_name: String,
+    pub passed: bool,
+    pub tests: Vec<LiveTestResult>,
+}
+
+/// Result for a single test in live testing
+#[derive(Debug, Serialize)]
+pub struct LiveTestResult {
+    pub method: String,
+    pub path: String,
+    pub passed: bool,
+    pub assertions: Vec<LiveAssertionResult>,
+}
+
+/// Result for a single assertion in live testing
+#[derive(Debug, Serialize)]
+pub struct LiveAssertionResult {
+    pub assertion_text: String,
+    pub passed: bool,
+    pub message: Option<String>,
+}
+
+/// Run tests against an already-running server (no interpreter needed)
+/// Returns results in a format suitable for JSON serialization and UI display
+pub fn run_tests_against_server(intent: &IntentFile, port: u16) -> LiveTestResults {
+    let mut feature_results = Vec::new();
+    let mut total_assertions = 0;
+    let mut passed_assertions = 0;
+    let mut failed_assertions = 0;
+    
+    for feature in &intent.features {
+        let feature_id = feature.id.clone().unwrap_or_else(|| "unknown".to_string());
+        let mut test_results = Vec::new();
+        let mut feature_passed = true;
+        
+        for test in &feature.tests {
+            let result = run_single_test(test, port);
+            let mut assertion_results = Vec::new();
+            let mut test_passed = result.passed;
+            
+            for ar in &result.assertion_results {
+                total_assertions += 1;
+                let assertion_text = format_assertion(&ar.assertion);
+                
+                if ar.passed {
+                    passed_assertions += 1;
+                } else {
+                    failed_assertions += 1;
+                    test_passed = false;
+                    feature_passed = false;
+                }
+                
+                assertion_results.push(LiveAssertionResult {
+                    assertion_text,
+                    passed: ar.passed,
+                    message: ar.message.clone(),
+                });
+            }
+            
+            test_results.push(LiveTestResult {
+                method: test.method.clone(),
+                path: test.path.clone(),
+                passed: test_passed,
+                assertions: assertion_results,
+            });
+        }
+        
+        feature_results.push(LiveFeatureResult {
+            feature_id,
+            feature_name: feature.name.clone(),
+            passed: feature_passed,
+            tests: test_results,
+        });
+    }
+    
+    LiveTestResults {
+        features: feature_results,
+        total_assertions,
+        passed_assertions,
+        failed_assertions,
+    }
 }
 
 /// Print intent check results

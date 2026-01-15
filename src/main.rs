@@ -245,6 +245,7 @@ enum IntentCommands {
     /// Examples:
     ///   ntnt intent studio server.intent
     ///   ntnt intent studio server.intent --port 3000
+    ///   ntnt intent studio server.intent --app-port 8080
     Studio {
         /// The intent file to visualize
         #[arg(value_name = "INTENT_FILE")]
@@ -253,6 +254,10 @@ enum IntentCommands {
         /// Port to run the studio server on (default: 3000)
         #[arg(long = "port", short = 'p', default_value = "3000")]
         port: u16,
+        
+        /// Port where the application server is running (for live test execution)
+        #[arg(long = "app-port", short = 'a')]
+        app_port: Option<u16>,
         
         /// Don't automatically open the browser
         #[arg(long = "no-open")]
@@ -1716,8 +1721,8 @@ fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
         IntentCommands::Init { intent_file, output } => {
             run_intent_init_command(&intent_file, output.as_ref())
         }
-        IntentCommands::Studio { intent_file, port, no_open } => {
-            run_intent_studio_command(&intent_file, port, no_open)
+        IntentCommands::Studio { intent_file, port, app_port, no_open } => {
+            run_intent_studio_command(&intent_file, port, app_port, no_open)
         }
     }
 }
@@ -1854,6 +1859,7 @@ fn run_intent_init_command(
 fn run_intent_studio_command(
     intent_path: &PathBuf,
     port: u16,
+    app_port: Option<u16>,
     no_open: bool,
 ) -> anyhow::Result<()> {
     use std::io::{Read, Write};
@@ -1873,6 +1879,14 @@ fn run_intent_studio_command(
     println!();
     println!("  {} {}", "File:".dimmed(), intent_path.display());
     println!("  {} http://{}", "URL:".dimmed(), addr);
+    if let Some(app) = app_port {
+        println!("  {} http://127.0.0.1:{}", "App:".dimmed(), app);
+        println!();
+        println!("  {} Live test execution enabled!", "✅".green());
+    } else {
+        println!();
+        println!("  {} Add --app-port <PORT> to enable live test execution", "💡".yellow());
+    }
     println!();
     println!("  {} Watching for changes (auto-refresh every 2s)", "👀".dimmed());
     println!("  {} Press Ctrl+C to stop", "📝".dimmed());
@@ -1907,7 +1921,7 @@ fn run_intent_studio_command(
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let mut buffer = [0; 1024];
+                let mut buffer = [0; 4096];
                 if stream.read(&mut buffer).is_ok() {
                     let request = String::from_utf8_lossy(&buffer);
                     
@@ -1935,11 +1949,41 @@ fn run_intent_studio_command(
                             body.len(),
                             body
                         )
+                    } else if path == "/run-tests" {
+                        // Run tests against the app server
+                        if let Some(target_port) = app_port {
+                            match intent::IntentFile::parse(intent_path) {
+                                Ok(intent_file) => {
+                                    let results = intent::run_tests_against_server(&intent_file, target_port);
+                                    let json = serde_json::to_string(&results).unwrap_or_else(|_| "{}".to_string());
+                                    format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
+                                        json.len(),
+                                        json
+                                    )
+                                }
+                                Err(e) => {
+                                    let error = format!(r#"{{"error": "{}"}}"#, e.to_string().replace('"', "\\\""));
+                                    format!(
+                                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                        error.len(),
+                                        error
+                                    )
+                                }
+                            }
+                        } else {
+                            let error = r#"{"error": "No app-port specified. Start studio with --app-port <PORT>"}"#;
+                            format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                error.len(),
+                                error
+                            )
+                        }
                     } else {
                         // Main page - render the intent file
                         match intent::IntentFile::parse(intent_path) {
                             Ok(intent_file) => {
-                                let html = render_intent_studio_html(&intent_file, &intent_path_str);
+                                let html = render_intent_studio_html(&intent_file, &intent_path_str, app_port);
                                 format!(
                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
                                     html.len(),
@@ -1971,7 +2015,7 @@ fn run_intent_studio_command(
 }
 
 /// Render the Intent Studio HTML page
-fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) -> String {
+fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, app_port: Option<u16>) -> String {
     let mut features_html = String::new();
     
     for feature in &intent_file.features {
@@ -1980,9 +2024,9 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
         
         // Build test cases HTML
         let mut tests_html = String::new();
-        for test in &feature.tests {
+        for (test_idx, test) in feature.tests.iter().enumerate() {
             let mut assertions_html = String::new();
-            for assertion in &test.assertions {
+            for (assert_idx, assertion) in test.assertions.iter().enumerate() {
                 let assertion_str = match assertion {
                     intent::Assertion::Status(code) => format!("status: {}", code),
                     intent::Assertion::BodyContains(text) => format!("body contains \"{}\"", text),
@@ -1991,7 +2035,10 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
                     intent::Assertion::HeaderContains(name, value) => format!("header \"{}\" contains \"{}\"", name, value),
                 };
                 assertions_html.push_str(&format!(
-                    r#"<div class="assertion">✓ {}</div>"#,
+                    r#"<div class="assertion" data-feature="{}" data-test="{}" data-assert="{}"><span class="assertion-icon">○</span> {}</div>"#,
+                    html_escape(id),
+                    test_idx,
+                    assert_idx,
                     html_escape(&assertion_str)
                 ));
             }
@@ -2003,11 +2050,13 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
             };
             
             tests_html.push_str(&format!(
-                r#"<div class="test-case">
+                r#"<div class="test-case" data-feature="{}" data-test="{}">
                     <div class="test-request"><span class="method">{}</span> <span class="path">{}</span></div>
                     {}
                     <div class="assertions">{}</div>
                 </div>"#,
+                html_escape(id),
+                test_idx,
                 test.method,
                 html_escape(&test.path),
                 body_html,
@@ -2041,11 +2090,11 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
         };
         
         features_html.push_str(&format!(
-            r#"<div class="feature-card">
+            r#"<div class="feature-card" data-feature="{}">
                 <div class="feature-header">
                     <span class="feature-icon">{}</span>
                     <span class="feature-name">{}</span>
-                    <span class="feature-badge">feature</span>
+                    <span class="feature-badge feature-status" data-feature="{}">pending</span>
                 </div>
                 <div class="feature-id"><code>{}</code></div>
                 <div class="feature-description">{}</div>
@@ -2054,8 +2103,10 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
                     {}
                 </div>
             </div>"#,
+            html_escape(id),
             icon,
             html_escape(&feature.name),
+            html_escape(id),
             html_escape(id),
             html_escape(description),
             tests_html
@@ -2068,6 +2119,13 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
         .flat_map(|f| f.tests.iter())
         .map(|t| t.assertions.len())
         .sum();
+    
+    let has_app_port = app_port.is_some();
+    let run_button_html = if has_app_port {
+        r#"<button class="run-tests-btn" onclick="runTests()">▶ Run Tests</button>"#
+    } else {
+        r#"<button class="run-tests-btn disabled" disabled title="Add --app-port to enable">▶ No App Port</button>"#
+    };
     
     format!(
         r##"<!DOCTYPE html>
@@ -2089,6 +2147,7 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
             --accent-green: #3fb950;
             --accent-purple: #a371f7;
             --accent-orange: #d29922;
+            --accent-red: #f85149;
         }}
         
         * {{
@@ -2120,6 +2179,8 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
         }}
         
         .logo {{
@@ -2154,6 +2215,44 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
             font-size: 0.8rem;
         }}
         
+        .header-controls {{
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }}
+        
+        .run-tests-btn {{
+            background: var(--accent-green);
+            color: var(--bg-primary);
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+        }}
+        
+        .run-tests-btn:hover:not(:disabled) {{
+            background: #2ea043;
+            transform: scale(1.02);
+        }}
+        
+        .run-tests-btn:active:not(:disabled) {{
+            transform: scale(0.98);
+        }}
+        
+        .run-tests-btn.disabled {{
+            background: var(--bg-tertiary);
+            color: var(--text-muted);
+            cursor: not-allowed;
+        }}
+        
+        .run-tests-btn.running {{
+            background: var(--accent-orange);
+            cursor: wait;
+        }}
+        
         .status-badge {{
             display: flex;
             align-items: center;
@@ -2185,7 +2284,7 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
         
         .stats {{
             display: flex;
-            gap: 2rem;
+            gap: 1rem;
             margin-bottom: 2rem;
             flex-wrap: wrap;
         }}
@@ -2195,7 +2294,7 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
             border: 1px solid var(--border-color);
             border-radius: 8px;
             padding: 1rem 1.5rem;
-            min-width: 140px;
+            min-width: 120px;
         }}
         
         .stat-value {{
@@ -2207,6 +2306,14 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
         .stat-label {{
             color: var(--text-secondary);
             font-size: 0.875rem;
+        }}
+        
+        .stat.passing .stat-value {{
+            color: var(--accent-green);
+        }}
+        
+        .stat.failing .stat-value {{
+            color: var(--accent-red);
         }}
         
         .features-grid {{
@@ -2225,6 +2332,14 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
         .feature-card:hover {{
             border-color: var(--accent-purple);
             transform: translateY(-2px);
+        }}
+        
+        .feature-card.passed {{
+            border-color: var(--accent-green);
+        }}
+        
+        .feature-card.failed {{
+            border-color: var(--accent-red);
         }}
         
         .feature-header {{
@@ -2252,6 +2367,14 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
             border-radius: 4px;
             text-transform: uppercase;
             font-weight: 600;
+        }}
+        
+        .feature-status.passed {{
+            background: var(--accent-green);
+        }}
+        
+        .feature-status.failed {{
+            background: var(--accent-red);
         }}
         
         .feature-id {{
@@ -2336,9 +2459,39 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
         }}
         
         .assertion {{
-            color: var(--accent-green);
+            color: var(--text-secondary);
             font-size: 0.85rem;
             font-family: 'SF Mono', 'Consolas', monospace;
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+        }}
+        
+        .assertion-icon {{
+            flex-shrink: 0;
+        }}
+        
+        .assertion.passed {{
+            color: var(--accent-green);
+        }}
+        
+        .assertion.passed .assertion-icon::before {{
+            content: '✓';
+        }}
+        
+        .assertion.failed {{
+            color: var(--accent-red);
+        }}
+        
+        .assertion.failed .assertion-icon::before {{
+            content: '✗';
+        }}
+        
+        .assertion-message {{
+            color: var(--accent-red);
+            font-size: 0.75rem;
+            margin-left: 1.25rem;
+            opacity: 0.8;
         }}
         
         .footer {{
@@ -2367,6 +2520,42 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
             opacity: 1;
             transform: translateY(0);
         }}
+        
+        .results-summary {{
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            margin-bottom: 2rem;
+            display: none;
+        }}
+        
+        .results-summary.visible {{
+            display: block;
+        }}
+        
+        .results-summary.all-passed {{
+            border-color: var(--accent-green);
+        }}
+        
+        .results-summary.has-failures {{
+            border-color: var(--accent-red);
+        }}
+        
+        .results-summary h3 {{
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }}
+        
+        .results-summary.all-passed h3 {{
+            color: var(--accent-green);
+        }}
+        
+        .results-summary.has-failures h3 {{
+            color: var(--accent-red);
+        }}
     </style>
 </head>
 <body>
@@ -2379,14 +2568,22 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
             <div class="header-file">
                 <code>{file_path}</code>
             </div>
-            <div class="status-badge">
-                <span class="status-dot"></span>
-                <span>Live</span>
+            <div class="header-controls">
+                {run_button_html}
+                <div class="status-badge">
+                    <span class="status-dot"></span>
+                    <span>Live</span>
+                </div>
             </div>
         </div>
     </header>
     
     <main class="main">
+        <div class="results-summary" id="results-summary">
+            <h3><span id="results-icon"></span> <span id="results-title"></span></h3>
+            <p id="results-text"></p>
+        </div>
+        
         <div class="stats">
             <div class="stat">
                 <div class="stat-value">{feature_count}</div>
@@ -2396,9 +2593,17 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
                 <div class="stat-value">{test_count}</div>
                 <div class="stat-label">Test Cases</div>
             </div>
-            <div class="stat">
+            <div class="stat" id="assertions-stat">
                 <div class="stat-value">{assertion_count}</div>
                 <div class="stat-label">Assertions</div>
+            </div>
+            <div class="stat passing" id="passed-stat" style="display: none;">
+                <div class="stat-value" id="passed-count">0</div>
+                <div class="stat-label">Passed</div>
+            </div>
+            <div class="stat failing" id="failed-stat" style="display: none;">
+                <div class="stat-value" id="failed-count">0</div>
+                <div class="stat-label">Failed</div>
             </div>
         </div>
         
@@ -2414,19 +2619,125 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
     <div class="update-toast" id="toast">✨ Intent updated - refreshing...</div>
     
     <script>
-        // Poll for changes every 2 seconds
-        let lastCheck = Date.now();
+        const hasAppPort = {has_app_port};
         
+        async function runTests() {{
+            if (!hasAppPort) return;
+            
+            const btn = document.querySelector('.run-tests-btn');
+            btn.textContent = '⏳ Running...';
+            btn.classList.add('running');
+            
+            // Reset all states
+            document.querySelectorAll('.assertion').forEach(el => {{
+                el.classList.remove('passed', 'failed');
+                el.querySelector('.assertion-icon').textContent = '○';
+            }});
+            document.querySelectorAll('.feature-card').forEach(el => {{
+                el.classList.remove('passed', 'failed');
+            }});
+            document.querySelectorAll('.feature-status').forEach(el => {{
+                el.classList.remove('passed', 'failed');
+                el.textContent = 'testing...';
+            }});
+            
+            try {{
+                const response = await fetch('/run-tests');
+                const results = await response.json();
+                
+                if (results.error) {{
+                    alert('Error: ' + results.error);
+                    return;
+                }}
+                
+                // Update UI with results
+                let passedCount = results.passed_assertions || 0;
+                let failedCount = results.failed_assertions || 0;
+                
+                // Show stats
+                document.getElementById('passed-stat').style.display = 'block';
+                document.getElementById('failed-stat').style.display = 'block';
+                document.getElementById('passed-count').textContent = passedCount;
+                document.getElementById('failed-count').textContent = failedCount;
+                
+                // Update each feature
+                for (const feature of results.features) {{
+                    const featureCard = document.querySelector(`.feature-card[data-feature="${{feature.feature_id}}"]`);
+                    const featureStatus = document.querySelector(`.feature-status[data-feature="${{feature.feature_id}}"]`);
+                    
+                    if (featureCard) {{
+                        featureCard.classList.add(feature.passed ? 'passed' : 'failed');
+                    }}
+                    if (featureStatus) {{
+                        featureStatus.classList.add(feature.passed ? 'passed' : 'failed');
+                        featureStatus.textContent = feature.passed ? 'passed' : 'failed';
+                    }}
+                    
+                    // Update each test's assertions
+                    for (let ti = 0; ti < feature.tests.length; ti++) {{
+                        const test = feature.tests[ti];
+                        for (let ai = 0; ai < test.assertions.length; ai++) {{
+                            const assertion = test.assertions[ai];
+                            const assertionEl = document.querySelector(
+                                `.assertion[data-feature="${{feature.feature_id}}"][data-test="${{ti}}"][data-assert="${{ai}}"]`
+                            );
+                            if (assertionEl) {{
+                                assertionEl.classList.add(assertion.passed ? 'passed' : 'failed');
+                                const iconEl = assertionEl.querySelector('.assertion-icon');
+                                iconEl.textContent = assertion.passed ? '✓' : '✗';
+                                
+                                // Add error message if failed
+                                if (!assertion.passed && assertion.message) {{
+                                    const existing = assertionEl.querySelector('.assertion-message');
+                                    if (existing) existing.remove();
+                                    const msgEl = document.createElement('div');
+                                    msgEl.className = 'assertion-message';
+                                    msgEl.textContent = assertion.message;
+                                    assertionEl.appendChild(msgEl);
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+                
+                // Show summary
+                const summary = document.getElementById('results-summary');
+                const icon = document.getElementById('results-icon');
+                const title = document.getElementById('results-title');
+                const text = document.getElementById('results-text');
+                
+                summary.classList.add('visible');
+                if (failedCount === 0) {{
+                    summary.classList.remove('has-failures');
+                    summary.classList.add('all-passed');
+                    icon.textContent = '✓';
+                    title.textContent = 'All Tests Passed!';
+                    text.textContent = `${{passedCount}} assertions passed across ${{results.features.length}} features.`;
+                }} else {{
+                    summary.classList.remove('all-passed');
+                    summary.classList.add('has-failures');
+                    icon.textContent = '✗';
+                    title.textContent = 'Some Tests Failed';
+                    text.textContent = `${{passedCount}} passed, ${{failedCount}} failed.`;
+                }}
+                
+            }} catch (e) {{
+                console.error('Test run failed:', e);
+                alert('Failed to run tests: ' + e.message);
+            }} finally {{
+                btn.textContent = '▶ Run Tests';
+                btn.classList.remove('running');
+            }}
+        }}
+        
+        // Poll for changes every 2 seconds
         async function checkForUpdates() {{
             try {{
                 const response = await fetch('/check-update');
                 const text = await response.text();
                 if (text === 'changed') {{
-                    // Show toast
                     const toast = document.getElementById('toast');
                     toast.classList.add('show');
-                    
-                    // Reload after brief delay
                     setTimeout(() => {{
                         window.location.reload();
                     }}, 500);
@@ -2437,6 +2748,11 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
         }}
         
         setInterval(checkForUpdates, 2000);
+        
+        // Auto-run tests on load if app port is configured
+        if (hasAppPort) {{
+            setTimeout(runTests, 500);
+        }}
     </script>
 </body>
 </html>"##,
@@ -2444,7 +2760,9 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) 
         feature_count = feature_count,
         test_count = test_count,
         assertion_count = assertion_count,
-        features_html = features_html
+        features_html = features_html,
+        run_button_html = run_button_html,
+        has_app_port = if has_app_port { "true" } else { "false" }
     )
 }
 
