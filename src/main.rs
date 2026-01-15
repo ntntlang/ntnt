@@ -237,6 +237,27 @@ enum IntentCommands {
         #[arg(long = "output", short = 'o')]
         output: Option<PathBuf>,
     },
+    /// Start Intent Studio - a visual workspace for developing intent
+    /// 
+    /// Opens a beautiful HTML view of your intent file that auto-refreshes
+    /// as you edit. Perfect for collaborative intent development with AI.
+    /// 
+    /// Examples:
+    ///   ntnt intent studio server.intent
+    ///   ntnt intent studio server.intent --port 3000
+    Studio {
+        /// The intent file to visualize
+        #[arg(value_name = "INTENT_FILE")]
+        intent_file: PathBuf,
+        
+        /// Port to run the studio server on (default: 3000)
+        #[arg(long = "port", short = 'p', default_value = "3000")]
+        port: u16,
+        
+        /// Don't automatically open the browser
+        #[arg(long = "no-open")]
+        no_open: bool,
+    },
 }
 
 fn main() {
@@ -1695,6 +1716,9 @@ fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
         IntentCommands::Init { intent_file, output } => {
             run_intent_init_command(&intent_file, output.as_ref())
         }
+        IntentCommands::Studio { intent_file, port, no_open } => {
+            run_intent_studio_command(&intent_file, port, no_open)
+        }
     }
 }
 
@@ -1824,6 +1848,698 @@ fn run_intent_init_command(
     }
     
     Ok(())
+}
+
+/// Run the intent studio command - starts a visual preview server
+fn run_intent_studio_command(
+    intent_path: &PathBuf,
+    port: u16,
+    no_open: bool,
+) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::SystemTime;
+    
+    // Verify the file exists
+    if !intent_path.exists() {
+        anyhow::bail!("Intent file not found: {}", intent_path.display());
+    }
+    
+    let intent_path_str = intent_path.to_string_lossy().to_string();
+    let addr = format!("127.0.0.1:{}", port);
+    
+    println!();
+    println!("{}", "  🎨 Intent Studio".cyan().bold());
+    println!();
+    println!("  {} {}", "File:".dimmed(), intent_path.display());
+    println!("  {} http://{}", "URL:".dimmed(), addr);
+    println!();
+    println!("  {} Watching for changes (auto-refresh every 2s)", "👀".dimmed());
+    println!("  {} Press Ctrl+C to stop", "📝".dimmed());
+    println!();
+    
+    // Try to open browser
+    if !no_open {
+        let url = format!("http://{}", addr);
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(&url).spawn();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("cmd").args(["/C", "start", &url]).spawn();
+        }
+    }
+    
+    // Start simple HTTP server
+    let listener = TcpListener::bind(&addr)
+        .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", addr, e))?;
+    
+    // Track file modification time for change detection
+    let mut last_modified = fs::metadata(&intent_path)
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    
+    for stream in listener.incoming() {
+        match stream {
+            Ok(mut stream) => {
+                let mut buffer = [0; 1024];
+                if stream.read(&mut buffer).is_ok() {
+                    let request = String::from_utf8_lossy(&buffer);
+                    
+                    // Parse request path
+                    let path = request
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    
+                    let response = if path == "/check-update" {
+                        // Endpoint for checking if file has changed
+                        let current_modified = fs::metadata(&intent_path)
+                            .and_then(|m| m.modified())
+                            .unwrap_or(SystemTime::UNIX_EPOCH);
+                        
+                        let changed = current_modified != last_modified;
+                        if changed {
+                            last_modified = current_modified;
+                        }
+                        
+                        let body = if changed { "changed" } else { "unchanged" };
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    } else {
+                        // Main page - render the intent file
+                        match intent::IntentFile::parse(intent_path) {
+                            Ok(intent_file) => {
+                                let html = render_intent_studio_html(&intent_file, &intent_path_str);
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
+                                    html.len(),
+                                    html
+                                )
+                            }
+                            Err(e) => {
+                                let html = render_intent_studio_error(&e.to_string(), &intent_path_str);
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+                                    html.len(),
+                                    html
+                                )
+                            }
+                        }
+                    };
+                    
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                }
+            }
+            Err(e) => {
+                eprintln!("Connection error: {}", e);
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Render the Intent Studio HTML page
+fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str) -> String {
+    let mut features_html = String::new();
+    
+    for feature in &intent_file.features {
+        let id = feature.id.as_deref().unwrap_or("no-id");
+        let description = feature.description.as_deref().unwrap_or("No description");
+        
+        // Build test cases HTML
+        let mut tests_html = String::new();
+        for test in &feature.tests {
+            let mut assertions_html = String::new();
+            for assertion in &test.assertions {
+                let assertion_str = match assertion {
+                    intent::Assertion::Status(code) => format!("status: {}", code),
+                    intent::Assertion::BodyContains(text) => format!("body contains \"{}\"", text),
+                    intent::Assertion::BodyNotContains(text) => format!("body not contains \"{}\"", text),
+                    intent::Assertion::BodyMatches(pattern) => format!("body matches \"{}\"", pattern),
+                    intent::Assertion::HeaderContains(name, value) => format!("header \"{}\" contains \"{}\"", name, value),
+                };
+                assertions_html.push_str(&format!(
+                    r#"<div class="assertion">✓ {}</div>"#,
+                    html_escape(&assertion_str)
+                ));
+            }
+            
+            let body_html = if let Some(body) = &test.body {
+                format!(r#"<div class="test-body">Body: <code>{}</code></div>"#, html_escape(body))
+            } else {
+                String::new()
+            };
+            
+            tests_html.push_str(&format!(
+                r#"<div class="test-case">
+                    <div class="test-request"><span class="method">{}</span> <span class="path">{}</span></div>
+                    {}
+                    <div class="assertions">{}</div>
+                </div>"#,
+                test.method,
+                html_escape(&test.path),
+                body_html,
+                assertions_html
+            ));
+        }
+        
+        // Pick an icon based on the feature name
+        let icon = if feature.name.to_lowercase().contains("login") || feature.name.to_lowercase().contains("auth") {
+            "🔐"
+        } else if feature.name.to_lowercase().contains("register") || feature.name.to_lowercase().contains("signup") {
+            "📝"
+        } else if feature.name.to_lowercase().contains("home") || feature.name.to_lowercase().contains("index") {
+            "🏠"
+        } else if feature.name.to_lowercase().contains("api") || feature.name.to_lowercase().contains("status") {
+            "⚡"
+        } else if feature.name.to_lowercase().contains("about") {
+            "ℹ️"
+        } else if feature.name.to_lowercase().contains("user") || feature.name.to_lowercase().contains("profile") {
+            "👤"
+        } else if feature.name.to_lowercase().contains("search") {
+            "🔍"
+        } else if feature.name.to_lowercase().contains("setting") || feature.name.to_lowercase().contains("config") {
+            "⚙️"
+        } else if feature.name.to_lowercase().contains("chart") || feature.name.to_lowercase().contains("graph") {
+            "📊"
+        } else if feature.name.to_lowercase().contains("data") || feature.name.to_lowercase().contains("database") {
+            "💾"
+        } else {
+            "✨"
+        };
+        
+        features_html.push_str(&format!(
+            r#"<div class="feature-card">
+                <div class="feature-header">
+                    <span class="feature-icon">{}</span>
+                    <span class="feature-name">{}</span>
+                    <span class="feature-badge">feature</span>
+                </div>
+                <div class="feature-id"><code>{}</code></div>
+                <div class="feature-description">{}</div>
+                <div class="feature-tests">
+                    <div class="tests-header">Acceptance Criteria</div>
+                    {}
+                </div>
+            </div>"#,
+            icon,
+            html_escape(&feature.name),
+            html_escape(id),
+            html_escape(description),
+            tests_html
+        ));
+    }
+    
+    let feature_count = intent_file.features.len();
+    let test_count: usize = intent_file.features.iter().map(|f| f.tests.len()).sum();
+    let assertion_count: usize = intent_file.features.iter()
+        .flat_map(|f| f.tests.iter())
+        .map(|t| t.assertions.len())
+        .sum();
+    
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intent Studio - {file_path}</title>
+    <style>
+        :root {{
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --border-color: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-purple: #a371f7;
+            --accent-orange: #d29922;
+        }}
+        
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+        }}
+        
+        .header {{
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            padding: 1rem 2rem;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }}
+        
+        .header-content {{
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        
+        .logo {{
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }}
+        
+        .logo-icon {{
+            font-size: 1.5rem;
+        }}
+        
+        .logo-text {{
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }}
+        
+        .logo-text span {{
+            color: var(--accent-purple);
+        }}
+        
+        .header-file {{
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+        }}
+        
+        .header-file code {{
+            background: var(--bg-tertiary);
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }}
+        
+        .status-badge {{
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: var(--bg-tertiary);
+            padding: 0.375rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+        }}
+        
+        .status-dot {{
+            width: 8px;
+            height: 8px;
+            background: var(--accent-green);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }}
+        
+        @keyframes pulse {{
+            0%, 100% {{ opacity: 1; }}
+            50% {{ opacity: 0.5; }}
+        }}
+        
+        .main {{
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }}
+        
+        .stats {{
+            display: flex;
+            gap: 2rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }}
+        
+        .stat {{
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            min-width: 140px;
+        }}
+        
+        .stat-value {{
+            font-size: 2rem;
+            font-weight: 600;
+            color: var(--accent-blue);
+        }}
+        
+        .stat-label {{
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+        }}
+        
+        .features-grid {{
+            display: grid;
+            gap: 1.5rem;
+        }}
+        
+        .feature-card {{
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.5rem;
+            transition: border-color 0.2s, transform 0.2s;
+        }}
+        
+        .feature-card:hover {{
+            border-color: var(--accent-purple);
+            transform: translateY(-2px);
+        }}
+        
+        .feature-header {{
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.5rem;
+        }}
+        
+        .feature-icon {{
+            font-size: 1.5rem;
+        }}
+        
+        .feature-name {{
+            font-size: 1.25rem;
+            font-weight: 600;
+            flex-grow: 1;
+        }}
+        
+        .feature-badge {{
+            background: var(--accent-purple);
+            color: white;
+            font-size: 0.7rem;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }}
+        
+        .feature-id {{
+            margin-bottom: 0.75rem;
+        }}
+        
+        .feature-id code {{
+            background: var(--bg-tertiary);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }}
+        
+        .feature-description {{
+            color: var(--text-secondary);
+            margin-bottom: 1rem;
+            font-size: 0.95rem;
+        }}
+        
+        .feature-tests {{
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            padding: 1rem;
+        }}
+        
+        .tests-header {{
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+        }}
+        
+        .test-case {{
+            padding: 0.75rem 0;
+            border-bottom: 1px solid var(--border-color);
+        }}
+        
+        .test-case:last-child {{
+            border-bottom: none;
+            padding-bottom: 0;
+        }}
+        
+        .test-request {{
+            font-family: 'SF Mono', 'Consolas', monospace;
+            margin-bottom: 0.5rem;
+        }}
+        
+        .method {{
+            background: var(--accent-green);
+            color: var(--bg-primary);
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }}
+        
+        .path {{
+            color: var(--accent-blue);
+            margin-left: 0.5rem;
+        }}
+        
+        .test-body {{
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }}
+        
+        .test-body code {{
+            background: var(--bg-secondary);
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }}
+        
+        .assertions {{
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+        }}
+        
+        .assertion {{
+            color: var(--accent-green);
+            font-size: 0.85rem;
+            font-family: 'SF Mono', 'Consolas', monospace;
+        }}
+        
+        .footer {{
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }}
+        
+        .update-toast {{
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            background: var(--accent-purple);
+            color: white;
+            padding: 0.75rem 1.25rem;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity 0.3s, transform 0.3s;
+            z-index: 1000;
+        }}
+        
+        .update-toast.show {{
+            opacity: 1;
+            transform: translateY(0);
+        }}
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <span class="logo-icon">🎨</span>
+                <span class="logo-text">Intent <span>Studio</span></span>
+            </div>
+            <div class="header-file">
+                <code>{file_path}</code>
+            </div>
+            <div class="status-badge">
+                <span class="status-dot"></span>
+                <span>Live</span>
+            </div>
+        </div>
+    </header>
+    
+    <main class="main">
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-value">{feature_count}</div>
+                <div class="stat-label">Features</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">{test_count}</div>
+                <div class="stat-label">Test Cases</div>
+            </div>
+            <div class="stat">
+                <div class="stat-value">{assertion_count}</div>
+                <div class="stat-label">Assertions</div>
+            </div>
+        </div>
+        
+        <div class="features-grid">
+            {features_html}
+        </div>
+    </main>
+    
+    <footer class="footer">
+        Intent-Driven Development • NTNT Language
+    </footer>
+    
+    <div class="update-toast" id="toast">✨ Intent updated - refreshing...</div>
+    
+    <script>
+        // Poll for changes every 2 seconds
+        let lastCheck = Date.now();
+        
+        async function checkForUpdates() {{
+            try {{
+                const response = await fetch('/check-update');
+                const text = await response.text();
+                if (text === 'changed') {{
+                    // Show toast
+                    const toast = document.getElementById('toast');
+                    toast.classList.add('show');
+                    
+                    // Reload after brief delay
+                    setTimeout(() => {{
+                        window.location.reload();
+                    }}, 500);
+                }}
+            }} catch (e) {{
+                // Server might be restarting, ignore
+            }}
+        }}
+        
+        setInterval(checkForUpdates, 2000);
+    </script>
+</body>
+</html>"##,
+        file_path = html_escape(file_path),
+        feature_count = feature_count,
+        test_count = test_count,
+        assertion_count = assertion_count,
+        features_html = features_html
+    )
+}
+
+/// Render error page for Intent Studio
+fn render_intent_studio_error(error: &str, file_path: &str) -> String {
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intent Studio - Error</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0d1117;
+            color: #e6edf3;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+        }}
+        .error-box {{
+            background: #161b22;
+            border: 1px solid #f85149;
+            border-radius: 12px;
+            padding: 2rem;
+            max-width: 600px;
+            text-align: center;
+        }}
+        .error-icon {{
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }}
+        .error-title {{
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+        }}
+        .error-file {{
+            color: #8b949e;
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+        }}
+        .error-message {{
+            background: #21262d;
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'SF Mono', monospace;
+            font-size: 0.85rem;
+            color: #f85149;
+            text-align: left;
+            white-space: pre-wrap;
+        }}
+        .retry-note {{
+            color: #8b949e;
+            font-size: 0.85rem;
+            margin-top: 1rem;
+        }}
+    </style>
+</head>
+<body>
+    <div class="error-box">
+        <div class="error-icon">⚠️</div>
+        <div class="error-title">Parse Error</div>
+        <div class="error-file">{file_path}</div>
+        <div class="error-message">{error}</div>
+        <div class="retry-note">Fix the error and save - the page will refresh automatically.</div>
+    </div>
+    
+    <script>
+        setInterval(async () => {{
+            try {{
+                const response = await fetch('/check-update');
+                const text = await response.text();
+                if (text === 'changed') {{
+                    window.location.reload();
+                }}
+            }} catch (e) {{}}
+        }}, 2000);
+    </script>
+</body>
+</html>"##,
+        file_path = html_escape(file_path),
+        error = html_escape(error)
+    )
+}
+
+/// Simple HTML escaping
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+     .replace('<', "&lt;")
+     .replace('>', "&gt;")
+     .replace('"', "&quot;")
+     .replace('\'', "&#39;")
 }
 
 /// Collect all .tnt files from a path (file or directory)

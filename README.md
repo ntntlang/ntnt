@@ -47,6 +47,14 @@ Traditional programming languages were designed for humans typing code character
 
 NTNT's CLI commands are designed for AI agents and automated workflows.
 
+**Intent Studio**: `ntnt intent studio` opens a beautiful live preview of your `.intent` file. Edit side-by-side with an AI agent and watch updates appear instantly.
+
+```bash
+ntnt intent studio server.intent
+# 🎨 Intent Studio: http://localhost:3000
+# 👀 Watching server.intent for changes...
+```
+
 **Intent verification**: `ntnt intent check` verifies that code with `@implements` annotations matches human intent described in natural language `.intent` files.
 
 ```bash

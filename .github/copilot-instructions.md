@@ -18,14 +18,32 @@ ntnt test server.tnt --get /api/status --post /users --body 'name=Alice'
 
 **CRITICAL: IDD is a collaborative process.** The intent file is a shared artifact developed TOGETHER with the user before implementation.
 
+### Intent Studio - Visual Intent Development
+
+For the best collaborative experience, use **Intent Studio** - a beautiful live preview of intent files:
+
+```bash
+ntnt intent studio server.intent           # Opens browser with live preview
+ntnt intent studio server.intent --port 3000  # Custom port
+```
+
+Intent Studio:
+- Renders `.intent` files as beautiful HTML with feature cards
+- Auto-refreshes every 2 seconds when you save changes
+- Shows feature count, test cases, and assertions at a glance
+- Perfect for side-by-side editing with the user
+
+**Recommended workflow:** Start Intent Studio, then edit the `.intent` file together with the user watching the live preview.
+
 ### Phase 1: Draft and Present Intent (STOP FOR USER INPUT)
 
 When user asks to build something using IDD:
 
 1. **Draft the `.intent` file** based on requirements (use correct format below!)
-2. **STOP and present it to the user** - do NOT proceed to implementation
-3. **Ask clarifying questions** about requirements
-4. **Wait for user approval** before implementing
+2. **Optionally start Intent Studio** for visual review: `ntnt intent studio <file>.intent`
+3. **STOP and present it to the user** - do NOT proceed to implementation
+4. **Ask clarifying questions** about requirements
+5. **Wait for user approval** before implementing
 
 Example response pattern:
 

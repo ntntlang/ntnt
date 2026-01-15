@@ -21,14 +21,34 @@ ntnt test server.tnt --get /api/status --post /users --body 'name=Alice&age=25'
 
 **CRITICAL: IDD is a collaborative process between human and AI.** The intent file is a shared artifact that must be developed TOGETHER before any implementation begins.
 
+### Intent Studio - Visual Intent Development
+
+For the best collaborative experience, use **Intent Studio** to preview intent files in a beautiful HTML interface:
+
+```bash
+ntnt intent studio server.intent           # Opens browser with live preview
+ntnt intent studio server.intent --port 3000  # Custom port
+ntnt intent studio server.intent --no-open    # Don't auto-open browser
+```
+
+**What Intent Studio provides:**
+- 🎨 Beautiful dark theme with feature cards
+- 📊 Stats dashboard (features, test cases, assertions)
+- 🔄 Auto-refresh every 2 seconds when file changes
+- ✨ Smart icons based on feature names
+- ❌ Error display with auto-retry on parse errors
+
+**Recommended workflow:** Start Intent Studio, position it side-by-side with your editor, and edit the `.intent` file while watching updates live. This makes collaborative intent development visual and immediate.
+
 ### Phase 1: Draft and Present Intent (DO NOT SKIP)
 
 When the user asks to build something using IDD:
 
 1. **Draft the `.intent` file** based on user requirements (use correct format below!)
-2. **STOP and present it to the user** for review - do NOT proceed to implementation
-3. **Discuss and refine** the intent with the user
-4. Only after user approval, proceed to Phase 2
+2. **Start Intent Studio** for visual review: `ntnt intent studio <file>.intent`
+3. **STOP and present it to the user** for review - do NOT proceed to implementation
+4. **Discuss and refine** the intent with the user
+5. Only after user approval, proceed to Phase 2
 
 ### Intent File Format (CRITICAL - Use This Exact Format!)
 
@@ -158,16 +178,26 @@ Feature: User Authentication
 
 ### IDD Workflow Summary
 
-| Step | Action                       | Human Input Required |
-| ---- | ---------------------------- | -------------------- |
-| 1    | Draft `.intent` file         | No                   |
-| 2    | **Present intent to user**   | **YES - STOP HERE**  |
-| 3    | Refine based on feedback     | Yes                  |
-| 4    | User approves intent         | **YES**              |
-| 5    | Generate scaffolding         | No                   |
-| 6    | Implement with `@implements` | No                   |
-| 7    | Run `ntnt intent check`      | No                   |
-| 8    | Present results to user      | No                   |
+| Step | Action                              | Human Input Required |
+| ---- | ----------------------------------- | -------------------- |
+| 1    | Draft `.intent` file                | No                   |
+| 2    | Start Intent Studio (optional)      | No                   |
+| 3    | **Present intent to user**          | **YES - STOP HERE**  |
+| 4    | Refine based on feedback            | Yes                  |
+| 5    | User approves intent                | **YES**              |
+| 6    | Run `ntnt intent init` (scaffolding)| No                   |
+| 7    | Implement with `@implements`        | No                   |
+| 8    | Run `ntnt intent check`             | No                   |
+| 9    | Present results to user             | No                   |
+
+### Intent Commands Reference
+
+| Command | Purpose |
+| ------- | ------- |
+| `ntnt intent studio <file>.intent` | Visual preview with live refresh |
+| `ntnt intent check <file>.tnt` | Run tests from intent file |
+| `ntnt intent init <file>.intent` | Generate code scaffolding |
+| `ntnt intent coverage <file>.tnt` | Show feature implementation coverage |
 
 ### Annotation Types
 

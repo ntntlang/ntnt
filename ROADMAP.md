@@ -594,12 +594,16 @@ fn home_handler(req) {
 
 The `.intent` format is optimized for machine parsing and testing, but humans deserve a better experience when creating and refining intent. Intent Studio provides a beautiful HTML view that makes intent development feel like a creative collaboration, not a chore.
 
-**Phase 1: Basic Studio (MVP)**
+**Phase 1: Basic Studio (MVP) ✅ COMPLETE**
 
-- [ ] `ntnt intent studio <file.intent>` - Start studio server
-- [ ] Rich HTML rendering with feature cards and visual hierarchy
-- [ ] Auto-refresh via polling (page refreshes every few seconds)
-- [ ] File watcher detects changes
+- [x] `ntnt intent studio <file.intent>` - Start studio server
+- [x] Rich HTML rendering with feature cards and visual hierarchy
+- [x] Auto-refresh via polling (page refreshes every 2 seconds)
+- [x] File watcher detects changes
+- [x] Auto-open browser on launch (with `--no-open` flag to disable)
+- [x] Beautiful dark theme with stats dashboard
+- [x] Feature icons based on feature name/type
+- [x] Error page with auto-retry when intent file has parse errors
 
 **Phase 2: Enhanced Studio (Later)**
 

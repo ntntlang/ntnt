@@ -1271,6 +1271,8 @@ $ ntnt intent check myproject.tnt
 
 ## Intent Studio
 
+> ✅ **Status: Implemented** - Use `ntnt intent studio <file>.intent` to try it!
+
 ### The Problem with Raw Intent Files
 
 The `.intent` format is optimized for machine parsing and testing—but humans deserve a better experience when creating and refining intent. Even though intent files are written in natural language, reading YAML-like structure with indentation, IDs, and assertion syntax can feel tedious.
@@ -1278,7 +1280,7 @@ The `.intent` format is optimized for machine parsing and testing—but humans d
 **Intent files should be:**
 
 - Great for agents (parseable, testable) ✅
-- Great for humans (enjoyable to develop) ❌ ← We need to fix this
+- Great for humans (enjoyable to develop) ✅ ← Fixed with Intent Studio!
 
 ### The Solution: Intent Studio
 
@@ -1289,7 +1291,15 @@ $ ntnt intent studio server.intent --port 3000
 👀 Watching server.intent for changes...
 ```
 
-Intent Studio is a collaborative workspace where humans and agents develop intent together. It renders your `.intent` file as a beautiful, interactive HTML page. When you save changes, the browser **automatically refreshes**—making it feel like you're designing intent in real-time.
+Intent Studio is a collaborative workspace where humans and agents develop intent together. It renders your `.intent` file as a beautiful, interactive HTML page. When you save changes, the browser **automatically refreshes** every 2 seconds—making it feel like you're designing intent in real-time.
+
+**Features:**
+- 🎨 Beautiful dark theme with feature cards
+- 📊 Stats dashboard showing features, test cases, and assertions
+- 🔄 Auto-refresh when you save the `.intent` file
+- ✨ Smart icons based on feature names (🔐 login, 📊 charts, etc.)
+- ❌ Error display with auto-retry when parsing fails
+- 🌐 Auto-opens your browser (use `--no-open` to disable)
 
 ### What You See
 
