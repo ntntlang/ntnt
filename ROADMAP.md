@@ -535,11 +535,42 @@ fn home_handler(req) {
 
 ### 6.4 Expanded Assertions
 
-- [x] Regex assertions: `body matches r"Snow: \d+ in"`
-- [ ] JSON assertions: `body.json.sites[0] == "bear_lake"`
+**Output Assertions (Current)**
+- [x] Status code: `status: 200`
+- [x] Body contains: `body contains "text"`
+- [x] Regex matching: `body matches r"pattern"`
 - [x] Header assertions: `header "Content-Type" contains "text/html"`
 - [x] Negation: `body not contains "error"`
-- [ ] Timing: `response_time < 2000ms`
+- [ ] JSON path: `body.json.users[0].name == "Alice"`
+- [ ] Response timing: `response_time < 500ms`
+
+**State & Mutation Assertions**
+- [ ] Database verification: `verify_db:` with SQL queries
+- [ ] State before/after comparison
+- [ ] No unintended mutations: `no_db_writes: true`
+
+**Behavioral Properties**
+- [ ] Idempotency: `repeat: N` with result comparison
+- [ ] Purity: `pure: true` (same input = same output, no side effects)
+- [ ] Thread safety: `parallel:` concurrent request testing
+- [ ] Sequencing: `sequence:` state machine transitions
+
+**Side Effect Verification**
+- [ ] Email sent: `email_sent_to:`
+- [ ] Event published: `event_published:`
+- [ ] Log verification: `log_contains:`
+- [ ] External call verification
+
+**Contract Integration**
+- [ ] `contracts:` section linking intent to code contracts
+- [ ] Precondition violation testing
+- [ ] Postcondition verification
+- [ ] Invariant checking across test sequences
+
+**Resource Constraints**
+- [ ] Query count: `db_query_count <= N`
+- [ ] Memory bounds: `memory_delta < X`
+- [ ] Connection limits
 
 ### 6.5 Test Execution for All Program Types
 
