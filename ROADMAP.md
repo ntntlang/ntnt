@@ -244,12 +244,6 @@ match recv_timeout(ch, 5000) {
 close(ch)
 ```
 
-**Future Enhancements (Phase 5.1b):**
-
-- [ ] `spawn(fn)` / `join(handle)` - background task execution
-- [ ] `parallel([fn1, fn2, ...])` - run multiple functions in parallel
-- [ ] `select([ch1, ch2, ...])` - wait on multiple channels
-
 ### 5.2 File System I/O ✅ COMPLETE
 
 - [x] `std/fs`: read_file, write_file, read_bytes, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size
@@ -292,7 +286,6 @@ listen(8080)  // Start server
 - [x] `std/http` for HTTP requests (get, post, put, delete, patch, head)
 - [x] Full request control with `request()` (method, headers, body, timeout)
 - [x] JSON request/response helpers (get_json, post_json)
-- [ ] Async HTTP requests (deferred to async runtime)
 
 ### 5.5 File-Based Routing & Introspection
 
@@ -321,12 +314,12 @@ my-app/
 
 **Conventions:**
 
-- [ ] `routes/` - File path = URL path, exports = HTTP methods
-- [ ] `[param].tnt` - Dynamic URL segments (e.g., `[id].tnt` → `/users/:id`)
-- [ ] `index.tnt` - Directory root handler
-- [ ] `lib/` - Shared code, auto-imported into all routes
-- [ ] `middleware/` - Auto-loaded in alphabetical order (use `01_`, `02_` prefixes)
-- [ ] Hot-reload on file changes
+- [x] `routes/` - File path = URL path, exports = HTTP methods
+- [x] `[param].tnt` - Dynamic URL segments (e.g., `[id].tnt` → `/users/:id`)
+- [x] `index.tnt` - Directory root handler
+- [x] `lib/` - Shared code, auto-imported into all routes
+- [x] `middleware/` - Auto-loaded in alphabetical order (use `01_`, `02_` prefixes)
+- [x] Hot-reload on file changes
 
 **Example Route:**
 
@@ -967,6 +960,15 @@ Native compilation requires re-implementing stdlib in the target:
 - [ ] I/O operations (file system, HTTP)
 - [ ] Database drivers (PostgreSQL bindings)
 - [ ] Concurrency primitives (threads, channels)
+
+### 9.8 Advanced Concurrency
+
+Building on Phase 5's channel-based concurrency:
+
+- [ ] `spawn(fn)` / `join(handle)` - background task execution
+- [ ] `parallel([fn1, fn2, ...])` - run multiple functions in parallel
+- [ ] `select([ch1, ch2, ...])` - wait on multiple channels (Go-style)
+- [ ] Async HTTP requests (requires async runtime)
 
 **Deliverables:**
 
