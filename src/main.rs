@@ -244,20 +244,19 @@ enum IntentCommands {
     /// 
     /// Examples:
     ///   ntnt intent studio server.intent
-    ///   ntnt intent studio server.intent --port 3000
-    ///   ntnt intent studio server.intent --app-port 8080
+    ///   ntnt intent studio server.intent --port 4000 --app-port 9000
     Studio {
         /// The intent file to visualize
         #[arg(value_name = "INTENT_FILE")]
         intent_file: PathBuf,
         
-        /// Port to run the studio server on (default: 3000)
-        #[arg(long = "port", short = 'p', default_value = "3000")]
+        /// Port to run the studio server on (default: 3001)
+        #[arg(long = "port", short = 'p', default_value = "3001")]
         port: u16,
         
-        /// Port where the application server is running (for live test execution)
-        #[arg(long = "app-port", short = 'a')]
-        app_port: Option<u16>,
+        /// Port where the application server is running (default: 8081)
+        #[arg(long = "app-port", short = 'a', default_value = "8081")]
+        app_port: u16,
         
         /// Don't automatically open the browser
         #[arg(long = "no-open")]
@@ -470,6 +469,13 @@ fn evaluate(interpreter: &mut Interpreter, source: &str) -> anyhow::Result<Strin
 fn run_file(path: &PathBuf) -> anyhow::Result<()> {
     let source = fs::read_to_string(path)?;
     let mut interpreter = Interpreter::new();
+    
+    // Set the current file path for imports and hot-reload
+    let canonical_path = path.canonicalize()
+        .unwrap_or_else(|_| path.clone());
+    let path_str = canonical_path.to_string_lossy();
+    interpreter.set_current_file(&path_str);
+    interpreter.set_main_source_file(&path_str);
     
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
@@ -1855,21 +1861,26 @@ fn run_intent_init_command(
     Ok(())
 }
 
-/// Run the intent studio command - starts a visual preview server
+/// Run the intent studio command - starts a visual preview server AND the app server
 fn run_intent_studio_command(
     intent_path: &PathBuf,
     port: u16,
-    app_port: Option<u16>,
+    app_port: u16,
     no_open: bool,
 ) -> anyhow::Result<()> {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::SystemTime;
+    use std::process::{Command, Child};
     
     // Verify the file exists
     if !intent_path.exists() {
         anyhow::bail!("Intent file not found: {}", intent_path.display());
     }
+    
+    // Find the corresponding .tnt file
+    let tnt_path = intent_path.with_extension("tnt");
+    let has_tnt_file = tnt_path.exists();
     
     let intent_path_str = intent_path.to_string_lossy().to_string();
     let addr = format!("127.0.0.1:{}", port);
@@ -1879,18 +1890,60 @@ fn run_intent_studio_command(
     println!();
     println!("  {} {}", "File:".dimmed(), intent_path.display());
     println!("  {} http://{}", "URL:".dimmed(), addr);
-    if let Some(app) = app_port {
-        println!("  {} http://127.0.0.1:{}", "App:".dimmed(), app);
-        println!();
-        println!("  {} Live test execution enabled!", "✅".green());
+    println!("  {} http://127.0.0.1:{}", "App:".dimmed(), app_port);
+    println!();
+    
+    // Start the app server if .tnt file exists
+    let mut app_process: Option<Child> = None;
+    
+    if has_tnt_file {
+        // Get the current executable path to run ntnt
+        let current_exe = std::env::current_exe()
+            .unwrap_or_else(|_| PathBuf::from("ntnt"));
+        
+        // Set up environment to override the listen port
+        // We'll use a special env var that the interpreter checks
+        println!("  {} Starting app from {}", "🚀".green(), tnt_path.display());
+        
+        match Command::new(&current_exe)
+            .arg("run")
+            .arg(&tnt_path)
+            .env("NTNT_LISTEN_PORT", app_port.to_string())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+        {
+            Ok(child) => {
+                app_process = Some(child);
+                println!("  {} App server starting on port {}", "✅".green(), app_port);
+                
+                // Give it a moment to start
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => {
+                println!("  {} Failed to start app: {}", "⚠️".yellow(), e);
+                println!("  {} You can start it manually: ntnt run {}", "💡".dimmed(), tnt_path.display());
+            }
+        }
     } else {
-        println!();
-        println!("  {} Add --app-port <PORT> to enable live test execution", "💡".yellow());
+        println!("  {} No .tnt file found at {}", "⚠️".yellow(), tnt_path.display());
+        println!("  {} Start your app manually: ntnt run <your-app>.tnt", "💡".dimmed());
     }
+    
+    println!();
+    println!("  {} Live test execution enabled!", "✅".green());
     println!();
     println!("  {} Watching for changes (auto-refresh every 2s)", "👀".dimmed());
     println!("  {} Press Ctrl+C to stop", "📝".dimmed());
     println!();
+    
+    // Set up Ctrl+C handler to clean up child process
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let r = running.clone();
+    
+    ctrlc::set_handler(move || {
+        r.store(false, std::sync::atomic::Ordering::SeqCst);
+    }).expect("Error setting Ctrl-C handler");
     
     // Try to open browser
     if !no_open {
@@ -1909,18 +1962,23 @@ fn run_intent_studio_command(
         }
     }
     
-    // Start simple HTTP server
+    // Start simple HTTP server with non-blocking accepts
     let listener = TcpListener::bind(&addr)
         .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", addr, e))?;
+    listener.set_nonblocking(true)?;
     
     // Track file modification time for change detection
     let mut last_modified = fs::metadata(&intent_path)
         .and_then(|m| m.modified())
         .unwrap_or(SystemTime::UNIX_EPOCH);
     
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut stream) => {
+    // Main loop
+    while running.load(std::sync::atomic::Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                // Set stream back to blocking for read/write
+                stream.set_nonblocking(false)?;
+                
                 let mut buffer = [0; 4096];
                 if stream.read(&mut buffer).is_ok() {
                     let request = String::from_utf8_lossy(&buffer);
@@ -1949,35 +2007,55 @@ fn run_intent_studio_command(
                             body.len(),
                             body
                         )
-                    } else if path == "/run-tests" {
-                        // Run tests against the app server
-                        if let Some(target_port) = app_port {
-                            match intent::IntentFile::parse(intent_path) {
-                                Ok(intent_file) => {
-                                    let results = intent::run_tests_against_server(&intent_file, target_port);
-                                    let json = serde_json::to_string(&results).unwrap_or_else(|_| "{}".to_string());
-                                    format!(
-                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
-                                        json.len(),
-                                        json
-                                    )
-                                }
-                                Err(e) => {
-                                    let error = format!(r#"{{"error": "{}"}}"#, e.to_string().replace('"', "\\\""));
-                                    format!(
-                                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                        error.len(),
-                                        error
-                                    )
+                    } else if path == "/app-status" {
+                        // Check if app is responding and healthy
+                        let app_url = format!("http://127.0.0.1:{}/", app_port);
+                        let status = match reqwest::blocking::Client::builder()
+                            .timeout(std::time::Duration::from_secs(2))
+                            .build()
+                            .and_then(|client| client.get(&app_url).send())
+                        {
+                            Ok(resp) => {
+                                let status_code = resp.status().as_u16();
+                                // Consider 404 and 5xx as "error" states (routes not registered or server error)
+                                if status_code == 404 {
+                                    format!(r#"{{"running": true, "healthy": false, "status": {}, "error": "No routes registered (404)"}}"#, status_code)
+                                } else if status_code >= 500 {
+                                    format!(r#"{{"running": true, "healthy": false, "status": {}, "error": "Server error"}}"#, status_code)
+                                } else {
+                                    format!(r#"{{"running": true, "healthy": true, "status": {}}}"#, status_code)
                                 }
                             }
-                        } else {
-                            let error = r#"{"error": "No app-port specified. Start studio with --app-port <PORT>"}"#;
-                            format!(
-                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                error.len(),
-                                error
-                            )
+                            Err(e) => {
+                                let error_msg = e.to_string().replace('"', "\\\"");
+                                format!(r#"{{"running": false, "healthy": false, "error": "{}"}}"#, error_msg)
+                            }
+                        };
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
+                            status.len(),
+                            status
+                        )
+                    } else if path == "/run-tests" {
+                        // Run tests against the app server
+                        match intent::IntentFile::parse(intent_path) {
+                            Ok(intent_file) => {
+                                let results = intent::run_tests_against_server(&intent_file, app_port);
+                                let json = serde_json::to_string(&results).unwrap_or_else(|_| "{}".to_string());
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
+                                    json.len(),
+                                    json
+                                )
+                            }
+                            Err(e) => {
+                                let error = format!(r#"{{"error": "{}"}}"#, e.to_string().replace('"', "\\\""));
+                                format!(
+                                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                    error.len(),
+                                    error
+                                )
+                            }
                         }
                     } else {
                         // Main page - render the intent file
@@ -2005,17 +2083,30 @@ fn run_intent_studio_command(
                     let _ = stream.flush();
                 }
             }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No connection pending, sleep briefly and check shutdown
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             Err(e) => {
                 eprintln!("Connection error: {}", e);
             }
         }
     }
     
+    // Clean up: kill the app process if we started it
+    if let Some(mut child) = app_process {
+        println!("\n  {} Stopping app server...", "🛑".red());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    
+    println!("  {} Intent Studio stopped", "👋".dimmed());
+    
     Ok(())
 }
 
 /// Render the Intent Studio HTML page
-fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, app_port: Option<u16>) -> String {
+fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, app_port: u16) -> String {
     let mut features_html = String::new();
     
     for feature in &intent_file.features {
@@ -2120,12 +2211,7 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
         .map(|t| t.assertions.len())
         .sum();
     
-    let has_app_port = app_port.is_some();
-    let run_button_html = if has_app_port {
-        r#"<button class="run-tests-btn" onclick="runTests()">▶ Run Tests</button>"#
-    } else {
-        r#"<button class="run-tests-btn disabled" disabled title="Add --app-port to enable">▶ No App Port</button>"#
-    };
+    let run_button_html = r#"<button class="run-tests-btn" onclick="runTests()">▶ Run Tests</button>"#;
     
     format!(
         r##"<!DOCTYPE html>
@@ -2190,7 +2276,16 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
         }}
         
         .logo-icon {{
-            font-size: 1.5rem;
+            width: 28px;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        
+        .logo-icon svg {{
+            width: 100%;
+            height: 100%;
         }}
         
         .logo-text {{
@@ -2253,6 +2348,28 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
             cursor: wait;
         }}
         
+        .open-app-btn {{
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            font-weight: 500;
+            font-size: 0.875rem;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background 0.2s, border-color 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.375rem;
+        }}
+        
+        .open-app-btn:hover {{
+            background: var(--bg-secondary);
+            border-color: var(--accent-blue);
+            color: var(--accent-blue);
+        }}
+        
         .status-badge {{
             display: flex;
             align-items: center;
@@ -2269,6 +2386,37 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
             background: var(--accent-green);
             border-radius: 50%;
             animation: pulse 2s infinite;
+        }}
+        
+        .app-status {{
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: var(--bg-tertiary);
+            padding: 0.375rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+        }}
+        
+        .app-status-dot {{
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-muted);
+        }}
+        
+        .app-status.running .app-status-dot {{
+            background: var(--accent-green);
+            animation: pulse 2s infinite;
+        }}
+        
+        .app-status.error .app-status-dot {{
+            background: var(--accent-red);
+        }}
+        
+        .app-status.starting .app-status-dot {{
+            background: var(--accent-orange);
+            animation: pulse 1s infinite;
         }}
         
         @keyframes pulse {{
@@ -2562,13 +2710,18 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
     <header class="header">
         <div class="header-content">
             <div class="logo">
-                <span class="logo-icon">🎨</span>
+                <span class="logo-icon"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAGxlWElmTU0AKgAAAAgABAEaAAUAAAABAAAAPgEbAAUAAAABAAAARgEoAAMAAAABAAIAAIdpAAQAAAABAAAATgAAAAAAAAEsAAAAAQAAASwAAAABAAKgAgAEAAAAAQAAAECgAwAEAAAAAQAAAEAAAAAA9Ed7egAAAAlwSFlzAAAuIwAALiMBeKU/dgAAEEtJREFUeAHtWWtwXOV5fs5tz9ldaVfSSlpJ1s2yZMnYxmCDHFNsmKF2gFIHpnEvdJrSTgrTThsm/d0MnkybZtppWiaTtHRKm5Z2OgmkLZMYGiiug8PFGBtbxhjfJVlX67qrvZ5rn/esxdjBgLnlR7qfvLtnz37n+573fZ/3M1BtVQSqCFQRqCJQRaCKQBWBKgJVBKoIVBGoIlBF4P8dAsrP3uKAc/69jsH/TvQbxcYaLx/PuXp+3K5byGU3ZDH8iA0o/s9qXZ8iAIHSM/iLfXpgd2xK+e0dddpKI7C7or7bkTSDdIOlNdUYQdJUPLPkKuVioCzlnWAx52hzRS+YzJQweWJBGR8rG+O6Yb1xYP8LQ58GKJ8KAHW3P1C3NnfkkfvXGA8u5ssx2fNVDRr6UxG0xRXEFA+KqsDjDwGt4iXUIIDDfZ8vA+cXHIxkPBRcBStTJk7Mefl/OFL+y0L99r8Ye+Wvi58kEJ84ALt27thuz0781ed6gvW/siZGAxVkygFGMw6m8wEypQAxHUjHFHTWRxAxFMzkXZyftzFX8BGLaFiR0NFRq6KBHTUVsInMY4cKOJXX909r6S8/99xzhz4pED45ABp31j68de4rrZbz5f5aW9/WbsD2ZX8VGqEgoinhLmfo4acXXBy4UMTQvIqMWotuYxGfWWFiU0sELbEAuga4ZIfjASQGiAHZouLZ8w6K0JZenVG/+q/P/u6jwEPOxwXiEwHg5pu33HZ/X/kbXTXBRscLsL3b5MLJZ4W0phELJR+TS37IgGzZRcJU0NVgYe+5IvKehuubuOt0jbMLJTJGRSquo4Xfm6MKaiIqXYTL5CvrKHymgK5aDS9Oac//80j84ZHDL574OCB8PAD6d9b+Xt/FP9nVozyc0BzzzEwRn11loeApmCoEmFhySGsv3MGWuIaOpIHGuBq6wA9Ol9CV1LGhycBTJ4vY3KKiPWEgQyOnch7G6DLiOgZ9IMVn2mi0AJJzAuwfLuGOnhhenlZm/2tEf+S7yZcew5MMLB+hfWQA0td9ZvPdrflv//FgfGPB9vEj7syGRpUGuyF9G+m/HQkuOqaihn4um2iTzgb5fHjaxRyN3LHSJLWBxbKP/yEbdvbHwK7hjqvsJ79l+NtU3sd41sUSr4URPiGdLga4f30chycdfOsN54dveG2/P37g2bEPi8FHAmDt7Tt7f6d1Yv+6OqflR8Meji5aeGDARXctSF0NdVENdHl4jAESBvgvbGKU7O4rF8q4rz/O+/InoChhXDg1U8bdfRZ8X088w/uSJzSiJy+biMwyYDJJYM8IcGhGxc62PAbSMeyd0P/3a9+/605gN6PMtTeGmw/Zuh+wvrjyzHf/aKO5bnLJw6sjBWxpU9HfoGBjayTcPQlcfrj0SppbnsEmSZ87W8L2lRaiBvsQJIWGeTRSmDLG8eaLPl1F5+5zkHB7OIaMJ0jxImGpIcDTOcYSpYwZutidq2JY16isnNGOB8eHp/Ytz3ctnx8agN/erP/ZQ2vwm6+Nl3Amq2Brp4XP9+k4MF5GKdDQSn8NF3vZ7LJ2nbv53LkS1jdFQtdwaYwYHzZGfKF7d52B1zhOrQkkLYXjSB81xEF6cghmFuDpkwXcnNaxY5WJiaKGC4wXNaqHVUnllvN616vj4+PnKgN/8PuHAuC+Hbff82t9waNnZ/JqC/N4ifl5S4cZBrm+RhOvjJagcTfTMS00qLKDgMlZDoyVQxoPkiVhehNa0yckRcoOSxM8Wmt1vHC+iN4Gg/GAPnPZbz6/7DlTxPXNEfTW6VD5bNkNUG/4mMg6iJqa1pnUbj2ur/teZvJsrjLq+79zhmtr27bt6NiQLH57qejqg+0x5moFDOpI6PTz0FIfd/ZaGJp2cIFU1pkCA1omsWAkwzSY8/EL7TTe9xnZK3ZNLrk4PWejRCMkDojn15kBNrVa2DdihyJIxpDdVzjeM2dK6Ks3sJrgiGp0SZuBegVn5hxmhSgiFBC1erDy7uaZb2I3hcM1tGtiwKYHHzPM4ef/7aaUu2n7ygga6a/7Rx1s6zJDSSvOKrsoEb6L6u7F0TIamLKSlhamrX3c0V8eiENjShtddPDGlI1zWeA7Q3l852iefq0zZTLKl1zZRfTQyCl+l3viFiKlnz9fDgPsjWkBsWKZuJCliz6QbKFgc6sEFhdnZkrXld/4p4XJyckDH4TBNQAQKKuMP/jK51cFX9zVbyLOOY7OeKiRhTaoIdUlVstixPeF7mnK2B8Pl5GiH/9k3GYON2i4zefcEJCeeh1LzInPXDCg1jbDdBZxJ4Fd4L0Tcz5OzthIMZOcWQQNDDB0kfRmftzcbtJ9xCcIeEgLZhpxOY4vqbU9DqQostYwzkzl3K16+5q9F4aH3zc1fiAAPZteuPX+7tLjD91oqS4tLHk+XhotYmuXJWaTy7ISkasiWiR3V1JfwVPx9SMRXGS07qtjeqzRcGOLgQ1pE7Ml4G8PZjHjRpFM1uL02CyN0HFXb4y+raHeVLFEwTPFCP/ocaZFz8UdBEjmMMkiSaehExELmd3ivYWixxTpoJViKk6tMLjCiLx8Ljuob/vCE9NDL7+nZH5fAHbTj84f+8a3+hLuQAsX2Fyj4NCUQz9TGKS0cNclcOUZmkcyLo5M23iTuzWapWAhFZaYkX9jtYItKwzU0R2kHji36OHFCy4OTlMmKwYsi4Bk8kjF6NeOgy4WQjEasILKbyClIku3aOO9MiX0m4wv5+lCC2UvDJ4xXYXJtQTcmHqy7fAUwW6MwGc8+QndcDZnp4+fHD6/ODt9WCC7WntfAGLJk4Nqae5rX9poqIeouExTp2DxMNgexSjVyLHpMg12w9JV6N/Bha5nhL6efirlbcLwcAsDH7VLuGuzlMeHJ128Pe/hyExAf48QAAtLS3lkCWJfnRKqwpX0+zKprqgB72lYLDrY0R3BKsaX+qgaBk0JrG/PeRjmOmT3a6IsMQ3GDqrGU7wvZbcIstcXrJ6t937uibcOHryqQOJT791Ur/Sr1zXH9HRtgNsiLh45RB1vRGEqBZjkYZpFyw0tOosbKVguU340/u1ZB51MVSJ+JDhmWQaLAkxyoS8MF6gLjJBBKsdh9MD4kopTC0ATdcRrE0Xc1Ep/pyJMRoAcDVwIy2gljA3NTLPCPBIB83STSarLoYseLvBzz3QKv9WxgI10GY+Zo69ObZ0+dW4HrfyPq1n6nqninl1fWKG7SzesjBbp20pYoqawhBadBQ81vPjkAOkm2lxig8hUiU8SouR6gbpdaCzMEEP2MijeQA3w78cLKPk6C0VmdUkdbPIpVN5zzmX6BM8HuItkSSRMjQyqjB+jdDHxfXnEZRYQLSGLb6b03kiw7uohQyjFO5VZRCmKAskQWoCeaMFUfXvrrl27COW723sCUC7mBtstO9VkeTAC+h+j865+Hbe3SxxwQ52/bPA7io7jCxOEhlIAScaQKL3ndJGCyQrV4iFSX4xdbu+AwN1yKXweOyIBNl6hN42Wne6kNB7N0u/Z58pWqSYYL8PiaIIHLn96K12OC5NKUg88dCeUeJsVtGYKzvorn618uyoAu3fv1l3PuWl1XZBOsKorcoZxys1e7vg6+vfZ+RLmilwcqSt7vmyEDCmSV4LgqpTBqhD4IWXr2kadfXz84zEbliFeVymCpP874LGviKG3FlR8n+Xx3RRVBydsjFJUrUiQZcw2LDTZKnPKGJICRB0KMPtH6DZtEcpoNYxFQ5NFJBmI04mIMpAopTNLuQ3y9E+3qwJw8NixzphX6FxhlRtreET11oKPzlqFCxRV5uMmnt4cGHdorFCSC7msOeS8nPq0JSJ45rQdngOuadbwNwdzmLclVghglz1w6VKAkLEiHPSJ42VS3sY9q6N4fcIJVaSMN8ZDFWa8Su6j8QKjKNITsy4luI+eBFCgSuqnPrlAFoadXQ+9sXI/u7fRDRp+euarAuC72trehNeaini6+Pd4LsD6Fot+p9D/FCq1CKIERqKtBDjhqdgkdBX1Joa8Qu2/OqVR1kbwg1Ml/HjMp6iRSkH6VYSTLEb6Lhsvn5Lrs66Kbx4uhmlze4+FN2d9xhemUDkxlbnEeL6kMUsyE9nYyppE4oLwI8q41F1v4SxTbtl2CIiWbon66UyhMBA+dNnb1QBQcsXCwIZ6p9viQKKzW6KVg0zBXOZ1KYY2r4iEkpZH2QxoYgSpSAqP8TT3IM/7ZLcGqMiEwo8dLrDGZ953bLiOG+Z7yfmexxWzybXrXrrPT5W+u49S+2kC18RAIq+n385hmvVEmRFQ5uO/0N1euWBjAzdHKkgxnyQFdROuY40wRs3gKBrakpraG8315Yr2aul1eXsXAPfe+0DSt8s9KOVW5BwVs0wzaylIRIKK8fKSyZmOsYa+/RIrQF1mlYkJ/yzr+fvX1zD3V4Ll40eLFC9kBVclRi6/lgEQBjjcpeX7y58yyeNHS3h1koBSfN1OHdBFCT1OEIhzWHWem3dCETbAkyiHzJTSudIUROkakobHCpTrXJhbyvfrmpp+8MEHY5c6hR/LT7xzz/Pm+qKGeuu+4irr8cN5NPGU1ufulrhzgrzJa55JhL58I0WPosqi6ItE4CLzsBxrX9eooS8J/OeJPJ46nkOU1F+m/fKn5H8xXgyVQ8/w75JrSB8JpuN0p6/umw3PEG/gwWlPAxlFhtG2MM0NUYRt66Se4M5bvClpU5Sd63uMQx4aydy3JrL4+lAMozVru4NS4ZbR0dHed4zlxbuEULlcHiGV/242m/vz6UK81rXbcOQkDfdLqFFKiCs2Dx9sNFAYNTM/J0nPZ08u4dfXxcPSNs0qUFKfz6gvJ7jiLiFlaFTYxGhe+yyLfS5UDj1c4Wz4M98udQufYdfT8xRVPGy9b3UtLI41k7VZ/UXwOmVxYJg4nWHNMOEybuhMfyYyHg9WedJcRBSuZmHCzGJshmtPFg7puv64YRgTlwOwPN3l98LrX9qy4XsFLX5bXVs3aw29NmJFufcVOknqUfnfdxLSfKeEpcVFRL0cbNdBqsaCGdGR83RGb3Eb8VeJERxW3gSAS1aGByJkR9muqNSwizwR9ql0k95xskqkrRRFFxdy4fgFxUSioQkOT6ECslD2XtV4FkkmSDyyiyV4DDqlcnHRnnwbdc0t9z21Z+/LHO6K9i4GLP8a6b3+DxvicUyeOWNxQWmi18ZKrzPwgnbTNLt0K9LOmZs1zUjF61LJ7GRGc7UoaptWs2KUAxH5nx+hKke8ZJBcXyJ7OI0YKgaKpOOa2U++hG8VsORZPiEBNMsYpNLHdT2PiyNvob49TaZpRdcpL7hObsYulSapXcY51AjXOuL7zoRbKE80tLTMpNfdga6uVIYAyIBXtHCKK+58iC+7tmyJZhOJOm5gc6x88Ut+rHYSVmLEJwAeKc49oXwVr6xEe0lRlaBTuccu4Y3KvcrEcmu5yf3wO99EBkvo48i6mb/42ZwW/5dIJDqk5/NzsdbW7JNPPlmZZPnhn+/PZRXw821l1boqAlUEqghUEagiUEWgikAVgSoCVQSqCFQRqCJQRaCKwKeCwP8BfTuDvi4jUIkAAAAASUVORK5CYII=" alt="NTNT Logo" /></span>
                 <span class="logo-text">Intent <span>Studio</span></span>
             </div>
             <div class="header-file">
                 <code>{file_path}</code>
             </div>
             <div class="header-controls">
+                <a href="http://127.0.0.1:{app_port}/" target="_blank" class="open-app-btn" title="Open app in new window">🌐 Open App</a>
+                <div class="app-status" id="app-status">
+                    <span class="app-status-dot" id="app-status-dot"></span>
+                    <span id="app-status-text">Checking app...</span>
+                </div>
                 {run_button_html}
                 <div class="status-badge">
                     <span class="status-dot"></span>
@@ -2619,11 +2772,7 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
     <div class="update-toast" id="toast">✨ Intent updated - refreshing...</div>
     
     <script>
-        const hasAppPort = {has_app_port};
-        
         async function runTests() {{
-            if (!hasAppPort) return;
-            
             const btn = document.querySelector('.run-tests-btn');
             btn.textContent = '⏳ Running...';
             btn.classList.add('running');
@@ -2646,7 +2795,20 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
                 const results = await response.json();
                 
                 if (results.error) {{
-                    alert('Error: ' + results.error);
+                    // Show error in summary
+                    const summary = document.getElementById('results-summary');
+                    const icon = document.getElementById('results-icon');
+                    const title = document.getElementById('results-title');
+                    const text = document.getElementById('results-text');
+                    
+                    summary.classList.add('visible', 'has-failures');
+                    summary.classList.remove('all-passed');
+                    icon.textContent = '⚠️';
+                    title.textContent = 'Test Error';
+                    text.textContent = results.error;
+                    
+                    // Also check app status
+                    checkAppStatus();
                     return;
                 }}
                 
@@ -2749,20 +2911,53 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
         
         setInterval(checkForUpdates, 2000);
         
-        // Auto-run tests on load if app port is configured
-        if (hasAppPort) {{
-            setTimeout(runTests, 500);
+        // Check app status
+        async function checkAppStatus() {{
+            const statusEl = document.getElementById('app-status');
+            const textEl = document.getElementById('app-status-text');
+            
+            try {{
+                const response = await fetch('/app-status');
+                const data = await response.json();
+                
+                statusEl.classList.remove('running', 'error', 'starting');
+                
+                if (data.running && data.healthy) {{
+                    statusEl.classList.add('running');
+                    textEl.textContent = 'App running';
+                    textEl.title = 'Status: ' + data.status;
+                }} else if (data.running && !data.healthy) {{
+                    statusEl.classList.add('error');
+                    textEl.textContent = 'App error';
+                    textEl.title = data.error || 'Routes not registered';
+                }} else {{
+                    statusEl.classList.add('error');
+                    textEl.textContent = 'App not responding';
+                    textEl.title = data.error || 'Connection failed';
+                }}
+            }} catch (e) {{
+                statusEl.classList.remove('running', 'error', 'starting');
+                statusEl.classList.add('error');
+                textEl.textContent = 'Status check failed';
+            }}
         }}
+        
+        // Check app status periodically
+        setInterval(checkAppStatus, 5000);
+        checkAppStatus();
+        
+        // Auto-run tests on load
+        setTimeout(runTests, 500);
     </script>
 </body>
 </html>"##,
         file_path = html_escape(file_path),
+        app_port = app_port,
         feature_count = feature_count,
         test_count = test_count,
         assertion_count = assertion_count,
         features_html = features_html,
-        run_button_html = run_button_html,
-        has_app_port = if has_app_port { "true" } else { "false" }
+        run_button_html = run_button_html
     )
 }
 

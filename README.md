@@ -47,12 +47,22 @@ Traditional programming languages were designed for humans typing code character
 
 NTNT's CLI commands are designed for AI agents and automated workflows.
 
-**Intent Studio**: `ntnt intent studio` opens a beautiful live preview of your `.intent` file. Edit side-by-side with an AI agent and watch updates appear instantly.
+**Intent Studio**: `ntnt intent studio` opens a beautiful live preview of your `.intent` file with live test execution. Edit side-by-side with an AI agent and watch tests pass/fail in real-time.
 
 ```bash
 ntnt intent studio server.intent
-# 🎨 Intent Studio: http://localhost:3000
-# 👀 Watching server.intent for changes...
+# 🎨 Intent Studio
+#   File: server.intent
+#   URL:  http://127.0.0.1:3001
+#   App:  http://127.0.0.1:8081
+#   ✅ Live test execution enabled!
+```
+
+**Native hot-reload**: Edit your `.tnt` file and changes apply automatically on the next request - no restart required.
+
+```bash
+ntnt run server.tnt
+# 🔥 Hot-reload enabled: edit your .tnt file and changes apply on next request
 ```
 
 **Intent verification**: `ntnt intent check` verifies that code with `@implements` annotations matches human intent described in natural language `.intent` files.
@@ -98,15 +108,15 @@ Agents and humans agree via contracts on the intended functionality of the code.
 
 NTNT includes a standard library for common tasks. No package manager, no dependency decisions, no setup:
 
-| Category | Modules | What's Included |
-| -------- | ------- | --------------- |
-| **Web** | `std/http/server`, `std/http` | HTTP server with routing, middleware, static files; HTTP client with fetch/post |
-| **Data** | `std/json`, `std/csv`, `std/db/postgres` | Parse and stringify; PostgreSQL with transactions |
-| **I/O** | `std/fs`, `std/path`, `std/env` | File operations, path manipulation, environment variables |
-| **Text** | `std/string`, `std/url` | Split, join, trim, replace; URL encode/decode/parse |
-| **Utilities** | `std/time`, `std/math`, `std/crypto` | Timestamps, formatting, sleep; trig, log, exp; SHA256, HMAC, UUID |
-| **Collections** | `std/collections` | Array and map operations: push, pop, keys, values, get_key |
-| **Concurrency** | `std/concurrent` | Go-style channels: send, recv, try_recv |
+| Category        | Modules                                  | What's Included                                                                 |
+| --------------- | ---------------------------------------- | ------------------------------------------------------------------------------- |
+| **Web**         | `std/http/server`, `std/http`            | HTTP server with routing, middleware, static files; HTTP client with fetch/post |
+| **Data**        | `std/json`, `std/csv`, `std/db/postgres` | Parse and stringify; PostgreSQL with transactions                               |
+| **I/O**         | `std/fs`, `std/path`, `std/env`          | File operations, path manipulation, environment variables                       |
+| **Text**        | `std/string`, `std/url`                  | Split, join, trim, replace; URL encode/decode/parse                             |
+| **Utilities**   | `std/time`, `std/math`, `std/crypto`     | Timestamps, formatting, sleep; trig, log, exp; SHA256, HMAC, UUID               |
+| **Collections** | `std/collections`                        | Array and map operations: push, pop, keys, values, get_key                      |
+| **Concurrency** | `std/concurrent`                         | Go-style channels: send, recv, try_recv                                         |
 
 ---
 
@@ -129,7 +139,7 @@ Feature: User Greeting
         - body contains "Hello, Alice"
 
 Feature: API Status
-  id: feature.api_status  
+  id: feature.api_status
   description: "Health check endpoint for monitoring"
   test:
     - request: GET /api/status
@@ -263,7 +273,19 @@ Feature: JSON API
         - body contains "Bob"
 ```
 
-### Step 2: Generate Scaffolding
+### Step 2: Launch Intent Studio
+
+Start **Intent Studio** to visualize your intent with live test execution:
+
+```bash
+ntnt intent studio greeting.intent
+```
+
+This opens a beautiful HTML preview at `http://127.0.0.1:3001` showing your features, test cases, and assertions. Tests will run automatically against your app on port 8081 once it's running—you'll see ✓/✗ indicators update in real-time.
+
+**Tip:** Keep Intent Studio open while you implement. Watch tests go from failing to passing as you build each feature!
+
+### Step 3: Generate Scaffolding
 
 Use `ntnt intent init` to create a starting point:
 
@@ -273,7 +295,7 @@ ntnt intent init greeting.intent > greeting.tnt
 
 This generates a skeleton with TODO comments for each feature.
 
-### Step 3: Implement the Features
+### Step 4: Implement the Features
 
 Add the implementation with `@implements` annotations:
 
@@ -299,9 +321,9 @@ get(r"/api/greet", api_greet)
 listen(8080)
 ```
 
-### Step 4: Verify Against Intent
+### Step 5: Verify Against Intent
 
-Run `ntnt intent check` to verify your implementation:
+Run `ntnt intent check` to verify your implementation (or just watch Intent Studio!):
 
 ```bash
 $ ntnt intent check greeting.tnt
@@ -324,7 +346,7 @@ Feature: JSON API
 2/2 features passing (6/6 assertions)
 ```
 
-### Step 5: Check Coverage
+### Step 6: Check Coverage
 
 See which features have implementations:
 
@@ -344,11 +366,12 @@ $ ntnt intent coverage greeting.tnt
 
 ### IDD Commands Reference
 
-| Command | Description |
-|---------|-------------|
-| `ntnt intent check <file>` | Verify code matches intent, run tests |
-| `ntnt intent coverage <file>` | Show feature implementation coverage |
-| `ntnt intent init <intent>` | Generate code scaffolding from intent |
+| Command                       | Description                                   |
+| ----------------------------- | --------------------------------------------- |
+| `ntnt intent studio <intent>` | Launch visual studio with live test execution |
+| `ntnt intent check <file>`    | Verify code matches intent, run tests         |
+| `ntnt intent coverage <file>` | Show feature implementation coverage          |
+| `ntnt intent init <intent>`   | Generate code scaffolding from intent         |
 
 ---
 
@@ -385,14 +408,17 @@ $ ntnt intent coverage greeting.tnt
 
 ## Current Status
 
-**Version 0.2.1** - Intent-Driven Development
+**Version 0.2.2** - Intent-Driven Development + Hot-Reload
 
 NTNT includes:
+
 - ✅ Full contract system (`requires`, `ensures`, struct invariants)
 - ✅ Type system with generics, enums, pattern matching
 - ✅ Standard library (HTTP, PostgreSQL, JSON, CSV, time, crypto, etc.)
 - ✅ File-based routing with hot-reload
-- ✅ IDD commands (`intent check`, `intent coverage`, `intent init`)
+- ✅ **Native hot-reload** for single-file apps (edit .tnt, changes apply on next request)
+- ✅ **Intent Studio** with live test execution
+- ✅ IDD commands (`intent check`, `intent coverage`, `intent init`, `intent studio`)
 - ✅ Agent tooling (`inspect`, `validate`, `test`)
 - 🔄 Intent diff and watch (coming soon)
 
@@ -1112,22 +1138,22 @@ ntnt test server.tnt --get /health --verbose
 
 ### Standard Library Quick Reference
 
-| Module            | Key Functions                                                |
-| ----------------- | ------------------------------------------------------------ |
-| `std/string`      | split, join, trim, replace, contains, to_upper, to_lower     |
-| `std/math`        | sin, cos, tan, log, exp, PI, E                               |
-| `std/collections` | push, pop, first, last, keys, values, has_key, get_key       |
-| `std/env`         | get_env, load_env, args, cwd                                 |
-| `std/fs`          | read_file, write_file, exists, mkdir, remove, readdir        |
-| `std/json`        | parse, stringify, stringify_pretty                           |
-| `std/csv`         | parse, parse_with_headers, stringify                         |
-| `std/time`        | now, sleep, format, elapsed                                  |
-| `std/crypto`      | sha256, hmac_sha256, uuid, random_bytes                      |
-| `std/url`         | parse, encode, decode, build_query, parse_query              |
-| `std/http`        | fetch, post, put, delete, get_json, post_json                |
-| `std/http/server` | text, html, json, status, get, post, put, listen             |
-| `std/db/postgres` | connect, query, execute, begin, commit, rollback, close      |
-| `std/concurrent`  | channel, send, recv, try_recv, recv_timeout, close           |
+| Module            | Key Functions                                            |
+| ----------------- | -------------------------------------------------------- |
+| `std/string`      | split, join, trim, replace, contains, to_upper, to_lower |
+| `std/math`        | sin, cos, tan, log, exp, PI, E                           |
+| `std/collections` | push, pop, first, last, keys, values, has_key, get_key   |
+| `std/env`         | get_env, load_env, args, cwd                             |
+| `std/fs`          | read_file, write_file, exists, mkdir, remove, readdir    |
+| `std/json`        | parse, stringify, stringify_pretty                       |
+| `std/csv`         | parse, parse_with_headers, stringify                     |
+| `std/time`        | now, sleep, format, elapsed                              |
+| `std/crypto`      | sha256, hmac_sha256, uuid, random_bytes                  |
+| `std/url`         | parse, encode, decode, build_query, parse_query          |
+| `std/http`        | fetch, post, put, delete, get_json, post_json            |
+| `std/http/server` | text, html, json, status, get, post, put, listen         |
+| `std/db/postgres` | connect, query, execute, begin, commit, rollback, close  |
+| `std/concurrent`  | channel, send, recv, try_recv, recv_timeout, close       |
 
 ---
 

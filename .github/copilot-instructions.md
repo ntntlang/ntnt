@@ -20,20 +20,29 @@ ntnt test server.tnt --get /api/status --post /users --body 'name=Alice'
 
 ### Intent Studio - Visual Intent Development
 
-For the best collaborative experience, use **Intent Studio** - a beautiful live preview of intent files:
+For the best collaborative experience, use **Intent Studio** - a beautiful live preview of intent files with **live test execution**:
 
 ```bash
-ntnt intent studio server.intent           # Opens browser with live preview
-ntnt intent studio server.intent --port 3000  # Custom port
+ntnt intent studio server.intent                        # Studio on :3001, app auto-starts on :8081
+ntnt intent studio server.intent --port 4000            # Custom studio port
+ntnt intent studio server.intent --app-port 9000        # Custom app port
 ```
 
-Intent Studio:
-- Renders `.intent` files as beautiful HTML with feature cards
-- Auto-refreshes every 2 seconds when you save changes
-- Shows feature count, test cases, and assertions at a glance
-- Perfect for side-by-side editing with the user
+**Default ports:**
 
-**Recommended workflow:** Start Intent Studio, then edit the `.intent` file together with the user watching the live preview.
+- Studio runs on `http://127.0.0.1:3001`
+- App auto-starts on `http://127.0.0.1:8081`
+
+**Intent Studio automatically:**
+
+- Starts your app server from the matching `.tnt` file (e.g., `server.intent` → `server.tnt`)
+- Runs tests against the live app and shows pass/fail status
+- Auto-refreshes every 2 seconds when you save changes
+- Shows feature count, test cases, assertions, and **live pass/fail counts**
+- Provides "Run Tests" button to re-execute anytime
+- Stops the app server cleanly on Ctrl+C
+
+**Recommended workflow:** Run `ntnt intent studio server.intent` and start editing - the app starts automatically with hot-reload enabled!
 
 ### Phase 1: Draft and Present Intent (STOP FOR USER INPUT)
 

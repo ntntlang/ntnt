@@ -21,24 +21,56 @@ ntnt test server.tnt --get /api/status --post /users --body 'name=Alice&age=25'
 
 **CRITICAL: IDD is a collaborative process between human and AI.** The intent file is a shared artifact that must be developed TOGETHER before any implementation begins.
 
-### Intent Studio - Visual Intent Development
+### Native Hot-Reload
 
-For the best collaborative experience, use **Intent Studio** to preview intent files in a beautiful HTML interface:
+NTNT HTTP servers support native hot-reload. When you run `ntnt run server.tnt`, the server watches the source file for changes and automatically reloads on the next request - **no restart required**.
 
 ```bash
-ntnt intent studio server.intent           # Opens browser with live preview
-ntnt intent studio server.intent --port 3000  # Custom port
-ntnt intent studio server.intent --no-open    # Don't auto-open browser
+# Start your app with hot-reload enabled by default
+ntnt run server.tnt
+
+# Edit server.tnt in another terminal or editor
+# Changes apply automatically on the next HTTP request!
 ```
 
-**What Intent Studio provides:**
-- 🎨 Beautiful dark theme with feature cards
-- 📊 Stats dashboard (features, test cases, assertions)
-- 🔄 Auto-refresh every 2 seconds when file changes
-- ✨ Smart icons based on feature names
-- ❌ Error display with auto-retry on parse errors
+This makes the IDD workflow seamless:
 
-**Recommended workflow:** Start Intent Studio, position it side-by-side with your editor, and edit the `.intent` file while watching updates live. This makes collaborative intent development visual and immediate.
+1. Start your app with `ntnt run`
+2. Start Intent Studio to see test results
+3. Edit code → save → tests re-run and pass/fail updates instantly
+
+### Intent Studio - Visual Intent Development
+
+For the best collaborative experience, use **Intent Studio** to preview intent files with **live test execution**:
+
+```bash
+ntnt intent studio server.intent                        # Starts BOTH studio AND app automatically!
+ntnt intent studio server.intent --port 4000            # Custom studio port
+ntnt intent studio server.intent --app-port 9000        # Custom app port
+ntnt intent studio server.intent --no-open              # Don't auto-open browser
+```
+
+**Default ports:**
+
+- Studio server: `http://127.0.0.1:3001`
+- App server: `http://127.0.0.1:8081` (auto-started!)
+
+**Intent Studio automatically:**
+
+- 🚀 **Starts your app** from the matching `.tnt` file (e.g., `server.intent` → `server.tnt`)
+- 🔥 **Hot-reload enabled** - edit your `.tnt` file and changes apply instantly
+- ✅ **Live test execution** - tests run automatically against your app
+- 🔴🟢 **Pass/fail indicators** on every assertion in real-time
+- 🔄 Auto-refresh every 2 seconds when file changes
+- ▶️ "Run Tests" button to re-execute anytime
+- 🛑 Clean shutdown of app server on Ctrl+C
+
+**One command to rule them all:**
+
+```bash
+ntnt intent studio server.intent
+# That's it! Studio starts, app starts, browser opens, tests run.
+```
 
 ### Phase 1: Draft and Present Intent (DO NOT SKIP)
 
@@ -178,26 +210,26 @@ Feature: User Authentication
 
 ### IDD Workflow Summary
 
-| Step | Action                              | Human Input Required |
-| ---- | ----------------------------------- | -------------------- |
-| 1    | Draft `.intent` file                | No                   |
-| 2    | Start Intent Studio (optional)      | No                   |
-| 3    | **Present intent to user**          | **YES - STOP HERE**  |
-| 4    | Refine based on feedback            | Yes                  |
-| 5    | User approves intent                | **YES**              |
-| 6    | Run `ntnt intent init` (scaffolding)| No                   |
-| 7    | Implement with `@implements`        | No                   |
-| 8    | Run `ntnt intent check`             | No                   |
-| 9    | Present results to user             | No                   |
+| Step | Action                               | Human Input Required |
+| ---- | ------------------------------------ | -------------------- |
+| 1    | Draft `.intent` file                 | No                   |
+| 2    | Start Intent Studio (optional)       | No                   |
+| 3    | **Present intent to user**           | **YES - STOP HERE**  |
+| 4    | Refine based on feedback             | Yes                  |
+| 5    | User approves intent                 | **YES**              |
+| 6    | Run `ntnt intent init` (scaffolding) | No                   |
+| 7    | Implement with `@implements`         | No                   |
+| 8    | Run `ntnt intent check`              | No                   |
+| 9    | Present results to user              | No                   |
 
 ### Intent Commands Reference
 
-| Command | Purpose |
-| ------- | ------- |
-| `ntnt intent studio <file>.intent` | Visual preview with live refresh |
-| `ntnt intent check <file>.tnt` | Run tests from intent file |
-| `ntnt intent init <file>.intent` | Generate code scaffolding |
-| `ntnt intent coverage <file>.tnt` | Show feature implementation coverage |
+| Command                            | Purpose                              |
+| ---------------------------------- | ------------------------------------ |
+| `ntnt intent studio <file>.intent` | Visual preview with live refresh     |
+| `ntnt intent check <file>.tnt`     | Run tests from intent file           |
+| `ntnt intent init <file>.intent`   | Generate code scaffolding            |
+| `ntnt intent coverage <file>.tnt`  | Show feature implementation coverage |
 
 ### Annotation Types
 

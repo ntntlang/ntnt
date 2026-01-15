@@ -604,6 +604,12 @@ The `.intent` format is optimized for machine parsing and testing, but humans de
 - [x] Beautiful dark theme with stats dashboard
 - [x] Feature icons based on feature name/type
 - [x] Error page with auto-retry when intent file has parse errors
+- [x] **Live test execution** - tests run against a running app
+- [x] **Pass/fail indicators** - visual ✓/✗ on every assertion
+- [x] **Run Tests button** - re-execute tests on demand
+- [x] **Default ports** - Studio on 3001, app on 8081
+- [x] **Native hot-reload** - edit .tnt file, changes apply on next request (no restart!)
+- [x] **Auto-start app** - Studio automatically starts the matching .tnt file
 
 **Phase 2: Enhanced Studio (Later)**
 
@@ -613,25 +619,30 @@ The `.intent` format is optimized for machine parsing and testing, but humans de
 - [ ] Diff highlighting when intent changes
 
 ```bash
-# Start intent studio
-$ ntnt intent studio server.intent --port 3000
+# Start intent studio (default ports: studio on 3001, app on 8081)
+$ ntnt intent studio server.intent
 
-🎨 Intent Studio: http://localhost:3000
-👀 Watching server.intent for changes...
+🎨 Intent Studio
+  File: server.intent
+  URL:  http://127.0.0.1:3001
+  App:  http://127.0.0.1:8081
+  ✅ Live test execution enabled!
 
-# Phase 1: Page auto-refreshes every 2s to pick up changes
-# Phase 2: WebSocket pushes instant updates
+# Custom ports if needed
+$ ntnt intent studio server.intent --port 4000 --app-port 9000
 ```
 
-**Workflow:** Human and AI collaborate on intent in real-time:
+**Workflow:** Human and AI collaborate on intent with live test feedback:
 
 1. Create or open an existing `.intent` file (`ntnt intent init` or edit directly)
-2. Start the studio: `ntnt intent studio server.intent`
-3. Human opens studio in browser (side-by-side with editor)
-4. Human and AI collaborate—discussing, adding, removing, refining features
-5. AI updates `.intent` file, studio refreshes with changes
-6. Repeat until human says "looks good!"
-7. AI implements the code with `@implements` annotations
+2. Start your app on port 8081 (or use `--app-port` for custom port)
+3. Start the studio: `ntnt intent studio server.intent`
+4. Human opens studio in browser (side-by-side with editor)
+5. Tests run automatically—see which assertions pass ✓ or fail ✗
+6. Human and AI collaborate—discussing, adding, removing, refining features
+7. AI updates `.intent` file, studio refreshes and re-runs tests
+8. Watch tests fail for new features, implement until they pass
+9. All tests green = intent is verified!
 
 ### 6.6 Test Execution for All Program Types
 

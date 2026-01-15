@@ -299,6 +299,10 @@ pub struct Interpreter {
     server_state: crate::stdlib::http_server::ServerState,
     /// Test mode: if Some, contains (port, max_requests, shutdown_flag)
     test_mode: Option<(u16, usize, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
+    /// Main source file path for hot-reload (single-file apps)
+    main_source_file: Option<String>,
+    /// Main source file last modification time
+    main_source_mtime: Option<std::time::SystemTime>,
 }
 
 /// Information about a trait definition
@@ -337,6 +341,8 @@ impl Interpreter {
             current_file: None,
             server_state: crate::stdlib::http_server::ServerState::new(),
             test_mode: None,
+            main_source_file: None,
+            main_source_mtime: None,
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
@@ -352,6 +358,101 @@ impl Interpreter {
     /// Set the current file path for relative imports
     pub fn set_current_file(&mut self, path: &str) {
         self.current_file = Some(path.to_string());
+    }
+    
+    /// Set the main source file for hot-reload tracking
+    pub fn set_main_source_file(&mut self, path: &str) {
+        self.main_source_file = Some(path.to_string());
+        // Store the current mtime
+        self.main_source_mtime = std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+    }
+    
+    /// Check if the main source file needs reloading and reload if necessary
+    /// Returns true if reload happened, false otherwise
+    fn check_and_reload_main_source(&mut self) -> bool {
+        // Check if hot-reload is enabled
+        if !self.server_state.hot_reload {
+            return false;
+        }
+        
+        // Only check if we have a main source file configured
+        let (file_path, cached_mtime) = match (&self.main_source_file, &self.main_source_mtime) {
+            (Some(fp), Some(mt)) => (fp.clone(), *mt),
+            _ => return false,
+        };
+        
+        // Check current mtime
+        let current_mtime = match std::fs::metadata(&file_path) {
+            Ok(m) => match m.modified() {
+                Ok(mt) => mt,
+                Err(_) => return false,
+            },
+            Err(_) => return false,
+        };
+        
+        // No change
+        if current_mtime <= cached_mtime {
+            return false;
+        }
+        
+        // File changed - reload!
+        println!("\n[hot-reload] {} changed, reloading...", file_path);
+        
+        // Read the new source
+        let source_code = match std::fs::read_to_string(&file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[hot-reload] Failed to read file: {}", e);
+                return false;
+            }
+        };
+        
+        // Parse the source
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        
+        let lexer = Lexer::new(&source_code);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        
+        let ast = match parser.parse() {
+            Ok(ast) => ast,
+            Err(e) => {
+                eprintln!("[hot-reload] Parse error: {}", e);
+                return false;
+            }
+        };
+        
+        // Clear current state (routes, middleware, etc.) but keep server running
+        self.server_state.clear();
+        
+        // Clear loaded modules FIRST to force reimport (before redefining stdlib)
+        self.loaded_modules.clear();
+        
+        // Reset environment but keep builtins
+        self.environment = std::rc::Rc::new(std::cell::RefCell::new(Environment::new()));
+        self.define_builtins();
+        self.define_builtin_types();
+        self.define_stdlib();  // Re-populate stdlib modules after clearing
+        
+        // Re-set the current file for imports
+        self.current_file = Some(file_path.clone());
+        
+        // Re-evaluate the AST
+        match self.eval(&ast) {
+            Ok(_) => {
+                // Update mtime
+                self.main_source_mtime = Some(current_mtime);
+                println!("[hot-reload] Reload complete. {} routes registered.", self.server_state.route_count());
+                true
+            }
+            Err(e) => {
+                eprintln!("[hot-reload] Evaluation error: {}", e);
+                false
+            }
+        }
     }
 
     fn define_builtins(&mut self) {
@@ -2791,10 +2892,15 @@ impl Interpreter {
         use std::sync::atomic::Ordering;
         use std::time::Duration;
         
+        // Check for NTNT_LISTEN_PORT env var override (used by Intent Studio)
+        let env_port = std::env::var("NTNT_LISTEN_PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok());
+        
         // Check if we're in test mode
         let (actual_port, is_test_mode, shutdown_flag) = match &self.test_mode {
             Some((test_port, _max_req, flag)) => (*test_port, true, Some(flag.clone())),
-            None => (port, false, None),
+            None => (env_port.unwrap_or(port), false, None),
         };
         
         // Check if any routes or static dirs are registered
@@ -2828,6 +2934,11 @@ impl Interpreter {
         let middleware_count = self.server_state.middleware.len();
         if middleware_count > 0 {
             println!("Middleware: {}", middleware_count);
+        }
+        
+        // Show hot-reload status
+        if self.server_state.hot_reload && self.main_source_file.is_some() {
+            println!("\n🔥 Hot-reload enabled: edit your .tnt file and changes apply on next request");
         }
         
         if !is_test_mode {
@@ -2865,6 +2976,10 @@ impl Interpreter {
                     Err(_) => break,
                 }
             };
+            
+            // Hot-reload check: if main source file changed, reload it
+            // This runs on each request to pick up changes without restart
+            self.check_and_reload_main_source();
             
             let method = request.method().to_string();
             let url = request.url().to_string();

@@ -1285,17 +1285,35 @@ The `.intent` format is optimized for machine parsing and testing—but humans d
 ### The Solution: Intent Studio
 
 ```bash
-$ ntnt intent studio server.intent --port 3000
+$ ntnt intent studio server.intent
 
-🎨 Intent Studio: http://localhost:3000
-👀 Watching server.intent for changes...
+🎨 Intent Studio
+
+  File: server.intent
+  URL:  http://127.0.0.1:3001
+  App:  http://127.0.0.1:8081
+
+  ✅ Live test execution enabled!
+
+  👀 Watching for changes (auto-refresh every 2s)
 ```
 
-Intent Studio is a collaborative workspace where humans and agents develop intent together. It renders your `.intent` file as a beautiful, interactive HTML page. When you save changes, the browser **automatically refreshes** every 2 seconds—making it feel like you're designing intent in real-time.
+Intent Studio is a collaborative workspace where humans and agents develop intent together. It renders your `.intent` file as a beautiful, interactive HTML page and **executes tests in real-time** against your running application. When you save changes, the browser automatically refreshes and re-runs all tests.
+
+**Default ports:**
+
+- Studio server: `http://127.0.0.1:3001`
+- App under test: `http://127.0.0.1:8081`
+
+Customize with `--port` and `--app-port` flags.
 
 **Features:**
+
 - 🎨 Beautiful dark theme with feature cards
 - 📊 Stats dashboard showing features, test cases, and assertions
+- ✅ **Live test execution** - tests run automatically against your app
+- 🔴🟢 **Pass/fail indicators** on every assertion in real-time
+- ▶️ "Run Tests" button to re-execute anytime
 - 🔄 Auto-refresh when you save the `.intent` file
 - ✨ Smart icons based on feature names (🔐 login, 📊 charts, etc.)
 - ❌ Error display with auto-retry when parsing fails
@@ -1352,12 +1370,15 @@ This transforms how humans and agents collaborate on intent:
 **Step-by-step:**
 
 1. Create or open an existing `.intent` file (`ntnt intent init` for new projects)
-2. Start the studio: `ntnt intent studio server.intent`
-3. Human opens studio in browser (side-by-side with editor)
-4. Human and agent collaborate—discussing, adding, removing, refining features
-5. Agent updates `.intent` file, studio instantly refreshes
-6. Repeat until human says "looks good!"
-7. Agent implements the code with `@implements` annotations
+2. Start your application on port 8081 (or specify a custom port with `--app-port`)
+3. Start the studio: `ntnt intent studio server.intent`
+4. Human opens studio in browser (side-by-side with editor)
+5. Tests run automatically—you see which assertions pass ✓ or fail ✗
+6. Human and agent collaborate—discussing, adding, removing, refining features
+7. Agent updates `.intent` file, studio refreshes and re-runs tests
+8. Watch tests fail for new features, then implement until they pass
+9. Repeat until all tests are green!
+10. Implementation complete—intent is verified
 
 This works for both **new intent development** and **modifying existing intent**.
 
