@@ -1,0 +1,21 @@
+# Test with some failing assertions
+# Run: ntnt intent check server.tnt --intent failing.intent
+
+Feature: Home Page
+  id: feature.home
+  description: "Testing failure reporting"
+  test:
+    - request: GET /
+      assert:
+        - status: 200
+        - body contains "Welcome"
+        - body contains "NONEXISTENT TEXT"
+        - body not contains "Test Server"
+
+Feature: Nonexistent Page
+  id: feature.nonexistent
+  description: "This should return 404"
+  test:
+    - request: GET /nonexistent
+      assert:
+        - status: 404

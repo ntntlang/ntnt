@@ -11,5 +11,6 @@ pub mod types;
 pub mod contracts;
 pub mod error;
 pub mod stdlib;
+pub mod intent;
 
 pub use error::{IntentError, Result};

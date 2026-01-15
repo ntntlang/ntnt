@@ -4,7 +4,7 @@
 
 use clap::{Parser, Subcommand};
 use colored::*;
-use ntnt::{interpreter::Interpreter, lexer::Lexer, parser::Parser as IntentParser};
+use ntnt::{interpreter::Interpreter, lexer::Lexer, parser::Parser as IntentParser, intent};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::fs;
@@ -162,6 +162,47 @@ enum Commands {
         #[arg(long)]
         fix: bool,
     },
+    /// Intent-Driven Development commands
+    /// 
+    /// Verify that code matches human intent specifications.
+    /// Intent files (.intent) define requirements as executable tests.
+    /// 
+    /// Examples:
+    ///   ntnt intent check server.tnt
+    ///   ntnt intent check server.tnt --intent custom.intent
+    #[command(subcommand)]
+    Intent(IntentCommands),
+}
+
+/// Intent-Driven Development subcommands
+#[derive(Subcommand)]
+enum IntentCommands {
+    /// Check that code matches its intent specification
+    /// 
+    /// Runs all tests defined in the .intent file against the NTNT program.
+    /// Looks for <name>.intent file automatically, or specify with --intent.
+    /// 
+    /// Examples:
+    ///   ntnt intent check server.tnt
+    ///   ntnt intent check server.tnt --intent requirements.intent
+    ///   ntnt intent check server.tnt --verbose
+    Check {
+        /// The NTNT source file to check
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        
+        /// Path to intent file (default: looks for <name>.intent)
+        #[arg(long = "intent", short = 'i')]
+        intent_file: Option<PathBuf>,
+        
+        /// Port to run the test server on (default: 18081)
+        #[arg(long = "port", default_value = "18081")]
+        port: u16,
+        
+        /// Show verbose output including response bodies
+        #[arg(long = "verbose", short = 'v')]
+        verbose: bool,
+    },
 }
 
 fn main() {
@@ -186,6 +227,7 @@ fn main() {
         Some(Commands::Inspect { path, pretty }) => inspect_project(&path, pretty),
         Some(Commands::Validate { path }) => validate_project(&path),
         Some(Commands::Lint { path, quiet, fix }) => lint_project(&path, quiet, fix),
+        Some(Commands::Intent(intent_cmd)) => run_intent_command(intent_cmd),
         None => {
             if let Some(file) = cli.file {
                 run_file(&file)
@@ -1605,6 +1647,69 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
     }
     
     issues
+}
+
+/// Run intent-driven development commands
+fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
+    match cmd {
+        IntentCommands::Check { file, intent_file, port, verbose } => {
+            run_intent_check_command(&file, intent_file.as_ref(), port, verbose)
+        }
+    }
+}
+
+/// Run the intent check command
+fn run_intent_check_command(
+    ntnt_path: &PathBuf, 
+    intent_path: Option<&PathBuf>,
+    port: u16,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    println!("{}", "=== NTNT Intent Check ===".cyan().bold());
+    println!();
+    
+    // Find the intent file
+    let intent_file_path = if let Some(path) = intent_path {
+        path.clone()
+    } else {
+        // Auto-discover intent file
+        match intent::find_intent_file(ntnt_path) {
+            Some(path) => path,
+            None => {
+                let stem = ntnt_path.file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                anyhow::bail!(
+                    "No intent file found. Create {}.intent or specify with --intent",
+                    stem
+                );
+            }
+        }
+    };
+    
+    println!("Source: {}", ntnt_path.display().to_string().green());
+    println!("Intent: {}", intent_file_path.display().to_string().green());
+    println!();
+    
+    // Run intent check
+    match intent::run_intent_check(
+        ntnt_path.as_path(),
+        intent_file_path.as_path(),
+        port,
+        verbose,
+    ) {
+        Ok(result) => {
+            intent::print_intent_results(&result);
+            
+            if result.features_failed > 0 {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            anyhow::bail!("Intent check failed: {}", e);
+        }
+    }
 }
 
 /// Collect all .tnt files from a path (file or directory)

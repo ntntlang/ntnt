@@ -1,0 +1,47 @@
+import { html, json, text } from "std/http/server"
+
+// Simple test server for IDD testing
+
+fn home(req) {
+    return html("""
+    <!DOCTYPE html>
+    <html>
+    <head><title>Test Server</title></head>
+    <body>
+        <h1>Welcome to the Test Server</h1>
+        <p>This is a simple test page.</p>
+        <ul>
+            <li><a href="/about">About</a></li>
+            <li><a href="/api/status">API Status</a></li>
+        </ul>
+    </body>
+    </html>
+    """)
+}
+
+fn about(req) {
+    return html("""
+    <!DOCTYPE html>
+    <html>
+    <head><title>About</title></head>
+    <body>
+        <h1>About Us</h1>
+        <p>This is a test server for Intent-Driven Development.</p>
+    </body>
+    </html>
+    """)
+}
+
+fn api_status(req) {
+    return json(map {
+        "status": "ok",
+        "version": "1.0.0",
+        "uptime": 12345
+    })
+}
+
+get(r"/", home)
+get(r"/about", about)
+get(r"/api/status", api_status)
+
+listen(8080)

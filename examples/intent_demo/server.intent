@@ -1,0 +1,33 @@
+# Test Server Intent Specification
+# Run: ntnt intent check server.tnt
+
+Feature: Home Page
+  id: feature.home
+  description: "The home page displays a welcome message and navigation"
+  test:
+    - request: GET /
+      assert:
+        - status: 200
+        - body contains "Welcome to the Test Server"
+        - body contains "About"
+        - body contains "API Status"
+
+Feature: About Page
+  id: feature.about
+  description: "The about page describes the application"
+  test:
+    - request: GET /about
+      assert:
+        - status: 200
+        - body contains "About Us"
+        - body contains "Intent-Driven Development"
+
+Feature: API Status Endpoint
+  id: feature.api_status
+  description: "The API status endpoint returns health information"
+  test:
+    - request: GET /api/status
+      assert:
+        - status: 200
+        - body contains "ok"
+        - body contains "version"
