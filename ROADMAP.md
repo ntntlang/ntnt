@@ -429,6 +429,44 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] `std/http`: get, post, put, delete, patch, head, request, get_json, post_json
 - [x] `std/csv`: parse, parse_with_headers, stringify, stringify_with_headers
 
+### 5.9 Response Caching
+
+**Goal:** Simple in-memory caching for HTTP handlers and expensive operations.
+
+- [ ] `std/cache` module with TTL-based caching
+- [ ] `cache()` middleware for route handlers
+- [ ] Cache key generation from request (path, query params)
+- [ ] `vary` option to cache different responses per parameter
+- [ ] Manual cache API: `create_cache`, `get_cached`, `set_cached`, `invalidate`
+
+```ntnt
+import { cache } from "std/cache"
+
+// Cache response for 30 minutes (1800 seconds)
+get("/api/weather", cache(1800, get_weather))
+
+// With options - vary by query param
+get("/api/weather", cache(map {
+    "ttl": 1800,
+    "vary": ["location"]
+}, get_weather))
+
+// Manual cache control
+import { create_cache, get_cached, set_cached } from "std/cache"
+
+let api_cache = create_cache()
+
+fn fetch_data(key) {
+    let cached = get_cached(api_cache, key, 1800)
+    if is_some(cached) {
+        return unwrap(cached)
+    }
+    let data = fetch("https://api.example.com/" + key)
+    set_cached(api_cache, key, data)
+    return data
+}
+```
+
 ### 5.8 CLI & Testing Tools ✅ COMPLETE
 
 - [x] `ntnt run` - Execute NTNT files
@@ -536,6 +574,7 @@ fn home_handler(req) {
 ### 6.4 Expanded Assertions
 
 **Output Assertions (Current)**
+
 - [x] Status code: `status: 200`
 - [x] Body contains: `body contains "text"`
 - [x] Regex matching: `body matches r"pattern"`
@@ -544,76 +583,30 @@ fn home_handler(req) {
 - [ ] JSON path: `body.json.users[0].name == "Alice"`
 - [ ] Response timing: `response_time < 500ms`
 
-**State & Mutation Assertions**
+**State & Database Assertions**
+
 - [ ] Database verification: `verify_db:` with SQL queries
 - [ ] State before/after comparison
-- [ ] No unintended mutations: `no_db_writes: true`
 
-**Behavioral Properties**
-- [ ] Idempotency: `repeat: N` with result comparison
-- [ ] Purity: `pure: true` (same input = same output, no side effects)
-- [ ] Thread safety: `parallel:` concurrent request testing
-- [ ] Sequencing: `sequence:` state machine transitions
-
-**Side Effect Verification**
-- [ ] Email sent: `email_sent_to:`
-- [ ] Event published: `event_published:`
-- [ ] Log verification: `log_contains:`
-- [ ] External call verification
-
-**Contract Integration**
-- [ ] `contracts:` section linking intent to code contracts
-- [ ] Precondition violation testing
-- [ ] Postcondition verification
-- [ ] Invariant checking across test sequences
-
-**Resource Constraints**
-- [ ] Query count: `db_query_count <= N`
-- [ ] Memory bounds: `memory_delta < X`
-- [ ] Connection limits
-
-### 6.5 Test Execution for All Program Types
-
-- [x] HTTP servers (primary focus)
-- [ ] CLI applications (`run:`, `exit_code:`, `stdout:`)
-- [ ] Library functions (`eval:`, `result:`)
-- [ ] Database operations (`verify_db:`, transactions)
-
-### 6.6 Developer Experience
-
-- [ ] `ntnt intent watch` - Continuous verification during development
-- [x] Colored output (green/red for pass/fail)
-- [x] Failure details with expected vs actual
-- [ ] Intent file line numbers in error messages
-- [ ] Parallel test execution
-
-### 6.7 Intent History & Changelog
-
-- [ ] `ntnt intent history <feature>` - View feature evolution
-- [ ] `ntnt intent changelog v1 v2` - Generate release notes from intent diffs
-- [ ] `ntnt intent archaeology "<term>"` - Search intent history
-
-### 6.8 Browser & Visual Testing (Future)
-
-- [ ] DOM assertions (element exists, visible, attributes)
-- [ ] Browser automation (click, fill, navigate)
-- [ ] Visual regression (screenshot comparison)
-- [ ] LLM visual verification for subjective qualities
-
-### 6.9 Intent Studio
+### 6.5 Intent Studio
 
 **Goal:** A collaborative workspace where humans and agents develop intent together.
 
-The `.intent` format is optimized for machine parsing and testing, but humans deserve a better experience when creating and refining intent. Intent Studio provides a beautiful, live-updating HTML view that makes intent development feel like a creative collaboration, not a chore.
+The `.intent` format is optimized for machine parsing and testing, but humans deserve a better experience when creating and refining intent. Intent Studio provides a beautiful HTML view that makes intent development feel like a creative collaboration, not a chore.
 
-- [ ] `ntnt intent studio <file.intent>` - Start the intent studio server
+**Phase 1: Basic Studio (MVP)**
+
+- [ ] `ntnt intent studio <file.intent>` - Start studio server
 - [ ] Rich HTML rendering with feature cards and visual hierarchy
-- [ ] WebSocket-based live reload (instant updates on file save)
-- [ ] Feature history timeline - view evolution of each feature over time
-- [ ] Removed feature archive - browse features that were removed
+- [ ] Auto-refresh via polling (page refreshes every few seconds)
+- [ ] File watcher detects changes
+
+**Phase 2: Enhanced Studio (Later)**
+
+- [ ] WebSocket-based instant live reload (no polling)
 - [ ] Implementation status indicators (linked to `@implements` annotations)
 - [ ] Collapsible test case details
-- [ ] Shareable URLs for team review
+- [ ] Diff highlighting when intent changes
 
 ```bash
 # Start intent studio
@@ -622,7 +615,8 @@ $ ntnt intent studio server.intent --port 3000
 🎨 Intent Studio: http://localhost:3000
 👀 Watching server.intent for changes...
 
-# Browser auto-refreshes when you save the .intent file
+# Phase 1: Page auto-refreshes every 2s to pick up changes
+# Phase 2: WebSocket pushes instant updates
 ```
 
 **Workflow:** Human and AI collaborate on intent in real-time:
@@ -631,9 +625,70 @@ $ ntnt intent studio server.intent --port 3000
 2. Start the studio: `ntnt intent studio server.intent`
 3. Human opens studio in browser (side-by-side with editor)
 4. Human and AI collaborate—discussing, adding, removing, refining features
-5. AI updates `.intent` file, studio instantly refreshes
+5. AI updates `.intent` file, studio refreshes with changes
 6. Repeat until human says "looks good!"
 7. AI implements the code with `@implements` annotations
+
+### 6.6 Test Execution for All Program Types
+
+- [x] HTTP servers (primary focus)
+- [ ] CLI applications (`run:`, `exit_code:`, `stdout:`)
+- [ ] Library functions (`eval:`, `result:`)
+- [ ] Database operations (`verify_db:`, transactions)
+
+### 6.7 Developer Experience
+
+- [ ] `ntnt intent watch` - Continuous verification during development
+- [x] Colored output (green/red for pass/fail)
+- [x] Failure details with expected vs actual
+- [ ] Intent file line numbers in error messages
+- [ ] Parallel test execution
+
+### 6.8 Intent History & Changelog
+
+- [ ] `ntnt intent history <feature>` - View feature evolution
+- [ ] `ntnt intent changelog v1 v2` - Generate release notes from intent diffs
+- [ ] `ntnt intent archaeology "<term>"` - Search intent history
+- [ ] Feature history timeline in Intent Studio
+- [ ] Removed feature archive - browse features that were removed
+- [ ] Shareable URLs for team review
+
+### 6.9 Advanced Assertions & Behavioral Properties
+
+**Behavioral Properties**
+
+- [ ] Idempotency: `repeat: N` with result comparison
+- [ ] Purity: `pure: true` (same input = same output, no side effects)
+- [ ] Thread safety: `parallel:` concurrent request testing
+- [ ] Sequencing: `sequence:` state machine transitions
+- [ ] No unintended mutations: `no_db_writes: true`
+
+**Side Effect Verification**
+
+- [ ] Email sent: `email_sent_to:`
+- [ ] Event published: `event_published:`
+- [ ] Log verification: `log_contains:`
+- [ ] External call verification
+
+**Contract Integration**
+
+- [ ] `contracts:` section linking intent to code contracts
+- [ ] Precondition violation testing
+- [ ] Postcondition verification
+- [ ] Invariant checking across test sequences
+
+**Resource Constraints**
+
+- [ ] Query count: `db_query_count <= N`
+- [ ] Memory bounds: `memory_delta < X`
+- [ ] Connection limits
+
+### 6.10 Browser & Visual Testing (Future)
+
+- [ ] DOM assertions (element exists, visible, attributes)
+- [ ] Browser automation (click, fill, navigate)
+- [ ] Visual regression (screenshot comparison)
+- [ ] LLM visual verification for subjective qualities
 
 **Phase 6 Deliverables:**
 
