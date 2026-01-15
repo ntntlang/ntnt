@@ -2810,6 +2810,140 @@ The goal isn't 100% annotation coverage—it's that every piece of code has a cl
 
 ---
 
+## Architecture: Zero Runtime Impact
+
+A critical design principle: **IDD must not affect the performance or stability of `ntnt run`.**
+
+### Separation of Concerns
+
+IDD is implemented as a completely separate module with no dependencies on the interpreter:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    NTNT ARCHITECTURE                             │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  RUNTIME (performance-critical)       │  IDD TOOLS (separate)   │
+│  ──────────────────────────────       │  ────────────────────   │
+│                                       │                          │
+│  ntnt run myapp.tnt                   │  ntnt intent check       │
+│    │                                  │    │                     │
+│    ├── Lexer       (UNCHANGED)        │    ├── Intent Parser     │
+│    ├── Parser      (UNCHANGED)        │    ├── HTTP Client       │
+│    ├── Interpreter (UNCHANGED)        │    ├── Test Runner       │
+│    └── Stdlib      (UNCHANGED)        │    └── Report Generator  │
+│                                       │                          │
+│  Zero changes to runtime code         │  Completely isolated     │
+│                                       │                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### File Structure
+
+```
+src/
+├── main.rs           # CLI entry point (add intent subcommand)
+├── lexer.rs          # UNCHANGED
+├── parser.rs         # UNCHANGED
+├── interpreter.rs    # UNCHANGED
+├── stdlib/           # UNCHANGED
+│   ├── http.rs
+│   ├── string.rs
+│   └── ...
+└── intent/           # NEW - completely separate module
+    ├── mod.rs        # Intent subcommand dispatch
+    ├── parser.rs     # .intent file parser
+    ├── runner.rs     # Test execution
+    ├── coverage.rs   # Coverage analysis
+    ├── diff.rs       # Intent diffing
+    └── changelog.rs  # Changelog generation
+```
+
+### Runtime Impact: Zero
+
+| IDD Component        | When It Runs                      | Runtime Impact |
+| -------------------- | --------------------------------- | -------------- |
+| Intent parser        | `ntnt intent check` only          | None           |
+| HTTP test runner     | `ntnt intent check` only          | None           |
+| Coverage analysis    | `ntnt intent coverage` only       | None           |
+| Changelog generation | `ntnt intent changelog` only      | None           |
+| Browser automation   | `ntnt intent check --visual` only | None           |
+| LLM verification     | `ntnt intent check` only          | None           |
+
+**The interpreter (`ntnt run`) has zero knowledge of IDD.**
+
+### Annotation Strategy: Comments First
+
+For the POC, `@implements` annotations are just comments:
+
+```ntnt
+// @implements: feature.site_selection
+fn home_handler(req) {
+    // The interpreter ignores this comment entirely
+    // The IDD tools parse it when needed
+}
+```
+
+**Benefits:**
+
+- Zero parser changes required
+- Zero runtime overhead
+- Can iterate on IDD design without touching core language
+- Annotations still work for coverage tracking
+
+**Trade-off:**
+
+- Typos in intent IDs caught at `ntnt intent check` time, not compile time
+- No IDE autocomplete for intent IDs (without separate plugin)
+
+### Future: Optional Deep Integration
+
+Once IDD is proven, we can optionally add deeper integration:
+
+```
+Phase 1 (POC): Comment-based annotations
+├── // @implements: feature.site_selection
+├── Parsed by IDD tools only
+└── Zero runtime impact
+
+Phase 2 (Future): First-class syntax (optional)
+├── @implements(feature.site_selection)
+├── Validated at compile time
+├── IDE autocomplete via LSP
+└── Still zero runtime impact (stripped after parsing)
+```
+
+The path from Phase 1 → Phase 2 is ~100-200 lines of parser code, easily added later if valuable.
+
+### What We Preserve vs. Defer
+
+| Capability              | Phase 1 (POC)                | Phase 2 (Future) |
+| ----------------------- | ---------------------------- | ---------------- |
+| Intent file parsing     | ✅ Full                      | ✅               |
+| HTTP test execution     | ✅ Full                      | ✅               |
+| Browser automation      | ✅ Full                      | ✅               |
+| LLM visual verification | ✅ Full                      | ✅               |
+| Changelog generation    | ✅ Full                      | ✅               |
+| Coverage reports        | ✅ Full                      | ✅               |
+| Annotation parsing      | ✅ Regex-based (99% as good) | AST-based        |
+| Typo detection          | ✅ At check-time             | At compile-time  |
+| IDE autocomplete        | ❌ Requires plugin           | Native           |
+| IDE jump-to-definition  | ❌ Requires plugin           | Native           |
+
+**Phase 1 delivers 99% of IDD functionality with zero risk to runtime stability.**
+
+### Why This Approach?
+
+1. **Design will change** - During POC, we'll discover what works. Easier to iterate on a separate module than parser changes.
+
+2. **Risk management** - If IDD doesn't work out, we haven't touched the interpreter.
+
+3. **IDE features are additive** - Can build LSP plugin anytime without architectural changes.
+
+4. **Proves the concept** - If IDD doesn't work well with this architecture, deeper integration won't save it.
+
+---
+
 ## Implementation Roadmap
 
 The roadmap is broken into incremental milestones. Each milestone is testable with a real app before proceeding to the next.
@@ -2818,11 +2952,11 @@ The roadmap is broken into incremental milestones. Each milestone is testable wi
 
 **Goal:** Choose a test app and write its intent file manually.
 
-| Task | Description |
-|------|-------------|
-| Select test app | Use `snowgauge.tnt` or similar small HTTP app |
-| Write intent file by hand | Create `snowgauge.intent` with 2-3 features |
-| Define success criteria | What would prove the concept works? |
+| Task                      | Description                                   |
+| ------------------------- | --------------------------------------------- |
+| Select test app           | Use `snowgauge.tnt` or similar small HTTP app |
+| Write intent file by hand | Create `snowgauge.intent` with 2-3 features   |
+| Define success criteria   | What would prove the concept works?           |
 
 **Deliverable:** A handwritten `.intent` file for an existing app.
 
@@ -2834,12 +2968,12 @@ The roadmap is broken into incremental milestones. Each milestone is testable wi
 
 **Goal:** Parse `.intent` files into a usable data structure.
 
-| Task | Description |
-|------|-------------|
+| Task              | Description                                        |
+| ----------------- | -------------------------------------------------- |
 | Define intent AST | Rust structs for Meta, Features, Data, Constraints |
-| Write parser | Parse YAML-ish intent format |
-| Error handling | Clear errors for malformed intent files |
-| Unit tests | Parse various intent file examples |
+| Write parser      | Parse YAML-ish intent format                       |
+| Error handling    | Clear errors for malformed intent files            |
+| Unit tests        | Parse various intent file examples                 |
 
 ```rust
 // Target: parse intent file into this structure
@@ -2873,12 +3007,12 @@ struct TestCase {
 
 **Goal:** Execute HTTP tests against a running server.
 
-| Task | Description |
-|------|-------------|
+| Task              | Description                                |
+| ----------------- | ------------------------------------------ |
 | Server management | Start NTNT app in background, capture port |
-| HTTP client | Make GET/POST requests |
-| Basic assertions | `status: 200`, `body contains "text"` |
-| Result collection | Track pass/fail for each assertion |
+| HTTP client       | Make GET/POST requests                     |
+| Basic assertions  | `status: 200`, `body contains "text"`      |
+| Result collection | Track pass/fail for each assertion         |
 
 ```bash
 # Target behavior
@@ -2908,14 +3042,15 @@ Feature: Snow Display
 
 **Goal:** Use the system for real development and evaluate.
 
-| Task | Description |
-|------|-------------|
-| Add a feature via IDD | Write intent first, then implement |
-| Break something intentionally | Verify the check catches it |
-| Get feedback | Does this feel useful? What's missing? |
-| Document learnings | What worked? What's awkward? |
+| Task                          | Description                            |
+| ----------------------------- | -------------------------------------- |
+| Add a feature via IDD         | Write intent first, then implement     |
+| Break something intentionally | Verify the check catches it            |
+| Get feedback                  | Does this feel useful? What's missing? |
+| Document learnings            | What worked? What's awkward?           |
 
 **Experiment checklist:**
+
 - [ ] Write intent for new feature before coding
 - [ ] Run `ntnt intent check` - see it fail
 - [ ] Implement feature
@@ -2933,12 +3068,12 @@ Feature: Snow Display
 
 **Goal:** Support more assertion types for realistic testing.
 
-| Task | Description |
-|------|-------------|
-| Regex assertions | `body matches r"Snow: \d+ in"` |
-| JSON assertions | `body.json.sites[0] == "bear_lake"` |
+| Task              | Description                                  |
+| ----------------- | -------------------------------------------- |
+| Regex assertions  | `body matches r"Snow: \d+ in"`               |
+| JSON assertions   | `body.json.sites[0] == "bear_lake"`          |
 | Header assertions | `header "Content-Type" contains "text/html"` |
-| Negation | `body not contains "error"` |
+| Negation          | `body not contains "error"`                  |
 
 ```yaml
 # More expressive tests
@@ -2962,12 +3097,12 @@ Feature: Snow Display
 
 **Goal:** Make output clear, helpful, and actionable.
 
-| Task | Description |
-|------|-------------|
-| Colored output | Green for pass, red for fail |
-| Failure details | Show expected vs actual |
+| Task            | Description                               |
+| --------------- | ----------------------------------------- |
+| Colored output  | Green for pass, red for fail              |
+| Failure details | Show expected vs actual                   |
 | Intent location | Link failures to intent file line numbers |
-| Summary stats | "3/4 features passing, 78% coverage" |
+| Summary stats   | "3/4 features passing, 78% coverage"      |
 
 ```bash
 # Target: helpful failure output
@@ -2975,10 +3110,10 @@ Feature: Snow Display
 
   ✓ GET / returns status 200
   ✗ body contains "canvas"
-  
+
     Expected: body to contain "canvas"
     Actual:   "<div class='chart'>..." (no canvas element)
-    
+
     Intent: snowgauge.intent:34 (Snow Chart)
     Hint: Consider using <canvas> element for chart rendering
 ```
@@ -2993,12 +3128,12 @@ Feature: Snow Display
 
 **Goal:** Parse `@implements` annotations from NTNT code.
 
-| Task | Description |
-|------|-------------|
+| Task           | Description                           |
+| -------------- | ------------------------------------- |
 | Comment parser | Extract `// @implements:` from source |
-| Link to intent | Map annotations to feature IDs |
-| Validate IDs | Warn on typos/missing features |
-| Basic coverage | "3/5 features have implementations" |
+| Link to intent | Map annotations to feature IDs        |
+| Validate IDs   | Warn on typos/missing features        |
+| Basic coverage | "3/5 features have implementations"   |
 
 ```ntnt
 // This annotation is now meaningful:
@@ -3027,12 +3162,12 @@ Feature Coverage:
 
 **Goal:** Generate code scaffolding from intent.
 
-| Task | Description |
-|------|-------------|
-| Template generation | Create function stubs from features |
-| Data scaffolding | Create maps/structs from data schemas |
-| TODO comments | Mark what needs implementation |
-| Import generation | Add necessary stdlib imports |
+| Task                | Description                           |
+| ------------------- | ------------------------------------- |
+| Template generation | Create function stubs from features   |
+| Data scaffolding    | Create maps/structs from data schemas |
+| TODO comments       | Mark what needs implementation        |
+| Import generation   | Add necessary stdlib imports          |
 
 ```bash
 $ ntnt intent init snowgauge.intent
@@ -3043,7 +3178,7 @@ Generated: snowgauge.tnt
   - sites map (3 entries, URLs marked TODO)
   - home_handler() stub
   - fetch_snow_data() stub
-  
+
   Next: Implement TODOs, then run `ntnt intent check`
 ```
 
@@ -3057,12 +3192,12 @@ Generated: snowgauge.tnt
 
 **Goal:** Continuous verification during development.
 
-| Task | Description |
-|------|-------------|
-| File watcher | Detect changes to .tnt and .intent files |
-| Debouncing | Don't spam checks on rapid saves |
-| Incremental output | Show what changed, not full report |
-| Server restart | Restart app when code changes |
+| Task               | Description                              |
+| ------------------ | ---------------------------------------- |
+| File watcher       | Detect changes to .tnt and .intent files |
+| Debouncing         | Don't spam checks on rapid saves         |
+| Incremental output | Show what changed, not full report       |
+| Server restart     | Restart app when code changes            |
 
 ```bash
 $ ntnt intent watch snowgauge.tnt
@@ -3084,12 +3219,12 @@ Watching for changes... (Ctrl+C to stop)
 
 **Goal:** Verify data structures match intent schemas.
 
-| Task | Description |
-|------|-------------|
+| Task                  | Description                            |
+| --------------------- | -------------------------------------- |
 | Find data definitions | Locate `let sites = map {...}` in code |
-| Extract structure | Parse map keys, list items, etc. |
-| Compare to intent | Check required keys present |
-| Report gaps | "Missing key: copeland_lake" |
+| Extract structure     | Parse map keys, list items, etc.       |
+| Compare to intent     | Check required keys present            |
+| Report gaps           | "Missing key: copeland_lake"           |
 
 ```yaml
 # Intent defines expected data
@@ -3118,12 +3253,12 @@ Data Validation:
 
 **Goal:** Show gaps between intent and implementation.
 
-| Task | Description |
-|------|-------------|
-| Collect intent requirements | All features, data, constraints |
-| Analyze implementation | What exists in code |
-| Compute diff | What's missing, what's extra |
-| Actionable output | "Add X" or "Intent missing for Y" |
+| Task                        | Description                       |
+| --------------------------- | --------------------------------- |
+| Collect intent requirements | All features, data, constraints   |
+| Analyze implementation      | What exists in code               |
+| Compute diff                | What's missing, what's extra      |
+| Actionable output           | "Add X" or "Intent missing for Y" |
 
 ```bash
 $ ntnt intent diff snowgauge.tnt
@@ -3151,23 +3286,24 @@ Suggestions:
 
 ### Summary: Phase 1 Roadmap
 
-| Milestone | Description | Days | Cumulative |
-|-----------|-------------|------|------------|
-| M0 | POC Preparation | 1-2 | 1-2 |
-| M1 | Intent Parser | 2-3 | 3-5 |
-| M2 | HTTP Test Runner | 3-4 | 6-9 |
-| **M3** | **POC Validation** | **1-2** | **7-11** |
-| M4 | Expanded Assertions | 2-3 | 9-14 |
-| M5 | Output Polish | 1-2 | 10-16 |
-| M6 | Code Annotations | 2-3 | 12-19 |
-| M7 | `ntnt intent init` | 2-3 | 14-22 |
-| M8 | `ntnt intent watch` | 1-2 | 15-24 |
-| M9 | Data Validation | 2-3 | 17-27 |
-| M10 | `ntnt intent diff` | 1-2 | 18-29 |
+| Milestone | Description         | Days    | Cumulative |
+| --------- | ------------------- | ------- | ---------- |
+| M0        | POC Preparation     | 1-2     | 1-2        |
+| M1        | Intent Parser       | 2-3     | 3-5        |
+| M2        | HTTP Test Runner    | 3-4     | 6-9        |
+| **M3**    | **POC Validation**  | **1-2** | **7-11**   |
+| M4        | Expanded Assertions | 2-3     | 9-14       |
+| M5        | Output Polish       | 1-2     | 10-16      |
+| M6        | Code Annotations    | 2-3     | 12-19      |
+| M7        | `ntnt intent init`  | 2-3     | 14-22      |
+| M8        | `ntnt intent watch` | 1-2     | 15-24      |
+| M9        | Data Validation     | 2-3     | 17-27      |
+| M10       | `ntnt intent diff`  | 1-2     | 18-29      |
 
 **Key checkpoint: Milestone 3 (POC Validation)**
 
 After M3 (~1-2 weeks), you'll have enough to answer:
+
 - Does writing intent-first feel natural?
 - Does the feedback loop help?
 - Is this worth building out further?
@@ -3179,13 +3315,13 @@ If no → Pivot or abandon before investing more time
 
 ### Phase 2+ (Future, if POC succeeds)
 
-| Phase | Features | Estimate |
-|-------|----------|----------|
+| Phase       | Features                                              | Estimate  |
+| ----------- | ----------------------------------------------------- | --------- |
 | **Phase 2** | Browser automation, DOM assertions, visual regression | 3-4 weeks |
-| **Phase 3** | LLM visual verification, accessibility testing | 2-3 weeks |
-| **Phase 4** | Intent history, changelog generation, archaeology | 2-3 weeks |
+| **Phase 3** | LLM visual verification, accessibility testing        | 2-3 weeks |
+| **Phase 4** | Intent history, changelog generation, archaeology     | 2-3 weeks |
 | **Phase 5** | IDE integration (LSP), first-class @implements syntax | 3-4 weeks |
-| **Phase 6** | Standalone tool extraction, multi-language support | 4-6 weeks |
+| **Phase 6** | Standalone tool extraction, multi-language support    | 4-6 weeks |
 
 **Total for full vision: 4-6 months**
 
@@ -3651,6 +3787,7 @@ fn get_site(req) {
 ```
 
 **Benefits of starting native:**
+
 - Best possible proof-of-concept
 - Compile-time intent verification
 - Deep IDE integration
@@ -3686,7 +3823,7 @@ def get_site(request):
 // TypeScript - JSDoc-based
 /** @implements feature.site_selection */
 function getSite(request: Request) {
-    // ...
+  // ...
 }
 ```
 
@@ -3742,17 +3879,17 @@ Maintain both for optimal experience per language:
 
 #### Capability Comparison
 
-| Capability | NTNT Native | Standalone Tool |
-|------------|-------------|-----------------|
-| Parse `.intent` files | ✓ Full | ✓ Full |
-| HTTP test execution | ✓ Full | ✓ Full |
-| Browser automation | ✓ Full | ✓ Full |
-| LLM visual verification | ✓ Full | ✓ Full |
-| Changelog generation | ✓ Full | ✓ Full |
-| Find `@implements` | AST-based (accurate) | Regex-based (good enough) |
-| Typo detection | Compile-time | Runtime (`idd check`) |
-| IDE integration | Deep (LSP) | Shallow (generic plugin) |
-| Coverage analysis | Semantic | Syntactic |
+| Capability              | NTNT Native          | Standalone Tool           |
+| ----------------------- | -------------------- | ------------------------- |
+| Parse `.intent` files   | ✓ Full               | ✓ Full                    |
+| HTTP test execution     | ✓ Full               | ✓ Full                    |
+| Browser automation      | ✓ Full               | ✓ Full                    |
+| LLM visual verification | ✓ Full               | ✓ Full                    |
+| Changelog generation    | ✓ Full               | ✓ Full                    |
+| Find `@implements`      | AST-based (accurate) | Regex-based (good enough) |
+| Typo detection          | Compile-time         | Runtime (`idd check`)     |
+| IDE integration         | Deep (LSP)           | Shallow (generic plugin)  |
+| Coverage analysis       | Semantic             | Syntactic                 |
 
 #### Transpilation Option
 
@@ -3766,11 +3903,13 @@ idd generate myapp.intent --target go-test   # → intent_test.go
 ```
 
 **Pros:**
+
 - Uses existing test infrastructure
 - No runtime IDD dependency
 - Familiar test output
 
 **Cons:**
+
 - Generated code can drift from intent
 - Loses dynamic capabilities (LLM verification harder)
 - Two sources of truth
