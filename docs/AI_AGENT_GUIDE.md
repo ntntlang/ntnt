@@ -143,6 +143,108 @@ Constraint: Constraint Name
 - `assert:` is a list of assertions (status codes, body contains)
 - Separate sections with `---`
 
+### File Linking: How `.intent` and `.tnt` Files Connect
+
+Intent files are linked to source files **by filename**:
+- `server.tnt` ↔ `server.intent`
+- `crypto.tnt` ↔ `crypto.intent`
+- `myapp.tnt` ↔ `myapp.intent`
+
+All `ntnt intent` commands work with either file extension:
+```bash
+# These are equivalent:
+ntnt intent check server.tnt      # Finds server.intent automatically
+ntnt intent check server.intent   # Finds server.tnt automatically
+ntnt intent studio server.intent  # Starts both studio and app
+ntnt intent coverage server.tnt   # Shows coverage report
+```
+
+### File Organization for Larger Apps
+
+**Recommendation: Use a single `.intent` file per application**, even for multi-page apps. This is especially important for AI agents because:
+
+1. **Full context** - The agent sees all features, constraints, and relationships
+2. **Easier reasoning** - No need to coordinate across multiple files
+3. **Single source of truth** - One file to review and approve
+4. **Simpler linking** - One `.intent` ↔ one `.tnt` file
+
+**For organization within the file**, use `## Module:` section headers:
+
+```intent
+# E-Commerce Platform
+# A full-featured online store
+
+## Overview
+Multi-page e-commerce application with user auth, product catalog, and checkout.
+
+---
+
+## Module: Authentication
+
+Feature: User Registration
+  id: feature.user_registration
+  description: "New users can create accounts"
+  test:
+    - request: POST /auth/register
+      body: '{"email": "test@example.com", "password": "secret123"}'
+      assert:
+        - status: 201
+        - body contains "id"
+
+Feature: User Login
+  id: feature.user_login
+  description: "Existing users can log in"
+  test:
+    - request: POST /auth/login
+      body: '{"email": "test@example.com", "password": "secret123"}'
+      assert:
+        - status: 200
+        - body contains "token"
+
+---
+
+## Module: Product Catalog
+
+Feature: List Products
+  id: feature.list_products
+  description: "Browse all products with pagination"
+  test:
+    - request: GET /products
+      assert:
+        - status: 200
+        - body contains "products"
+
+Feature: Product Details
+  id: feature.product_details
+  description: "View individual product information"
+  test:
+    - request: GET /products/1
+      assert:
+        - status: 200
+        - body contains "name"
+        - body contains "price"
+
+---
+
+## Module: Shopping Cart
+
+Feature: Add to Cart
+  id: feature.add_to_cart
+  description: "Add products to shopping cart"
+  test:
+    - request: POST /cart/items
+      body: '{"product_id": 1, "quantity": 2}'
+      assert:
+        - status: 200
+```
+
+**When you might use separate files:**
+- Truly independent microservices with separate deployments
+- Different teams owning different services
+- Separate test suites that never run together
+
+But for a single application—even with dozens of pages—keep it in one `.intent` file.
+
 ```markdown
 # Example: Present intent to user BEFORE implementing
 

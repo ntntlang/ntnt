@@ -88,6 +88,46 @@ Constraint: Constraint Name
 - `test:` contains HTTP test assertions
 - Separate sections with `---`
 
+### File Linking: How `.intent` and `.tnt` Files Connect
+
+Intent files are linked to source files **by filename**:
+- `server.tnt` ↔ `server.intent`
+- `crypto.tnt` ↔ `crypto.intent`
+
+All `ntnt intent` commands work with either file extension:
+```bash
+ntnt intent check server.tnt      # Finds server.intent automatically
+ntnt intent check server.intent   # Finds server.tnt automatically
+```
+
+### File Organization for Larger Apps
+
+**Use a single `.intent` file per application**, even for multi-page apps:
+
+1. **Full context** - Agent sees all features and relationships
+2. **Easier reasoning** - No coordination across files
+3. **Single source of truth** - One file to review
+
+**Organize with `## Module:` headers:**
+
+```intent
+# E-Commerce Platform
+
+## Module: Authentication
+
+Feature: User Login
+  id: feature.user_login
+  ...
+
+---
+
+## Module: Products
+
+Feature: List Products
+  id: feature.list_products
+  ...
+```
+
 ### Phase 2: Implement (After Approval)
 
 ```bash

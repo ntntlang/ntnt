@@ -1735,30 +1735,51 @@ fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
 
 /// Run the intent check command
 fn run_intent_check_command(
-    ntnt_path: &PathBuf, 
-    intent_path: Option<&PathBuf>,
+    input_path: &PathBuf, 
+    explicit_intent_path: Option<&PathBuf>,
     port: u16,
     verbose: bool,
 ) -> anyhow::Result<()> {
     println!("{}", "=== NTNT Intent Check ===".cyan().bold());
     println!();
     
-    // Find the intent file
-    let intent_file_path = if let Some(path) = intent_path {
-        path.clone()
+    // Verify file exists
+    if !input_path.exists() {
+        anyhow::bail!("File not found: {}", input_path.display());
+    }
+    
+    // Resolve both .intent and .tnt paths from either input
+    let (intent_path_opt, tnt_path_opt) = if let Some(explicit) = explicit_intent_path {
+        // User explicitly provided intent file
+        (Some(explicit.clone()), Some(input_path.clone()))
     } else {
-        // Auto-discover intent file
-        match intent::find_intent_file(ntnt_path) {
-            Some(path) => path,
-            None => {
-                let stem = ntnt_path.file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                anyhow::bail!(
-                    "No intent file found. Create {}.intent or specify with --intent",
-                    stem
-                );
-            }
+        intent::resolve_intent_tnt_pair(input_path)
+    };
+    
+    // We need both files for check
+    let intent_file_path = match intent_path_opt {
+        Some(p) => p,
+        None => {
+            let stem = input_path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            anyhow::bail!(
+                "No intent file found. Create {}.intent or specify with --intent",
+                stem
+            );
+        }
+    };
+    
+    let ntnt_path = match tnt_path_opt {
+        Some(p) => p,
+        None => {
+            let stem = input_path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            anyhow::bail!(
+                "No .tnt file found. Create {}.tnt to run tests against",
+                stem
+            );
         }
     };
     
@@ -1789,24 +1810,46 @@ fn run_intent_check_command(
 
 /// Run the intent coverage command
 fn run_intent_coverage_command(
-    ntnt_path: &PathBuf,
-    intent_path: Option<&PathBuf>,
+    input_path: &PathBuf,
+    explicit_intent_path: Option<&PathBuf>,
 ) -> anyhow::Result<()> {
-    // Find the intent file
-    let intent_file_path = if let Some(path) = intent_path {
-        path.clone()
+    // Verify file exists
+    if !input_path.exists() {
+        anyhow::bail!("File not found: {}", input_path.display());
+    }
+    
+    // Resolve both .intent and .tnt paths from either input
+    let (intent_path_opt, tnt_path_opt) = if let Some(explicit) = explicit_intent_path {
+        // User explicitly provided intent file
+        (Some(explicit.clone()), Some(input_path.clone()))
     } else {
-        match intent::find_intent_file(ntnt_path) {
-            Some(path) => path,
-            None => {
-                let stem = ntnt_path.file_stem()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                anyhow::bail!(
-                    "No intent file found. Create {}.intent or specify with --intent",
-                    stem
-                );
-            }
+        intent::resolve_intent_tnt_pair(input_path)
+    };
+    
+    // We need both files for coverage
+    let intent_file_path = match intent_path_opt {
+        Some(p) => p,
+        None => {
+            let stem = input_path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            anyhow::bail!(
+                "No intent file found. Create {}.intent or specify with --intent",
+                stem
+            );
+        }
+    };
+    
+    let ntnt_path = match tnt_path_opt {
+        Some(p) => p,
+        None => {
+            let stem = input_path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            anyhow::bail!(
+                "No .tnt file found. Create {}.tnt to check coverage",
+                stem
+            );
         }
     };
     
@@ -1815,7 +1858,7 @@ fn run_intent_coverage_command(
         .map_err(|e| anyhow::anyhow!("Failed to parse intent file: {}", e))?;
     
     // Read source file(s)
-    let source_content = fs::read_to_string(ntnt_path)?;
+    let source_content = fs::read_to_string(&ntnt_path)?;
     let source_files = vec![(
         ntnt_path.to_string_lossy().to_string(),
         source_content,
@@ -1835,11 +1878,32 @@ fn run_intent_coverage_command(
 
 /// Run the intent init command
 fn run_intent_init_command(
-    intent_path: &PathBuf,
+    input_path: &PathBuf,
     output_path: Option<&PathBuf>,
 ) -> anyhow::Result<()> {
+    // Verify file exists
+    if !input_path.exists() {
+        anyhow::bail!("File not found: {}", input_path.display());
+    }
+    
+    // Resolve to find intent file (allows passing either .tnt or .intent)
+    let (intent_path_opt, _tnt_path_opt) = intent::resolve_intent_tnt_pair(input_path);
+    
+    let intent_path = match intent_path_opt {
+        Some(p) => p,
+        None => {
+            let stem = input_path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            anyhow::bail!(
+                "No intent file found. Create {}.intent first",
+                stem
+            );
+        }
+    };
+    
     // Parse intent file
-    let intent_file = intent::IntentFile::parse(intent_path)
+    let intent_file = intent::IntentFile::parse(&intent_path)
         .map_err(|e| anyhow::anyhow!("Failed to parse intent file: {}", e))?;
     
     // Generate scaffolding
@@ -1863,7 +1927,7 @@ fn run_intent_init_command(
 
 /// Run the intent studio command - starts a visual preview server AND the app server
 fn run_intent_studio_command(
-    intent_path: &PathBuf,
+    input_path: &PathBuf,
     port: u16,
     app_port: u16,
     no_open: bool,
@@ -1874,13 +1938,35 @@ fn run_intent_studio_command(
     use std::process::{Command, Child};
     
     // Verify the file exists
-    if !intent_path.exists() {
-        anyhow::bail!("Intent file not found: {}", intent_path.display());
+    if !input_path.exists() {
+        anyhow::bail!("File not found: {}", input_path.display());
     }
     
-    // Find the corresponding .tnt file
-    let tnt_path = intent_path.with_extension("tnt");
-    let has_tnt_file = tnt_path.exists();
+    // Resolve both .intent and .tnt paths from either input
+    let (intent_path_opt, tnt_path_opt) = intent::resolve_intent_tnt_pair(input_path);
+    
+    // We need an .intent file to show features/tests in Studio
+    let intent_path = match intent_path_opt {
+        Some(p) => p,
+        None => {
+            let stem = input_path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            eprintln!();
+            eprintln!("{}", "  ⚠️  No .intent file found".yellow().bold());
+            eprintln!();
+            eprintln!("  Intent Studio requires a .intent file to display features and run tests.");
+            eprintln!("  Expected: {}.intent", input_path.parent().unwrap_or(std::path::Path::new(".")).join(&stem).display());
+            eprintln!();
+            eprintln!("  {} Create one with:", "💡".yellow());
+            eprintln!("     ntnt intent init {}.intent", stem);
+            eprintln!();
+            anyhow::bail!("No .intent file found for Intent Studio");
+        }
+    };
+    
+    // .tnt file is optional (Studio can still show intent without running tests)
+    let tnt_path = tnt_path_opt;
     
     let intent_path_str = intent_path.to_string_lossy().to_string();
     let addr = format!("127.0.0.1:{}", port);
@@ -1896,18 +1982,18 @@ fn run_intent_studio_command(
     // Start the app server if .tnt file exists
     let mut app_process: Option<Child> = None;
     
-    if has_tnt_file {
+    if let Some(ref tnt_file) = tnt_path {
         // Get the current executable path to run ntnt
         let current_exe = std::env::current_exe()
             .unwrap_or_else(|_| PathBuf::from("ntnt"));
         
         // Set up environment to override the listen port
         // We'll use a special env var that the interpreter checks
-        println!("  {} Starting app from {}", "🚀".green(), tnt_path.display());
+        println!("  {} Starting app from {}", "🚀".green(), tnt_file.display());
         
         match Command::new(&current_exe)
             .arg("run")
-            .arg(&tnt_path)
+            .arg(tnt_file)
             .env("NTNT_LISTEN_PORT", app_port.to_string())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -1922,11 +2008,12 @@ fn run_intent_studio_command(
             }
             Err(e) => {
                 println!("  {} Failed to start app: {}", "⚠️".yellow(), e);
-                println!("  {} You can start it manually: ntnt run {}", "💡".dimmed(), tnt_path.display());
+                println!("  {} You can start it manually: ntnt run {}", "💡".dimmed(), tnt_file.display());
             }
         }
     } else {
-        println!("  {} No .tnt file found at {}", "⚠️".yellow(), tnt_path.display());
+        let expected_tnt = intent_path.with_extension("tnt");
+        println!("  {} No .tnt file found at {}", "⚠️".yellow(), expected_tnt.display());
         println!("  {} Start your app manually: ntnt run <your-app>.tnt", "💡".dimmed());
     }
     
@@ -2038,9 +2125,16 @@ fn run_intent_studio_command(
                         )
                     } else if path == "/run-tests" {
                         // Run tests against the app server
-                        match intent::IntentFile::parse(intent_path) {
+                        match intent::IntentFile::parse(&intent_path) {
                             Ok(intent_file) => {
-                                let results = intent::run_tests_against_server(&intent_file, app_port);
+                                // Read source content for annotation checking
+                                let source_content = tnt_path.as_ref()
+                                    .and_then(|p| fs::read_to_string(p).ok());
+                                let results = intent::run_tests_against_server(
+                                    &intent_file, 
+                                    app_port,
+                                    source_content.as_deref()
+                                );
                                 let json = serde_json::to_string(&results).unwrap_or_else(|_| "{}".to_string());
                                 format!(
                                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
@@ -2059,7 +2153,7 @@ fn run_intent_studio_command(
                         }
                     } else {
                         // Main page - render the intent file
-                        match intent::IntentFile::parse(intent_path) {
+                        match intent::IntentFile::parse(&intent_path) {
                             Ok(intent_file) => {
                                 let html = render_intent_studio_html(&intent_file, &intent_path_str, app_port);
                                 format!(
@@ -2283,9 +2377,10 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
             justify-content: center;
         }}
         
-        .logo-icon svg {{
+        .logo-icon img {{
             width: 100%;
             height: 100%;
+            display: block;
         }}
         
         .logo-text {{
@@ -2525,6 +2620,20 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
             background: var(--accent-red);
         }}
         
+        .unlinked-warning {{
+            background: rgba(251, 191, 36, 0.2);
+            color: #fbbf24;
+            font-size: 0.7rem;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-weight: 500;
+            margin-left: 0.5rem;
+        }}
+        
+        .feature-card.unlinked {{
+            border-left: 3px solid #fbbf24;
+        }}
+        
         .feature-id {{
             margin-bottom: 0.75rem;
         }}
@@ -2690,6 +2799,10 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
             border-color: var(--accent-red);
         }}
         
+        .results-summary.has-warnings {{
+            border-color: #fbbf24;
+        }}
+        
         .results-summary h3 {{
             margin-bottom: 0.5rem;
             display: flex;
@@ -2704,13 +2817,17 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
         .results-summary.has-failures h3 {{
             color: var(--accent-red);
         }}
+        
+        .results-summary.has-warnings h3 {{
+            color: #fbbf24;
+        }}
     </style>
 </head>
 <body>
     <header class="header">
         <div class="header-content">
             <div class="logo">
-                <span class="logo-icon"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAGxlWElmTU0AKgAAAAgABAEaAAUAAAABAAAAPgEbAAUAAAABAAAARgEoAAMAAAABAAIAAIdpAAQAAAABAAAATgAAAAAAAAEsAAAAAQAAASwAAAABAAKgAgAEAAAAAQAAAECgAwAEAAAAAQAAAEAAAAAA9Ed7egAAAAlwSFlzAAAuIwAALiMBeKU/dgAAEEtJREFUeAHtWWtwXOV5fs5tz9ldaVfSSlpJ1s2yZMnYxmCDHFNsmKF2gFIHpnEvdJrSTgrTThsm/d0MnkybZtppWiaTtHRKm5Z2OgmkLZMYGiiug8PFGBtbxhjfJVlX67qrvZ5rn/esxdjBgLnlR7qfvLtnz37n+573fZ/3M1BtVQSqCFQRqCJQRaCKQBWBKgJVBKoIVBGoIlBF4P8dAsrP3uKAc/69jsH/TvQbxcYaLx/PuXp+3K5byGU3ZDH8iA0o/s9qXZ8iAIHSM/iLfXpgd2xK+e0dddpKI7C7or7bkTSDdIOlNdUYQdJUPLPkKuVioCzlnWAx52hzRS+YzJQweWJBGR8rG+O6Yb1xYP8LQ58GKJ8KAHW3P1C3NnfkkfvXGA8u5ssx2fNVDRr6UxG0xRXEFA+KqsDjDwGt4iXUIIDDfZ8vA+cXHIxkPBRcBStTJk7Mefl/OFL+y0L99r8Ye+Wvi58kEJ84ALt27thuz0781ed6gvW/siZGAxVkygFGMw6m8wEypQAxHUjHFHTWRxAxFMzkXZyftzFX8BGLaFiR0NFRq6KBHTUVsInMY4cKOJXX909r6S8/99xzhz4pED45ABp31j68de4rrZbz5f5aW9/WbsD2ZX8VGqEgoinhLmfo4acXXBy4UMTQvIqMWotuYxGfWWFiU0sELbEAuga4ZIfjASQGiAHZouLZ8w6K0JZenVG/+q/P/u6jwEPOxwXiEwHg5pu33HZ/X/kbXTXBRscLsL3b5MLJZ4W0phELJR+TS37IgGzZRcJU0NVgYe+5IvKehuubuOt0jbMLJTJGRSquo4Xfm6MKaiIqXYTL5CvrKHymgK5aDS9Oac//80j84ZHDL574OCB8PAD6d9b+Xt/FP9nVozyc0BzzzEwRn11loeApmCoEmFhySGsv3MGWuIaOpIHGuBq6wA9Ol9CV1LGhycBTJ4vY3KKiPWEgQyOnch7G6DLiOgZ9IMVn2mi0AJJzAuwfLuGOnhhenlZm/2tEf+S7yZcew5MMLB+hfWQA0td9ZvPdrflv//FgfGPB9vEj7syGRpUGuyF9G+m/HQkuOqaihn4um2iTzgb5fHjaxRyN3LHSJLWBxbKP/yEbdvbHwK7hjqvsJ79l+NtU3sd41sUSr4URPiGdLga4f30chycdfOsN54dveG2/P37g2bEPi8FHAmDt7Tt7f6d1Yv+6OqflR8Meji5aeGDARXctSF0NdVENdHl4jAESBvgvbGKU7O4rF8q4rz/O+/InoChhXDg1U8bdfRZ8X088w/uSJzSiJy+biMwyYDJJYM8IcGhGxc62PAbSMeyd0P/3a9+/605gN6PMtTeGmw/Zuh+wvrjyzHf/aKO5bnLJw6sjBWxpU9HfoGBjayTcPQlcfrj0SppbnsEmSZ87W8L2lRaiBvsQJIWGeTRSmDLG8eaLPl1F5+5zkHB7OIaMJ0jxImGpIcDTOcYSpYwZutidq2JY16isnNGOB8eHp/Ytz3ctnx8agN/erP/ZQ2vwm6+Nl3Amq2Brp4XP9+k4MF5GKdDQSn8NF3vZ7LJ2nbv53LkS1jdFQtdwaYwYHzZGfKF7d52B1zhOrQkkLYXjSB81xEF6cghmFuDpkwXcnNaxY5WJiaKGC4wXNaqHVUnllvN616vj4+PnKgN/8PuHAuC+Hbff82t9waNnZ/JqC/N4ifl5S4cZBrm+RhOvjJagcTfTMS00qLKDgMlZDoyVQxoPkiVhehNa0yckRcoOSxM8Wmt1vHC+iN4Gg/GAPnPZbz6/7DlTxPXNEfTW6VD5bNkNUG/4mMg6iJqa1pnUbj2ur/teZvJsrjLq+79zhmtr27bt6NiQLH57qejqg+0x5moFDOpI6PTz0FIfd/ZaGJp2cIFU1pkCA1omsWAkwzSY8/EL7TTe9xnZK3ZNLrk4PWejRCMkDojn15kBNrVa2DdihyJIxpDdVzjeM2dK6Ks3sJrgiGp0SZuBegVn5hxmhSgiFBC1erDy7uaZb2I3hcM1tGtiwKYHHzPM4ef/7aaUu2n7ygga6a/7Rx1s6zJDSSvOKrsoEb6L6u7F0TIamLKSlhamrX3c0V8eiENjShtddPDGlI1zWeA7Q3l852iefq0zZTLKl1zZRfTQyCl+l3viFiKlnz9fDgPsjWkBsWKZuJCliz6QbKFgc6sEFhdnZkrXld/4p4XJyckDH4TBNQAQKKuMP/jK51cFX9zVbyLOOY7OeKiRhTaoIdUlVstixPeF7mnK2B8Pl5GiH/9k3GYON2i4zefcEJCeeh1LzInPXDCg1jbDdBZxJ4Fd4L0Tcz5OzthIMZOcWQQNDDB0kfRmftzcbtJ9xCcIeEgLZhpxOY4vqbU9DqQostYwzkzl3K16+5q9F4aH3zc1fiAAPZteuPX+7tLjD91oqS4tLHk+XhotYmuXJWaTy7ISkasiWiR3V1JfwVPx9SMRXGS07qtjeqzRcGOLgQ1pE7Ml4G8PZjHjRpFM1uL02CyN0HFXb4y+raHeVLFEwTPFCP/ocaZFz8UdBEjmMMkiSaehExELmd3ivYWixxTpoJViKk6tMLjCiLx8Ljuob/vCE9NDL7+nZH5fAHbTj84f+8a3+hLuQAsX2Fyj4NCUQz9TGKS0cNclcOUZmkcyLo5M23iTuzWapWAhFZaYkX9jtYItKwzU0R2kHji36OHFCy4OTlMmKwYsi4Bk8kjF6NeOgy4WQjEasILKbyClIku3aOO9MiX0m4wv5+lCC2UvDJ4xXYXJtQTcmHqy7fAUwW6MwGc8+QndcDZnp4+fHD6/ODt9WCC7WntfAGLJk4Nqae5rX9poqIeouExTp2DxMNgexSjVyLHpMg12w9JV6N/Bha5nhL6efirlbcLwcAsDH7VLuGuzlMeHJ128Pe/hyExAf48QAAtLS3lkCWJfnRKqwpX0+zKprqgB72lYLDrY0R3BKsaX+qgaBk0JrG/PeRjmOmT3a6IsMQ3GDqrGU7wvZbcIstcXrJ6t937uibcOHryqQOJT791Ur/Sr1zXH9HRtgNsiLh45RB1vRGEqBZjkYZpFyw0tOosbKVguU340/u1ZB51MVSJ+JDhmWQaLAkxyoS8MF6gLjJBBKsdh9MD4kopTC0ATdcRrE0Xc1Ep/pyJMRoAcDVwIy2gljA3NTLPCPBIB83STSarLoYseLvBzz3QKv9WxgI10GY+Zo69ObZ0+dW4HrfyPq1n6nqninl1fWKG7SzesjBbp20pYoqawhBadBQ81vPjkAOkm2lxig8hUiU8SouR6gbpdaCzMEEP2MijeQA3w78cLKPk6C0VmdUkdbPIpVN5zzmX6BM8HuItkSSRMjQyqjB+jdDHxfXnEZRYQLSGLb6b03kiw7uohQyjFO5VZRCmKAskQWoCeaMFUfXvrrl27COW723sCUC7mBtstO9VkeTAC+h+j865+Hbe3SxxwQ52/bPA7io7jCxOEhlIAScaQKL3ndJGCyQrV4iFSX4xdbu+AwN1yKXweOyIBNl6hN42Wne6kNB7N0u/Z58pWqSYYL8PiaIIHLn96K12OC5NKUg88dCeUeJsVtGYKzvorn618uyoAu3fv1l3PuWl1XZBOsKorcoZxys1e7vg6+vfZ+RLmilwcqSt7vmyEDCmSV4LgqpTBqhD4IWXr2kadfXz84zEbliFeVymCpP874LGviKG3FlR8n+Xx3RRVBydsjFJUrUiQZcw2LDTZKnPKGJICRB0KMPtH6DZtEcpoNYxFQ5NFJBmI04mIMpAopTNLuQ3y9E+3qwJw8NixzphX6FxhlRtreET11oKPzlqFCxRV5uMmnt4cGHdorFCSC7msOeS8nPq0JSJ45rQdngOuadbwNwdzmLclVghglz1w6VKAkLEiHPSJ42VS3sY9q6N4fcIJVaSMN8ZDFWa8Su6j8QKjKNITsy4luI+eBFCgSuqnPrlAFoadXQ+9sXI/u7fRDRp+euarAuC72trehNeaini6+Pd4LsD6Fot+p9D/FCq1CKIERqKtBDjhqdgkdBX1Joa8Qu2/OqVR1kbwg1Ml/HjMp6iRSkH6VYSTLEb6Lhsvn5Lrs66Kbx4uhmlze4+FN2d9xhemUDkxlbnEeL6kMUsyE9nYyppE4oLwI8q41F1v4SxTbtl2CIiWbon66UyhMBA+dNnb1QBQcsXCwIZ6p9viQKKzW6KVg0zBXOZ1KYY2r4iEkpZH2QxoYgSpSAqP8TT3IM/7ZLcGqMiEwo8dLrDGZ953bLiOG+Z7yfmexxWzybXrXrrPT5W+u49S+2kC18RAIq+n385hmvVEmRFQ5uO/0N1euWBjAzdHKkgxnyQFdROuY40wRs3gKBrakpraG8315Yr2aul1eXsXAPfe+0DSt8s9KOVW5BwVs0wzaylIRIKK8fKSyZmOsYa+/RIrQF1mlYkJ/yzr+fvX1zD3V4Ll40eLFC9kBVclRi6/lgEQBjjcpeX7y58yyeNHS3h1koBSfN1OHdBFCT1OEIhzWHWem3dCETbAkyiHzJTSudIUROkakobHCpTrXJhbyvfrmpp+8MEHY5c6hR/LT7xzz/Pm+qKGeuu+4irr8cN5NPGU1ufulrhzgrzJa55JhL58I0WPosqi6ItE4CLzsBxrX9eooS8J/OeJPJ46nkOU1F+m/fKn5H8xXgyVQ8/w75JrSB8JpuN0p6/umw3PEG/gwWlPAxlFhtG2MM0NUYRt66Se4M5bvClpU5Sd63uMQx4aydy3JrL4+lAMozVru4NS4ZbR0dHed4zlxbuEULlcHiGV/242m/vz6UK81rXbcOQkDfdLqFFKiCs2Dx9sNFAYNTM/J0nPZ08u4dfXxcPSNs0qUFKfz6gvJ7jiLiFlaFTYxGhe+yyLfS5UDj1c4Wz4M98udQufYdfT8xRVPGy9b3UtLI41k7VZ/UXwOmVxYJg4nWHNMOEybuhMfyYyHg9WedJcRBSuZmHCzGJshmtPFg7puv64YRgTlwOwPN3l98LrX9qy4XsFLX5bXVs3aw29NmJFufcVOknqUfnfdxLSfKeEpcVFRL0cbNdBqsaCGdGR83RGb3Eb8VeJERxW3gSAS1aGByJkR9muqNSwizwR9ql0k95xskqkrRRFFxdy4fgFxUSioQkOT6ECslD2XtV4FkkmSDyyiyV4DDqlcnHRnnwbdc0t9z21Z+/LHO6K9i4GLP8a6b3+DxvicUyeOWNxQWmi18ZKrzPwgnbTNLt0K9LOmZs1zUjF61LJ7GRGc7UoaptWs2KUAxH5nx+hKke8ZJBcXyJ7OI0YKgaKpOOa2U++hG8VsORZPiEBNMsYpNLHdT2PiyNvob49TaZpRdcpL7hObsYulSapXcY51AjXOuL7zoRbKE80tLTMpNfdga6uVIYAyIBXtHCKK+58iC+7tmyJZhOJOm5gc6x88Ut+rHYSVmLEJwAeKc49oXwVr6xEe0lRlaBTuccu4Y3KvcrEcmu5yf3wO99EBkvo48i6mb/42ZwW/5dIJDqk5/NzsdbW7JNPPlmZZPnhn+/PZRXw821l1boqAlUEqghUEagiUEWgikAVgSoCVQSqCFQRqCJQRaCKwKeCwP8BfTuDvi4jUIkAAAAASUVORK5CYII=" alt="NTNT Logo" /></span>
+                <span class="logo-icon"><img src="data:image/png;base64,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" alt="NTNT Logo" /></span>
                 <span class="logo-text">Intent <span>Studio</span></span>
             </div>
             <div class="header-file">
@@ -2829,6 +2946,20 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
                     
                     if (featureCard) {{
                         featureCard.classList.add(feature.passed ? 'passed' : 'failed');
+                        
+                        // Show warning if no implementation linked
+                        if (!feature.has_implementation) {{
+                            featureCard.classList.add('unlinked');
+                            // Add warning badge if not already present
+                            const header = featureCard.querySelector('.feature-header');
+                            if (header && !header.querySelector('.unlinked-warning')) {{
+                                const warningBadge = document.createElement('span');
+                                warningBadge.className = 'unlinked-warning';
+                                warningBadge.title = 'No @implements annotation found for this feature';
+                                warningBadge.textContent = '⚠️ No code linked';
+                                header.appendChild(warningBadge);
+                            }}
+                        }}
                     }}
                     if (featureStatus) {{
                         featureStatus.classList.add(feature.passed ? 'passed' : 'failed');
@@ -2848,10 +2979,12 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
                                 const iconEl = assertionEl.querySelector('.assertion-icon');
                                 iconEl.textContent = assertion.passed ? '✓' : '✗';
                                 
+                                // Remove any existing error message first
+                                const existing = assertionEl.querySelector('.assertion-message');
+                                if (existing) existing.remove();
+                                
                                 // Add error message if failed
                                 if (!assertion.passed && assertion.message) {{
-                                    const existing = assertionEl.querySelector('.assertion-message');
-                                    if (existing) existing.remove();
                                     const msgEl = document.createElement('div');
                                     msgEl.className = 'assertion-message';
                                     msgEl.textContent = assertion.message;
@@ -2868,19 +3001,29 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
                 const title = document.getElementById('results-title');
                 const text = document.getElementById('results-text');
                 
+                // Check for unlinked features
+                const unlinkedCount = results.total_features - results.linked_features;
+                const hasUnlinked = unlinkedCount > 0;
+                
                 summary.classList.add('visible');
-                if (failedCount === 0) {{
-                    summary.classList.remove('has-failures');
+                if (failedCount === 0 && !hasUnlinked) {{
+                    summary.classList.remove('has-failures', 'has-warnings');
                     summary.classList.add('all-passed');
                     icon.textContent = '✓';
                     title.textContent = 'All Tests Passed!';
-                    text.textContent = `${{passedCount}} assertions passed across ${{results.features.length}} features.`;
+                    text.textContent = `${{passedCount}} assertions passed across ${{results.features.length}} features. Coverage: ${{results.linked_features}}/${{results.total_features}} features linked.`;
+                }} else if (failedCount === 0 && hasUnlinked) {{
+                    summary.classList.remove('all-passed', 'has-failures');
+                    summary.classList.add('has-warnings');
+                    icon.textContent = '⚠';
+                    title.textContent = 'Tests Passed, But Missing Coverage';
+                    text.textContent = `${{passedCount}} assertions passed. Coverage: ${{results.linked_features}}/${{results.total_features}} features linked. Add @implements annotations to link code.`;
                 }} else {{
-                    summary.classList.remove('all-passed');
+                    summary.classList.remove('all-passed', 'has-warnings');
                     summary.classList.add('has-failures');
                     icon.textContent = '✗';
                     title.textContent = 'Some Tests Failed';
-                    text.textContent = `${{passedCount}} passed, ${{failedCount}} failed.`;
+                    text.textContent = `${{passedCount}} passed, ${{failedCount}} failed. Coverage: ${{results.linked_features}}/${{results.total_features}} features linked.`;
                 }}
                 
             }} catch (e) {{

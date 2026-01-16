@@ -303,6 +303,8 @@ pub struct Interpreter {
     main_source_file: Option<String>,
     /// Main source file last modification time
     main_source_mtime: Option<std::time::SystemTime>,
+    /// Flag to track if we're currently in a hot-reload evaluation
+    is_hot_reloading: bool,
 }
 
 /// Information about a trait definition
@@ -343,6 +345,7 @@ impl Interpreter {
             test_mode: None,
             main_source_file: None,
             main_source_mtime: None,
+            is_hot_reloading: false,
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
@@ -440,8 +443,11 @@ impl Interpreter {
         // Re-set the current file for imports
         self.current_file = Some(file_path.clone());
         
+        // Set hot-reload flag so listen() knows to skip re-binding
+        self.is_hot_reloading = true;
+        
         // Re-evaluate the AST
-        match self.eval(&ast) {
+        let result = match self.eval(&ast) {
             Ok(_) => {
                 // Update mtime
                 self.main_source_mtime = Some(current_mtime);
@@ -452,7 +458,11 @@ impl Interpreter {
                 eprintln!("[hot-reload] Evaluation error: {}", e);
                 false
             }
-        }
+        };
+        
+        // Clear hot-reload flag
+        self.is_hot_reloading = false;
+        result
     }
 
     fn define_builtins(&mut self) {
@@ -1994,6 +2004,10 @@ impl Interpreter {
                     
                     // Special handling for listen() - starts HTTP server
                     if name == "listen" && arguments.len() == 1 {
+                        // During hot-reload, skip listen() since server is already running
+                        if self.is_hot_reloading {
+                            return Ok(Value::Unit);
+                        }
                         let port = self.eval_expression(&arguments[0])?;
                         if let Value::Int(port_num) = port {
                             return self.run_http_server(port_num as u16);

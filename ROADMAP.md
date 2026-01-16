@@ -715,6 +715,33 @@ $ ntnt intent studio server.intent --port 4000 --app-port 9000
 - Intent Studio with WebSocket hot-reload for collaborative intent development
 - Applied to `snowgauge.tnt` and other examples
 
+### 6.11 Modular Intent Files (Future)
+
+- [ ] `@include` directive for importing features from other `.intent` files
+- [ ] Scoped feature IDs to prevent collisions across modules
+- [ ] Module-level constraints that apply to all included features
+- [ ] Selective imports: `@include "auth.intent" only [feature.login, feature.logout]`
+
+```intent
+# Main application intent file
+# Includes modules for large applications
+
+@include "modules/auth.intent"
+@include "modules/products.intent"
+@include "modules/checkout.intent" only [feature.cart, feature.payment]
+
+## Overview
+Full e-commerce platform composed from reusable intent modules.
+
+---
+
+Constraint: Global Rate Limiting
+  description: "All API endpoints are rate limited"
+  applies_to: [auth.*, products.*, checkout.*]
+```
+
+> **Note:** For most applications, a single `.intent` file with `## Module:` section headers is recommended. The `@include` directive is for very large projects or organizations that need to share intent modules across multiple applications.
+
 ---
 
 ## Phase 7: Testing Framework

@@ -101,6 +101,7 @@ pub struct FeatureResult {
     pub feature: Feature,
     pub passed: bool,
     pub test_results: Vec<TestResult>,
+    pub has_implementation: bool, // Whether any @implements annotation links to this feature
 }
 
 /// Result of running all intent checks
@@ -419,12 +420,26 @@ pub fn run_intent_check(
     // Collect results
     let test_results = results.lock().unwrap();
     
+    // Parse annotations from source to check for implementations
+    let annotations = parse_annotations(&source, &ntnt_path.to_string_lossy());
+    
     // Build feature results
     let mut feature_results: Vec<FeatureResult> = intent.features.iter().map(|f| {
+        let feature_id = f.id.clone().unwrap_or_else(|| {
+            f.name.to_lowercase().replace(' ', "_")
+        });
+        
+        // Check if any annotation implements this feature
+        let has_impl = annotations.iter().any(|a| {
+            a.kind == AnnotationKind::Implements && 
+            (a.id == feature_id || a.id == format!("feature.{}", feature_id))
+        });
+        
         FeatureResult {
             feature: f.clone(),
             passed: true,
             test_results: Vec::new(),
+            has_implementation: has_impl,
         }
     }).collect();
     
@@ -638,6 +653,8 @@ pub struct LiveTestResults {
     pub total_assertions: usize,
     pub passed_assertions: usize,
     pub failed_assertions: usize,
+    pub linked_features: usize,
+    pub total_features: usize,
 }
 
 /// Result for a single feature in live testing
@@ -647,6 +664,7 @@ pub struct LiveFeatureResult {
     pub feature_name: String,
     pub passed: bool,
     pub tests: Vec<LiveTestResult>,
+    pub has_implementation: bool,
 }
 
 /// Result for a single test in live testing
@@ -668,16 +686,28 @@ pub struct LiveAssertionResult {
 
 /// Run tests against an already-running server (no interpreter needed)
 /// Returns results in a format suitable for JSON serialization and UI display
-pub fn run_tests_against_server(intent: &IntentFile, port: u16) -> LiveTestResults {
+/// If source_content is provided, will check for @implements annotations
+pub fn run_tests_against_server(intent: &IntentFile, port: u16, source_content: Option<&str>) -> LiveTestResults {
     let mut feature_results = Vec::new();
     let mut total_assertions = 0;
     let mut passed_assertions = 0;
     let mut failed_assertions = 0;
     
+    // Parse annotations if source is provided
+    let annotations: Vec<Annotation> = source_content
+        .map(|src| parse_annotations(src, "source.tnt"))
+        .unwrap_or_default();
+    
     for feature in &intent.features {
         let feature_id = feature.id.clone().unwrap_or_else(|| "unknown".to_string());
         let mut test_results = Vec::new();
         let mut feature_passed = true;
+        
+        // Check if any annotation implements this feature
+        let has_impl = annotations.iter().any(|a| {
+            a.kind == AnnotationKind::Implements && 
+            (a.id == feature_id || a.id == format!("feature.{}", feature_id))
+        });
         
         for test in &feature.tests {
             let result = run_single_test(test, port);
@@ -716,20 +746,29 @@ pub fn run_tests_against_server(intent: &IntentFile, port: u16) -> LiveTestResul
             feature_name: feature.name.clone(),
             passed: feature_passed,
             tests: test_results,
+            has_implementation: has_impl,
         });
     }
+    
+    // Calculate coverage stats
+    let linked_features = feature_results.iter().filter(|f| f.has_implementation).count();
+    let total_features = feature_results.len();
     
     LiveTestResults {
         features: feature_results,
         total_assertions,
         passed_assertions,
         failed_assertions,
+        linked_features,
+        total_features,
     }
 }
 
 /// Print intent check results
 pub fn print_intent_results(result: &IntentCheckResult) {
     println!();
+    
+    let mut unlinked_features: Vec<&str> = Vec::new();
     
     for fr in &result.feature_results {
         // Feature header
@@ -738,6 +777,13 @@ pub fn print_intent_results(result: &IntentCheckResult) {
         
         if let Some(ref desc) = fr.feature.description {
             println!("  {}", desc.dimmed());
+        }
+        
+        // Show warning if no implementation linked
+        if !fr.has_implementation {
+            let feature_id = fr.feature.id.as_deref().unwrap_or("(no id)");
+            unlinked_features.push(feature_id);
+            println!("  {} {}", "⚠".yellow(), "No code linked to this feature".yellow());
         }
         
         // Test results
@@ -780,6 +826,16 @@ pub fn print_intent_results(result: &IntentCheckResult) {
     } else {
         println!("{}", summary.red().bold());
     }
+    
+    // Show unlinked features warning at the end
+    if !unlinked_features.is_empty() {
+        println!();
+        println!("{}", "⚠️  Warning: Some features have no linked code".yellow().bold());
+        println!("{}", "   Add @implements annotations to link code to features:".dimmed());
+        for id in &unlinked_features {
+            println!("     // @implements: {}", id);
+        }
+    }
 }
 
 /// Format an assertion for display
@@ -818,6 +874,53 @@ pub fn find_intent_file(ntnt_path: &Path) -> Option<std::path::PathBuf> {
     }
     
     None
+}
+
+/// Resolve both .intent and .tnt paths from either extension
+/// 
+/// This function accepts either a .tnt or .intent file and resolves both paths.
+/// Returns (intent_path, tnt_path) where:
+/// - intent_path is always the .intent file (if found)
+/// - tnt_path is always the .tnt file (if found)
+/// 
+/// This allows commands like `ntnt intent studio` and `ntnt intent check` 
+/// to work consistently with either file extension.
+pub fn resolve_intent_tnt_pair(input_path: &Path) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+    let parent = match input_path.parent() {
+        Some(p) => p,
+        None => return (None, None),
+    };
+    
+    let ext = input_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let stem = match input_path.file_stem() {
+        Some(s) => s.to_string_lossy().to_string(),
+        None => return (None, None),
+    };
+    
+    let (intent_path, tnt_path) = if ext == "tnt" {
+        // Input is .tnt, look for .intent
+        let intent = parent.join(format!("{}.intent", stem));
+        let tnt = input_path.to_path_buf();
+        (intent, tnt)
+    } else if ext == "intent" {
+        // Input is .intent, look for .tnt
+        let intent = input_path.to_path_buf();
+        let tnt = parent.join(format!("{}.tnt", stem));
+        (intent, tnt)
+    } else {
+        // Unknown extension, try both
+        let intent = parent.join(format!("{}.intent", stem));
+        let tnt = parent.join(format!("{}.tnt", stem));
+        (intent, tnt)
+    };
+    
+    let intent_exists = intent_path.exists();
+    let tnt_exists = tnt_path.exists();
+    
+    (
+        if intent_exists { Some(intent_path) } else { None },
+        if tnt_exists { Some(tnt_path) } else { None },
+    )
 }
 
 /// Parse annotations from NTNT source code
