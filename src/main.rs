@@ -225,9 +225,12 @@ enum IntentCommands {
     /// Creates a new .tnt file with function stubs and route
     /// registrations based on the intent specification.
     /// 
+    /// IMPORTANT: Always use -o flag to save to a file. Shell redirection
+    /// (>) may add incorrect encoding (BOM) on Windows, causing UTF-8 errors.
+    /// 
     /// Examples:
-    ///   ntnt intent init requirements.intent
     ///   ntnt intent init requirements.intent -o server.tnt
+    ///   ntnt intent init requirements.intent (prints to stdout)
     Init {
         /// The intent file to generate code from
         #[arg(value_name = "INTENT_FILE")]
@@ -1911,7 +1914,8 @@ fn run_intent_init_command(
     
     // Output
     if let Some(output) = output_path {
-        fs::write(output, &scaffolding)?;
+        // Write directly to file with explicit UTF-8 encoding (no BOM)
+        fs::write(output, scaffolding.as_bytes())?;
         println!("{}", format!("Generated {} from intent file", output.display()).green());
         println!();
         println!("Next steps:");
@@ -1919,7 +1923,11 @@ fn run_intent_init_command(
         println!("  2. Run {} to verify", format!("ntnt intent check {}", output.display()).cyan());
     } else {
         // Print to stdout
-        println!("{}", scaffolding);
+        print!("{}", scaffolding);
+        eprintln!();
+        eprintln!("{}", "⚠️  Note: When redirecting to a file, use -o flag instead:".yellow());
+        eprintln!("   {} {}", "ntnt intent init".cyan(), format!("{} -o output.tnt", intent_path.display()).cyan());
+        eprintln!("   Shell redirection (>) may add incorrect encoding (BOM) on Windows");
     }
     
     Ok(())

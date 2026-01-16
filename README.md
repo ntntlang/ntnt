@@ -1181,6 +1181,38 @@ Then restart VS Code. The extension provides:
 
 ---
 
+## Troubleshooting
+
+### UTF-8 Encoding Errors on Windows
+
+If you see "stream did not contain valid UTF-8" errors, the issue is likely a BOM (Byte Order Mark) in your `.tnt` files.
+
+**Cause:** Windows tools like PowerShell's `Out-File` and some text editors add BOMs by default. NTNT requires UTF-8 without BOM.
+
+**Solutions:**
+
+1. **When using `ntnt intent init`, always use `-o` flag:**
+   ```bash
+   ntnt intent init greeting.intent -o greeting.tnt  # ✅ Correct
+   ntnt intent init greeting.intent > greeting.tnt   # ❌ May add BOM
+   ```
+
+2. **Configure VS Code** (create/edit `.vscode/settings.json`):
+   ```json
+   {
+     "files.encoding": "utf8",
+     "files.autoGuessEncoding": false
+   }
+   ```
+
+3. **Fix existing files with PowerShell:**
+   ```powershell
+   $content = Get-Content file.tnt -Raw
+   [System.IO.File]::WriteAllText("file.tnt", $content, (New-Object System.Text.UTF8Encoding $false))
+   ```
+
+---
+
 ## Documentation
 
 - [Whitepaper](whitepaper.md) - Complete technical specification and motivation
