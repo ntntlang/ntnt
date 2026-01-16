@@ -31,6 +31,7 @@ Feature: Homepage
         - body contains "experimental"
         - body contains "Get Started"
         - body contains "Intent-Driven Development"
+        - body contains "Yessir!"
 
 Feature: Learn Page
   id: feature.learn_page

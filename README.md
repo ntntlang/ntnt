@@ -6,6 +6,36 @@ NTNT (pronounced "Intent") is an experimental Agent-Native programming language 
 
 ### Installation
 
+**macOS / Linux:**
+
+```bash
+curl -sSf https://raw.githubusercontent.com/ntntlang/ntnt/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/ntntlang/ntnt/main/install.ps1 | iex
+```
+
+This automatically installs Rust if needed, clones the repo, and builds NTNT.
+
+<details>
+<summary><b>Manual Installation</b></summary>
+
+**1. Install Rust (if you don't have it):**
+
+macOS/Linux:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+Windows: Download and run [rustup-init.exe](https://win.rustup.rs/x86_64)
+
+**2. Clone and build:**
+
 ```bash
 git clone https://github.com/ntntlang/ntnt.git
 cd ntnt
@@ -13,16 +43,54 @@ cargo build --release
 cargo install --path . --locked
 ```
 
-**For contributors/developers** (faster builds, ~2x speedup):
+**3. Verify installation:**
+
+```bash
+ntnt --version
+```
+
+If `ntnt` isn't found, add cargo's bin directory to your PATH:
+
+macOS/Linux:
+
+```bash
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Windows (PowerShell):
+
+```powershell
+[Environment]::SetEnvironmentVariable("PATH", "$env:USERPROFILE\.cargo\bin;$env:PATH", "User")
+```
+
+</details>
+
+<details>
+<summary><b>For Contributors (faster builds)</b></summary>
+
 ```bash
 cargo build --profile dev-release
 cargo install --path . --profile dev-release --locked
 ```
 
+This skips link-time optimization for ~2x faster builds.
+
+</details>
+
 ### Hello World
+
+**macOS / Linux:**
 
 ```bash
 echo 'print("Hello, World!")' > hello.tnt
+ntnt run hello.tnt
+```
+
+**Windows (PowerShell):**
+
+```powershell
+Set-Content -Path hello.tnt -Value 'print("Hello, World!")' -Encoding UTF8
 ntnt run hello.tnt
 ```
 

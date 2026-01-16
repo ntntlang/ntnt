@@ -5,6 +5,8 @@ import { html } from "std/http/server"
 
 // CSS styles
 let CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
 :root {
     --teal: #137EA2;
     --orange: #F1993F;
@@ -12,11 +14,14 @@ let CSS = """
     --navy: #192F52;
     --yellow: #FCDD83;
     --cyan: #20DDE3;
-    --bg: #fafbfc;
+    --bg: #f7fafc;
     --text: #1a1a2e;
     --text-muted: #5a5a7a;
-    --code-bg: #f4f4f8;
+    --code-bg: #1a1a2e;
     --border: #e1e4e8;
+    --card-bg: #ffffff;
+    --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
 }
 
 * {
@@ -26,23 +31,25 @@ let CSS = """
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
     background: var(--bg);
     color: var(--text);
     line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
 }
 
 a {
     color: var(--teal);
     text-decoration: none;
+    transition: color 0.2s;
 }
 
 a:hover {
-    text-decoration: underline;
+    color: var(--cyan);
 }
 
 .header {
-    background: rgba(25, 47, 82, 0.7);
+    background: rgba(25, 47, 82, 0.95);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     padding: 1rem 2rem;
@@ -67,12 +74,23 @@ a:hover {
     width: 48px;
     height: 48px;
     border-radius: 8px;
+    filter: drop-shadow(0 0 20px rgba(251, 186, 79, 0.3));
+    animation: float 6s ease-in-out infinite;
+}
+
+@keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-5px); }
 }
 
 .header h1 {
     color: white;
     font-size: 1.5rem;
-    font-weight: 600;
+    font-weight: 700;
+}
+
+.header h1 span {
+    color: var(--yellow);
 }
 
 .nav {
@@ -81,7 +99,7 @@ a:hover {
 }
 
 .nav a {
-    color: rgba(255,255,255,0.9);
+    color: rgba(255,255,255,0.8);
     font-weight: 500;
     transition: color 0.2s;
 }
@@ -92,33 +110,60 @@ a:hover {
 }
 
 .main {
-    max-width: 1200px;
+    max-width: 1100px;
     margin: 0 auto;
     padding: 2rem;
-    padding-top: 5rem;
+    padding-top: 6rem;
 }
 
 .hero {
     text-align: center;
-    padding: 8rem 2rem 5rem 2rem;
-    background: linear-gradient(135deg, var(--navy) 0%, var(--indigo) 100%);
+    padding: 8rem 2rem 6rem 2rem;
+    background: radial-gradient(circle at top right, var(--indigo) 0%, var(--navy) 100%);
     color: white;
     width: 100vw;
     margin-left: calc(-50vw + 50%);
+    margin-top: -6rem;
     position: relative;
+    overflow: hidden;
+}
+
+.hero-pattern {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-image: radial-gradient(rgba(255, 255, 255, 0.1) 1px, transparent 1px);
+    background-size: 30px 30px;
+    opacity: 0.3;
+}
+
+.hero-content {
+    position: relative;
+    z-index: 2;
+    max-width: 800px;
+    margin: 0 auto;
 }
 
 .hero h2 {
-    font-size: 3rem;
-    margin-bottom: 1rem;
-    font-weight: 700;
+    font-size: 3.5rem;
+    margin-bottom: 1.5rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    background: linear-gradient(135deg, #fff 0%, var(--cyan) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    line-height: 1.1;
 }
 
 .hero .tagline {
-    font-size: 1.25rem;
-    opacity: 0.9;
+    font-size: 1.3rem;
+    color: rgba(255, 255, 255, 0.85);
     max-width: 700px;
-    margin: 0 auto 2rem auto;
+    margin: 0 auto 2.5rem auto;
+    line-height: 1.7;
 }
 
 .cta-button {
@@ -126,107 +171,161 @@ a:hover {
     background: var(--orange);
     color: white;
     padding: 1rem 2.5rem;
-    border-radius: 8px;
+    border-radius: 10px;
     font-weight: 600;
     font-size: 1.1rem;
     transition: transform 0.2s, box-shadow 0.2s;
+    box-shadow: 0 4px 14px 0 rgba(241, 153, 63, 0.4);
 }
 
 .cta-button:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(241, 153, 63, 0.4);
+    transform: translateY(-2px) scale(1.02);
+    box-shadow: 0 8px 25px 0 rgba(241, 153, 63, 0.5);
     text-decoration: none;
+    color: white;
+}
+
+.cta-button.secondary {
+    background: rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    box-shadow: none;
+}
+
+.cta-button.secondary:hover {
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.3);
+    box-shadow: none;
 }
 
 .warning {
     background: var(--yellow);
     color: var(--navy);
     padding: 1rem 1.5rem;
-    border-radius: 8px;
+    border-radius: 12px;
     margin: 2rem 0;
     display: flex;
     align-items: center;
     gap: 0.75rem;
+    font-size: 0.95rem;
+    box-shadow: var(--shadow);
 }
 
 .section {
-    margin: 4rem 0;
+    margin: 5rem 0;
 }
 
 .section h3 {
-    font-size: 2rem;
+    font-size: 2.25rem;
     color: var(--navy);
-    margin-bottom: 1.5rem;
-    font-weight: 600;
+    margin-bottom: 1rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
 }
 
 .section-subtitle {
     color: var(--text-muted);
-    font-size: 1.1rem;
-    margin-bottom: 2rem;
+    font-size: 1.15rem;
+    margin-bottom: 2.5rem;
+    max-width: 600px;
 }
 
 .features {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 1.5rem;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 2rem;
     margin-top: 2rem;
 }
 
 .feature-card {
-    background: white;
+    background: var(--card-bg);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1.5rem;
-    transition: box-shadow 0.2s, transform 0.2s;
+    border-radius: 16px;
+    padding: 2rem;
+    transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    position: relative;
+    overflow: hidden;
 }
 
 .feature-card:hover {
-    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-    transform: translateY(-2px);
+    transform: translateY(-8px);
+    box-shadow: var(--shadow-lg);
+    border-color: var(--teal);
 }
 
 .feature-card h4 {
     color: var(--indigo);
-    font-size: 1.25rem;
+    font-size: 1.35rem;
     margin-bottom: 0.75rem;
+    font-weight: 700;
 }
 
 .feature-card p {
     color: var(--text-muted);
     font-size: 0.95rem;
+    line-height: 1.6;
 }
+
+/* Code Blocks */
+.code-window {
+    background: var(--code-bg);
+    border-radius: 12px;
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+    margin: 1.5rem 0;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.window-header {
+    background: #151525;
+    padding: 0.75rem 1rem;
+    display: flex;
+    gap: 0.5rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+}
+.red { background: #ff5f56; }
+.yellow { background: #ffbd2e; }
+.green { background: #27c93f; }
 
 pre {
     background: var(--code-bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 12px;
     padding: 1.5rem;
     overflow-x: auto;
-    font-family: 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-family: 'JetBrains Mono', 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
     font-size: 0.9rem;
-    line-height: 1.5;
+    line-height: 1.6;
+    color: #e2e8f0;
+    box-shadow: var(--shadow);
 }
 
 code {
-    font-family: 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
-    background: var(--code-bg);
-    padding: 0.2rem 0.4rem;
-    border-radius: 4px;
+    font-family: 'JetBrains Mono', 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
+    background: rgba(25, 47, 82, 0.1);
+    padding: 0.2rem 0.5rem;
+    border-radius: 6px;
     font-size: 0.9em;
+    color: var(--indigo);
 }
 
 pre code {
     background: none;
     padding: 0;
+    color: #e2e8f0;
 }
 
 .footer {
     background: var(--navy);
     color: rgba(255,255,255,0.7);
-    padding: 2rem;
+    padding: 3rem 2rem;
     text-align: center;
-    margin-top: 4rem;
+    margin-top: 5rem;
 }
 
 .footer a {
@@ -241,46 +340,72 @@ pre code {
 }
 
 .why-item {
-    background: white;
+    background: var(--card-bg);
     border-left: 4px solid var(--teal);
-    padding: 1.5rem;
-    border-radius: 0 8px 8px 0;
+    padding: 1.75rem;
+    border-radius: 0 12px 12px 0;
+    box-shadow: var(--shadow);
+    transition: transform 0.3s, box-shadow 0.3s;
+}
+
+.why-item:hover {
+    transform: translateX(4px);
+    box-shadow: var(--shadow-lg);
 }
 
 .why-item h4 {
     color: var(--navy);
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.75rem;
+    font-weight: 700;
+    font-size: 1.15rem;
+}
+
+.why-item p {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    line-height: 1.6;
 }
 
 .learn-section {
-    background: white;
+    background: var(--card-bg);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 2rem;
-    margin: 2rem 0;
+    border-radius: 16px;
+    padding: 2.5rem;
+    margin: 2.5rem 0;
+    box-shadow: var(--shadow);
 }
 
 .learn-section h4 {
     color: var(--indigo);
     font-size: 1.5rem;
-    margin-bottom: 1rem;
+    margin-bottom: 1.5rem;
+    font-weight: 700;
 }
 
 .step {
-    margin: 1.5rem 0;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin: 1.5rem 0 0.75rem 0;
 }
 
 .step-number {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     background: var(--teal);
     color: white;
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     border-radius: 50%;
-    text-align: center;
-    line-height: 28px;
-    font-weight: 600;
-    margin-right: 0.75rem;
+    font-weight: 700;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+}
+
+.step strong {
+    color: var(--navy);
+    font-size: 1.05rem;
 }
 
 .blog-list {
@@ -290,25 +415,34 @@ pre code {
 }
 
 .blog-card {
-    background: white;
+    background: var(--card-bg);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 1.5rem;
-    transition: box-shadow 0.2s;
+    border-radius: 16px;
+    padding: 2rem;
+    transition: all 0.3s;
+    box-shadow: var(--shadow);
 }
 
 .blog-card:hover {
-    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    transform: translateY(-4px);
+    box-shadow: var(--shadow-lg);
+    border-color: var(--teal);
 }
 
 .blog-card h4 {
     color: var(--navy);
-    font-size: 1.25rem;
+    font-size: 1.35rem;
     margin-bottom: 0.5rem;
+    font-weight: 700;
 }
 
 .blog-card h4 a {
     color: inherit;
+    transition: color 0.2s;
+}
+
+.blog-card h4 a:hover {
+    color: var(--teal);
 }
 
 .blog-meta {
@@ -319,19 +453,22 @@ pre code {
 
 .blog-excerpt {
     color: var(--text-muted);
+    line-height: 1.6;
 }
 
 .blog-post {
-    background: white;
+    background: var(--card-bg);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 2rem;
+    border-radius: 16px;
+    padding: 2.5rem;
+    box-shadow: var(--shadow);
 }
 
 .blog-post h2 {
     color: var(--navy);
-    font-size: 2rem;
+    font-size: 2.25rem;
     margin-bottom: 0.5rem;
+    font-weight: 700;
 }
 
 .blog-post .content {
@@ -340,41 +477,96 @@ pre code {
 
 .blog-post .content h3 {
     color: var(--indigo);
-    margin-top: 2rem;
+    margin-top: 2.5rem;
     margin-bottom: 1rem;
+    font-size: 1.5rem;
+    font-weight: 700;
 }
 
 .blog-post .content p {
-    margin-bottom: 1rem;
+    margin-bottom: 1.25rem;
+    color: var(--text-muted);
+    line-height: 1.7;
 }
 
 .blog-post .content ul,
 .blog-post .content ol {
-    margin: 1rem 0 1rem 2rem;
+    margin: 1rem 0 1.5rem 2rem;
+    color: var(--text-muted);
+    line-height: 1.7;
+}
+
+.blog-post .content li {
+    margin-bottom: 0.5rem;
 }
 
 .back-link {
-    display: inline-block;
-    margin-bottom: 1.5rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 2rem;
     color: var(--teal);
+    font-weight: 500;
+    transition: transform 0.2s;
+}
+
+.back-link:hover {
+    transform: translateX(-4px);
+}
+
+/* CTA Section */
+.cta-section {
+    background: radial-gradient(circle at top right, var(--indigo) 0%, var(--navy) 100%);
+    border-radius: 20px;
+    padding: 4rem 2rem;
+    text-align: center;
+    color: white;
+    margin: 4rem 0;
+    position: relative;
+    overflow: hidden;
+}
+
+.cta-section h3 {
+    color: white;
+    margin-bottom: 1rem;
+}
+
+.cta-section p {
+    color: rgba(255, 255, 255, 0.8);
+    max-width: 500px;
+    margin: 0 auto 2rem;
 }
 
 @media (max-width: 768px) {
     .header {
         flex-direction: column;
         gap: 1rem;
+        padding: 1rem;
     }
     
-    .hero h2 {
-        font-size: 2rem;
+    .nav {
+        gap: 1rem;
     }
     
     .hero {
-        padding: 2rem 1rem;
+        padding: 6rem 1.5rem 4rem 1.5rem;
+    }
+    
+    .hero h2 {
+        font-size: 2.25rem;
+    }
+    
+    .hero .tagline {
+        font-size: 1.1rem;
     }
     
     .main {
-        padding: 1rem;
+        padding: 1.5rem;
+        padding-top: 8rem;
+    }
+    
+    .section h3 {
+        font-size: 1.75rem;
     }
     
     .features {
@@ -383,6 +575,14 @@ pre code {
     
     .why-grid {
         grid-template-columns: 1fr;
+    }
+    
+    .learn-section {
+        padding: 1.5rem;
+    }
+    
+    .blog-post {
+        padding: 1.5rem;
     }
 }
 """
@@ -403,7 +603,7 @@ fn wrap_page(content) {
     <header class="header">
         <div class="header-left">
             <a href="/"><img src="/assets/ntnt-logo-lofi-square.png" alt="NTNT Logo" class="logo"></a>
-            <h1>NTNT</h1>
+            <h1><span>NTNT</span></h1>
         </div>
         <nav class="nav">
             <a href="/">Home</a>
@@ -420,7 +620,7 @@ fn wrap_page(content) {
     </main>
     
     <footer class="footer">
-        <p>NTNT Programming Language - <a href="https://github.com/ntntlang/ntnt">GitHub</a> - MIT License</p>
+        <p>NTNT Programming Language &copy; 2026 &nbsp;|&nbsp; <a href="https://github.com/ntntlang/ntnt">GitHub</a> &nbsp;|&nbsp; MIT + Apache 2.0 License</p>
     </footer>
 </body>
 </html>"""
@@ -443,12 +643,18 @@ use_middleware(logger)
 fn home_page(req) {
     let content = """
 <section class="hero">
-    <h2>The NTNT Programming Language</h2>
-    <p class="tagline">
-        An experimental Agent-Native language where human intent becomes executable specification.
-        AI agents implement. The system verifies. Full traceability from requirement to code.
-    </p>
-    <a href="https://github.com/ntntlang/ntnt" class="cta-button">Get Started</a>
+    <div class="hero-pattern"></div>
+    <div class="hero-content">
+        <h2>The NTNT Programming Language</h2>
+        <p class="tagline">
+            An experimental Agent-Native language where human intent becomes executable specification.
+            AI agents implement. The system verifies. Full traceability from requirement to code. Yessir!
+        </p>
+        <div style="display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap;">
+            <a href="https://github.com/ntntlang/ntnt" class="cta-button">Get Started</a>
+            <a href="/learn" class="cta-button secondary">Learn More</a>
+        </div>
+    </div>
 </section>
 
 <div class="warning">
@@ -534,10 +740,10 @@ listen(3000)</code></pre>
     </div>
 </section>
 
-<section class="section" style="text-align: center;">
+<section class="cta-section">
     <h3>Ready to Explore?</h3>
-    <p class="section-subtitle">Check out the documentation and try NTNT for yourself.</p>
-    <a href="/learn" class="cta-button" style="background: var(--teal);">Learn NTNT</a>
+    <p>Check out the documentation and try NTNT for yourself.</p>
+    <a href="/learn" class="cta-button">Learn NTNT</a>
 </section>
 """
     
