@@ -132,10 +132,12 @@ Constraint: Constraint Name
 ### File Linking: How `.intent` and `.tnt` Files Connect
 
 Intent files are linked to source files **by filename**:
+
 - `server.tnt` ↔ `server.intent`
 - `crypto.tnt` ↔ `crypto.intent`
 
 All `ntnt intent` commands work with either file extension:
+
 ```bash
 ntnt intent check server.tnt      # Finds server.intent automatically
 ntnt intent check server.intent   # Finds server.tnt automatically

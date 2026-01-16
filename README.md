@@ -13,6 +13,12 @@ cargo build --release
 cargo install --path . --locked
 ```
 
+**For contributors/developers** (faster builds, ~2x speedup):
+```bash
+cargo build --profile dev-release
+cargo install --path . --profile dev-release --locked
+```
+
 ### Hello World
 
 ```bash

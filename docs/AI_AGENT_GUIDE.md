@@ -146,11 +146,13 @@ Constraint: Constraint Name
 ### File Linking: How `.intent` and `.tnt` Files Connect
 
 Intent files are linked to source files **by filename**:
+
 - `server.tnt` ↔ `server.intent`
 - `crypto.tnt` ↔ `crypto.intent`
 - `myapp.tnt` ↔ `myapp.intent`
 
 All `ntnt intent` commands work with either file extension:
+
 ```bash
 # These are equivalent:
 ntnt intent check server.tnt      # Finds server.intent automatically
@@ -239,6 +241,7 @@ Feature: Add to Cart
 ```
 
 **When you might use separate files:**
+
 - Truly independent microservices with separate deployments
 - Different teams owning different services
 - Separate test suites that never run together

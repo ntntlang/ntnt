@@ -63,3 +63,10 @@ path = "src/main.rs"
 [profile.release]
 opt-level = 3
 lto = true
+
+# Fast release builds for development testing (no LTO)
+# Usage: cargo build --profile dev-release
+[profile.dev-release]
+inherits = "release"
+lto = false
+incremental = true

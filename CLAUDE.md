@@ -6,6 +6,20 @@ This file provides instructions for Claude when working with NTNT (.tnt) code fi
 
 NTNT (pronounced "Intent") is an agent-native programming language designed for AI-driven web application development. File extension: `.tnt`
 
+## Building NTNT
+
+```bash
+# Standard release build (for distribution)
+cargo build --release
+cargo install --path . --locked
+
+# Fast dev-release build (for development, ~2x faster)
+cargo build --profile dev-release
+cargo install --path . --profile dev-release --locked
+```
+
+Use `dev-release` when iterating on the compiler. Use `release` for final builds.
+
 ## ⚠️ MANDATORY: Always Lint Before Run
 
 **Before running ANY `.tnt` file, run lint first:**
@@ -91,10 +105,12 @@ Constraint: Constraint Name
 ### File Linking: How `.intent` and `.tnt` Files Connect
 
 Intent files are linked to source files **by filename**:
+
 - `server.tnt` ↔ `server.intent`
 - `crypto.tnt` ↔ `crypto.intent`
 
 All `ntnt intent` commands work with either file extension:
+
 ```bash
 ntnt intent check server.tnt      # Finds server.intent automatically
 ntnt intent check server.intent   # Finds server.tnt automatically
