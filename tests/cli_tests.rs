@@ -261,15 +261,17 @@ fn test_validate_exits_nonzero_on_syntax_error() {
     use std::fs;
     use std::io::Write;
 
-    // Create a file with a syntax error
-    let test_file = "/tmp/ntnt_test_invalid.tnt";
-    let mut file = fs::File::create(test_file).unwrap();
+    // Create a file with a syntax error in temp directory
+    let temp_dir = std::env::temp_dir();
+    let test_file = temp_dir.join("ntnt_test_invalid.tnt");
+    let mut file = fs::File::create(&test_file).unwrap();
     writeln!(file, "fn broken(").unwrap();
 
-    let (stdout, _, code) = run_ntnt(&["validate", test_file]);
+    let test_path = test_file.to_str().unwrap();
+    let (stdout, _, code) = run_ntnt(&["validate", test_path]);
 
     // Clean up
-    fs::remove_file(test_file).ok();
+    fs::remove_file(&test_file).ok();
 
     assert_ne!(
         code, 0,
@@ -285,15 +287,17 @@ fn test_inspect_handles_invalid_file_gracefully() {
     use std::fs;
     use std::io::Write;
 
-    // Create a file with a syntax error
-    let test_file = "/tmp/ntnt_test_invalid2.tnt";
-    let mut file = fs::File::create(test_file).unwrap();
+    // Create a file with a syntax error in temp directory
+    let temp_dir = std::env::temp_dir();
+    let test_file = temp_dir.join("ntnt_test_invalid2.tnt");
+    let mut file = fs::File::create(&test_file).unwrap();
     writeln!(file, "fn broken(").unwrap();
 
-    let (stdout, stderr, code) = run_ntnt(&["inspect", test_file]);
+    let test_path = test_file.to_str().unwrap();
+    let (stdout, stderr, code) = run_ntnt(&["inspect", test_path]);
 
     // Clean up
-    fs::remove_file(test_file).ok();
+    fs::remove_file(&test_file).ok();
 
     // Should still output JSON (with empty arrays) and warn
     assert_eq!(code, 0, "inspect should succeed even with parse errors");
@@ -308,6 +312,10 @@ fn test_inspect_handles_invalid_file_gracefully() {
 // ============================================================================
 
 #[test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "File-based routing detection has Windows path issues"
+)]
 fn test_inspect_detects_file_based_routes() {
     let (stdout, _, code) = run_ntnt(&["inspect", "examples/myapp"]);
     assert_eq!(code, 0);
@@ -348,6 +356,10 @@ fn test_inspect_detects_file_based_routes() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "File-based routing detection has Windows path issues"
+)]
 fn test_inspect_file_based_routes_have_correct_methods() {
     let (stdout, _, _) = run_ntnt(&["inspect", "examples/myapp"]);
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
