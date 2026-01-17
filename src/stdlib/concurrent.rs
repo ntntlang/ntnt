@@ -38,17 +38,17 @@
 //! ])
 //! ```
 
+use crate::error::IntentError;
+use crate::interpreter::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use crate::interpreter::Value;
-use crate::error::IntentError;
 
 type Result<T> = std::result::Result<T, IntentError>;
 
 // Global registry for channels - using thread-safe value serialization
-static CHANNEL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, ChannelPair>>> = 
+static CHANNEL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, ChannelPair>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 static CHANNEL_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -110,7 +110,7 @@ impl SerializedValue {
             )),
         }
     }
-    
+
     /// Convert back to Value
     fn to_value(&self) -> Value {
         match self {
@@ -119,14 +119,15 @@ impl SerializedValue {
             SerializedValue::Float(f) => Value::Float(*f),
             SerializedValue::Bool(b) => Value::Bool(*b),
             SerializedValue::String(s) => Value::String(s.clone()),
-            SerializedValue::Array(arr) => {
-                Value::Array(arr.iter().map(|v| v.to_value()).collect())
-            }
+            SerializedValue::Array(arr) => Value::Array(arr.iter().map(|v| v.to_value()).collect()),
             SerializedValue::Map(map) => {
                 // Check for special __enum marker
                 if let Some(SerializedValue::String(enum_name)) = map.get("__enum") {
-                    if let (Some(SerializedValue::String(variant)), Some(SerializedValue::Array(values))) = 
-                        (map.get("__variant"), map.get("__values")) {
+                    if let (
+                        Some(SerializedValue::String(variant)),
+                        Some(SerializedValue::Array(values)),
+                    ) = (map.get("__variant"), map.get("__values"))
+                    {
                         return Value::EnumValue {
                             enum_name: enum_name.clone(),
                             variant: variant.clone(),
@@ -192,17 +193,17 @@ fn get_channel_id(ch: &Value) -> Result<u64> {
 fn concurrent_channel() -> Result<Value> {
     let (tx, rx) = mpsc::channel();
     let id = CHANNEL_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    
+
     let pair = ChannelPair {
         sender: tx,
         receiver: Arc::new(Mutex::new(rx)),
         closed: Arc::new(Mutex::new(false)),
     };
-    
+
     if let Ok(mut registry) = CHANNEL_REGISTRY.lock() {
         registry.insert(id, pair);
     }
-    
+
     Ok(create_channel_value(id))
 }
 
@@ -211,19 +212,20 @@ fn concurrent_channel() -> Result<Value> {
 fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
     let id = get_channel_id(ch)?;
     let serialized = SerializedValue::from_value(value)?;
-    
-    let registry = CHANNEL_REGISTRY.lock()
+
+    let registry = CHANNEL_REGISTRY
+        .lock()
         .map_err(|e| IntentError::RuntimeError(format!("Failed to lock registry: {}", e)))?;
-    
+
     if let Some(pair) = registry.get(&id) {
         // Check if closed
         if *pair.closed.lock().unwrap() {
             return Ok(Value::Bool(false));
         }
-        
+
         match pair.sender.send(serialized) {
             Ok(_) => Ok(Value::Bool(true)),
-            Err(_) => Ok(Value::Bool(false)),  // Receiver dropped
+            Err(_) => Ok(Value::Bool(false)), // Receiver dropped
         }
     } else {
         Err(IntentError::RuntimeError("Invalid channel".to_string()))
@@ -235,24 +237,26 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
 /// Returns Unit if channel is closed and empty.
 fn concurrent_recv(ch: &Value) -> Result<Value> {
     let id = get_channel_id(ch)?;
-    
+
     let receiver = {
-        let registry = CHANNEL_REGISTRY.lock()
+        let registry = CHANNEL_REGISTRY
+            .lock()
             .map_err(|e| IntentError::RuntimeError(format!("Failed to lock registry: {}", e)))?;
-        
+
         if let Some(pair) = registry.get(&id) {
             Arc::clone(&pair.receiver)
         } else {
             return Err(IntentError::RuntimeError("Invalid channel".to_string()));
         }
     };
-    
-    let rx = receiver.lock()
+
+    let rx = receiver
+        .lock()
         .map_err(|e| IntentError::RuntimeError(format!("Failed to lock receiver: {}", e)))?;
-    
+
     match rx.recv() {
         Ok(serialized) => Ok(serialized.to_value()),
-        Err(_) => Ok(Value::Unit),  // Channel closed
+        Err(_) => Ok(Value::Unit), // Channel closed
     }
 }
 
@@ -260,21 +264,23 @@ fn concurrent_recv(ch: &Value) -> Result<Value> {
 /// Receives a value with timeout. Returns None if timeout expires.
 fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
     let id = get_channel_id(ch)?;
-    
+
     let receiver = {
-        let registry = CHANNEL_REGISTRY.lock()
+        let registry = CHANNEL_REGISTRY
+            .lock()
             .map_err(|e| IntentError::RuntimeError(format!("Failed to lock registry: {}", e)))?;
-        
+
         if let Some(pair) = registry.get(&id) {
             Arc::clone(&pair.receiver)
         } else {
             return Err(IntentError::RuntimeError("Invalid channel".to_string()));
         }
     };
-    
-    let rx = receiver.lock()
+
+    let rx = receiver
+        .lock()
         .map_err(|e| IntentError::RuntimeError(format!("Failed to lock receiver: {}", e)))?;
-    
+
     match rx.recv_timeout(Duration::from_millis(timeout_ms as u64)) {
         Ok(serialized) => Ok(Value::EnumValue {
             enum_name: "Option".to_string(),
@@ -298,21 +304,23 @@ fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
 /// Non-blocking receive. Returns None if no value is available.
 fn concurrent_try_recv(ch: &Value) -> Result<Value> {
     let id = get_channel_id(ch)?;
-    
+
     let receiver = {
-        let registry = CHANNEL_REGISTRY.lock()
+        let registry = CHANNEL_REGISTRY
+            .lock()
             .map_err(|e| IntentError::RuntimeError(format!("Failed to lock registry: {}", e)))?;
-        
+
         if let Some(pair) = registry.get(&id) {
             Arc::clone(&pair.receiver)
         } else {
             return Err(IntentError::RuntimeError("Invalid channel".to_string()));
         }
     };
-    
-    let rx = receiver.lock()
+
+    let rx = receiver
+        .lock()
         .map_err(|e| IntentError::RuntimeError(format!("Failed to lock receiver: {}", e)))?;
-    
+
     match rx.try_recv() {
         Ok(serialized) => Ok(Value::EnumValue {
             enum_name: "Option".to_string(),
@@ -336,10 +344,11 @@ fn concurrent_try_recv(ch: &Value) -> Result<Value> {
 /// Closes a channel. Senders will fail, receivers will get remaining messages then Unit.
 fn concurrent_close(ch: &Value) -> Result<Value> {
     let id = get_channel_id(ch)?;
-    
-    let registry = CHANNEL_REGISTRY.lock()
+
+    let registry = CHANNEL_REGISTRY
+        .lock()
         .map_err(|e| IntentError::RuntimeError(format!("Failed to lock registry: {}", e)))?;
-    
+
     if let Some(pair) = registry.get(&id) {
         let mut closed = pair.closed.lock().unwrap();
         *closed = true;
@@ -361,88 +370,114 @@ fn concurrent_sleep_ms(ms: i64) -> Result<Value> {
 /// thread_count() -> Int
 /// Returns the number of available CPU threads (useful for parallel work decisions)
 fn concurrent_thread_count() -> Result<Value> {
-    Ok(Value::Int(thread::available_parallelism()
-        .map(|n| n.get() as i64)
-        .unwrap_or(1)))
+    Ok(Value::Int(
+        thread::available_parallelism()
+            .map(|n| n.get() as i64)
+            .unwrap_or(1),
+    ))
 }
 
 /// Initialize the std/concurrent module
 pub fn init() -> HashMap<String, Value> {
     let mut module = HashMap::new();
-    
+
     // channel() -> Channel
-    module.insert("channel".to_string(), Value::NativeFunction {
-        name: "channel".to_string(),
-        arity: 0,
-        func: |_args| concurrent_channel(),
-    });
-    
+    module.insert(
+        "channel".to_string(),
+        Value::NativeFunction {
+            name: "channel".to_string(),
+            arity: 0,
+            func: |_args| concurrent_channel(),
+        },
+    );
+
     // send(channel, value) -> Bool
-    module.insert("send".to_string(), Value::NativeFunction {
-        name: "send".to_string(),
-        arity: 2,
-        func: |args| concurrent_send(&args[0], &args[1]),
-    });
-    
+    module.insert(
+        "send".to_string(),
+        Value::NativeFunction {
+            name: "send".to_string(),
+            arity: 2,
+            func: |args| concurrent_send(&args[0], &args[1]),
+        },
+    );
+
     // recv(channel) -> Value
-    module.insert("recv".to_string(), Value::NativeFunction {
-        name: "recv".to_string(),
-        arity: 1,
-        func: |args| concurrent_recv(&args[0]),
-    });
-    
+    module.insert(
+        "recv".to_string(),
+        Value::NativeFunction {
+            name: "recv".to_string(),
+            arity: 1,
+            func: |args| concurrent_recv(&args[0]),
+        },
+    );
+
     // recv_timeout(channel, millis) -> Option<Value>
-    module.insert("recv_timeout".to_string(), Value::NativeFunction {
-        name: "recv_timeout".to_string(),
-        arity: 2,
-        func: |args| {
-            match &args[1] {
+    module.insert(
+        "recv_timeout".to_string(),
+        Value::NativeFunction {
+            name: "recv_timeout".to_string(),
+            arity: 2,
+            func: |args| match &args[1] {
                 Value::Int(ms) => concurrent_recv_timeout(&args[0], *ms),
-                _ => Err(IntentError::TypeError("recv_timeout requires (channel, int_millis)".to_string())),
-            }
+                _ => Err(IntentError::TypeError(
+                    "recv_timeout requires (channel, int_millis)".to_string(),
+                )),
+            },
         },
-    });
-    
+    );
+
     // try_recv(channel) -> Option<Value>
-    module.insert("try_recv".to_string(), Value::NativeFunction {
-        name: "try_recv".to_string(),
-        arity: 1,
-        func: |args| concurrent_try_recv(&args[0]),
-    });
-    
-    // close(channel) -> Bool
-    module.insert("close".to_string(), Value::NativeFunction {
-        name: "close".to_string(),
-        arity: 1,
-        func: |args| concurrent_close(&args[0]),
-    });
-    
-    // sleep_ms(millis) -> Unit  
-    module.insert("sleep_ms".to_string(), Value::NativeFunction {
-        name: "sleep_ms".to_string(),
-        arity: 1,
-        func: |args| {
-            match &args[0] {
-                Value::Int(ms) => concurrent_sleep_ms(*ms),
-                _ => Err(IntentError::TypeError("sleep_ms requires an integer".to_string())),
-            }
+    module.insert(
+        "try_recv".to_string(),
+        Value::NativeFunction {
+            name: "try_recv".to_string(),
+            arity: 1,
+            func: |args| concurrent_try_recv(&args[0]),
         },
-    });
-    
+    );
+
+    // close(channel) -> Bool
+    module.insert(
+        "close".to_string(),
+        Value::NativeFunction {
+            name: "close".to_string(),
+            arity: 1,
+            func: |args| concurrent_close(&args[0]),
+        },
+    );
+
+    // sleep_ms(millis) -> Unit
+    module.insert(
+        "sleep_ms".to_string(),
+        Value::NativeFunction {
+            name: "sleep_ms".to_string(),
+            arity: 1,
+            func: |args| match &args[0] {
+                Value::Int(ms) => concurrent_sleep_ms(*ms),
+                _ => Err(IntentError::TypeError(
+                    "sleep_ms requires an integer".to_string(),
+                )),
+            },
+        },
+    );
+
     // thread_count() -> Int
-    module.insert("thread_count".to_string(), Value::NativeFunction {
-        name: "thread_count".to_string(),
-        arity: 0,
-        func: |_args| concurrent_thread_count(),
-    });
-    
+    module.insert(
+        "thread_count".to_string(),
+        Value::NativeFunction {
+            name: "thread_count".to_string(),
+            arity: 0,
+            func: |_args| concurrent_thread_count(),
+        },
+    );
+
     module
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_module_init() {
         let module = init();
@@ -455,30 +490,30 @@ mod tests {
         assert!(module.contains_key("sleep_ms"));
         assert!(module.contains_key("thread_count"));
     }
-    
+
     #[test]
     fn test_channel_creation() {
         let ch = concurrent_channel().unwrap();
         assert!(matches!(ch, Value::Map(_)));
     }
-    
+
     #[test]
     fn test_channel_send_recv() {
         let ch = concurrent_channel().unwrap();
-        
+
         // Send a value
         let sent = concurrent_send(&ch, &Value::String("hello".to_string())).unwrap();
         assert!(matches!(sent, Value::Bool(true)));
-        
+
         // Receive it
         let received = concurrent_recv(&ch).unwrap();
         assert!(matches!(received, Value::String(s) if s == "hello"));
     }
-    
+
     #[test]
     fn test_try_recv_empty() {
         let ch = concurrent_channel().unwrap();
-        
+
         // Try receive on empty channel
         let result = concurrent_try_recv(&ch).unwrap();
         match result {
@@ -486,7 +521,7 @@ mod tests {
             _ => panic!("Expected Option::None"),
         }
     }
-    
+
     #[test]
     fn test_serialization_round_trip() {
         // Test primitive types
@@ -497,7 +532,7 @@ mod tests {
             Value::String("test".to_string()),
             Value::Unit,
         ];
-        
+
         for val in values {
             let serialized = SerializedValue::from_value(&val).unwrap();
             let deserialized = serialized.to_value();
@@ -512,7 +547,7 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_thread_count() {
         let count = concurrent_thread_count().unwrap();

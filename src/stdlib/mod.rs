@@ -6,24 +6,24 @@
 //! import { sin, cos, PI } from "std/math"
 //! ```
 
-pub mod string;
-pub mod math;
 pub mod collections;
+pub mod concurrent;
+pub mod crypto;
+pub mod csv;
 pub mod env;
 pub mod fs;
-pub mod path;
-pub mod json;
-pub mod time;
-pub mod crypto;
-pub mod url;
 pub mod http;
 pub mod http_server;
+pub mod json;
+pub mod math;
+pub mod path;
 pub mod postgres;
-pub mod concurrent;
-pub mod csv;
+pub mod string;
+pub mod time;
+pub mod url;
 
-use std::collections::HashMap;
 use crate::interpreter::Value;
+use std::collections::HashMap;
 
 /// Type alias for stdlib module initialization functions
 pub type StdlibModule = HashMap<String, Value>;
@@ -31,7 +31,7 @@ pub type StdlibModule = HashMap<String, Value>;
 /// Initialize all standard library modules
 pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     let mut modules = HashMap::new();
-    
+
     modules.insert("std/string".to_string(), string::init());
     modules.insert("std/math".to_string(), math::init());
     modules.insert("std/collections".to_string(), collections::init());
@@ -47,6 +47,6 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/db/postgres".to_string(), postgres::init());
     modules.insert("std/concurrent".to_string(), concurrent::init());
     modules.insert("std/csv".to_string(), csv::init());
-    
+
     modules
 }

@@ -1,8 +1,8 @@
 //! std/json module - JSON parsing and stringification
 
-use std::collections::HashMap;
-use crate::interpreter::Value;
 use crate::error::IntentError;
+use crate::interpreter::Value;
+use std::collections::HashMap;
 
 /// Convert JSON value to Intent Value
 pub fn json_to_intent_value(json: &serde_json::Value) -> Value {
@@ -38,11 +38,9 @@ pub fn intent_value_to_json(value: &Value) -> serde_json::Value {
         Value::Unit => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
-        Value::Float(f) => {
-            serde_json::Number::from_f64(*f)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null)
-        }
+        Value::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
         Value::String(s) => serde_json::Value::String(s.clone()),
         Value::Array(arr) => {
             serde_json::Value::Array(arr.iter().map(intent_value_to_json).collect())
@@ -69,13 +67,14 @@ pub fn intent_value_to_json(value: &Value) -> serde_json::Value {
 /// Initialize the std/json module
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
-    
+
     // parse(json_str) -> Result<Value, Error>
-    module.insert("parse".to_string(), Value::NativeFunction {
-        name: "parse".to_string(),
-        arity: 1,
-        func: |args| {
-            match &args[0] {
+    module.insert(
+        "parse".to_string(),
+        Value::NativeFunction {
+            name: "parse".to_string(),
+            arity: 1,
+            func: |args| match &args[0] {
                 Value::String(json_str) => {
                     match serde_json::from_str::<serde_json::Value>(json_str) {
                         Ok(json_val) => {
@@ -93,33 +92,41 @@ pub fn init() -> HashMap<String, Value> {
                         }),
                     }
                 }
-                _ => Err(IntentError::TypeError("parse() requires a JSON string".to_string())),
-            }
+                _ => Err(IntentError::TypeError(
+                    "parse() requires a JSON string".to_string(),
+                )),
+            },
         },
-    });
-    
+    );
+
     // stringify(value) -> String
-    module.insert("stringify".to_string(), Value::NativeFunction {
-        name: "stringify".to_string(),
-        arity: 1,
-        func: |args| {
-            let json_val = intent_value_to_json(&args[0]);
-            Ok(Value::String(json_val.to_string()))
+    module.insert(
+        "stringify".to_string(),
+        Value::NativeFunction {
+            name: "stringify".to_string(),
+            arity: 1,
+            func: |args| {
+                let json_val = intent_value_to_json(&args[0]);
+                Ok(Value::String(json_val.to_string()))
+            },
         },
-    });
-    
+    );
+
     // stringify_pretty(value) -> String - With indentation
-    module.insert("stringify_pretty".to_string(), Value::NativeFunction {
-        name: "stringify_pretty".to_string(),
-        arity: 1,
-        func: |args| {
-            let json_val = intent_value_to_json(&args[0]);
-            match serde_json::to_string_pretty(&json_val) {
-                Ok(s) => Ok(Value::String(s)),
-                Err(e) => Ok(Value::String(format!("{{\"error\": \"{}\"}}", e))),
-            }
+    module.insert(
+        "stringify_pretty".to_string(),
+        Value::NativeFunction {
+            name: "stringify_pretty".to_string(),
+            arity: 1,
+            func: |args| {
+                let json_val = intent_value_to_json(&args[0]);
+                match serde_json::to_string_pretty(&json_val) {
+                    Ok(s) => Ok(Value::String(s)),
+                    Err(e) => Ok(Value::String(format!("{{\"error\": \"{}\"}}", e))),
+                }
+            },
         },
-    });
-    
+    );
+
     module
 }

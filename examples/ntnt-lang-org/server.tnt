@@ -14,6 +14,11 @@ let CSS = """
     --navy: #192F52;
     --yellow: #FCDD83;
     --cyan: #20DDE3;
+    --hero-warm-start: #2C2A74;
+    --hero-warm-mid: #5A3AA6;
+    --hero-warm-glow: #F1993F;
+    --glass-dark: rgba(8, 10, 24, 0.72);
+    --glass-border: rgba(255, 255, 255, 0.08);
     --bg: #f7fafc;
     --text: #1a1a2e;
     --text-muted: #5a5a7a;
@@ -49,9 +54,9 @@ a:hover {
 }
 
 .header {
-    background: rgba(25, 47, 82, 0.95);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    background: linear-gradient(135deg, rgba(18, 12, 30, 0.88) 0%, rgba(44, 42, 116, 0.65) 55%, rgba(90, 58, 166, 0.55) 100%);
+    backdrop-filter: blur(16px) saturate(120%);
+    -webkit-backdrop-filter: blur(16px) saturate(120%);
     padding: 1rem 2rem;
     display: flex;
     align-items: center;
@@ -61,7 +66,8 @@ a:hover {
     left: 0;
     right: 0;
     z-index: 100;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom: 1px solid rgba(241, 153, 63, 0.18);
+    box-shadow: 0 12px 30px rgba(8, 10, 24, 0.35);
 }
 
 .header-left {
@@ -70,12 +76,19 @@ a:hover {
     gap: 1rem;
 }
 
+.header-left a {
+    display: flex;
+    align-items: center;
+}
+
 .logo {
     width: 48px;
     height: 48px;
     border-radius: 8px;
     filter: drop-shadow(0 0 20px rgba(251, 186, 79, 0.3));
-    animation: float 6s ease-in-out infinite;
+    animation: none;
+    transform: translateY(1px);
+    display: block;
 }
 
 @keyframes float {
@@ -90,7 +103,7 @@ a:hover {
 }
 
 .header h1 span {
-    color: var(--yellow);
+    color: var(--orange);
 }
 
 .nav {
@@ -118,15 +131,26 @@ a:hover {
 
 .hero {
     text-align: center;
-    padding: 8rem 2rem 6rem 2rem;
-    background: radial-gradient(circle at top right, var(--indigo) 0%, var(--navy) 100%);
+    padding: 9rem 2rem 7rem 2rem;
+    background: linear-gradient(135deg, var(--hero-warm-start) 0%, var(--hero-warm-mid) 45%, var(--hero-warm-glow) 100%);
     color: white;
     width: 100vw;
     margin-left: calc(-50vw + 50%);
     margin-top: -6rem;
     position: relative;
-    overflow: hidden;
+    overflow: visible;
+    box-shadow: 0 24px 60px -40px rgba(44, 42, 116, 0.6);
 }
+
+.hero::before {
+    content: "";
+    position: absolute;
+    inset: -20% -10% auto -10%;
+    height: 70%;
+    background: radial-gradient(60% 60% at 70% 20%, rgba(241, 153, 63, 0.45) 0%, rgba(241, 153, 63, 0.0) 65%);
+    pointer-events: none;
+}
+
 
 .hero-pattern {
     position: absolute;
@@ -144,6 +168,7 @@ a:hover {
     z-index: 2;
     max-width: 800px;
     margin: 0 auto;
+    padding-bottom: 0.5rem;
 }
 
 .hero h2 {
@@ -151,11 +176,13 @@ a:hover {
     margin-bottom: 1.5rem;
     font-weight: 800;
     letter-spacing: -0.03em;
-    background: linear-gradient(135deg, #fff 0%, var(--cyan) 100%);
+    background: linear-gradient(135deg, #fff 0%, #ffe3c2 55%, var(--cyan) 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
     line-height: 1.1;
+    padding-bottom: 0.15em;
+    text-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
 }
 
 .hero .tagline {
@@ -203,12 +230,14 @@ a:hover {
     color: var(--navy);
     padding: 1rem 1.5rem;
     border-radius: 12px;
-    margin: 2rem 0;
+    margin: 3rem 0 2rem 0;
     display: flex;
     align-items: center;
     gap: 0.75rem;
     font-size: 0.95rem;
     box-shadow: var(--shadow);
+    position: relative;
+    z-index: 2;
 }
 
 .section {
@@ -296,13 +325,44 @@ a:hover {
 pre {
     background: var(--code-bg);
     border-radius: 12px;
-    padding: 1.5rem;
+    padding: 2.5rem 1.5rem 1.5rem 1.5rem;
     overflow-x: auto;
+    position: relative;
     font-family: 'JetBrains Mono', 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
     font-size: 0.9rem;
     line-height: 1.6;
     color: #e2e8f0;
     box-shadow: var(--shadow);
+}
+
+.copy-button {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    padding: 0.35rem 0.6rem;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.copy-button:hover {
+    transform: translateY(-1px);
+    background: rgba(255, 255, 255, 0.2);
+    border-color: rgba(255, 255, 255, 0.35);
+}
+
+.copy-button.copied {
+    background: rgba(241, 153, 63, 0.95);
+    border-color: rgba(241, 153, 63, 1);
+    color: #1a1a2e;
 }
 
 code {
@@ -622,6 +682,52 @@ fn wrap_page(content) {
     <footer class="footer">
         <p>NTNT Programming Language &copy; 2026 &nbsp;|&nbsp; <a href="https://github.com/ntntlang/ntnt">GitHub</a> &nbsp;|&nbsp; MIT + Apache 2.0 License</p>
     </footer>
+    <script>
+        document.addEventListener("DOMContentLoaded", () => {
+            document.querySelectorAll("pre").forEach((pre) => {
+                if (pre.querySelector(".copy-button")) {
+                    return;
+                }
+
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = "copy-button";
+                button.textContent = "Copy";
+
+                button.addEventListener("click", async () => {
+                    const codeEl = pre.querySelector("code");
+                    const codeText = codeEl ? codeEl.innerText : pre.innerText;
+
+                    try {
+                        await navigator.clipboard.writeText(codeText.trim());
+                        button.classList.add("copied");
+                        button.textContent = "Copied";
+                        setTimeout(() => {
+                            button.classList.remove("copied");
+                            button.textContent = "Copy";
+                        }, 1200);
+                    } catch (err) {
+                        const textarea = document.createElement("textarea");
+                        textarea.value = codeText.trim();
+                        textarea.style.position = "fixed";
+                        textarea.style.opacity = "0";
+                        document.body.appendChild(textarea);
+                        textarea.select();
+                        document.execCommand("copy");
+                        document.body.removeChild(textarea);
+                        button.classList.add("copied");
+                        button.textContent = "Copied";
+                        setTimeout(() => {
+                            button.classList.remove("copied");
+                            button.textContent = "Copy";
+                        }, 1200);
+                    }
+                });
+
+                pre.appendChild(button);
+            });
+        });
+    </script>
 </body>
 </html>"""
     

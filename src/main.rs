@@ -4,7 +4,7 @@
 
 use clap::{Parser, Subcommand};
 use colored::*;
-use ntnt::{interpreter::Interpreter, lexer::Lexer, parser::Parser as IntentParser, intent};
+use ntnt::{intent, interpreter::Interpreter, lexer::Lexer, parser::Parser as IntentParser};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::fs;
@@ -29,7 +29,7 @@ enum Commands {
     /// Start the interactive REPL
     Repl,
     /// Run an NTNT source file
-    /// 
+    ///
     /// For HTTP servers, the program runs until Ctrl+C:
     ///   ntnt run examples/http_server.tnt
     Run {
@@ -38,10 +38,10 @@ enum Commands {
         file: PathBuf,
     },
     /// Test an HTTP server by running it and making requests
-    /// 
+    ///
     /// Starts the server, makes the specified HTTP request(s), prints responses,
     /// then shuts down. Perfect for AI agents and CI/CD testing.
-    /// 
+    ///
     /// Examples:
     ///   ntnt test server.tnt --get /api/status
     ///   ntnt test server.tnt --get "/divide?a=10&b=2"
@@ -51,31 +51,31 @@ enum Commands {
         /// The source file containing the HTTP server
         #[arg(value_name = "FILE")]
         file: PathBuf,
-        
+
         /// Make a GET request to the specified path
         #[arg(long = "get", value_name = "PATH")]
         get_requests: Vec<String>,
-        
+
         /// Make a POST request to the specified path
         #[arg(long = "post", value_name = "PATH")]
         post_requests: Vec<String>,
-        
+
         /// Make a PUT request to the specified path
         #[arg(long = "put", value_name = "PATH")]
         put_requests: Vec<String>,
-        
+
         /// Make a DELETE request to the specified path
         #[arg(long = "delete", value_name = "PATH")]
         delete_requests: Vec<String>,
-        
+
         /// Request body for POST/PUT requests (applies to the preceding request)
         #[arg(long = "body", value_name = "JSON")]
         body: Option<String>,
-        
+
         /// Port to run the test server on (default: 18080)
         #[arg(long = "port", default_value = "18080")]
         port: u16,
-        
+
         /// Show verbose output including headers
         #[arg(long = "verbose", short = 'v')]
         verbose: bool,
@@ -102,13 +102,13 @@ enum Commands {
         file: PathBuf,
     },
     /// Inspect a project and output JSON structure (for agents and tools)
-    /// 
+    ///
     /// Outputs a JSON description of:
     /// - All functions with their parameters, return types, and contracts
     /// - HTTP routes registered
     /// - Imports and exports
     /// - Structs and enums
-    /// 
+    ///
     /// Examples:
     ///   ntnt inspect app.tnt
     ///   ntnt inspect app.tnt --pretty
@@ -116,16 +116,16 @@ enum Commands {
         /// The source file or directory to inspect
         #[arg(value_name = "PATH")]
         path: PathBuf,
-        
+
         /// Pretty-print the JSON output
         #[arg(long, short)]
         pretty: bool,
     },
     /// Validate source files for errors (outputs JSON for tools)
-    /// 
+    ///
     /// Checks syntax, imports, and contracts without running.
     /// Outputs JSON with detailed error information.
-    /// 
+    ///
     /// Examples:
     ///   ntnt validate app.tnt
     ///   ntnt validate routes/
@@ -135,16 +135,16 @@ enum Commands {
         path: PathBuf,
     },
     /// Lint source files for common issues and style problems
-    /// 
+    ///
     /// Performs comprehensive analysis to catch common mistakes:
     /// - Route patterns without raw strings (should use r"/path/{id}")
     /// - Potential map literal confusion (suggests map {} when appropriate)
     /// - Missing contracts on public functions
     /// - Unused imports
     /// - And more...
-    /// 
+    ///
     /// Outputs JSON with suggestions and auto-fix hints.
-    /// 
+    ///
     /// Examples:
     ///   ntnt lint app.tnt
     ///   ntnt lint routes/ --fix
@@ -153,20 +153,20 @@ enum Commands {
         /// The source file or directory to lint
         #[arg(value_name = "PATH")]
         path: PathBuf,
-        
+
         /// Show only errors, not warnings or suggestions
         #[arg(long, short)]
         quiet: bool,
-        
+
         /// Output auto-fix suggestions as JSON patch
         #[arg(long)]
         fix: bool,
     },
     /// Intent-Driven Development commands
-    /// 
+    ///
     /// Verify that code matches human intent specifications.
     /// Intent files (.intent) define requirements as executable tests.
-    /// 
+    ///
     /// Examples:
     ///   ntnt intent check server.tnt
     ///   ntnt intent check server.tnt --intent custom.intent
@@ -178,10 +178,10 @@ enum Commands {
 #[derive(Subcommand)]
 enum IntentCommands {
     /// Check that code matches its intent specification
-    /// 
+    ///
     /// Runs all tests defined in the .intent file against the NTNT program.
     /// Looks for <name>.intent file automatically, or specify with --intent.
-    /// 
+    ///
     /// Examples:
     ///   ntnt intent check server.tnt
     ///   ntnt intent check server.tnt --intent requirements.intent
@@ -190,24 +190,24 @@ enum IntentCommands {
         /// The NTNT source file to check
         #[arg(value_name = "FILE")]
         file: PathBuf,
-        
+
         /// Path to intent file (default: looks for <name>.intent)
         #[arg(long = "intent", short = 'i')]
         intent_file: Option<PathBuf>,
-        
+
         /// Port to run the test server on (default: 18081)
         #[arg(long = "port", default_value = "18081")]
         port: u16,
-        
+
         /// Show verbose output including response bodies
         #[arg(long = "verbose", short = 'v')]
         verbose: bool,
     },
     /// Show implementation coverage of intent features
-    /// 
+    ///
     /// Analyzes source code for @implements annotations and shows
     /// which features from the intent file have implementations.
-    /// 
+    ///
     /// Examples:
     ///   ntnt intent coverage server.tnt
     ///   ntnt intent coverage server.tnt --intent requirements.intent
@@ -215,16 +215,16 @@ enum IntentCommands {
         /// The NTNT source file(s) to analyze
         #[arg(value_name = "FILE")]
         file: PathBuf,
-        
+
         /// Path to intent file (default: looks for <name>.intent)
         #[arg(long = "intent", short = 'i')]
         intent_file: Option<PathBuf>,
     },
     /// Generate code scaffolding from an intent file
-    /// 
+    ///
     /// Creates a new .tnt file with function stubs and route
     /// registrations based on the intent specification.
-    /// 
+    ///
     /// Examples:
     ///   ntnt intent init requirements.intent
     ///   ntnt intent init requirements.intent -o server.tnt
@@ -232,16 +232,16 @@ enum IntentCommands {
         /// The intent file to generate code from
         #[arg(value_name = "INTENT_FILE")]
         intent_file: PathBuf,
-        
+
         /// Output file (default: prints to stdout)
         #[arg(long = "output", short = 'o')]
         output: Option<PathBuf>,
     },
     /// Start Intent Studio - a visual workspace for developing intent
-    /// 
+    ///
     /// Opens a beautiful HTML view of your intent file that auto-refreshes
     /// as you edit. Perfect for collaborative intent development with AI.
-    /// 
+    ///
     /// Examples:
     ///   ntnt intent studio server.intent
     ///   ntnt intent studio server.intent --port 4000 --app-port 9000
@@ -249,15 +249,15 @@ enum IntentCommands {
         /// The intent file to visualize
         #[arg(value_name = "INTENT_FILE")]
         intent_file: PathBuf,
-        
+
         /// Port to run the studio server on (default: 3001)
         #[arg(long = "port", short = 'p', default_value = "3001")]
         port: u16,
-        
+
         /// Port where the application server is running (default: 8081)
         #[arg(long = "app-port", short = 'a', default_value = "8081")]
         app_port: u16,
-        
+
         /// Don't automatically open the browser
         #[arg(long = "no-open")]
         no_open: bool,
@@ -270,16 +270,25 @@ fn main() {
     let result = match cli.command {
         Some(Commands::Repl) => run_repl(),
         Some(Commands::Run { file }) => run_file(&file),
-        Some(Commands::Test { 
-            file, 
-            get_requests, 
-            post_requests, 
-            put_requests, 
-            delete_requests, 
-            body, 
-            port, 
-            verbose 
-        }) => test_http_server(&file, get_requests, post_requests, put_requests, delete_requests, body, port, verbose),
+        Some(Commands::Test {
+            file,
+            get_requests,
+            post_requests,
+            put_requests,
+            delete_requests,
+            body,
+            port,
+            verbose,
+        }) => test_http_server(
+            &file,
+            get_requests,
+            post_requests,
+            put_requests,
+            delete_requests,
+            body,
+            port,
+            verbose,
+        ),
         Some(Commands::Parse { file, json }) => parse_file(&file, json),
         Some(Commands::Lex { file }) => lex_file(&file),
         Some(Commands::Check { file }) => check_file(&file),
@@ -303,8 +312,20 @@ fn main() {
 }
 
 fn run_repl() -> anyhow::Result<()> {
-    println!("{}", format!("NTNT (Intent) Programming Language v{}", env!("CARGO_PKG_VERSION")).green().bold());
-    println!("Type {} for help, {} to exit\n", ":help".cyan(), ":quit".cyan());
+    println!(
+        "{}",
+        format!(
+            "NTNT (Intent) Programming Language v{}",
+            env!("CARGO_PKG_VERSION")
+        )
+        .green()
+        .bold()
+    );
+    println!(
+        "Type {} for help, {} to exit\n",
+        ":help".cyan(),
+        ":quit".cyan()
+    );
 
     let mut rl = DefaultEditor::new()?;
     let mut interpreter = Interpreter::new();
@@ -382,57 +403,132 @@ fn print_repl_help() {
     println!("  {}    - Show this help message", ":help, :h".cyan());
     println!("  {} - Exit the REPL", ":quit, :q, :exit".cyan());
     println!("  {}   - Clear the environment", ":clear".cyan());
-    println!("  {}     - Show current environment bindings", ":env".cyan());
+    println!(
+        "  {}     - Show current environment bindings",
+        ":env".cyan()
+    );
     println!();
     println!("{}", "Module System:".yellow().bold());
-    println!("  {} - Import specific functions", r#"import { split, join } from "std/string""#.cyan());
-    println!("  {}    - Import module with alias", r#"import "std/math" as math"#.cyan());
+    println!(
+        "  {} - Import specific functions",
+        r#"import { split, join } from "std/string""#.cyan()
+    );
+    println!(
+        "  {}    - Import module with alias",
+        r#"import "std/math" as math"#.cyan()
+    );
     println!();
     println!("{}", "Standard Library:".yellow().bold());
-    println!("  {} - std/string: split, join, trim, replace, to_upper, to_lower", "String".cyan());
-    println!("  {}   - std/math: sin, cos, tan, log, exp, PI, E", "Math".cyan());
-    println!("  {} - std/collections: push, pop, first, last, reverse, slice", "Collections".cyan());
-    println!("  {}    - std/env: get_env, args, cwd", "Environment".cyan());
-    println!("  {}     - std/fs: read_file, write_file, exists, mkdir, remove", "Files".cyan());
-    println!("  {}     - std/path: join, dirname, basename, extension, resolve", "Paths".cyan());
-    println!("  {}      - std/json: parse, stringify, stringify_pretty", "JSON".cyan());
-    println!("  {}      - std/time: now, sleep, elapsed, format_timestamp", "Time".cyan());
-    println!("  {}    - std/crypto: sha256, hmac_sha256, uuid, random_bytes", "Crypto".cyan());
-    println!("  {}       - std/url: parse, encode, decode, build_query, join", "URL".cyan());
-    println!("  {}      - std/http: fetch, post, put, delete, request, get_json", "HTTP".cyan());
+    println!(
+        "  {} - std/string: split, join, trim, replace, to_upper, to_lower",
+        "String".cyan()
+    );
+    println!(
+        "  {}   - std/math: sin, cos, tan, log, exp, PI, E",
+        "Math".cyan()
+    );
+    println!(
+        "  {} - std/collections: push, pop, first, last, reverse, slice",
+        "Collections".cyan()
+    );
+    println!(
+        "  {}    - std/env: get_env, args, cwd",
+        "Environment".cyan()
+    );
+    println!(
+        "  {}     - std/fs: read_file, write_file, exists, mkdir, remove",
+        "Files".cyan()
+    );
+    println!(
+        "  {}     - std/path: join, dirname, basename, extension, resolve",
+        "Paths".cyan()
+    );
+    println!(
+        "  {}      - std/json: parse, stringify, stringify_pretty",
+        "JSON".cyan()
+    );
+    println!(
+        "  {}      - std/time: now, sleep, elapsed, format_timestamp",
+        "Time".cyan()
+    );
+    println!(
+        "  {}    - std/crypto: sha256, hmac_sha256, uuid, random_bytes",
+        "Crypto".cyan()
+    );
+    println!(
+        "  {}       - std/url: parse, encode, decode, build_query, join",
+        "URL".cyan()
+    );
+    println!(
+        "  {}      - std/http: fetch, post, put, delete, request, get_json",
+        "HTTP".cyan()
+    );
     println!();
     println!("{}", "Basic Examples:".yellow().bold());
     println!("  {}           - Variable binding", "let x = 42;".cyan());
     println!("  {}    - Arithmetic", "let y = x + 10;".cyan());
-    println!("  {} - Function definition", "fn add(a, b) { a + b }".cyan());
+    println!(
+        "  {} - Function definition",
+        "fn add(a, b) { a + b }".cyan()
+    );
     println!("  {}       - Function call", "add(1, 2)".cyan());
     println!();
     println!("{}", "Traits:".yellow().bold());
-    println!("  {} - Define a trait", "trait Display { fn show(self); }".cyan());
-    println!("  {} - Implement trait", "impl Display for Point { ... }".cyan());
+    println!(
+        "  {} - Define a trait",
+        "trait Display { fn show(self); }".cyan()
+    );
+    println!(
+        "  {} - Implement trait",
+        "impl Display for Point { ... }".cyan()
+    );
     println!();
     println!("{}", "Loops & Iteration:".yellow().bold());
-    println!("  {}  - For-in loop", "for x in [1, 2, 3] { print(x); }".cyan());
-    println!("  {}    - Range (exclusive)", "for i in 0..5 { print(i); }".cyan());
-    println!("  {}   - Range (inclusive)", "for i in 0..=5 { print(i); }".cyan());
-    println!("  {} - Iterate strings", r#"for c in "hello" { print(c); }"#.cyan());
+    println!(
+        "  {}  - For-in loop",
+        "for x in [1, 2, 3] { print(x); }".cyan()
+    );
+    println!(
+        "  {}    - Range (exclusive)",
+        "for i in 0..5 { print(i); }".cyan()
+    );
+    println!(
+        "  {}   - Range (inclusive)",
+        "for i in 0..=5 { print(i); }".cyan()
+    );
+    println!(
+        "  {} - Iterate strings",
+        r#"for c in "hello" { print(c); }"#.cyan()
+    );
     println!();
     println!("{}", "Defer:".yellow().bold());
-    println!("  {} - Runs on scope exit", "defer print(\"cleanup\");".cyan());
+    println!(
+        "  {} - Runs on scope exit",
+        "defer print(\"cleanup\");".cyan()
+    );
     println!();
     println!("{}", "Maps:".yellow().bold());
-    println!("  {} - Map literal", r#"let m = map { "a": 1, "b": 2 };"#.cyan());
+    println!(
+        "  {} - Map literal",
+        r#"let m = map { "a": 1, "b": 2 };"#.cyan()
+    );
     println!();
     println!("{}", "String Interpolation:".yellow().bold());
     println!("  {} - Embed expressions", r#""Hello, {name}!""#.cyan());
     println!("  {} - With math", r#""Sum: {a + b}""#.cyan());
     println!();
     println!("{}", "Raw Strings:".yellow().bold());
-    println!("  {}   - No escape processing", r#"r"C:\path\to\file""#.cyan());
+    println!(
+        "  {}   - No escape processing",
+        r#"r"C:\path\to\file""#.cyan()
+    );
     println!("  {} - With quotes inside", r##"r#"say "hi""#"##.cyan());
     println!();
     println!("{}", "Trait Bounds:".yellow().bold());
-    println!("  {} - Bounded generic", "fn sort<T: Comparable>(arr: [T])".cyan());
+    println!(
+        "  {} - Bounded generic",
+        "fn sort<T: Comparable>(arr: [T])".cyan()
+    );
     println!("  {} - Multiple bounds", "fn f<T: A + B>(x: T)".cyan());
     println!();
     println!("{}", "Option & Result Types:".yellow().bold());
@@ -447,21 +543,30 @@ fn print_repl_help() {
     println!();
     println!("{}", "Enums & Generics:".yellow().bold());
     println!("  {}", "enum Color { Red, Green, Blue }".cyan());
-    println!("  {} - Generic function", "fn id<T>(x: T) -> T { x }".cyan());
+    println!(
+        "  {} - Generic function",
+        "fn id<T>(x: T) -> T { x }".cyan()
+    );
     println!();
     println!("{}", "Contracts:".yellow().bold());
-    println!("  {} - Precondition", "fn div(a, b) requires b != 0 { a / b }".cyan());
-    println!("  {} - Postcondition", "fn abs(x) ensures result >= 0 { ... }".cyan());
+    println!(
+        "  {} - Precondition",
+        "fn div(a, b) requires b != 0 { a / b }".cyan()
+    );
+    println!(
+        "  {} - Postcondition",
+        "fn abs(x) ensures result >= 0 { ... }".cyan()
+    );
     println!();
 }
 
 fn evaluate(interpreter: &mut Interpreter, source: &str) -> anyhow::Result<String> {
     let lexer = Lexer::new(source);
     let tokens: Vec<_> = lexer.collect();
-    
+
     let mut parser = IntentParser::new(tokens);
     let ast = parser.parse()?;
-    
+
     let result = interpreter.eval(&ast)?;
     Ok(result.to_string())
 }
@@ -469,20 +574,19 @@ fn evaluate(interpreter: &mut Interpreter, source: &str) -> anyhow::Result<Strin
 fn run_file(path: &PathBuf) -> anyhow::Result<()> {
     let source = fs::read_to_string(path)?;
     let mut interpreter = Interpreter::new();
-    
+
     // Set the current file path for imports and hot-reload
-    let canonical_path = path.canonicalize()
-        .unwrap_or_else(|_| path.clone());
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
     let path_str = canonical_path.to_string_lossy();
     interpreter.set_current_file(&path_str);
     interpreter.set_main_source_file(&path_str);
-    
+
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
-    
+
     let mut parser = IntentParser::new(tokens);
     let ast = parser.parse()?;
-    
+
     interpreter.eval(&ast)?;
     Ok(())
 }
@@ -504,10 +608,10 @@ fn test_http_server(
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
-    
+
     // Build list of requests to make
     let mut requests: Vec<(String, String, Option<String>)> = Vec::new();
-    
+
     for path in get_requests {
         requests.push(("GET".to_string(), path, None));
     }
@@ -520,40 +624,42 @@ fn test_http_server(
     for path in delete_requests {
         requests.push(("DELETE".to_string(), path, None));
     }
-    
+
     if requests.is_empty() {
-        anyhow::bail!("No requests specified. Use --get, --post, --put, or --delete to specify requests.");
+        anyhow::bail!(
+            "No requests specified. Use --get, --post, --put, or --delete to specify requests."
+        );
     }
-    
+
     println!("{}", "=== NTNT HTTP Test Mode ===".green().bold());
     println!();
-    
+
     // Counters for tracking
     let requests_to_make = requests.len();
     let requests_completed = Arc::new(AtomicUsize::new(0));
     let shutdown_flag = Arc::new(AtomicBool::new(false));
-    
+
     // Prepare results storage
-    let results: Arc<std::sync::Mutex<Vec<(String, String, u16, String)>>> = 
+    let results: Arc<std::sync::Mutex<Vec<(String, String, u16, String)>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
-    
+
     // Clone for request thread
     let requests_completed_clone = requests_completed.clone();
     let shutdown_flag_clone = shutdown_flag.clone();
     let results_clone = results.clone();
-    
+
     // Spawn thread to make HTTP requests after a short delay
     let request_handle = thread::spawn(move || {
         // Wait for server to start
         thread::sleep(Duration::from_millis(200));
-        
+
         for (method, req_path, req_body) in requests {
-            let path_with_slash = if req_path.starts_with('/') { 
-                req_path.clone() 
-            } else { 
-                format!("/{}", req_path) 
+            let path_with_slash = if req_path.starts_with('/') {
+                req_path.clone()
+            } else {
+                format!("/{}", req_path)
             };
-            
+
             let body_content = req_body.unwrap_or_default();
             let request = if body_content.is_empty() {
                 format!(
@@ -566,28 +672,28 @@ fn test_http_server(
                     method, path_with_slash, port, body_content.len(), body_content
                 )
             };
-            
+
             // Try to connect with retries
             let mut attempts = 0;
             let max_attempts = 10;
             let mut response_data = None;
-            
+
             while attempts < max_attempts {
                 match TcpStream::connect(format!("127.0.0.1:{}", port)) {
                     Ok(mut stream) => {
                         stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
                         stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
-                        
+
                         if stream.write_all(request.as_bytes()).is_ok() {
                             let mut response = Vec::new();
                             let _ = stream.read_to_end(&mut response);
-                            
+
                             if !response.is_empty() {
                                 let response_str = String::from_utf8_lossy(&response).to_string();
                                 let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
                                 let headers = parts.get(0).unwrap_or(&"");
                                 let body = parts.get(1).unwrap_or(&"").to_string();
-                                
+
                                 let status_code = headers
                                     .lines()
                                     .next()
@@ -597,8 +703,9 @@ fn test_http_server(
                                     .unwrap_or("0")
                                     .parse::<u16>()
                                     .unwrap_or(0);
-                                
-                                response_data = Some((method.clone(), req_path.clone(), status_code, body));
+
+                                response_data =
+                                    Some((method.clone(), req_path.clone(), status_code, body));
                                 break;
                             }
                         }
@@ -608,7 +715,7 @@ fn test_http_server(
                 attempts += 1;
                 thread::sleep(Duration::from_millis(100));
             }
-            
+
             if let Some(data) = response_data {
                 results_clone.lock().unwrap().push(data);
             } else {
@@ -619,47 +726,52 @@ fn test_http_server(
                     "Connection failed".to_string(),
                 ));
             }
-            
+
             requests_completed_clone.fetch_add(1, Ordering::SeqCst);
         }
-        
+
         // Signal shutdown after all requests complete
         shutdown_flag_clone.store(true, Ordering::SeqCst);
     });
-    
+
     // Parse and run the server in main thread
     let source = fs::read_to_string(path)?;
     let mut interpreter = Interpreter::new();
     interpreter.set_test_mode(port, requests_to_make, shutdown_flag.clone());
-    
+
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
-    
+
     let mut parser = IntentParser::new(tokens);
     let ast = parser.parse()?;
-    
+
     // Run the server (will exit when shutdown_flag is set)
     let _ = interpreter.eval(&ast);
-    
+
     // Wait for request thread to finish
     request_handle.join().ok();
-    
+
     // Print results
     println!();
     let results_vec = results.lock().unwrap();
     let mut passed = 0;
     let mut failed = 0;
-    
+
     for (i, (method, path, status, body)) in results_vec.iter().enumerate() {
         let req_num = i + 1;
-        println!("{}", format!("[REQUEST {}] {} {}", req_num, method, path).cyan().bold());
-        
+        println!(
+            "{}",
+            format!("[REQUEST {}] {} {}", req_num, method, path)
+                .cyan()
+                .bold()
+        );
+
         let is_success = *status >= 200 && *status < 400;
-        
+
         if verbose {
             println!("{}", format!("[STATUS] {}", status).yellow());
         }
-        
+
         let status_display = if is_success {
             format!("[RESPONSE] {} ({})", status, "OK".green())
         } else if *status == 0 {
@@ -668,23 +780,26 @@ fn test_http_server(
             format!("[RESPONSE] {} ({})", status, "ERROR".red())
         };
         println!("{}", status_display);
-        
+
         // Pretty print JSON if possible
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-            println!("{}", serde_json::to_string_pretty(&json).unwrap_or_else(|_| body.to_string()));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json).unwrap_or_else(|_| body.to_string())
+            );
         } else {
             println!("{}", body);
         }
-        
+
         if is_success {
             passed += 1;
         } else {
             failed += 1;
         }
-        
+
         println!();
     }
-    
+
     // Summary
     let total = results_vec.len();
     let summary = format!(
@@ -696,59 +811,59 @@ fn test_http_server(
     } else {
         println!("{}", summary.red().bold());
     }
-    
+
     println!("Server shutdown.");
-    
+
     if failed > 0 {
         std::process::exit(1);
     }
-    
+
     Ok(())
 }
 
 fn parse_file(path: &PathBuf, json: bool) -> anyhow::Result<()> {
     let source = fs::read_to_string(path)?;
-    
+
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
-    
+
     let mut parser = IntentParser::new(tokens);
     let ast = parser.parse()?;
-    
+
     if json {
         println!("{}", serde_json::to_string_pretty(&ast)?);
     } else {
         println!("{:#?}", ast);
     }
-    
+
     Ok(())
 }
 
 fn lex_file(path: &PathBuf) -> anyhow::Result<()> {
     let source = fs::read_to_string(path)?;
-    
+
     let lexer = Lexer::new(&source);
     for token in lexer {
         println!("{:?}", token);
     }
-    
+
     Ok(())
 }
 
 fn check_file(path: &PathBuf) -> anyhow::Result<()> {
     let source = fs::read_to_string(path)?;
-    
+
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
-    
+
     let mut parser = IntentParser::new(tokens);
     let _ast = parser.parse()?;
-    
+
     println!("{} No errors found in {}", "✓".green(), path.display());
     Ok(())
 }
 /// Inspect a project and output JSON structure
-/// 
+///
 /// This extracts metadata from NTNT files including:
 /// - Functions (name, params, return type, contracts, line number)
 /// - HTTP routes (method, path, handler, line number)
@@ -757,12 +872,12 @@ fn check_file(path: &PathBuf) -> anyhow::Result<()> {
 /// - Structs and enums
 /// - Imports/exports
 fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
-    use serde_json::{json, Value as JsonValue};
     use ntnt::ast::Statement;
-    
+    use serde_json::{json, Value as JsonValue};
+
     // Collect all .tnt files
     let files = collect_tnt_files(path)?;
-    
+
     let mut functions: Vec<JsonValue> = Vec::new();
     let mut routes: Vec<JsonValue> = Vec::new();
     let mut structs: Vec<JsonValue> = Vec::new();
@@ -770,32 +885,45 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
     let mut imports: Vec<JsonValue> = Vec::new();
     let mut middleware: Vec<JsonValue> = Vec::new();
     let mut static_dirs: Vec<JsonValue> = Vec::new();
-    
+
     for file_path in &files {
         let source = fs::read_to_string(file_path)?;
         let lexer = Lexer::new(&source);
         let tokens: Vec<_> = lexer.collect();
         let mut parser = IntentParser::new(tokens);
-        
+
         let ast = match parser.parse() {
             Ok(ast) => ast,
             Err(e) => {
-                eprintln!("{}: Failed to parse {}: {}", "Warning".yellow(), file_path.display(), e);
+                eprintln!(
+                    "{}: Failed to parse {}: {}",
+                    "Warning".yellow(),
+                    file_path.display(),
+                    e
+                );
                 continue;
             }
         };
-        
-        let relative_path = file_path.strip_prefix(path.parent().unwrap_or(path))
+
+        let relative_path = file_path
+            .strip_prefix(path.parent().unwrap_or(path))
             .unwrap_or(file_path)
             .to_string_lossy()
             .to_string();
-        
+
         // Build a map of function names to line numbers by scanning source
         let line_map = build_line_number_map(&source);
-        
+
         for stmt in &ast.statements {
             match stmt {
-                Statement::Function { name, params, return_type, contract, attributes, .. } => {
+                Statement::Function {
+                    name,
+                    params,
+                    return_type,
+                    contract,
+                    attributes,
+                    ..
+                } => {
                     let line = line_map.get(&format!("fn {}", name)).copied();
                     let func_json = json!({
                         "name": name,
@@ -808,7 +936,12 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
                     });
                     functions.push(func_json);
                 }
-                Statement::Struct { name, fields, type_params, .. } => {
+                Statement::Struct {
+                    name,
+                    fields,
+                    type_params,
+                    ..
+                } => {
                     let line = line_map.get(&format!("struct {}", name)).copied();
                     let struct_json = json!({
                         "name": name,
@@ -823,7 +956,12 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
                     });
                     structs.push(struct_json);
                 }
-                Statement::Enum { name, variants, type_params, .. } => {
+                Statement::Enum {
+                    name,
+                    variants,
+                    type_params,
+                    ..
+                } => {
                     let line = line_map.get(&format!("enum {}", name)).copied();
                     let enum_json = json!({
                         "name": name,
@@ -834,7 +972,11 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
                     });
                     enums.push(enum_json);
                 }
-                Statement::Import { items, source, alias } => {
+                Statement::Import {
+                    items,
+                    source,
+                    alias,
+                } => {
                     let import_json = json!({
                         "source": source,
                         "items": items.iter().map(|i| i.name.clone()).collect::<Vec<_>>(),
@@ -858,12 +1000,12 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
                 _ => {}
             }
         }
-        
+
         // Detect file-based routes (functions named get, post, etc. in routes/ directory)
         if relative_path.contains("/routes/") || relative_path.starts_with("routes/") {
             let url_path = file_path_to_url(&relative_path);
             let http_methods = ["get", "post", "put", "delete", "patch", "head", "options"];
-            
+
             for stmt in &ast.statements {
                 if let Statement::Function { name, .. } = stmt {
                     let method = name.to_lowercase();
@@ -882,7 +1024,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
             }
         }
     }
-    
+
     let output = json!({
         "files": files.iter().map(|f| f.strip_prefix(path.parent().unwrap_or(path))
             .unwrap_or(f).to_string_lossy().to_string()).collect::<Vec<_>>(),
@@ -916,13 +1058,13 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
             }
         }
     });
-    
+
     if pretty {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("{}", serde_json::to_string(&output)?);
     }
-    
+
     Ok(())
 }
 
@@ -930,34 +1072,40 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
 fn build_line_number_map(source: &str) -> std::collections::HashMap<String, usize> {
     use std::collections::HashMap;
     let mut map = HashMap::new();
-    
+
     for (line_num, line) in source.lines().enumerate() {
         let trimmed = line.trim();
-        
+
         // Match function declarations: "fn name(" or "fn name<"
         if trimmed.starts_with("fn ") {
-            if let Some(name_end) = trimmed[3..].find(|c: char| c == '(' || c == '<' || c.is_whitespace()) {
+            if let Some(name_end) =
+                trimmed[3..].find(|c: char| c == '(' || c == '<' || c.is_whitespace())
+            {
                 let name = &trimmed[3..3 + name_end];
                 map.insert(format!("fn {}", name), line_num + 1);
             }
         }
-        
+
         // Match struct declarations
         if trimmed.starts_with("struct ") {
-            if let Some(name_end) = trimmed[7..].find(|c: char| c == '{' || c == '<' || c.is_whitespace()) {
+            if let Some(name_end) =
+                trimmed[7..].find(|c: char| c == '{' || c == '<' || c.is_whitespace())
+            {
                 let name = &trimmed[7..7 + name_end];
                 map.insert(format!("struct {}", name), line_num + 1);
             }
         }
-        
+
         // Match enum declarations
         if trimmed.starts_with("enum ") {
-            if let Some(name_end) = trimmed[5..].find(|c: char| c == '{' || c == '<' || c.is_whitespace()) {
+            if let Some(name_end) =
+                trimmed[5..].find(|c: char| c == '{' || c == '<' || c.is_whitespace())
+            {
                 let name = &trimmed[5..5 + name_end];
                 map.insert(format!("enum {}", name), line_num + 1);
             }
         }
-        
+
         // Match route registrations: get("/path", ...) etc
         for method in &["get", "post", "put", "delete", "patch", "head"] {
             let prefix = format!("{}(", method);
@@ -966,32 +1114,43 @@ fn build_line_number_map(source: &str) -> std::collections::HashMap<String, usiz
                 if let Some(start) = trimmed.find('"') {
                     if let Some(end) = trimmed[start + 1..].find('"') {
                         let path = &trimmed[start + 1..start + 1 + end];
-                        map.insert(format!("route {} {}", method.to_uppercase(), path), line_num + 1);
+                        map.insert(
+                            format!("route {} {}", method.to_uppercase(), path),
+                            line_num + 1,
+                        );
                     }
                 }
             }
         }
-        
+
         // Match middleware registrations
         if trimmed.starts_with("middleware(") || trimmed.contains(" middleware(") {
             map.insert(format!("middleware@{}", line_num), line_num + 1);
         }
-        
-        // Match serve_static registrations  
+
+        // Match serve_static registrations
         if trimmed.starts_with("serve_static(") || trimmed.contains(" serve_static(") {
             map.insert(format!("static@{}", line_num), line_num + 1);
         }
     }
-    
+
     map
 }
 
 /// Extract HTTP route with line number
-fn extract_route_with_line(expr: &ntnt::ast::Expression, file: &str, source: &str) -> Option<serde_json::Value> {
+fn extract_route_with_line(
+    expr: &ntnt::ast::Expression,
+    file: &str,
+    source: &str,
+) -> Option<serde_json::Value> {
     use ntnt::ast::Expression;
     use serde_json::json;
-    
-    if let Expression::Call { function, arguments } = expr {
+
+    if let Expression::Call {
+        function,
+        arguments,
+    } = expr
+    {
         if let Expression::Identifier(method) = function.as_ref() {
             let http_methods = ["get", "post", "put", "delete", "patch", "head"];
             if http_methods.contains(&method.as_str()) && arguments.len() >= 2 {
@@ -1004,11 +1163,13 @@ fn extract_route_with_line(expr: &ntnt::ast::Expression, file: &str, source: &st
                     Expression::Lambda { .. } => "<lambda>".to_string(),
                     _ => "<handler>".to_string(),
                 };
-                
+
                 // Find line number
                 let line_map = build_line_number_map(source);
-                let line = line_map.get(&format!("route {} {}", method.to_uppercase(), path)).copied();
-                
+                let line = line_map
+                    .get(&format!("route {} {}", method.to_uppercase(), path))
+                    .copied();
+
                 return Some(json!({
                     "method": method.to_uppercase(),
                     "path": path,
@@ -1023,11 +1184,19 @@ fn extract_route_with_line(expr: &ntnt::ast::Expression, file: &str, source: &st
 }
 
 /// Extract middleware registration
-fn extract_middleware(expr: &ntnt::ast::Expression, file: &str, source: &str) -> Option<serde_json::Value> {
+fn extract_middleware(
+    expr: &ntnt::ast::Expression,
+    file: &str,
+    source: &str,
+) -> Option<serde_json::Value> {
     use ntnt::ast::Expression;
     use serde_json::json;
-    
-    if let Expression::Call { function, arguments } = expr {
+
+    if let Expression::Call {
+        function,
+        arguments,
+    } = expr
+    {
         if let Expression::Identifier(name) = function.as_ref() {
             // Check for both "middleware" and "use_middleware"
             if (name == "middleware" || name == "use_middleware") && !arguments.is_empty() {
@@ -1036,10 +1205,10 @@ fn extract_middleware(expr: &ntnt::ast::Expression, file: &str, source: &str) ->
                     Expression::Lambda { .. } => "<lambda>".to_string(),
                     _ => "<handler>".to_string(),
                 };
-                
+
                 // Find approximate line by searching source
                 let line = find_call_line(source, "middleware");
-                
+
                 return Some(json!({
                     "handler": handler,
                     "file": file,
@@ -1052,11 +1221,19 @@ fn extract_middleware(expr: &ntnt::ast::Expression, file: &str, source: &str) ->
 }
 
 /// Extract static directory registration
-fn extract_static_dir(expr: &ntnt::ast::Expression, file: &str, source: &str) -> Option<serde_json::Value> {
+fn extract_static_dir(
+    expr: &ntnt::ast::Expression,
+    file: &str,
+    source: &str,
+) -> Option<serde_json::Value> {
     use ntnt::ast::Expression;
     use serde_json::json;
-    
-    if let Expression::Call { function, arguments } = expr {
+
+    if let Expression::Call {
+        function,
+        arguments,
+    } = expr
+    {
         if let Expression::Identifier(name) = function.as_ref() {
             if name == "serve_static" && arguments.len() >= 2 {
                 let prefix = match &arguments[0] {
@@ -1068,9 +1245,9 @@ fn extract_static_dir(expr: &ntnt::ast::Expression, file: &str, source: &str) ->
                     Expression::Identifier(var) => format!("${}", var), // Variable reference
                     _ => "<dir>".to_string(),
                 };
-                
+
                 let line = find_call_line(source, "serve_static");
-                
+
                 return Some(json!({
                     "prefix": prefix,
                     "directory": directory,
@@ -1084,7 +1261,7 @@ fn extract_static_dir(expr: &ntnt::ast::Expression, file: &str, source: &str) ->
 }
 
 /// Convert a file path in routes/ directory to a URL pattern
-/// 
+///
 /// Examples:
 /// - routes/index.tnt → /
 /// - routes/about.tnt → /about
@@ -1096,35 +1273,35 @@ fn file_path_to_url(path: &str) -> String {
         .strip_prefix("routes/")
         .or_else(|| path.rsplit("/routes/").next())
         .unwrap_or(path);
-    
+
     // Split into segments and process
     let mut segments: Vec<String> = Vec::new();
-    
+
     for segment in path.split('/') {
         // Remove .tnt extension
         let segment = segment.strip_suffix(".tnt").unwrap_or(segment);
-        
+
         // Skip index (represents directory root)
         if segment == "index" {
             continue;
         }
-        
+
         // Skip parent directory parts
         if segment.is_empty() || segment == ".." {
             continue;
         }
-        
+
         // Convert [param] to {param}
         let segment = if segment.starts_with('[') && segment.ends_with(']') {
-            let param = &segment[1..segment.len()-1];
+            let param = &segment[1..segment.len() - 1];
             format!("{{{}}}", param)
         } else {
             segment.to_string()
         };
-        
+
         segments.push(segment);
     }
-    
+
     if segments.is_empty() {
         "/".to_string()
     } else {
@@ -1146,19 +1323,20 @@ fn find_call_line(source: &str, call_name: &str) -> Option<usize> {
 /// Validate a project and output JSON errors
 fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
     use serde_json::{json, Value as JsonValue};
-    
+
     let files = collect_tnt_files(path)?;
-    
+
     let mut results: Vec<JsonValue> = Vec::new();
     let mut error_count = 0;
     let mut warning_count = 0;
-    
+
     for file_path in &files {
-        let relative_path = file_path.strip_prefix(path.parent().unwrap_or(path))
+        let relative_path = file_path
+            .strip_prefix(path.parent().unwrap_or(path))
             .unwrap_or(file_path)
             .to_string_lossy()
             .to_string();
-            
+
         let source = match fs::read_to_string(file_path) {
             Ok(s) => s,
             Err(e) => {
@@ -1171,36 +1349,41 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
                 continue;
             }
         };
-        
+
         let lexer = Lexer::new(&source);
         let tokens: Vec<_> = lexer.collect();
         let mut parser = IntentParser::new(tokens);
-        
+
         match parser.parse() {
             Ok(ast) => {
                 // Check for potential issues
                 let warnings = analyze_ast_warnings(&ast, &source);
                 warning_count += warnings.len();
-                
+
                 results.push(json!({
                     "file": relative_path,
                     "valid": true,
                     "errors": [],
                     "warnings": warnings,
                 }));
-                
+
                 // Print success indicator
                 if warnings.is_empty() {
                     eprintln!("{} {}", "✓".green(), relative_path);
                 } else {
-                    eprintln!("{} {} ({} warnings)", "⚠".yellow(), relative_path, warnings.len());
+                    eprintln!(
+                        "{} {} ({} warnings)",
+                        "⚠".yellow(),
+                        relative_path,
+                        warnings.len()
+                    );
                 }
             }
             Err(e) => {
                 let error_msg = e.to_string();
                 // Try to extract line number from error
                 let line = extract_line_from_error(&error_msg);
-                
+
                 results.push(json!({
                     "file": relative_path,
                     "valid": false,
@@ -1208,12 +1391,12 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
                     "warnings": [],
                 }));
                 error_count += 1;
-                
+
                 eprintln!("{} {}", "✗".red(), relative_path);
             }
         }
     }
-    
+
     // Summary
     eprintln!();
     if error_count == 0 {
@@ -1224,7 +1407,7 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
     if warning_count > 0 {
         eprintln!("{}: {}", "Warnings".yellow().bold(), warning_count);
     }
-    
+
     // Output JSON
     let output = json!({
         "files": results,
@@ -1235,34 +1418,35 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
             "warnings": warning_count,
         }
     });
-    
+
     println!("{}", serde_json::to_string_pretty(&output)?);
-    
+
     // Exit with error code if any errors
     if error_count > 0 {
         std::process::exit(1);
     }
-    
+
     Ok(())
 }
 
 /// Lint a project for common issues and style problems
 fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result<()> {
     use serde_json::{json, Value as JsonValue};
-    
+
     let files = collect_tnt_files(path)?;
-    
+
     let mut results: Vec<JsonValue> = Vec::new();
     let mut error_count = 0;
     let mut warning_count = 0;
     let mut suggestion_count = 0;
-    
+
     for file_path in &files {
-        let relative_path = file_path.strip_prefix(path.parent().unwrap_or(path))
+        let relative_path = file_path
+            .strip_prefix(path.parent().unwrap_or(path))
             .unwrap_or(file_path)
             .to_string_lossy()
             .to_string();
-            
+
         let source = match fs::read_to_string(file_path) {
             Ok(s) => s,
             Err(e) => {
@@ -1274,16 +1458,16 @@ fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result
                 continue;
             }
         };
-        
+
         let lexer = Lexer::new(&source);
         let tokens: Vec<_> = lexer.collect();
         let mut parser = IntentParser::new(tokens);
-        
+
         match parser.parse() {
             Ok(ast) => {
                 // Run comprehensive lint checks
                 let issues = lint_ast(&ast, &source, &relative_path);
-                
+
                 for issue in &issues {
                     let severity = issue["severity"].as_str().unwrap_or("warning");
                     match severity {
@@ -1293,17 +1477,26 @@ fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result
                         _ => {}
                     }
                 }
-                
+
                 if !issues.is_empty() {
                     results.push(json!({
                         "file": relative_path,
                         "issues": issues,
                     }));
-                    
+
                     if !quiet {
-                        let warn_str = if warning_count > 0 { format!("{} warnings", warning_count) } else { String::new() };
-                        let sug_str = if suggestion_count > 0 { format!("{} suggestions", suggestion_count) } else { String::new() };
-                        let parts: Vec<&str> = [warn_str.as_str(), sug_str.as_str()].iter()
+                        let warn_str = if warning_count > 0 {
+                            format!("{} warnings", warning_count)
+                        } else {
+                            String::new()
+                        };
+                        let sug_str = if suggestion_count > 0 {
+                            format!("{} suggestions", suggestion_count)
+                        } else {
+                            String::new()
+                        };
+                        let parts: Vec<&str> = [warn_str.as_str(), sug_str.as_str()]
+                            .iter()
                             .filter(|s| !s.is_empty())
                             .copied()
                             .collect();
@@ -1316,7 +1509,7 @@ fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result
             Err(e) => {
                 let error_msg = e.to_string();
                 let line = extract_line_from_error(&error_msg);
-                
+
                 results.push(json!({
                     "file": relative_path,
                     "issues": [{
@@ -1327,12 +1520,12 @@ fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result
                     }],
                 }));
                 error_count += 1;
-                
+
                 eprintln!("{} {}", "✗".red(), relative_path);
             }
         }
     }
-    
+
     // Summary
     eprintln!();
     if error_count == 0 && warning_count == 0 && suggestion_count == 0 {
@@ -1348,7 +1541,7 @@ fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result
             eprintln!("{}: {}", "Suggestions".cyan().bold(), suggestion_count);
         }
     }
-    
+
     // Output JSON
     let mut output = json!({
         "files": results,
@@ -1359,7 +1552,7 @@ fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result
             "suggestions": suggestion_count,
         }
     });
-    
+
     // Add syntax quick reference for agents if there are issues
     if show_fixes && (error_count > 0 || warning_count > 0) {
         output["syntax_hints"] = json!({
@@ -1370,25 +1563,25 @@ fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result
             "imports": "Use `import { x } from \"std/module\"` with `/` path separator",
         });
     }
-    
+
     println!("{}", serde_json::to_string_pretty(&output)?);
-    
+
     // Exit with error code if any errors
     if error_count > 0 {
         std::process::exit(1);
     }
-    
+
     Ok(())
 }
 
 /// Comprehensive lint checks for NTNT code
 fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serde_json::Value> {
-    use ntnt::ast::{Statement, Expression, StringPart};
+    use ntnt::ast::{Expression, Statement, StringPart};
     use serde_json::json;
-    
+
     let mut issues = Vec::new();
     let source_lines: Vec<&str> = source.lines().collect();
-    
+
     // Track context
     let mut http_route_functions = std::collections::HashSet::new();
     http_route_functions.insert("get");
@@ -1398,7 +1591,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
     http_route_functions.insert("patch");
     http_route_functions.insert("options");
     http_route_functions.insert("head");
-    
+
     fn find_line_number(source_lines: &[&str], pattern: &str) -> Option<usize> {
         for (i, line) in source_lines.iter().enumerate() {
             if line.contains(pattern) {
@@ -1407,7 +1600,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
         }
         None
     }
-    
+
     fn check_expr_for_issues(
         expr: &Expression,
         source_lines: &[&str],
@@ -1416,7 +1609,10 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
     ) {
         match expr {
             // Check for route patterns without raw strings
-            Expression::Call { function, arguments } => {
+            Expression::Call {
+                function,
+                arguments,
+            } => {
                 if let Expression::Identifier(name) = function.as_ref() {
                     if http_route_functions.contains(name.as_str()) {
                         // First argument should be a route pattern
@@ -1462,14 +1658,14 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         }
                     }
                 }
-                
+
                 // Recurse into function and arguments
                 check_expr_for_issues(function, source_lines, issues, http_route_functions);
                 for arg in arguments {
                     check_expr_for_issues(arg, source_lines, issues, http_route_functions);
                 }
             }
-            
+
             // Recurse into other expression types
             Expression::Binary { left, right, .. } => {
                 check_expr_for_issues(left, source_lines, issues, http_route_functions);
@@ -1497,7 +1693,11 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                     check_stmt_for_issues(stmt, source_lines, issues, http_route_functions);
                 }
             }
-            Expression::IfExpr { condition, then_branch, else_branch } => {
+            Expression::IfExpr {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 check_expr_for_issues(condition, source_lines, issues, http_route_functions);
                 check_expr_for_issues(then_branch, source_lines, issues, http_route_functions);
                 check_expr_for_issues(else_branch, source_lines, issues, http_route_functions);
@@ -1511,7 +1711,9 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                     check_expr_for_issues(&arm.body, source_lines, issues, http_route_functions);
                 }
             }
-            Expression::MethodCall { object, arguments, .. } => {
+            Expression::MethodCall {
+                object, arguments, ..
+            } => {
                 check_expr_for_issues(object, source_lines, issues, http_route_functions);
                 for arg in arguments {
                     check_expr_for_issues(arg, source_lines, issues, http_route_functions);
@@ -1548,7 +1750,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
             _ => {}
         }
     }
-    
+
     fn check_stmt_for_issues(
         stmt: &Statement,
         source_lines: &[&str],
@@ -1564,7 +1766,12 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                     check_expr_for_issues(expr, source_lines, issues, http_route_functions);
                 }
             }
-            Statement::Function { body, contract, name, .. } => {
+            Statement::Function {
+                body,
+                contract,
+                name,
+                ..
+            } => {
                 // Check for functions without contracts (suggestion only for exported ones)
                 if contract.is_none() {
                     let line = find_line_number(source_lines, &format!("fn {}", name));
@@ -1575,12 +1782,16 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         "line": line,
                     }));
                 }
-                
+
                 for s in &body.statements {
                     check_stmt_for_issues(s, source_lines, issues, http_route_functions);
                 }
             }
-            Statement::If { condition, then_branch, else_branch } => {
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 check_expr_for_issues(condition, source_lines, issues, http_route_functions);
                 for s in &then_branch.statements {
                     check_stmt_for_issues(s, source_lines, issues, http_route_functions);
@@ -1614,7 +1825,11 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
             Statement::Defer(expr) => {
                 check_expr_for_issues(expr, source_lines, issues, http_route_functions);
             }
-            Statement::Impl { methods, invariants, .. } => {
+            Statement::Impl {
+                methods,
+                invariants,
+                ..
+            } => {
                 for method in methods {
                     check_stmt_for_issues(method, source_lines, issues, http_route_functions);
                 }
@@ -1635,12 +1850,12 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
             _ => {}
         }
     }
-    
+
     // Run checks on all statements
     for stmt in &ast.statements {
         check_stmt_for_issues(stmt, &source_lines, &mut issues, &http_route_functions);
     }
-    
+
     // Also run the existing unused import analysis
     let ast_warnings = analyze_ast_warnings(ast, source);
     for w in ast_warnings {
@@ -1651,7 +1866,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
             "line": null,
         }));
     }
-    
+
     // Check source-level patterns that might indicate issues
     // These are heuristic checks on the raw source
     for (line_num, line) in source_lines.iter().enumerate() {
@@ -1667,7 +1882,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                 }
             }));
         }
-        
+
         // Check for Python-style range() calls
         if line.contains("range(") && (line.contains("for ") || line.contains("for\t")) {
             issues.push(json!({
@@ -1680,7 +1895,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                 }
             }));
         }
-        
+
         // Check for Rust/Python-style imports (heuristic)
         let trimmed = line.trim();
         if trimmed.starts_with("from ") && trimmed.contains(" import ") {
@@ -1694,7 +1909,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                 }
             }));
         }
-        
+
         if trimmed.starts_with("use ") && trimmed.contains("::") {
             issues.push(json!({
                 "severity": "error",
@@ -1706,48 +1921,55 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                 }
             }));
         }
-        
+
         // NOTE: NTNT DOES support escape sequences in regular strings!
         // The lexer handles: \n \t \r \\ \" \' \{ \}
         // Previous versions had incorrect warnings here - those have been removed.
     }
-    
+
     issues
 }
 
 /// Run intent-driven development commands
 fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
     match cmd {
-        IntentCommands::Check { file, intent_file, port, verbose } => {
-            run_intent_check_command(&file, intent_file.as_ref(), port, verbose)
-        }
+        IntentCommands::Check {
+            file,
+            intent_file,
+            port,
+            verbose,
+        } => run_intent_check_command(&file, intent_file.as_ref(), port, verbose),
         IntentCommands::Coverage { file, intent_file } => {
             run_intent_coverage_command(&file, intent_file.as_ref())
         }
-        IntentCommands::Init { intent_file, output } => {
-            run_intent_init_command(&intent_file, output.as_ref())
-        }
-        IntentCommands::Studio { intent_file, port, app_port, no_open } => {
-            run_intent_studio_command(&intent_file, port, app_port, no_open)
-        }
+        IntentCommands::Init {
+            intent_file,
+            output,
+        } => run_intent_init_command(&intent_file, output.as_ref()),
+        IntentCommands::Studio {
+            intent_file,
+            port,
+            app_port,
+            no_open,
+        } => run_intent_studio_command(&intent_file, port, app_port, no_open),
     }
 }
 
 /// Run the intent check command
 fn run_intent_check_command(
-    input_path: &PathBuf, 
+    input_path: &PathBuf,
     explicit_intent_path: Option<&PathBuf>,
     port: u16,
     verbose: bool,
 ) -> anyhow::Result<()> {
     println!("{}", "=== NTNT Intent Check ===".cyan().bold());
     println!();
-    
+
     // Verify file exists
     if !input_path.exists() {
         anyhow::bail!("File not found: {}", input_path.display());
     }
-    
+
     // Resolve both .intent and .tnt paths from either input
     let (intent_path_opt, tnt_path_opt) = if let Some(explicit) = explicit_intent_path {
         // User explicitly provided intent file
@@ -1755,12 +1977,13 @@ fn run_intent_check_command(
     } else {
         intent::resolve_intent_tnt_pair(input_path)
     };
-    
+
     // We need both files for check
     let intent_file_path = match intent_path_opt {
         Some(p) => p,
         None => {
-            let stem = input_path.file_stem()
+            let stem = input_path
+                .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             anyhow::bail!(
@@ -1769,11 +1992,12 @@ fn run_intent_check_command(
             );
         }
     };
-    
+
     let ntnt_path = match tnt_path_opt {
         Some(p) => p,
         None => {
-            let stem = input_path.file_stem()
+            let stem = input_path
+                .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             anyhow::bail!(
@@ -1782,11 +2006,11 @@ fn run_intent_check_command(
             );
         }
     };
-    
+
     println!("Source: {}", ntnt_path.display().to_string().green());
     println!("Intent: {}", intent_file_path.display().to_string().green());
     println!();
-    
+
     // Run intent check
     match intent::run_intent_check(
         ntnt_path.as_path(),
@@ -1796,7 +2020,7 @@ fn run_intent_check_command(
     ) {
         Ok(result) => {
             intent::print_intent_results(&result);
-            
+
             if result.features_failed > 0 {
                 std::process::exit(1);
             }
@@ -1817,7 +2041,7 @@ fn run_intent_coverage_command(
     if !input_path.exists() {
         anyhow::bail!("File not found: {}", input_path.display());
     }
-    
+
     // Resolve both .intent and .tnt paths from either input
     let (intent_path_opt, tnt_path_opt) = if let Some(explicit) = explicit_intent_path {
         // User explicitly provided intent file
@@ -1825,12 +2049,13 @@ fn run_intent_coverage_command(
     } else {
         intent::resolve_intent_tnt_pair(input_path)
     };
-    
+
     // We need both files for coverage
     let intent_file_path = match intent_path_opt {
         Some(p) => p,
         None => {
-            let stem = input_path.file_stem()
+            let stem = input_path
+                .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             anyhow::bail!(
@@ -1839,40 +2064,35 @@ fn run_intent_coverage_command(
             );
         }
     };
-    
+
     let ntnt_path = match tnt_path_opt {
         Some(p) => p,
         None => {
-            let stem = input_path.file_stem()
+            let stem = input_path
+                .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            anyhow::bail!(
-                "No .tnt file found. Create {}.tnt to check coverage",
-                stem
-            );
+            anyhow::bail!("No .tnt file found. Create {}.tnt to check coverage", stem);
         }
     };
-    
+
     // Parse intent file
     let intent_file = intent::IntentFile::parse(&intent_file_path)
         .map_err(|e| anyhow::anyhow!("Failed to parse intent file: {}", e))?;
-    
+
     // Read source file(s)
     let source_content = fs::read_to_string(&ntnt_path)?;
-    let source_files = vec![(
-        ntnt_path.to_string_lossy().to_string(),
-        source_content,
-    )];
-    
+    let source_files = vec![(ntnt_path.to_string_lossy().to_string(), source_content)];
+
     // Generate and print coverage report
     let report = intent::generate_coverage_report(&intent_file, &source_files);
     intent::print_coverage_report(&report);
-    
+
     // Exit with error if coverage is 0%
     if report.covered_features == 0 && report.total_features > 0 {
         std::process::exit(1);
     }
-    
+
     Ok(())
 }
 
@@ -1885,43 +2105,47 @@ fn run_intent_init_command(
     if !input_path.exists() {
         anyhow::bail!("File not found: {}", input_path.display());
     }
-    
+
     // Resolve to find intent file (allows passing either .tnt or .intent)
     let (intent_path_opt, _tnt_path_opt) = intent::resolve_intent_tnt_pair(input_path);
-    
+
     let intent_path = match intent_path_opt {
         Some(p) => p,
         None => {
-            let stem = input_path.file_stem()
+            let stem = input_path
+                .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            anyhow::bail!(
-                "No intent file found. Create {}.intent first",
-                stem
-            );
+            anyhow::bail!("No intent file found. Create {}.intent first", stem);
         }
     };
-    
+
     // Parse intent file
     let intent_file = intent::IntentFile::parse(&intent_path)
         .map_err(|e| anyhow::anyhow!("Failed to parse intent file: {}", e))?;
-    
+
     // Generate scaffolding
     let scaffolding = intent::generate_scaffolding(&intent_file);
-    
+
     // Output
     if let Some(output) = output_path {
         fs::write(output, &scaffolding)?;
-        println!("{}", format!("Generated {} from intent file", output.display()).green());
+        println!(
+            "{}",
+            format!("Generated {} from intent file", output.display()).green()
+        );
         println!();
         println!("Next steps:");
         println!("  1. Implement the TODO functions in {}", output.display());
-        println!("  2. Run {} to verify", format!("ntnt intent check {}", output.display()).cyan());
+        println!(
+            "  2. Run {} to verify",
+            format!("ntnt intent check {}", output.display()).cyan()
+        );
     } else {
         // Print to stdout
         println!("{}", scaffolding);
     }
-    
+
     Ok(())
 }
 
@@ -1934,29 +2158,37 @@ fn run_intent_studio_command(
 ) -> anyhow::Result<()> {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::process::{Child, Command};
     use std::time::SystemTime;
-    use std::process::{Command, Child};
-    
+
     // Verify the file exists
     if !input_path.exists() {
         anyhow::bail!("File not found: {}", input_path.display());
     }
-    
+
     // Resolve both .intent and .tnt paths from either input
     let (intent_path_opt, tnt_path_opt) = intent::resolve_intent_tnt_pair(input_path);
-    
+
     // We need an .intent file to show features/tests in Studio
     let intent_path = match intent_path_opt {
         Some(p) => p,
         None => {
-            let stem = input_path.file_stem()
+            let stem = input_path
+                .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             eprintln!();
             eprintln!("{}", "  ⚠️  No .intent file found".yellow().bold());
             eprintln!();
             eprintln!("  Intent Studio requires a .intent file to display features and run tests.");
-            eprintln!("  Expected: {}.intent", input_path.parent().unwrap_or(std::path::Path::new(".")).join(&stem).display());
+            eprintln!(
+                "  Expected: {}.intent",
+                input_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join(&stem)
+                    .display()
+            );
             eprintln!();
             eprintln!("  {} Create one with:", "💡".yellow());
             eprintln!("     ntnt intent init {}.intent", stem);
@@ -1964,13 +2196,13 @@ fn run_intent_studio_command(
             anyhow::bail!("No .intent file found for Intent Studio");
         }
     };
-    
+
     // .tnt file is optional (Studio can still show intent without running tests)
     let tnt_path = tnt_path_opt;
-    
+
     let intent_path_str = intent_path.to_string_lossy().to_string();
     let addr = format!("127.0.0.1:{}", port);
-    
+
     println!();
     println!("{}", "  🎨 Intent Studio".cyan().bold());
     println!();
@@ -1978,19 +2210,22 @@ fn run_intent_studio_command(
     println!("  {} http://{}", "URL:".dimmed(), addr);
     println!("  {} http://127.0.0.1:{}", "App:".dimmed(), app_port);
     println!();
-    
+
     // Start the app server if .tnt file exists
     let mut app_process: Option<Child> = None;
-    
+
     if let Some(ref tnt_file) = tnt_path {
         // Get the current executable path to run ntnt
-        let current_exe = std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from("ntnt"));
-        
+        let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ntnt"));
+
         // Set up environment to override the listen port
         // We'll use a special env var that the interpreter checks
-        println!("  {} Starting app from {}", "🚀".green(), tnt_file.display());
-        
+        println!(
+            "  {} Starting app from {}",
+            "🚀".green(),
+            tnt_file.display()
+        );
+
         match Command::new(&current_exe)
             .arg("run")
             .arg(tnt_file)
@@ -2001,37 +2236,56 @@ fn run_intent_studio_command(
         {
             Ok(child) => {
                 app_process = Some(child);
-                println!("  {} App server starting on port {}", "✅".green(), app_port);
-                
+                println!(
+                    "  {} App server starting on port {}",
+                    "✅".green(),
+                    app_port
+                );
+
                 // Give it a moment to start
                 std::thread::sleep(std::time::Duration::from_millis(500));
             }
             Err(e) => {
                 println!("  {} Failed to start app: {}", "⚠️".yellow(), e);
-                println!("  {} You can start it manually: ntnt run {}", "💡".dimmed(), tnt_file.display());
+                println!(
+                    "  {} You can start it manually: ntnt run {}",
+                    "💡".dimmed(),
+                    tnt_file.display()
+                );
             }
         }
     } else {
         let expected_tnt = intent_path.with_extension("tnt");
-        println!("  {} No .tnt file found at {}", "⚠️".yellow(), expected_tnt.display());
-        println!("  {} Start your app manually: ntnt run <your-app>.tnt", "💡".dimmed());
+        println!(
+            "  {} No .tnt file found at {}",
+            "⚠️".yellow(),
+            expected_tnt.display()
+        );
+        println!(
+            "  {} Start your app manually: ntnt run <your-app>.tnt",
+            "💡".dimmed()
+        );
     }
-    
+
     println!();
     println!("  {} Live test execution enabled!", "✅".green());
     println!();
-    println!("  {} Watching for changes (auto-refresh every 2s)", "👀".dimmed());
+    println!(
+        "  {} Watching for changes (auto-refresh every 2s)",
+        "👀".dimmed()
+    );
     println!("  {} Press Ctrl+C to stop", "📝".dimmed());
     println!();
-    
+
     // Set up Ctrl+C handler to clean up child process
     let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let r = running.clone();
-    
+
     ctrlc::set_handler(move || {
         r.store(false, std::sync::atomic::Ordering::SeqCst);
-    }).expect("Error setting Ctrl-C handler");
-    
+    })
+    .expect("Error setting Ctrl-C handler");
+
     // Try to open browser
     if !no_open {
         let url = format!("http://{}", addr);
@@ -2045,49 +2299,51 @@ fn run_intent_studio_command(
         }
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("cmd").args(["/C", "start", &url]).spawn();
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "start", &url])
+                .spawn();
         }
     }
-    
+
     // Start simple HTTP server with non-blocking accepts
     let listener = TcpListener::bind(&addr)
         .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", addr, e))?;
     listener.set_nonblocking(true)?;
-    
+
     // Track file modification time for change detection
     let mut last_modified = fs::metadata(&intent_path)
         .and_then(|m| m.modified())
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    
+
     // Main loop
     while running.load(std::sync::atomic::Ordering::SeqCst) {
         match listener.accept() {
             Ok((mut stream, _)) => {
                 // Set stream back to blocking for read/write
                 stream.set_nonblocking(false)?;
-                
+
                 let mut buffer = [0; 4096];
                 if stream.read(&mut buffer).is_ok() {
                     let request = String::from_utf8_lossy(&buffer);
-                    
+
                     // Parse request path
                     let path = request
                         .lines()
                         .next()
                         .and_then(|line| line.split_whitespace().nth(1))
                         .unwrap_or("/");
-                    
+
                     let response = if path == "/check-update" {
                         // Endpoint for checking if file has changed
                         let current_modified = fs::metadata(&intent_path)
                             .and_then(|m| m.modified())
                             .unwrap_or(SystemTime::UNIX_EPOCH);
-                        
+
                         let changed = current_modified != last_modified;
                         if changed {
                             last_modified = current_modified;
                         }
-                        
+
                         let body = if changed { "changed" } else { "unchanged" };
                         format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
@@ -2106,16 +2362,28 @@ fn run_intent_studio_command(
                                 let status_code = resp.status().as_u16();
                                 // Consider 404 and 5xx as "error" states (routes not registered or server error)
                                 if status_code == 404 {
-                                    format!(r#"{{"running": true, "healthy": false, "status": {}, "error": "No routes registered (404)"}}"#, status_code)
+                                    format!(
+                                        r#"{{"running": true, "healthy": false, "status": {}, "error": "No routes registered (404)"}}"#,
+                                        status_code
+                                    )
                                 } else if status_code >= 500 {
-                                    format!(r#"{{"running": true, "healthy": false, "status": {}, "error": "Server error"}}"#, status_code)
+                                    format!(
+                                        r#"{{"running": true, "healthy": false, "status": {}, "error": "Server error"}}"#,
+                                        status_code
+                                    )
                                 } else {
-                                    format!(r#"{{"running": true, "healthy": true, "status": {}}}"#, status_code)
+                                    format!(
+                                        r#"{{"running": true, "healthy": true, "status": {}}}"#,
+                                        status_code
+                                    )
                                 }
                             }
                             Err(e) => {
                                 let error_msg = e.to_string().replace('"', "\\\"");
-                                format!(r#"{{"running": false, "healthy": false, "error": "{}"}}"#, error_msg)
+                                format!(
+                                    r#"{{"running": false, "healthy": false, "error": "{}"}}"#,
+                                    error_msg
+                                )
                             }
                         };
                         format!(
@@ -2128,14 +2396,15 @@ fn run_intent_studio_command(
                         match intent::IntentFile::parse(&intent_path) {
                             Ok(intent_file) => {
                                 // Read source content for annotation checking
-                                let source_content = tnt_path.as_ref()
-                                    .and_then(|p| fs::read_to_string(p).ok());
+                                let source_content =
+                                    tnt_path.as_ref().and_then(|p| fs::read_to_string(p).ok());
                                 let results = intent::run_tests_against_server(
-                                    &intent_file, 
+                                    &intent_file,
                                     app_port,
-                                    source_content.as_deref()
+                                    source_content.as_deref(),
                                 );
-                                let json = serde_json::to_string(&results).unwrap_or_else(|_| "{}".to_string());
+                                let json = serde_json::to_string(&results)
+                                    .unwrap_or_else(|_| "{}".to_string());
                                 format!(
                                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
                                     json.len(),
@@ -2143,7 +2412,10 @@ fn run_intent_studio_command(
                                 )
                             }
                             Err(e) => {
-                                let error = format!(r#"{{"error": "{}"}}"#, e.to_string().replace('"', "\\\""));
+                                let error = format!(
+                                    r#"{{"error": "{}"}}"#,
+                                    e.to_string().replace('"', "\\\"")
+                                );
                                 format!(
                                     "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                                     error.len(),
@@ -2155,7 +2427,11 @@ fn run_intent_studio_command(
                         // Main page - render the intent file
                         match intent::IntentFile::parse(&intent_path) {
                             Ok(intent_file) => {
-                                let html = render_intent_studio_html(&intent_file, &intent_path_str, app_port);
+                                let html = render_intent_studio_html(
+                                    &intent_file,
+                                    &intent_path_str,
+                                    app_port,
+                                );
                                 format!(
                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
                                     html.len(),
@@ -2163,7 +2439,8 @@ fn run_intent_studio_command(
                                 )
                             }
                             Err(e) => {
-                                let html = render_intent_studio_error(&e.to_string(), &intent_path_str);
+                                let html =
+                                    render_intent_studio_error(&e.to_string(), &intent_path_str);
                                 format!(
                                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
                                     html.len(),
@@ -2172,7 +2449,7 @@ fn run_intent_studio_command(
                             }
                         }
                     };
-                    
+
                     let _ = stream.write_all(response.as_bytes());
                     let _ = stream.flush();
                 }
@@ -2186,27 +2463,31 @@ fn run_intent_studio_command(
             }
         }
     }
-    
+
     // Clean up: kill the app process if we started it
     if let Some(mut child) = app_process {
         println!("\n  {} Stopping app server...", "🛑".red());
         let _ = child.kill();
         let _ = child.wait();
     }
-    
+
     println!("  {} Intent Studio stopped", "👋".dimmed());
-    
+
     Ok(())
 }
 
 /// Render the Intent Studio HTML page
-fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, app_port: u16) -> String {
+fn render_intent_studio_html(
+    intent_file: &intent::IntentFile,
+    file_path: &str,
+    app_port: u16,
+) -> String {
     let mut features_html = String::new();
-    
+
     for feature in &intent_file.features {
         let id = feature.id.as_deref().unwrap_or("no-id");
         let description = feature.description.as_deref().unwrap_or("No description");
-        
+
         // Build test cases HTML
         let mut tests_html = String::new();
         for (test_idx, test) in feature.tests.iter().enumerate() {
@@ -2215,9 +2496,15 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
                 let assertion_str = match assertion {
                     intent::Assertion::Status(code) => format!("status: {}", code),
                     intent::Assertion::BodyContains(text) => format!("body contains \"{}\"", text),
-                    intent::Assertion::BodyNotContains(text) => format!("body not contains \"{}\"", text),
-                    intent::Assertion::BodyMatches(pattern) => format!("body matches \"{}\"", pattern),
-                    intent::Assertion::HeaderContains(name, value) => format!("header \"{}\" contains \"{}\"", name, value),
+                    intent::Assertion::BodyNotContains(text) => {
+                        format!("body not contains \"{}\"", text)
+                    }
+                    intent::Assertion::BodyMatches(pattern) => {
+                        format!("body matches \"{}\"", pattern)
+                    }
+                    intent::Assertion::HeaderContains(name, value) => {
+                        format!("header \"{}\" contains \"{}\"", name, value)
+                    }
                 };
                 assertions_html.push_str(&format!(
                     r#"<div class="assertion" data-feature="{}" data-test="{}" data-assert="{}"><span class="assertion-icon">○</span> {}</div>"#,
@@ -2227,13 +2514,16 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
                     html_escape(&assertion_str)
                 ));
             }
-            
+
             let body_html = if let Some(body) = &test.body {
-                format!(r#"<div class="test-body">Body: <code>{}</code></div>"#, html_escape(body))
+                format!(
+                    r#"<div class="test-body">Body: <code>{}</code></div>"#,
+                    html_escape(body)
+                )
             } else {
                 String::new()
             };
-            
+
             tests_html.push_str(&format!(
                 r#"<div class="test-case" data-feature="{}" data-test="{}">
                     <div class="test-request"><span class="method">{}</span> <span class="path">{}</span></div>
@@ -2248,32 +2538,48 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
                 assertions_html
             ));
         }
-        
+
         // Pick an icon based on the feature name
-        let icon = if feature.name.to_lowercase().contains("login") || feature.name.to_lowercase().contains("auth") {
+        let icon = if feature.name.to_lowercase().contains("login")
+            || feature.name.to_lowercase().contains("auth")
+        {
             "🔐"
-        } else if feature.name.to_lowercase().contains("register") || feature.name.to_lowercase().contains("signup") {
+        } else if feature.name.to_lowercase().contains("register")
+            || feature.name.to_lowercase().contains("signup")
+        {
             "📝"
-        } else if feature.name.to_lowercase().contains("home") || feature.name.to_lowercase().contains("index") {
+        } else if feature.name.to_lowercase().contains("home")
+            || feature.name.to_lowercase().contains("index")
+        {
             "🏠"
-        } else if feature.name.to_lowercase().contains("api") || feature.name.to_lowercase().contains("status") {
+        } else if feature.name.to_lowercase().contains("api")
+            || feature.name.to_lowercase().contains("status")
+        {
             "⚡"
         } else if feature.name.to_lowercase().contains("about") {
             "ℹ️"
-        } else if feature.name.to_lowercase().contains("user") || feature.name.to_lowercase().contains("profile") {
+        } else if feature.name.to_lowercase().contains("user")
+            || feature.name.to_lowercase().contains("profile")
+        {
             "👤"
         } else if feature.name.to_lowercase().contains("search") {
             "🔍"
-        } else if feature.name.to_lowercase().contains("setting") || feature.name.to_lowercase().contains("config") {
+        } else if feature.name.to_lowercase().contains("setting")
+            || feature.name.to_lowercase().contains("config")
+        {
             "⚙️"
-        } else if feature.name.to_lowercase().contains("chart") || feature.name.to_lowercase().contains("graph") {
+        } else if feature.name.to_lowercase().contains("chart")
+            || feature.name.to_lowercase().contains("graph")
+        {
             "📊"
-        } else if feature.name.to_lowercase().contains("data") || feature.name.to_lowercase().contains("database") {
+        } else if feature.name.to_lowercase().contains("data")
+            || feature.name.to_lowercase().contains("database")
+        {
             "💾"
         } else {
             "✨"
         };
-        
+
         features_html.push_str(&format!(
             r#"<div class="feature-card" data-feature="{}">
                 <div class="feature-header">
@@ -2297,16 +2603,19 @@ fn render_intent_studio_html(intent_file: &intent::IntentFile, file_path: &str, 
             tests_html
         ));
     }
-    
+
     let feature_count = intent_file.features.len();
     let test_count: usize = intent_file.features.iter().map(|f| f.tests.len()).sum();
-    let assertion_count: usize = intent_file.features.iter()
+    let assertion_count: usize = intent_file
+        .features
+        .iter()
         .flat_map(|f| f.tests.iter())
         .map(|t| t.assertions.len())
         .sum();
-    
-    let run_button_html = r#"<button class="run-tests-btn" onclick="runTests()">▶ Run Tests</button>"#;
-    
+
+    let run_button_html =
+        r#"<button class="run-tests-btn" onclick="runTests()">▶ Run Tests</button>"#;
+
     format!(
         r##"<!DOCTYPE html>
 <html lang="en">
@@ -3192,18 +3501,18 @@ fn render_intent_studio_error(error: &str, file_path: &str) -> String {
 /// Simple HTML escaping
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
-     .replace('<', "&lt;")
-     .replace('>', "&gt;")
-     .replace('"', "&quot;")
-     .replace('\'', "&#39;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Collect all .tnt files from a path (file or directory)
 fn collect_tnt_files(path: &PathBuf) -> anyhow::Result<Vec<PathBuf>> {
     use std::ffi::OsStr;
-    
+
     let mut files = Vec::new();
-    
+
     if path.is_file() {
         if path.extension() == Some(OsStr::new("tnt")) {
             files.push(path.clone());
@@ -3223,7 +3532,7 @@ fn collect_tnt_files(path: &PathBuf) -> anyhow::Result<Vec<PathBuf>> {
         }
         collect_recursive(path, &mut files)?;
     }
-    
+
     files.sort();
     Ok(files)
 }
@@ -3244,26 +3553,62 @@ fn type_to_string(t: &ntnt::ast::TypeExpr) -> String {
     match t {
         TypeExpr::Named(name) => name.clone(),
         TypeExpr::Array(inner) => format!("[{}]", type_to_string(inner)),
-        TypeExpr::Map { key_type, value_type } => {
-            format!("Map<{}, {}>", type_to_string(key_type), type_to_string(value_type))
+        TypeExpr::Map {
+            key_type,
+            value_type,
+        } => {
+            format!(
+                "Map<{}, {}>",
+                type_to_string(key_type),
+                type_to_string(value_type)
+            )
         }
         TypeExpr::Tuple(types) => {
-            format!("({})", types.iter().map(type_to_string).collect::<Vec<_>>().join(", "))
+            format!(
+                "({})",
+                types
+                    .iter()
+                    .map(type_to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
-        TypeExpr::Function { params, return_type } => {
-            format!("({}) -> {}", 
-                params.iter().map(type_to_string).collect::<Vec<_>>().join(", "),
-                type_to_string(return_type))
+        TypeExpr::Function {
+            params,
+            return_type,
+        } => {
+            format!(
+                "({}) -> {}",
+                params
+                    .iter()
+                    .map(type_to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                type_to_string(return_type)
+            )
         }
         TypeExpr::Generic { name, args } => {
-            format!("{}<{}>", name, args.iter().map(type_to_string).collect::<Vec<_>>().join(", "))
+            format!(
+                "{}<{}>",
+                name,
+                args.iter()
+                    .map(type_to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
         TypeExpr::Optional(inner) => format!("{}?", type_to_string(inner)),
-        TypeExpr::Union(types) => {
-            types.iter().map(type_to_string).collect::<Vec<_>>().join(" | ")
-        }
+        TypeExpr::Union(types) => types
+            .iter()
+            .map(type_to_string)
+            .collect::<Vec<_>>()
+            .join(" | "),
         TypeExpr::WithEffect { value_type, effect } => {
-            format!("{} / {}", type_to_string(value_type), type_to_string(effect))
+            format!(
+                "{} / {}",
+                type_to_string(value_type),
+                type_to_string(effect)
+            )
         }
     }
 }
@@ -3289,22 +3634,50 @@ fn expr_to_string(expr: &ntnt::ast::Expression) -> String {
         Expression::Float(n) => n.to_string(),
         Expression::String(s) => format!("\"{}\"", s),
         Expression::Bool(b) => b.to_string(),
-        Expression::Binary { left, operator, right } => {
-            format!("{} {:?} {}", expr_to_string(left), operator, expr_to_string(right))
+        Expression::Binary {
+            left,
+            operator,
+            right,
+        } => {
+            format!(
+                "{} {:?} {}",
+                expr_to_string(left),
+                operator,
+                expr_to_string(right)
+            )
         }
         Expression::FieldAccess { object, field } => {
             format!("{}.{}", expr_to_string(object), field)
         }
-        Expression::MethodCall { object, method, arguments } => {
-            format!("{}.{}({})", 
-                expr_to_string(object), 
+        Expression::MethodCall {
+            object,
+            method,
+            arguments,
+        } => {
+            format!(
+                "{}.{}({})",
+                expr_to_string(object),
                 method,
-                arguments.iter().map(expr_to_string).collect::<Vec<_>>().join(", "))
+                arguments
+                    .iter()
+                    .map(expr_to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
-        Expression::Call { function, arguments } => {
-            format!("{}({})", 
+        Expression::Call {
+            function,
+            arguments,
+        } => {
+            format!(
+                "{}({})",
                 expr_to_string(function),
-                arguments.iter().map(expr_to_string).collect::<Vec<_>>().join(", "))
+                arguments
+                    .iter()
+                    .map(expr_to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
         _ => "<expr>".to_string(),
     }
@@ -3314,13 +3687,13 @@ fn expr_to_string(expr: &ntnt::ast::Expression) -> String {
 fn analyze_ast_warnings(ast: &ntnt::ast::Program, _source: &str) -> Vec<serde_json::Value> {
     use ntnt::ast::Statement;
     use serde_json::json;
-    
+
     let mut warnings = Vec::new();
-    
+
     // Track declared but unused imports
     let mut imports: Vec<String> = Vec::new();
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    
+
     for stmt in &ast.statements {
         match stmt {
             Statement::Import { items, .. } => {
@@ -3334,7 +3707,7 @@ fn analyze_ast_warnings(ast: &ntnt::ast::Program, _source: &str) -> Vec<serde_js
             }
         }
     }
-    
+
     // Check for unused imports
     for import in &imports {
         if !used_names.contains(import) {
@@ -3344,66 +3717,71 @@ fn analyze_ast_warnings(ast: &ntnt::ast::Program, _source: &str) -> Vec<serde_js
             }));
         }
     }
-    
+
     warnings
 }
 
 /// Collect used identifiers from a statement (comprehensive AST traversal)
 fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections::HashSet<String>) {
-    use ntnt::ast::{Statement, Expression, StringPart};
-    
+    use ntnt::ast::{Expression, Statement, StringPart};
+
     fn collect_from_expr(expr: &Expression, names: &mut std::collections::HashSet<String>) {
         match expr {
             // Identifiers - the core of what we're tracking
-            Expression::Identifier(name) => { 
-                names.insert(name.clone()); 
+            Expression::Identifier(name) => {
+                names.insert(name.clone());
             }
-            
+
             // Function calls - both the function name and all arguments
-            Expression::Call { function, arguments } => {
+            Expression::Call {
+                function,
+                arguments,
+            } => {
                 collect_from_expr(function, names);
                 for arg in arguments {
                     collect_from_expr(arg, names);
                 }
             }
-            
+
             // Method calls - object and arguments (method name is not a used identifier)
-            Expression::MethodCall { object, arguments, .. } => {
+            Expression::MethodCall {
+                object, arguments, ..
+            } => {
                 collect_from_expr(object, names);
                 for arg in arguments {
                     collect_from_expr(arg, names);
                 }
             }
-            
+
             // Binary operations
             Expression::Binary { left, right, .. } => {
                 collect_from_expr(left, names);
                 collect_from_expr(right, names);
             }
-            
+
             // Unary operations
             Expression::Unary { operand, .. } => {
                 collect_from_expr(operand, names);
             }
-            
+
             // Field access - object contains identifier
             Expression::FieldAccess { object, .. } => {
                 collect_from_expr(object, names);
             }
-            
+
             // Index access
             Expression::Index { object, index } => {
                 collect_from_expr(object, names);
                 collect_from_expr(index, names);
             }
-            
+
             // Array literals
             Expression::Array(items) => {
                 for item in items {
                     collect_from_expr(item, names);
                 }
             }
-            
+
             // Map literals
             Expression::MapLiteral(pairs) => {
                 for (key, value) in pairs {
@@ -3411,13 +3789,13 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                     collect_from_expr(value, names);
                 }
             }
-            
+
             // Range expressions
             Expression::Range { start, end, .. } => {
                 collect_from_expr(start, names);
                 collect_from_expr(end, names);
             }
-            
+
             // Interpolated strings - expressions inside {}
             Expression::InterpolatedString(parts) => {
                 for part in parts {
@@ -3426,11 +3804,15 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                     }
                 }
             }
-            
+
             // Template strings - expressions inside {{}}
             Expression::TemplateString(parts) => {
                 use ntnt::ast::TemplatePart;
-                fn collect_from_template_parts(parts: &[TemplatePart], names: &mut std::collections::HashSet<String>, collect_fn: &dyn Fn(&Expression, &mut std::collections::HashSet<String>)) {
+                fn collect_from_template_parts(
+                    parts: &[TemplatePart],
+                    names: &mut std::collections::HashSet<String>,
+                    collect_fn: &dyn Fn(&Expression, &mut std::collections::HashSet<String>),
+                ) {
                     for part in parts {
                         match part {
                             TemplatePart::Literal(_) => {}
@@ -3441,7 +3823,11 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                                 collect_fn(iterable, names);
                                 collect_from_template_parts(body, names, collect_fn);
                             }
-                            TemplatePart::IfBlock { condition, then_parts, else_parts } => {
+                            TemplatePart::IfBlock {
+                                condition,
+                                then_parts,
+                                else_parts,
+                            } => {
                                 collect_fn(condition, names);
                                 collect_from_template_parts(then_parts, names, collect_fn);
                                 collect_from_template_parts(else_parts, names, collect_fn);
@@ -3451,7 +3837,7 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                 }
                 collect_from_template_parts(parts, names, &collect_from_expr);
             }
-            
+
             // Struct literals - the struct name and field values
             Expression::StructLiteral { name, fields } => {
                 names.insert(name.clone());
@@ -3459,34 +3845,42 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                     collect_from_expr(value, names);
                 }
             }
-            
+
             // Enum variants
-            Expression::EnumVariant { enum_name, arguments, .. } => {
+            Expression::EnumVariant {
+                enum_name,
+                arguments,
+                ..
+            } => {
                 names.insert(enum_name.clone());
                 for arg in arguments {
                     collect_from_expr(arg, names);
                 }
             }
-            
+
             // Lambda/closures - recurse into body
             Expression::Lambda { body, .. } => {
                 collect_from_expr(body, names);
             }
-            
+
             // Block expressions
             Expression::Block(block) => {
                 for s in &block.statements {
                     collect_used_names(s, names);
                 }
             }
-            
+
             // If expressions
-            Expression::IfExpr { condition, then_branch, else_branch } => {
+            Expression::IfExpr {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 collect_from_expr(condition, names);
                 collect_from_expr(then_branch, names);
                 collect_from_expr(else_branch, names);
             }
-            
+
             // Match expressions
             Expression::Match { scrutinee, arms } => {
                 collect_from_expr(scrutinee, names);
@@ -3499,30 +3893,36 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                     collect_from_expr(&arm.body, names);
                 }
             }
-            
+
             // Assignment
             Expression::Assign { target, value } => {
                 collect_from_expr(target, names);
                 collect_from_expr(value, names);
             }
-            
+
             // Await
             Expression::Await(inner) => {
                 collect_from_expr(inner, names);
             }
-            
+
             // Try
             Expression::Try(inner) => {
                 collect_from_expr(inner, names);
             }
-            
+
             // Literals - no identifiers to collect
-            Expression::Integer(_) | Expression::Float(_) | 
-            Expression::String(_) | Expression::Bool(_) | Expression::Unit => {}
+            Expression::Integer(_)
+            | Expression::Float(_)
+            | Expression::String(_)
+            | Expression::Bool(_)
+            | Expression::Unit => {}
         }
     }
-    
-    fn collect_from_pattern(pattern: &ntnt::ast::Pattern, names: &mut std::collections::HashSet<String>) {
+
+    fn collect_from_pattern(
+        pattern: &ntnt::ast::Pattern,
+        names: &mut std::collections::HashSet<String>,
+    ) {
         use ntnt::ast::Pattern;
         match pattern {
             Pattern::Struct { name, fields } => {
@@ -3550,7 +3950,7 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
             Pattern::Variable(_) | Pattern::Wildcard => {}
         }
     }
-    
+
     match stmt {
         Statement::Expression(expr) => collect_from_expr(expr, names),
         Statement::Let { value, pattern, .. } => {
@@ -3576,7 +3976,11 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                 }
             }
         }
-        Statement::If { condition, then_branch, else_branch } => {
+        Statement::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
             collect_from_expr(condition, names);
             for s in &then_branch.statements {
                 collect_used_names(s, names);
@@ -3606,7 +4010,11 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
         }
         Statement::Return(Some(expr)) => collect_from_expr(expr, names),
         Statement::Defer(expr) => collect_from_expr(expr, names),
-        Statement::Impl { methods, invariants, .. } => {
+        Statement::Impl {
+            methods,
+            invariants,
+            ..
+        } => {
             for method in methods {
                 collect_used_names(method, names);
             }
@@ -3628,10 +4036,16 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
             collect_used_names(target, names);
         }
         // These don't contain expressions to analyze
-        Statement::Return(None) | Statement::Break | Statement::Continue |
-        Statement::Struct { .. } | Statement::Enum { .. } | Statement::Trait { .. } |
-        Statement::TypeAlias { .. } | Statement::Use { .. } | Statement::Import { .. } |
-        Statement::Protocol { .. } => {}
+        Statement::Return(None)
+        | Statement::Break
+        | Statement::Continue
+        | Statement::Struct { .. }
+        | Statement::Enum { .. }
+        | Statement::Trait { .. }
+        | Statement::TypeAlias { .. }
+        | Statement::Use { .. }
+        | Statement::Import { .. }
+        | Statement::Protocol { .. } => {}
     }
 }
 

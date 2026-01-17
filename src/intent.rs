@@ -18,22 +18,22 @@
 //!         - body contains "Bear Lake"
 //! ```
 
+use colored::*;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
-use colored::*;
-use serde::Serialize;
 
+use crate::error::IntentError;
 use crate::interpreter::Interpreter;
 use crate::lexer::Lexer;
 use crate::parser::Parser as IntentParser;
-use crate::error::IntentError;
 
 /// A single assertion within a test
 #[derive(Debug, Clone, Serialize)]
@@ -165,25 +165,25 @@ impl IntentFile {
     pub fn parse(path: &Path) -> Result<Self, IntentError> {
         let content = fs::read_to_string(path)
             .map_err(|e| IntentError::RuntimeError(format!("Failed to read intent file: {}", e)))?;
-        
+
         Self::parse_content(&content, path.to_string_lossy().to_string())
     }
-    
+
     /// Parse intent file content
     pub fn parse_content(content: &str, source_path: String) -> Result<Self, IntentError> {
         let mut features = Vec::new();
         let mut current_feature: Option<Feature> = None;
         let mut current_test: Option<TestCase> = None;
         let mut in_assertions = false;
-        
+
         for line in content.lines() {
             let trimmed = line.trim();
-            
+
             // Skip empty lines and comments
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            
+
             // Feature declaration
             if trimmed.starts_with("Feature:") {
                 // Save previous feature
@@ -193,7 +193,7 @@ impl IntentFile {
                     }
                     features.push(feat);
                 }
-                
+
                 let name = trimmed.trim_start_matches("Feature:").trim().to_string();
                 current_feature = Some(Feature {
                     id: None,
@@ -205,7 +205,7 @@ impl IntentFile {
                 in_assertions = false;
                 continue;
             }
-            
+
             // Inside a feature
             if let Some(ref mut feature) = current_feature {
                 // Feature ID
@@ -214,7 +214,7 @@ impl IntentFile {
                     feature.id = Some(id.to_string());
                     continue;
                 }
-                
+
                 // Description
                 if trimmed.starts_with("description:") {
                     let desc = trimmed.trim_start_matches("description:").trim();
@@ -223,31 +223,31 @@ impl IntentFile {
                     feature.description = Some(desc);
                     continue;
                 }
-                
+
                 // Test section start
                 if trimmed == "test:" {
                     in_assertions = false;
                     continue;
                 }
-                
+
                 // Request line (starts a new test case)
                 if trimmed.starts_with("- request:") || trimmed.starts_with("request:") {
                     // Save previous test
                     if let Some(test) = current_test.take() {
                         feature.tests.push(test);
                     }
-                    
+
                     let request_str = if trimmed.starts_with("- request:") {
                         trimmed.trim_start_matches("- request:").trim()
                     } else {
                         trimmed.trim_start_matches("request:").trim()
                     };
-                    
+
                     // Parse "METHOD /path"
                     let parts: Vec<&str> = request_str.splitn(2, ' ').collect();
                     let method = parts.get(0).unwrap_or(&"GET").to_string();
                     let path = parts.get(1).unwrap_or(&"/").to_string();
-                    
+
                     current_test = Some(TestCase {
                         method,
                         path,
@@ -257,13 +257,13 @@ impl IntentFile {
                     in_assertions = false;
                     continue;
                 }
-                
+
                 // Assert section
                 if trimmed == "assert:" {
                     in_assertions = true;
                     continue;
                 }
-                
+
                 // Assertion lines
                 if in_assertions {
                     if let Some(ref mut test) = current_test {
@@ -273,7 +273,7 @@ impl IntentFile {
                     }
                     continue;
                 }
-                
+
                 // Body for POST requests
                 if trimmed.starts_with("body:") {
                     if let Some(ref mut test) = current_test {
@@ -285,7 +285,7 @@ impl IntentFile {
                 }
             }
         }
-        
+
         // Save final feature and test
         if let Some(mut feat) = current_feature {
             if let Some(test) = current_test {
@@ -293,14 +293,17 @@ impl IntentFile {
             }
             features.push(feat);
         }
-        
-        Ok(IntentFile { features, source_path })
+
+        Ok(IntentFile {
+            features,
+            source_path,
+        })
     }
-    
+
     /// Parse a single assertion line
     fn parse_assertion(line: &str) -> Option<Assertion> {
         let line = line.trim().trim_start_matches('-').trim();
-        
+
         // status: 200
         if line.starts_with("status:") {
             let code_str = line.trim_start_matches("status:").trim();
@@ -308,21 +311,21 @@ impl IntentFile {
                 return Some(Assertion::Status(code));
             }
         }
-        
+
         // body contains "text"
         if line.starts_with("body contains") {
             let text = line.trim_start_matches("body contains").trim();
             let text = text.trim_matches('"').to_string();
             return Some(Assertion::BodyContains(text));
         }
-        
+
         // body not contains "text"
         if line.starts_with("body not contains") {
             let text = line.trim_start_matches("body not contains").trim();
             let text = text.trim_matches('"').to_string();
             return Some(Assertion::BodyNotContains(text));
         }
-        
+
         // body matches r"pattern" or body matches "pattern"
         if line.starts_with("body matches") {
             let pattern = line.trim_start_matches("body matches").trim();
@@ -334,18 +337,22 @@ impl IntentFile {
             };
             return Some(Assertion::BodyMatches(pattern.to_string()));
         }
-        
+
         // header "Name" contains "value"
         if line.starts_with("header") {
             // header "Content-Type" contains "text/html"
             let rest = line.trim_start_matches("header").trim();
             if let Some(idx) = rest.find("contains") {
                 let header_name = rest[..idx].trim().trim_matches('"').to_string();
-                let value = rest[idx..].trim_start_matches("contains").trim().trim_matches('"').to_string();
+                let value = rest[idx..]
+                    .trim_start_matches("contains")
+                    .trim()
+                    .trim_matches('"')
+                    .to_string();
                 return Some(Assertion::HeaderContains(header_name, value));
             }
         }
-        
+
         None
     }
 }
@@ -359,22 +366,24 @@ pub fn run_intent_check(
 ) -> Result<IntentCheckResult, IntentError> {
     // Parse intent file
     let intent = IntentFile::parse(intent_path)?;
-    
+
     // Read NTNT source
     let source = fs::read_to_string(ntnt_path)
         .map_err(|e| IntentError::RuntimeError(format!("Failed to read NTNT file: {}", e)))?;
-    
+
     // Count total tests
     let total_tests: usize = intent.features.iter().map(|f| f.tests.len()).sum();
-    
+
     if total_tests == 0 {
-        return Err(IntentError::RuntimeError("No tests found in intent file".to_string()));
+        return Err(IntentError::RuntimeError(
+            "No tests found in intent file".to_string(),
+        ));
     }
-    
+
     // Setup for server
     let shutdown_flag = Arc::new(AtomicBool::new(false));
     let shutdown_flag_clone = shutdown_flag.clone();
-    
+
     // Collect all tests to run
     let mut all_tests: Vec<(usize, usize, TestCase)> = Vec::new();
     for (fi, feature) in intent.features.iter().enumerate() {
@@ -382,80 +391,84 @@ pub fn run_intent_check(
             all_tests.push((fi, ti, test.clone()));
         }
     }
-    
+
     let all_tests_clone = all_tests.clone();
-    let results: Arc<std::sync::Mutex<Vec<(usize, usize, TestResult)>>> = 
+    let results: Arc<std::sync::Mutex<Vec<(usize, usize, TestResult)>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let results_clone = results.clone();
-    
+
     // Spawn thread to run tests
     let test_handle = thread::spawn(move || {
         // Wait for server to start
         thread::sleep(Duration::from_millis(300));
-        
+
         for (fi, ti, test) in all_tests_clone {
             let result = run_single_test(&test, port);
             results_clone.lock().unwrap().push((fi, ti, result));
         }
-        
+
         // Signal shutdown
         shutdown_flag_clone.store(true, Ordering::SeqCst);
     });
-    
+
     // Start the server
     let mut interpreter = Interpreter::new();
     interpreter.set_test_mode(port, total_tests, shutdown_flag.clone());
-    
+
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
     let mut parser = IntentParser::new(tokens);
     let ast = parser.parse()?;
-    
+
     // Run (will exit when shutdown_flag is set)
     let _ = interpreter.eval(&ast);
-    
+
     // Wait for test thread
     test_handle.join().ok();
-    
+
     // Collect results
     let test_results = results.lock().unwrap();
-    
+
     // Parse annotations from source to check for implementations
     let annotations = parse_annotations(&source, &ntnt_path.to_string_lossy());
-    
+
     // Build feature results
-    let mut feature_results: Vec<FeatureResult> = intent.features.iter().map(|f| {
-        let feature_id = f.id.clone().unwrap_or_else(|| {
-            f.name.to_lowercase().replace(' ', "_")
-        });
-        
-        // Check if any annotation implements this feature
-        let has_impl = annotations.iter().any(|a| {
-            a.kind == AnnotationKind::Implements && 
-            (a.id == feature_id || a.id == format!("feature.{}", feature_id))
-        });
-        
-        FeatureResult {
-            feature: f.clone(),
-            passed: true,
-            test_results: Vec::new(),
-            has_implementation: has_impl,
-        }
-    }).collect();
-    
+    let mut feature_results: Vec<FeatureResult> = intent
+        .features
+        .iter()
+        .map(|f| {
+            let feature_id =
+                f.id.clone()
+                    .unwrap_or_else(|| f.name.to_lowercase().replace(' ', "_"));
+
+            // Check if any annotation implements this feature
+            let has_impl = annotations.iter().any(|a| {
+                a.kind == AnnotationKind::Implements
+                    && (a.id == feature_id || a.id == format!("feature.{}", feature_id))
+            });
+
+            FeatureResult {
+                feature: f.clone(),
+                passed: true,
+                test_results: Vec::new(),
+                has_implementation: has_impl,
+            }
+        })
+        .collect();
+
     for (fi, _ti, result) in test_results.iter() {
         if !result.passed {
             feature_results[*fi].passed = false;
         }
         feature_results[*fi].test_results.push(result.clone());
     }
-    
+
     // Calculate totals
     let mut features_passed = 0;
     let mut features_failed = 0;
     let mut assertions_passed = 0;
     let mut assertions_failed = 0;
-    
+
     for fr in &feature_results {
         if fr.passed {
             features_passed += 1;
@@ -472,7 +485,7 @@ pub fn run_intent_check(
             }
         }
     }
-    
+
     Ok(IntentCheckResult {
         intent_file: intent.source_path,
         features_passed,
@@ -490,7 +503,7 @@ fn run_single_test(test: &TestCase, port: u16) -> TestResult {
     } else {
         format!("/{}", test.path)
     };
-    
+
     let body_content = test.body.clone().unwrap_or_default();
     let request = if body_content.is_empty() {
         format!(
@@ -503,27 +516,27 @@ fn run_single_test(test: &TestCase, port: u16) -> TestResult {
             test.method, path, port, body_content.len(), body_content
         )
     };
-    
+
     // Try to connect
     let mut attempts = 0;
     let max_attempts = 20;
-    
+
     while attempts < max_attempts {
         match TcpStream::connect(format!("127.0.0.1:{}", port)) {
             Ok(mut stream) => {
                 stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
                 stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
-                
+
                 if stream.write_all(request.as_bytes()).is_ok() {
                     let mut response = Vec::new();
                     let _ = stream.read_to_end(&mut response);
-                    
+
                     if !response.is_empty() {
                         let response_str = String::from_utf8_lossy(&response).to_string();
                         let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
                         let headers_str = parts.get(0).unwrap_or(&"");
                         let body = parts.get(1).unwrap_or(&"").to_string();
-                        
+
                         // Parse status code
                         let status_code = headers_str
                             .lines()
@@ -534,21 +547,22 @@ fn run_single_test(test: &TestCase, port: u16) -> TestResult {
                             .unwrap_or("0")
                             .parse::<u16>()
                             .unwrap_or(0);
-                        
+
                         // Parse headers
                         let mut headers = HashMap::new();
                         for line in headers_str.lines().skip(1) {
                             if let Some(idx) = line.find(':') {
                                 let key = line[..idx].trim().to_lowercase();
-                                let value = line[idx+1..].trim().to_string();
+                                let value = line[idx + 1..].trim().to_string();
                                 headers.insert(key, value);
                             }
                         }
-                        
+
                         // Run assertions
-                        let assertion_results = run_assertions(&test.assertions, status_code, &body, &headers);
+                        let assertion_results =
+                            run_assertions(&test.assertions, status_code, &body, &headers);
                         let all_passed = assertion_results.iter().all(|r| r.passed);
-                        
+
                         return TestResult {
                             test: test.clone(),
                             passed: all_passed,
@@ -565,7 +579,7 @@ fn run_single_test(test: &TestCase, port: u16) -> TestResult {
         attempts += 1;
         thread::sleep(Duration::from_millis(100));
     }
-    
+
     // Connection failed
     TestResult {
         test: test.clone(),
@@ -589,15 +603,20 @@ fn run_assertions(
     body: &str,
     headers: &HashMap<String, String>,
 ) -> Vec<AssertionResult> {
-    assertions.iter().map(|assertion| {
-        match assertion {
+    assertions
+        .iter()
+        .map(|assertion| match assertion {
             Assertion::Status(expected) => {
                 let passed = status == *expected;
                 AssertionResult {
                     assertion: assertion.clone(),
                     passed,
                     actual: Some(status.to_string()),
-                    message: if passed { None } else { Some(format!("Expected status {}, got {}", expected, status)) },
+                    message: if passed {
+                        None
+                    } else {
+                        Some(format!("Expected status {}, got {}", expected, status))
+                    },
                 }
             }
             Assertion::BodyContains(text) => {
@@ -605,8 +624,16 @@ fn run_assertions(
                 AssertionResult {
                     assertion: assertion.clone(),
                     passed,
-                    actual: Some(if body.len() > 100 { format!("{}...", &body[..100]) } else { body.to_string() }),
-                    message: if passed { None } else { Some(format!("Body does not contain \"{}\"", text)) },
+                    actual: Some(if body.len() > 100 {
+                        format!("{}...", &body[..100])
+                    } else {
+                        body.to_string()
+                    }),
+                    message: if passed {
+                        None
+                    } else {
+                        Some(format!("Body does not contain \"{}\"", text))
+                    },
                 }
             }
             Assertion::BodyNotContains(text) => {
@@ -614,8 +641,16 @@ fn run_assertions(
                 AssertionResult {
                     assertion: assertion.clone(),
                     passed,
-                    actual: Some(if body.len() > 100 { format!("{}...", &body[..100]) } else { body.to_string() }),
-                    message: if passed { None } else { Some(format!("Body contains \"{}\" (should not)", text)) },
+                    actual: Some(if body.len() > 100 {
+                        format!("{}...", &body[..100])
+                    } else {
+                        body.to_string()
+                    }),
+                    message: if passed {
+                        None
+                    } else {
+                        Some(format!("Body contains \"{}\" (should not)", text))
+                    },
                 }
             }
             Assertion::BodyMatches(pattern) => {
@@ -626,8 +661,16 @@ fn run_assertions(
                 AssertionResult {
                     assertion: assertion.clone(),
                     passed,
-                    actual: Some(if body.len() > 100 { format!("{}...", &body[..100]) } else { body.to_string() }),
-                    message: if passed { None } else { Some(format!("Body does not match pattern \"{}\"", pattern)) },
+                    actual: Some(if body.len() > 100 {
+                        format!("{}...", &body[..100])
+                    } else {
+                        body.to_string()
+                    }),
+                    message: if passed {
+                        None
+                    } else {
+                        Some(format!("Body does not match pattern \"{}\"", pattern))
+                    },
                 }
             }
             Assertion::HeaderContains(header_name, expected_value) => {
@@ -637,13 +680,18 @@ fn run_assertions(
                     assertion: assertion.clone(),
                     passed,
                     actual: actual.cloned(),
-                    message: if passed { None } else { 
-                        Some(format!("Header \"{}\" does not contain \"{}\"", header_name, expected_value)) 
+                    message: if passed {
+                        None
+                    } else {
+                        Some(format!(
+                            "Header \"{}\" does not contain \"{}\"",
+                            header_name, expected_value
+                        ))
                     },
                 }
             }
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 /// Results from running tests against a live server (for Intent Studio)
@@ -687,37 +735,41 @@ pub struct LiveAssertionResult {
 /// Run tests against an already-running server (no interpreter needed)
 /// Returns results in a format suitable for JSON serialization and UI display
 /// If source_content is provided, will check for @implements annotations
-pub fn run_tests_against_server(intent: &IntentFile, port: u16, source_content: Option<&str>) -> LiveTestResults {
+pub fn run_tests_against_server(
+    intent: &IntentFile,
+    port: u16,
+    source_content: Option<&str>,
+) -> LiveTestResults {
     let mut feature_results = Vec::new();
     let mut total_assertions = 0;
     let mut passed_assertions = 0;
     let mut failed_assertions = 0;
-    
+
     // Parse annotations if source is provided
     let annotations: Vec<Annotation> = source_content
         .map(|src| parse_annotations(src, "source.tnt"))
         .unwrap_or_default();
-    
+
     for feature in &intent.features {
         let feature_id = feature.id.clone().unwrap_or_else(|| "unknown".to_string());
         let mut test_results = Vec::new();
         let mut feature_passed = true;
-        
+
         // Check if any annotation implements this feature
         let has_impl = annotations.iter().any(|a| {
-            a.kind == AnnotationKind::Implements && 
-            (a.id == feature_id || a.id == format!("feature.{}", feature_id))
+            a.kind == AnnotationKind::Implements
+                && (a.id == feature_id || a.id == format!("feature.{}", feature_id))
         });
-        
+
         for test in &feature.tests {
             let result = run_single_test(test, port);
             let mut assertion_results = Vec::new();
             let mut test_passed = result.passed;
-            
+
             for ar in &result.assertion_results {
                 total_assertions += 1;
                 let assertion_text = format_assertion(&ar.assertion);
-                
+
                 if ar.passed {
                     passed_assertions += 1;
                 } else {
@@ -725,14 +777,14 @@ pub fn run_tests_against_server(intent: &IntentFile, port: u16, source_content: 
                     test_passed = false;
                     feature_passed = false;
                 }
-                
+
                 assertion_results.push(LiveAssertionResult {
                     assertion_text,
                     passed: ar.passed,
                     message: ar.message.clone(),
                 });
             }
-            
+
             test_results.push(LiveTestResult {
                 method: test.method.clone(),
                 path: test.path.clone(),
@@ -740,7 +792,7 @@ pub fn run_tests_against_server(intent: &IntentFile, port: u16, source_content: 
                 assertions: assertion_results,
             });
         }
-        
+
         feature_results.push(LiveFeatureResult {
             feature_id,
             feature_name: feature.name.clone(),
@@ -749,11 +801,14 @@ pub fn run_tests_against_server(intent: &IntentFile, port: u16, source_content: 
             has_implementation: has_impl,
         });
     }
-    
+
     // Calculate coverage stats
-    let linked_features = feature_results.iter().filter(|f| f.has_implementation).count();
+    let linked_features = feature_results
+        .iter()
+        .filter(|f| f.has_implementation)
+        .count();
     let total_features = feature_results.len();
-    
+
     LiveTestResults {
         features: feature_results,
         total_assertions,
@@ -767,36 +822,52 @@ pub fn run_tests_against_server(intent: &IntentFile, port: u16, source_content: 
 /// Print intent check results
 pub fn print_intent_results(result: &IntentCheckResult) {
     println!();
-    
+
     let mut unlinked_features: Vec<&str> = Vec::new();
-    
+
     for fr in &result.feature_results {
         // Feature header
-        let status_icon = if fr.passed { "✓".green() } else { "✗".red() };
+        let status_icon = if fr.passed {
+            "✓".green()
+        } else {
+            "✗".red()
+        };
         println!("{} Feature: {}", status_icon, fr.feature.name.bold());
-        
+
         if let Some(ref desc) = fr.feature.description {
             println!("  {}", desc.dimmed());
         }
-        
+
         // Show warning if no implementation linked
         if !fr.has_implementation {
             let feature_id = fr.feature.id.as_deref().unwrap_or("(no id)");
             unlinked_features.push(feature_id);
-            println!("  {} {}", "⚠".yellow(), "No code linked to this feature".yellow());
+            println!(
+                "  {} {}",
+                "⚠".yellow(),
+                "No code linked to this feature".yellow()
+            );
         }
-        
+
         // Test results
         for tr in &fr.test_results {
             println!();
-            let test_icon = if tr.passed { "✓".green() } else { "✗".red() };
+            let test_icon = if tr.passed {
+                "✓".green()
+            } else {
+                "✗".red()
+            };
             println!("  {} {} {}", test_icon, tr.test.method.cyan(), tr.test.path);
-            
+
             // Assertion results
             for ar in &tr.assertion_results {
-                let assertion_icon = if ar.passed { "✓".green() } else { "✗".red() };
+                let assertion_icon = if ar.passed {
+                    "✓".green()
+                } else {
+                    "✗".red()
+                };
                 let assertion_desc = format_assertion(&ar.assertion);
-                
+
                 if ar.passed {
                     println!("    {} {}", assertion_icon, assertion_desc);
                 } else {
@@ -809,29 +880,36 @@ pub fn print_intent_results(result: &IntentCheckResult) {
         }
         println!();
     }
-    
+
     // Summary
     let total_features = result.features_passed + result.features_failed;
     let total_assertions = result.assertions_passed + result.assertions_failed;
-    
+
     let summary = format!(
         "{}/{} features passing ({}/{} assertions)",
-        result.features_passed, total_features,
-        result.assertions_passed, total_assertions
+        result.features_passed, total_features, result.assertions_passed, total_assertions
     );
-    
+
     println!();
     if result.features_failed == 0 {
         println!("{}", summary.green().bold());
     } else {
         println!("{}", summary.red().bold());
     }
-    
+
     // Show unlinked features warning at the end
     if !unlinked_features.is_empty() {
         println!();
-        println!("{}", "⚠️  Warning: Some features have no linked code".yellow().bold());
-        println!("{}", "   Add @implements annotations to link code to features:".dimmed());
+        println!(
+            "{}",
+            "⚠️  Warning: Some features have no linked code"
+                .yellow()
+                .bold()
+        );
+        println!(
+            "{}",
+            "   Add @implements annotations to link code to features:".dimmed()
+        );
         for id in &unlinked_features {
             println!("     // @implements: {}", id);
         }
@@ -845,7 +923,9 @@ fn format_assertion(assertion: &Assertion) -> String {
         Assertion::BodyContains(text) => format!("body contains \"{}\"", text),
         Assertion::BodyNotContains(text) => format!("body not contains \"{}\"", text),
         Assertion::BodyMatches(pattern) => format!("body matches \"{}\"", pattern),
-        Assertion::HeaderContains(name, value) => format!("header \"{}\" contains \"{}\"", name, value),
+        Assertion::HeaderContains(name, value) => {
+            format!("header \"{}\" contains \"{}\"", name, value)
+        }
     }
 }
 
@@ -854,49 +934,54 @@ fn format_assertion(assertion: &Assertion) -> String {
 pub fn find_intent_file(ntnt_path: &Path) -> Option<std::path::PathBuf> {
     let parent = ntnt_path.parent()?;
     let stem = ntnt_path.file_stem()?.to_string_lossy();
-    
+
     // Try <name>.intent
     let intent_path = parent.join(format!("{}.intent", stem));
     if intent_path.exists() {
         return Some(intent_path);
     }
-    
+
     // Try <name>.tnt.intent
     let intent_path = parent.join(format!("{}.tnt.intent", stem));
     if intent_path.exists() {
         return Some(intent_path);
     }
-    
+
     // Try intent.yaml in same directory
     let intent_path = parent.join("intent.yaml");
     if intent_path.exists() {
         return Some(intent_path);
     }
-    
+
     None
 }
 
 /// Resolve both .intent and .tnt paths from either extension
-/// 
+///
 /// This function accepts either a .tnt or .intent file and resolves both paths.
 /// Returns (intent_path, tnt_path) where:
 /// - intent_path is always the .intent file (if found)
 /// - tnt_path is always the .tnt file (if found)
-/// 
-/// This allows commands like `ntnt intent studio` and `ntnt intent check` 
+///
+/// This allows commands like `ntnt intent studio` and `ntnt intent check`
 /// to work consistently with either file extension.
-pub fn resolve_intent_tnt_pair(input_path: &Path) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+pub fn resolve_intent_tnt_pair(
+    input_path: &Path,
+) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
     let parent = match input_path.parent() {
         Some(p) => p,
         None => return (None, None),
     };
-    
-    let ext = input_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    let ext = input_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
     let stem = match input_path.file_stem() {
         Some(s) => s.to_string_lossy().to_string(),
         None => return (None, None),
     };
-    
+
     let (intent_path, tnt_path) = if ext == "tnt" {
         // Input is .tnt, look for .intent
         let intent = parent.join(format!("{}.intent", stem));
@@ -913,18 +998,22 @@ pub fn resolve_intent_tnt_pair(input_path: &Path) -> (Option<std::path::PathBuf>
         let tnt = parent.join(format!("{}.tnt", stem));
         (intent, tnt)
     };
-    
+
     let intent_exists = intent_path.exists();
     let tnt_exists = tnt_path.exists();
-    
+
     (
-        if intent_exists { Some(intent_path) } else { None },
+        if intent_exists {
+            Some(intent_path)
+        } else {
+            None
+        },
         if tnt_exists { Some(tnt_path) } else { None },
     )
 }
 
 /// Parse annotations from NTNT source code
-/// 
+///
 /// Looks for comments like:
 /// - `// @implements: feature.site_selection`
 /// - `// @supports: constraint.valid_email`
@@ -934,14 +1023,14 @@ pub fn resolve_intent_tnt_pair(input_path: &Path) -> (Option<std::path::PathBuf>
 pub fn parse_annotations(source: &str, file_path: &str) -> Vec<Annotation> {
     let mut annotations = Vec::new();
     let lines: Vec<&str> = source.lines().collect();
-    
+
     for (line_num, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        
+
         // Look for annotation comments
         if trimmed.starts_with("// @") {
             let annotation_str = trimmed.trim_start_matches("// @");
-            
+
             // Look ahead to find the next function declaration
             let mut function_name: Option<String> = None;
             for future_line in lines.iter().skip(line_num + 1) {
@@ -960,13 +1049,15 @@ pub fn parse_annotations(source: &str, file_path: &str) -> Vec<Annotation> {
                 // Stop looking after first non-comment/empty line
                 break;
             }
-            
-            if let Some(ann) = parse_single_annotation(annotation_str, file_path, line_num + 1, &function_name) {
+
+            if let Some(ann) =
+                parse_single_annotation(annotation_str, file_path, line_num + 1, &function_name)
+            {
                 annotations.push(ann);
             }
         }
     }
-    
+
     annotations
 }
 
@@ -979,7 +1070,10 @@ fn parse_single_annotation(
 ) -> Option<Annotation> {
     // @implements: feature.X
     if annotation_str.starts_with("implements:") {
-        let id = annotation_str.trim_start_matches("implements:").trim().to_string();
+        let id = annotation_str
+            .trim_start_matches("implements:")
+            .trim()
+            .to_string();
         return Some(Annotation {
             kind: AnnotationKind::Implements,
             id,
@@ -988,10 +1082,13 @@ fn parse_single_annotation(
             function_name: function_name.clone(),
         });
     }
-    
+
     // @supports: constraint.X
     if annotation_str.starts_with("supports:") {
-        let id = annotation_str.trim_start_matches("supports:").trim().to_string();
+        let id = annotation_str
+            .trim_start_matches("supports:")
+            .trim()
+            .to_string();
         return Some(Annotation {
             kind: AnnotationKind::Supports,
             id,
@@ -1000,7 +1097,7 @@ fn parse_single_annotation(
             function_name: function_name.clone(),
         });
     }
-    
+
     // @utility
     if annotation_str == "utility" || annotation_str.starts_with("utility ") {
         return Some(Annotation {
@@ -1011,7 +1108,7 @@ fn parse_single_annotation(
             function_name: function_name.clone(),
         });
     }
-    
+
     // @internal
     if annotation_str == "internal" || annotation_str.starts_with("internal ") {
         return Some(Annotation {
@@ -1022,7 +1119,7 @@ fn parse_single_annotation(
             function_name: function_name.clone(),
         });
     }
-    
+
     // @infrastructure
     if annotation_str == "infrastructure" || annotation_str.starts_with("infrastructure ") {
         return Some(Annotation {
@@ -1033,7 +1130,7 @@ fn parse_single_annotation(
             function_name: function_name.clone(),
         });
     }
-    
+
     None
 }
 
@@ -1045,37 +1142,38 @@ pub fn generate_coverage_report(
     // Parse all annotations from all source files
     let mut all_annotations: Vec<Annotation> = Vec::new();
     let mut file_paths: Vec<String> = Vec::new();
-    
+
     for (path, content) in source_files {
         let annotations = parse_annotations(content, path);
         all_annotations.extend(annotations);
         file_paths.push(path.clone());
     }
-    
+
     // Build coverage for each feature
     let mut features: Vec<FeatureCoverage> = Vec::new();
     let mut covered_count = 0;
-    
+
     for feature in &intent.features {
         let feature_id = feature.id.clone().unwrap_or_else(|| {
             // Generate ID from name if not specified
             feature.name.to_lowercase().replace(' ', "_")
         });
-        
+
         // Find all annotations that implement this feature
-        let implementations: Vec<Annotation> = all_annotations.iter()
+        let implementations: Vec<Annotation> = all_annotations
+            .iter()
             .filter(|a| {
-                a.kind == AnnotationKind::Implements && 
-                (a.id == feature_id || a.id == format!("feature.{}", feature_id))
+                a.kind == AnnotationKind::Implements
+                    && (a.id == feature_id || a.id == format!("feature.{}", feature_id))
             })
             .cloned()
             .collect();
-        
+
         let covered = !implementations.is_empty();
         if covered {
             covered_count += 1;
         }
-        
+
         features.push(FeatureCoverage {
             feature_id,
             feature_name: feature.name.clone(),
@@ -1083,14 +1181,14 @@ pub fn generate_coverage_report(
             implementations,
         });
     }
-    
+
     let total = intent.features.len();
     let coverage_percent = if total > 0 {
         (covered_count as f64 / total as f64) * 100.0
     } else {
         0.0
     };
-    
+
     CoverageReport {
         intent_file: intent.source_path.clone(),
         source_files: file_paths,
@@ -1109,22 +1207,30 @@ pub fn print_coverage_report(report: &CoverageReport) {
     println!("Intent: {}", report.intent_file.green());
     println!("Source files: {}", report.source_files.len());
     println!();
-    
+
     for fc in &report.features {
         let status = if fc.covered {
             "✓".green()
         } else {
             "✗".red()
         };
-        
-        println!("{} {} ({})", status, fc.feature_name.bold(), fc.feature_id.dimmed());
-        
+
+        println!(
+            "{} {} ({})",
+            status,
+            fc.feature_name.bold(),
+            fc.feature_id.dimmed()
+        );
+
         if fc.covered {
             for ann in &fc.implementations {
-                let func_info = ann.function_name.as_ref()
+                let func_info = ann
+                    .function_name
+                    .as_ref()
                     .map(|f| format!(" in fn {}", f))
                     .unwrap_or_default();
-                println!("    {} {}:{}{}",
+                println!(
+                    "    {} {}:{}{}",
                     "└─".dimmed(),
                     ann.file,
                     ann.line,
@@ -1132,26 +1238,27 @@ pub fn print_coverage_report(report: &CoverageReport) {
                 );
             }
         } else {
-            println!("    {} {}", "└─".dimmed(), "No implementation found".yellow());
+            println!(
+                "    {} {}",
+                "└─".dimmed(),
+                "No implementation found".yellow()
+            );
         }
     }
-    
+
     println!();
-    
+
     // Summary bar
     let bar_width = 30;
     let filled = (report.coverage_percent / 100.0 * bar_width as f64) as usize;
     let empty = bar_width - filled;
     let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(empty));
-    
+
     let summary = format!(
         "{} {:.1}% coverage ({}/{} features)",
-        bar,
-        report.coverage_percent,
-        report.covered_features,
-        report.total_features
+        bar, report.coverage_percent, report.covered_features, report.total_features
     );
-    
+
     if report.coverage_percent >= 80.0 {
         println!("{}", summary.green().bold());
     } else if report.coverage_percent >= 50.0 {
@@ -1164,45 +1271,50 @@ pub fn print_coverage_report(report: &CoverageReport) {
 /// Generate initial code scaffolding from an intent file
 pub fn generate_scaffolding(intent: &IntentFile) -> String {
     let mut output = String::new();
-    
+
     output.push_str("// Auto-generated from intent file\n");
     output.push_str(&format!("// Intent: {}\n", intent.source_path));
     output.push_str("// \n");
     output.push_str("// TODO: Implement the features defined in the intent file\n\n");
-    
+
     output.push_str("import { html, json, text, status } from \"std/http/server\"\n\n");
-    
+
     // Generate stubs for each feature
     for feature in &intent.features {
-        let feature_id = feature.id.clone().unwrap_or_else(|| {
-            feature.name.to_lowercase().replace(' ', "_")
-        });
-        
+        let feature_id = feature
+            .id
+            .clone()
+            .unwrap_or_else(|| feature.name.to_lowercase().replace(' ', "_"));
+
         // Add feature comment block
-        output.push_str(&format!("// =============================================================================\n"));
+        output.push_str(&format!(
+            "// =============================================================================\n"
+        ));
         output.push_str(&format!("// Feature: {}\n", feature.name));
         if let Some(ref desc) = feature.description {
             output.push_str(&format!("// {}\n", desc));
         }
-        output.push_str(&format!("// =============================================================================\n\n"));
-        
+        output.push_str(&format!(
+            "// =============================================================================\n\n"
+        ));
+
         // Generate handler for each test's route
         let mut seen_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
-        
+
         for test in &feature.tests {
             let route_key = format!("{} {}", test.method, test.path);
             if seen_routes.contains(&route_key) {
                 continue;
             }
             seen_routes.insert(route_key);
-            
+
             // Generate function name from path
             let fn_name = generate_function_name(&test.path, &test.method);
-            
+
             output.push_str(&format!("// @implements: {}\n", feature_id));
             output.push_str(&format!("fn {}(req) {{\n", fn_name));
             output.push_str("    // TODO: Implement this handler\n");
-            
+
             // Add hints from assertions
             output.push_str("    // Expected:\n");
             for assertion in &test.assertions {
@@ -1214,29 +1326,40 @@ pub fn generate_scaffolding(intent: &IntentFile) -> String {
                         output.push_str(&format!("    //   - Body should contain: \"{}\"\n", text));
                     }
                     Assertion::BodyNotContains(text) => {
-                        output.push_str(&format!("    //   - Body should NOT contain: \"{}\"\n", text));
+                        output.push_str(&format!(
+                            "    //   - Body should NOT contain: \"{}\"\n",
+                            text
+                        ));
                     }
                     Assertion::BodyMatches(pattern) => {
-                        output.push_str(&format!("    //   - Body should match: r\"{}\"\n", pattern));
+                        output
+                            .push_str(&format!("    //   - Body should match: r\"{}\"\n", pattern));
                     }
                     Assertion::HeaderContains(name, value) => {
-                        output.push_str(&format!("    //   - Header \"{}\" should contain: \"{}\"\n", name, value));
+                        output.push_str(&format!(
+                            "    //   - Header \"{}\" should contain: \"{}\"\n",
+                            name, value
+                        ));
                     }
                 }
             }
-            
+
             output.push_str("    return text(\"Not implemented\")\n");
             output.push_str("}\n\n");
         }
     }
-    
+
     // Generate route registrations
-    output.push_str("// =============================================================================\n");
+    output.push_str(
+        "// =============================================================================\n",
+    );
     output.push_str("// Routes\n");
-    output.push_str("// =============================================================================\n\n");
-    
+    output.push_str(
+        "// =============================================================================\n\n",
+    );
+
     let mut seen_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
-    
+
     for feature in &intent.features {
         for test in &feature.tests {
             let route_key = format!("{} {}", test.method, test.path);
@@ -1244,23 +1367,23 @@ pub fn generate_scaffolding(intent: &IntentFile) -> String {
                 continue;
             }
             seen_routes.insert(route_key);
-            
+
             let fn_name = generate_function_name(&test.path, &test.method);
             let method_fn = test.method.to_lowercase();
-            
+
             // Use raw string for paths with parameters
             let path_str = if test.path.contains('{') {
                 format!("r\"{}\"", test.path)
             } else {
                 format!("\"{}\"", test.path)
             };
-            
+
             output.push_str(&format!("{}({}, {})\n", method_fn, path_str, fn_name));
         }
     }
-    
+
     output.push_str("\nlisten(8080)\n");
-    
+
     output
 }
 
@@ -1274,13 +1397,13 @@ fn generate_function_name(path: &str, method: &str) -> String {
         .replace('?', "_query")
         .replace('&', "_")
         .replace('=', "_");
-    
+
     let base = if clean_path.is_empty() {
         "index".to_string()
     } else {
         clean_path
     };
-    
+
     if method == "GET" {
         base
     } else {
@@ -1291,7 +1414,7 @@ fn generate_function_name(path: &str, method: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_parse_simple_intent() {
         let content = r#"
@@ -1304,44 +1427,44 @@ Feature: Site Selection
         - status: 200
         - body contains "Bear Lake"
 "#;
-        
+
         let intent = IntentFile::parse_content(content, "test.intent".to_string()).unwrap();
         assert_eq!(intent.features.len(), 1);
-        
+
         let feature = &intent.features[0];
         assert_eq!(feature.name, "Site Selection");
         assert_eq!(feature.id, Some("feature.site_selection".to_string()));
         assert_eq!(feature.tests.len(), 1);
-        
+
         let test = &feature.tests[0];
         assert_eq!(test.method, "GET");
         assert_eq!(test.path, "/");
         assert_eq!(test.assertions.len(), 2);
     }
-    
+
     #[test]
     fn test_parse_assertions() {
         assert!(matches!(
             IntentFile::parse_assertion("status: 200"),
             Some(Assertion::Status(200))
         ));
-        
+
         assert!(matches!(
             IntentFile::parse_assertion("body contains \"test\""),
             Some(Assertion::BodyContains(s)) if s == "test"
         ));
-        
+
         assert!(matches!(
             IntentFile::parse_assertion("body not contains \"error\""),
             Some(Assertion::BodyNotContains(s)) if s == "error"
         ));
-        
+
         assert!(matches!(
             IntentFile::parse_assertion("body matches r\"\\d+\""),
             Some(Assertion::BodyMatches(s)) if s == "\\d+"
         ));
     }
-    
+
     #[test]
     fn test_multiple_features() {
         let content = r#"
@@ -1357,7 +1480,7 @@ Feature: API
       assert:
         - status: 200
 "#;
-        
+
         let intent = IntentFile::parse_content(content, "test.intent".to_string()).unwrap();
         assert_eq!(intent.features.len(), 2);
         assert_eq!(intent.features[0].name, "Home Page");

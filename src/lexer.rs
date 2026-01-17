@@ -46,7 +46,7 @@ pub enum TokenKind {
 
     // Identifiers and keywords
     Identifier(String),
-    
+
     // Keywords
     Let,
     Mut,
@@ -75,21 +75,21 @@ pub enum TokenKind {
     In,
     Defer,
     Where,
-    Map,            // Map literal keyword
-    
+    Map, // Map literal keyword
+
     // Contract keywords
     Contract,
     Requires,
     Ensures,
     Invariant,
-    
+
     // Effect keywords
     Effect,
-    With,           // for effect annotations: fn foo() with io
-    Pure,           // pure function marker
+    With, // for effect annotations: fn foo() with io
+    Pure, // pure function marker
     Try,
     Catch,
-    
+
     // AI/Collaboration keywords
     Intent,
     Approve,
@@ -99,67 +99,67 @@ pub enum TokenKind {
     Await,
 
     // Operators
-    Plus,           // +
-    Minus,          // -
-    Star,           // *
-    Slash,          // /
-    Percent,        // %
-    Caret,          // ^
-    
+    Plus,    // +
+    Minus,   // -
+    Star,    // *
+    Slash,   // /
+    Percent, // %
+    Caret,   // ^
+
     // Comparison
-    Equal,          // ==
-    NotEqual,       // !=
-    Less,           // <
-    LessEqual,      // <=
-    Greater,        // >
-    GreaterEqual,   // >=
-    
+    Equal,        // ==
+    NotEqual,     // !=
+    Less,         // <
+    LessEqual,    // <=
+    Greater,      // >
+    GreaterEqual, // >=
+
     // Logical
-    And,            // &&
-    Or,             // ||
-    Not,            // !
-    
+    And, // &&
+    Or,  // ||
+    Not, // !
+
     // Assignment
-    Assign,         // =
-    PlusAssign,     // +=
-    MinusAssign,    // -=
-    StarAssign,     // *=
-    SlashAssign,    // /=
-    
+    Assign,      // =
+    PlusAssign,  // +=
+    MinusAssign, // -=
+    StarAssign,  // *=
+    SlashAssign, // /=
+
     // Delimiters
-    LeftParen,      // (
-    RightParen,     // )
-    LeftBrace,      // {
-    RightBrace,     // }
-    LeftBracket,    // [
-    RightBracket,   // ]
-    
+    LeftParen,    // (
+    RightParen,   // )
+    LeftBrace,    // {
+    RightBrace,   // }
+    LeftBracket,  // [
+    RightBracket, // ]
+
     // Punctuation
-    Comma,          // ,
-    Dot,            // .
-    Colon,          // :
-    ColonColon,     // ::
-    Semicolon,      // ;
-    Arrow,          // ->
-    FatArrow,       // =>
-    Question,       // ?
+    Comma,            // ,
+    Dot,              // .
+    Colon,            // :
+    ColonColon,       // ::
+    Semicolon,        // ;
+    Arrow,            // ->
+    FatArrow,         // =>
+    Question,         // ?
     QuestionQuestion, // ??
-    At,             // @
-    Hash,           // #
-    Ampersand,      // &
-    Pipe,           // |
-    DotDot,         // ..
-    DotDotEqual,    // ..=
-    
+    At,               // @
+    Hash,             // #
+    Ampersand,        // &
+    Pipe,             // |
+    DotDot,           // ..
+    DotDotEqual,      // ..=
+
     // Raw strings
     RawString(String),
-    
+
     // Interpolated string parts
     InterpolatedString(Vec<StringPart>),
-    
+
     // Template string (triple-quoted with {{}} interpolation)
     TemplateString(Vec<TemplatePart>),
-    
+
     // Special
     Eof,
     Newline,
@@ -176,7 +176,12 @@ pub struct Token {
 
 impl Token {
     pub fn new(kind: TokenKind, line: usize, column: usize, lexeme: String) -> Self {
-        Token { kind, line, column, lexeme }
+        Token {
+            kind,
+            line,
+            column,
+            lexeme,
+        }
     }
 }
 
@@ -278,11 +283,11 @@ impl<'a> Lexer<'a> {
         let start_line = self.line;
         let start_column = self.column;
         self.current_lexeme.clear();
-        
+
         let mut value = String::new();
         let mut has_interpolation = false;
         let mut parts: Vec<StringPart> = Vec::new();
-        
+
         while let Some(&ch) = self.peek() {
             if ch == quote {
                 self.advance();
@@ -297,8 +302,8 @@ impl<'a> Lexer<'a> {
                     Some('\\') => value.push('\\'),
                     Some('"') => value.push('"'),
                     Some('\'') => value.push('\''),
-                    Some('{') => value.push('{'),  // Escape {
-                    Some('}') => value.push('}'),  // Escape }
+                    Some('{') => value.push('{'), // Escape {
+                    Some('}') => value.push('}'), // Escape }
                     Some(c) => value.push(c),
                     None => break,
                 }
@@ -310,7 +315,7 @@ impl<'a> Lexer<'a> {
                     value.clear();
                 }
                 self.advance(); // consume '{'
-                
+
                 // Read until matching '}'
                 let mut expr_str = String::new();
                 let mut brace_count = 1;
@@ -336,7 +341,7 @@ impl<'a> Lexer<'a> {
                 self.advance();
             }
         }
-        
+
         if has_interpolation {
             if !value.is_empty() {
                 parts.push(StringPart::Literal(value));
@@ -362,9 +367,9 @@ impl<'a> Lexer<'a> {
         let start_line = self.line;
         let start_column = self.column;
         self.current_lexeme.clear();
-        
+
         let mut value = String::new();
-        
+
         // Look for closing quote followed by the same number of #
         loop {
             match self.peek() {
@@ -394,7 +399,7 @@ impl<'a> Lexer<'a> {
                 None => break, // Unterminated raw string
             }
         }
-        
+
         Token::new(
             TokenKind::RawString(value),
             start_line,
@@ -410,9 +415,9 @@ impl<'a> Lexer<'a> {
         let start_line = self.line;
         let start_column = self.column;
         self.current_lexeme.clear();
-        
+
         let mut content = String::new();
-        
+
         // Read until closing """
         loop {
             match self.peek() {
@@ -441,10 +446,10 @@ impl<'a> Lexer<'a> {
                 None => break, // Unterminated template string
             }
         }
-        
+
         // Parse the content into TemplateParts
         let parts = self.parse_template_content(&content);
-        
+
         Token::new(
             TokenKind::TemplateString(parts),
             start_line,
@@ -452,13 +457,13 @@ impl<'a> Lexer<'a> {
             self.current_lexeme.clone(),
         )
     }
-    
+
     /// Parse template string content into parts
     fn parse_template_content(&self, content: &str) -> Vec<TemplatePart> {
         let mut parts = Vec::new();
         let mut chars = content.chars().peekable();
         let mut literal = String::new();
-        
+
         while let Some(ch) = chars.next() {
             if ch == '\\' {
                 // Check for escaped {{ or }}
@@ -483,17 +488,17 @@ impl<'a> Lexer<'a> {
                 }
             } else if ch == '{' && chars.peek() == Some(&'{') {
                 chars.next(); // consume second {
-                
+
                 // Save accumulated literal
                 if !literal.is_empty() {
                     parts.push(TemplatePart::Literal(literal.clone()));
                     literal.clear();
                 }
-                
+
                 // Read until }}
                 let mut expr = String::new();
                 let mut brace_depth = 0;
-                
+
                 while let Some(c) = chars.next() {
                     if c == '{' {
                         brace_depth += 1;
@@ -512,27 +517,27 @@ impl<'a> Lexer<'a> {
                         expr.push(c);
                     }
                 }
-                
+
                 // Parse the directive
                 let expr = expr.trim();
-                
+
                 if let Some(stripped) = expr.strip_prefix("#for ") {
                     // Parse: #for x in items
                     if let Some((var_part, iter_part)) = stripped.split_once(" in ") {
                         let var = var_part.trim().to_string();
                         let iterable = iter_part.trim().to_string();
-                        
+
                         // Find the body until {{/for}}
                         let rest: String = chars.clone().collect();
                         if let Some(end_pos) = rest.find("{{/for}}") {
                             let body_content = &rest[..end_pos];
                             let body_parts = self.parse_template_content(body_content);
-                            
+
                             // Advance past the body and closing tag
                             for _ in 0..(end_pos + 8) {
                                 chars.next();
                             }
-                            
+
                             parts.push(TemplatePart::ForLoop {
                                 var,
                                 iterable,
@@ -549,14 +554,14 @@ impl<'a> Lexer<'a> {
                 } else if let Some(stripped) = expr.strip_prefix("#if ") {
                     // Parse: #if condition
                     let condition = stripped.trim().to_string();
-                    
+
                     // Find the body parts until {{/if}} (with optional {{#else}})
                     let rest: String = chars.clone().collect();
-                    
+
                     // Find {{#else}} and {{/if}} positions
                     let else_pos = rest.find("{{#else}}");
                     let endif_pos = rest.find("{{/if}}");
-                    
+
                     if let Some(endif) = endif_pos {
                         let (then_content, else_content) = if let Some(else_p) = else_pos {
                             if else_p < endif {
@@ -567,19 +572,19 @@ impl<'a> Lexer<'a> {
                         } else {
                             (&rest[..endif], None)
                         };
-                        
+
                         let then_parts = self.parse_template_content(then_content);
                         let else_parts = if let Some(ec) = else_content {
                             self.parse_template_content(ec)
                         } else {
                             Vec::new()
                         };
-                        
+
                         // Advance past everything including closing tag
                         for _ in 0..(endif + 7) {
                             chars.next();
                         }
-                        
+
                         parts.push(TemplatePart::IfBlock {
                             condition,
                             then_parts,
@@ -589,7 +594,10 @@ impl<'a> Lexer<'a> {
                         // No closing tag found, treat as literal
                         parts.push(TemplatePart::Literal(format!("{{{{#if {}}}}}", stripped)));
                     }
-                } else if expr.starts_with("/for") || expr.starts_with("/if") || expr.starts_with("#else") {
+                } else if expr.starts_with("/for")
+                    || expr.starts_with("/if")
+                    || expr.starts_with("#else")
+                {
                     // Closing tags handled above, should not reach here
                     // If we do, it's unmatched - treat as literal
                     parts.push(TemplatePart::Literal(format!("{{{{{}}}}}", expr)));
@@ -601,22 +609,22 @@ impl<'a> Lexer<'a> {
                 literal.push(ch);
             }
         }
-        
+
         // Don't forget remaining literal
         if !literal.is_empty() {
             parts.push(TemplatePart::Literal(literal));
         }
-        
+
         parts
     }
 
     fn scan_number(&mut self, first: char) -> Token {
         let start_line = self.line;
         let start_column = self.column - 1;
-        
+
         let mut num_str = String::from(first);
         let mut is_float = false;
-        
+
         // Check for hex, binary, octal
         if first == '0' {
             if let Some(&ch) = self.peek() {
@@ -665,7 +673,7 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        
+
         // Regular decimal number
         while let Some(&ch) = self.peek() {
             if ch.is_ascii_digit() || ch == '_' {
@@ -677,7 +685,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        
+
         // Check for decimal point
         if self.peek_is('.') {
             // Look ahead to see if it's a method call or float
@@ -700,7 +708,7 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        
+
         // Check for exponent
         if let Some(&ch) = self.peek() {
             if ch == 'e' || ch == 'E' {
@@ -721,7 +729,7 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        
+
         if is_float {
             let value: f64 = num_str.parse().unwrap_or(0.0);
             Token::new(
@@ -744,7 +752,7 @@ impl<'a> Lexer<'a> {
     fn scan_identifier(&mut self, first: char) -> Token {
         let start_line = self.line;
         let start_column = self.column - 1;
-        
+
         // Check for raw string: r"..." or r#"..."#
         if first == 'r' {
             if self.peek_is('"') {
@@ -755,14 +763,14 @@ impl<'a> Lexer<'a> {
                 // Count hashes and check for quote
                 let mut hash_count = 0;
                 let mut chars_to_consume = Vec::new();
-                
+
                 // Peek ahead to count # and find "
                 let mut temp_source = self.source.clone();
                 while temp_source.peek() == Some(&'#') {
                     hash_count += 1;
                     chars_to_consume.push(temp_source.next().unwrap());
                 }
-                
+
                 if temp_source.peek() == Some(&'"') {
                     // It's a raw string! Consume the hashes and quote
                     for _ in 0..hash_count {
@@ -774,9 +782,9 @@ impl<'a> Lexer<'a> {
                 // Not a raw string, fall through to normal identifier
             }
         }
-        
+
         let mut ident = String::from(first);
-        
+
         while let Some(&ch) = self.peek() {
             if ch.is_alphanumeric() || ch == '_' {
                 ident.push(ch);
@@ -785,7 +793,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        
+
         let kind = match ident.as_str() {
             // Keywords
             "let" => TokenKind::Let,
@@ -816,20 +824,20 @@ impl<'a> Lexer<'a> {
             "defer" => TokenKind::Defer,
             "where" => TokenKind::Where,
             "map" => TokenKind::Map,
-            
+
             // Contract keywords
             "contract" => TokenKind::Contract,
             "requires" => TokenKind::Requires,
             "ensures" => TokenKind::Ensures,
             "invariant" => TokenKind::Invariant,
-            
+
             // Effect keywords
             "effect" => TokenKind::Effect,
             "with" => TokenKind::With,
             "pure" => TokenKind::Pure,
             "try" => TokenKind::Try,
             "catch" => TokenKind::Catch,
-            
+
             // AI/Collaboration keywords
             "intent" => TokenKind::Intent,
             "approve" => TokenKind::Approve,
@@ -837,27 +845,27 @@ impl<'a> Lexer<'a> {
             "protocol" => TokenKind::Protocol,
             "async" => TokenKind::Async,
             "await" => TokenKind::Await,
-            
+
             // Literals
             "true" => TokenKind::Bool(true),
             "false" => TokenKind::Bool(false),
-            
+
             // Identifier
             _ => TokenKind::Identifier(ident.clone()),
         };
-        
+
         Token::new(kind, start_line, start_column, ident)
     }
 
     fn next_token(&mut self) -> Option<Token> {
         self.skip_whitespace();
         self.current_lexeme.clear();
-        
+
         let start_line = self.line;
         let start_column = self.column;
-        
+
         let ch = self.advance()?;
-        
+
         let token = match ch {
             // String literals
             '"' | '\'' => {
@@ -880,13 +888,13 @@ impl<'a> Lexer<'a> {
                     self.scan_string(ch)
                 }
             }
-            
+
             // Numbers
             '0'..='9' => self.scan_number(ch),
-            
+
             // Identifiers and keywords
             'a'..='z' | 'A'..='Z' | '_' => self.scan_identifier(ch),
-            
+
             // Operators and punctuation
             '+' => {
                 if self.match_char('=') {
@@ -899,7 +907,12 @@ impl<'a> Lexer<'a> {
                 if self.match_char('>') {
                     Token::new(TokenKind::Arrow, start_line, start_column, "->".into())
                 } else if self.match_char('=') {
-                    Token::new(TokenKind::MinusAssign, start_line, start_column, "-=".into())
+                    Token::new(
+                        TokenKind::MinusAssign,
+                        start_line,
+                        start_column,
+                        "-=".into(),
+                    )
                 } else {
                     Token::new(TokenKind::Minus, start_line, start_column, "-".into())
                 }
@@ -913,14 +926,19 @@ impl<'a> Lexer<'a> {
             }
             '/' => {
                 if self.match_char('=') {
-                    Token::new(TokenKind::SlashAssign, start_line, start_column, "/=".into())
+                    Token::new(
+                        TokenKind::SlashAssign,
+                        start_line,
+                        start_column,
+                        "/=".into(),
+                    )
                 } else {
                     Token::new(TokenKind::Slash, start_line, start_column, "/".into())
                 }
             }
             '%' => Token::new(TokenKind::Percent, start_line, start_column, "%".into()),
             '^' => Token::new(TokenKind::Caret, start_line, start_column, "^".into()),
-            
+
             '=' => {
                 if self.match_char('=') {
                     Token::new(TokenKind::Equal, start_line, start_column, "==".into())
@@ -946,7 +964,12 @@ impl<'a> Lexer<'a> {
             }
             '>' => {
                 if self.match_char('=') {
-                    Token::new(TokenKind::GreaterEqual, start_line, start_column, ">=".into())
+                    Token::new(
+                        TokenKind::GreaterEqual,
+                        start_line,
+                        start_column,
+                        ">=".into(),
+                    )
                 } else {
                     Token::new(TokenKind::Greater, start_line, start_column, ">".into())
                 }
@@ -965,21 +988,31 @@ impl<'a> Lexer<'a> {
                     Token::new(TokenKind::Pipe, start_line, start_column, "|".into())
                 }
             }
-            
+
             // Delimiters
             '(' => Token::new(TokenKind::LeftParen, start_line, start_column, "(".into()),
             ')' => Token::new(TokenKind::RightParen, start_line, start_column, ")".into()),
             '{' => Token::new(TokenKind::LeftBrace, start_line, start_column, "{".into()),
             '}' => Token::new(TokenKind::RightBrace, start_line, start_column, "}".into()),
             '[' => Token::new(TokenKind::LeftBracket, start_line, start_column, "[".into()),
-            ']' => Token::new(TokenKind::RightBracket, start_line, start_column, "]".into()),
-            
+            ']' => Token::new(
+                TokenKind::RightBracket,
+                start_line,
+                start_column,
+                "]".into(),
+            ),
+
             // Punctuation
             ',' => Token::new(TokenKind::Comma, start_line, start_column, ",".into()),
             '.' => {
                 if self.match_char('.') {
                     if self.match_char('=') {
-                        Token::new(TokenKind::DotDotEqual, start_line, start_column, "..=".into())
+                        Token::new(
+                            TokenKind::DotDotEqual,
+                            start_line,
+                            start_column,
+                            "..=".into(),
+                        )
                     } else {
                         Token::new(TokenKind::DotDot, start_line, start_column, "..".into())
                     }
@@ -999,14 +1032,19 @@ impl<'a> Lexer<'a> {
             '?' => {
                 if self.peek() == Some(&'?') {
                     self.advance();
-                    Token::new(TokenKind::QuestionQuestion, start_line, start_column, "??".into())
+                    Token::new(
+                        TokenKind::QuestionQuestion,
+                        start_line,
+                        start_column,
+                        "??".into(),
+                    )
                 } else {
                     Token::new(TokenKind::Question, start_line, start_column, "?".into())
                 }
             }
             '@' => Token::new(TokenKind::At, start_line, start_column, "@".into()),
             '#' => Token::new(TokenKind::Hash, start_line, start_column, "#".into()),
-            
+
             _ => Token::new(
                 TokenKind::Identifier(ch.to_string()),
                 start_line,
@@ -1014,7 +1052,7 @@ impl<'a> Lexer<'a> {
                 ch.to_string(),
             ),
         };
-        
+
         Some(token)
     }
 }
@@ -1036,7 +1074,7 @@ mod tests {
         let source = "let x = 42;";
         let lexer = Lexer::new(source);
         let tokens: Vec<_> = lexer.collect();
-        
+
         assert!(matches!(tokens[0].kind, TokenKind::Let));
         assert!(matches!(tokens[1].kind, TokenKind::Identifier(_)));
         assert!(matches!(tokens[2].kind, TokenKind::Assign));
@@ -1049,7 +1087,7 @@ mod tests {
         let source = r#""hello world""#;
         let lexer = Lexer::new(source);
         let tokens: Vec<_> = lexer.collect();
-        
+
         assert!(matches!(&tokens[0].kind, TokenKind::String(s) if s == "hello world"));
     }
 
@@ -1058,7 +1096,7 @@ mod tests {
         let source = "fn add(x, y) { return x + y; }";
         let lexer = Lexer::new(source);
         let tokens: Vec<_> = lexer.collect();
-        
+
         assert!(matches!(tokens[0].kind, TokenKind::Fn));
     }
 }

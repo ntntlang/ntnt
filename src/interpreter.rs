@@ -1,9 +1,9 @@
 //! Interpreter for Intent
 //!
 //! A tree-walking interpreter for executing Intent programs.
-//! 
+//!
 //! ## Contract Support
-//! 
+//!
 //! This interpreter fully supports design-by-contract with:
 //! - `requires` clauses (preconditions) evaluated before function execution
 //! - `ensures` clauses (postconditions) evaluated after function execution
@@ -23,52 +23,52 @@ use std::rc::Rc;
 pub enum Value {
     /// Unit value
     Unit,
-    
+
     /// Integer value
     Int(i64),
-    
+
     /// Float value
     Float(f64),
-    
+
     /// Boolean value
     Bool(bool),
-    
+
     /// String value
     String(String),
-    
+
     /// Array value
     Array(Vec<Value>),
-    
+
     /// Map value
     Map(HashMap<String, Value>),
-    
+
     /// Range value
     Range {
         start: i64,
         end: i64,
         inclusive: bool,
     },
-    
+
     /// Struct instance
     Struct {
         name: String,
         fields: HashMap<String, Value>,
     },
-    
+
     /// Enum variant instance (for ADTs like Option, Result)
     EnumValue {
         enum_name: String,
         variant: String,
         values: Vec<Value>,
     },
-    
+
     /// Enum constructor (for creating enum values dynamically)
     EnumConstructor {
         enum_name: String,
         variant: String,
         arity: usize,
     },
-    
+
     /// Function value with contract
     Function {
         name: String,
@@ -78,20 +78,20 @@ pub enum Value {
         contract: Option<FunctionContract>,
         type_params: Vec<TypeParam>,
     },
-    
+
     /// Native/built-in function
     NativeFunction {
         name: String,
         arity: usize,
         func: fn(&[Value]) -> Result<Value>,
     },
-    
+
     /// Return value (for control flow)
     Return(Box<Value>),
-    
+
     /// Break (for loop control)
     Break,
-    
+
     /// Continue (for loop control)
     Continue,
 }
@@ -107,7 +107,7 @@ pub struct FunctionContract {
 
 impl Value {
     /// Determine if a value is truthy for conditionals
-    /// 
+    ///
     /// Falsy values: false, Unit, None, empty strings, empty arrays, empty maps
     /// Truthy values: everything else (including 0 and 0.0 to avoid subtle bugs)
     pub fn is_truthy(&self) -> bool {
@@ -122,9 +122,9 @@ impl Value {
             Value::Array(a) => !a.is_empty(),
             Value::Map(m) => !m.is_empty(),
             // None is falsy, Some(x) is truthy
-            Value::EnumValue { enum_name, variant, .. } => {
-                !(enum_name == "Option" && variant == "None")
-            }
+            Value::EnumValue {
+                enum_name, variant, ..
+            } => !(enum_name == "Option" && variant == "None"),
             // Everything else is truthy
             _ => true,
         }
@@ -165,13 +165,14 @@ impl fmt::Display for Value {
                 write!(f, "[{}]", items.join(", "))
             }
             Value::Map(map) => {
-                let items: Vec<String> = map
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k, v))
-                    .collect();
+                let items: Vec<String> = map.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
                 write!(f, "{{ {} }}", items.join(", "))
             }
-            Value::Range { start, end, inclusive } => {
+            Value::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 if *inclusive {
                     write!(f, "{}..={}", start, end)
                 } else {
@@ -185,7 +186,11 @@ impl fmt::Display for Value {
                     .collect();
                 write!(f, "{} {{ {} }}", name, field_strs.join(", "))
             }
-            Value::EnumValue { enum_name, variant, values } => {
+            Value::EnumValue {
+                enum_name,
+                variant,
+                values,
+            } => {
                 if values.is_empty() {
                     write!(f, "{}::{}", enum_name, variant)
                 } else {
@@ -193,7 +198,11 @@ impl fmt::Display for Value {
                     write!(f, "{}::{}({})", enum_name, variant, vals.join(", "))
                 }
             }
-            Value::EnumConstructor { enum_name, variant, arity } => {
+            Value::EnumConstructor {
+                enum_name,
+                variant,
+                arity,
+            } => {
                 write!(f, "<constructor {}::{}({})>", enum_name, variant, arity)
             }
             Value::Function { name, .. } => write!(f, "<fn {}>", name),
@@ -352,26 +361,29 @@ impl Interpreter {
         interpreter.define_stdlib();
         interpreter
     }
-    
+
     /// Enable test mode - server will handle limited requests then exit
-    pub fn set_test_mode(&mut self, port: u16, max_requests: usize, shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    pub fn set_test_mode(
+        &mut self,
+        port: u16,
+        max_requests: usize,
+        shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
         self.test_mode = Some((port, max_requests, shutdown_flag));
     }
-    
+
     /// Set the current file path for relative imports
     pub fn set_current_file(&mut self, path: &str) {
         self.current_file = Some(path.to_string());
     }
-    
+
     /// Set the main source file for hot-reload tracking
     pub fn set_main_source_file(&mut self, path: &str) {
         self.main_source_file = Some(path.to_string());
         // Store the current mtime
-        self.main_source_mtime = std::fs::metadata(path)
-            .ok()
-            .and_then(|m| m.modified().ok());
+        self.main_source_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
     }
-    
+
     /// Check if the main source file needs reloading and reload if necessary
     /// Returns true if reload happened, false otherwise
     fn check_and_reload_main_source(&mut self) -> bool {
@@ -379,13 +391,13 @@ impl Interpreter {
         if !self.server_state.hot_reload {
             return false;
         }
-        
+
         // Only check if we have a main source file configured
         let (file_path, cached_mtime) = match (&self.main_source_file, &self.main_source_mtime) {
             (Some(fp), Some(mt)) => (fp.clone(), *mt),
             _ => return false,
         };
-        
+
         // Check current mtime
         let current_mtime = match std::fs::metadata(&file_path) {
             Ok(m) => match m.modified() {
@@ -394,15 +406,15 @@ impl Interpreter {
             },
             Err(_) => return false,
         };
-        
+
         // No change
         if current_mtime <= cached_mtime {
             return false;
         }
-        
+
         // File changed - reload!
         println!("\n[hot-reload] {} changed, reloading...", file_path);
-        
+
         // Read the new source
         let source_code = match std::fs::read_to_string(&file_path) {
             Ok(s) => s,
@@ -411,15 +423,15 @@ impl Interpreter {
                 return false;
             }
         };
-        
+
         // Parse the source
         use crate::lexer::Lexer;
         use crate::parser::Parser;
-        
+
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
         let mut parser = Parser::new(tokens);
-        
+
         let ast = match parser.parse() {
             Ok(ast) => ast,
             Err(e) => {
@@ -427,31 +439,34 @@ impl Interpreter {
                 return false;
             }
         };
-        
+
         // Clear current state (routes, middleware, etc.) but keep server running
         self.server_state.clear();
-        
+
         // Clear loaded modules FIRST to force reimport (before redefining stdlib)
         self.loaded_modules.clear();
-        
+
         // Reset environment but keep builtins
         self.environment = std::rc::Rc::new(std::cell::RefCell::new(Environment::new()));
         self.define_builtins();
         self.define_builtin_types();
-        self.define_stdlib();  // Re-populate stdlib modules after clearing
-        
+        self.define_stdlib(); // Re-populate stdlib modules after clearing
+
         // Re-set the current file for imports
         self.current_file = Some(file_path.clone());
-        
+
         // Set hot-reload flag so listen() knows to skip re-binding
         self.is_hot_reloading = true;
-        
+
         // Re-evaluate the AST
         let result = match self.eval(&ast) {
             Ok(_) => {
                 // Update mtime
                 self.main_source_mtime = Some(current_mtime);
-                println!("[hot-reload] Reload complete. {} routes registered.", self.server_state.route_count());
+                println!(
+                    "[hot-reload] Reload complete. {} routes registered.",
+                    self.server_state.route_count()
+                );
                 true
             }
             Err(e) => {
@@ -459,7 +474,7 @@ impl Interpreter {
                 false
             }
         };
-        
+
         // Clear hot-reload flag
         self.is_hot_reloading = false;
         result
@@ -487,14 +502,12 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "len".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::String(s) => Ok(Value::Int(s.len() as i64)),
-                        Value::Array(a) => Ok(Value::Int(a.len() as i64)),
-                        _ => Err(IntentError::TypeError(
-                            "len() requires a string or array".to_string(),
-                        )),
-                    }
+                func: |args| match &args[0] {
+                    Value::String(s) => Ok(Value::Int(s.len() as i64)),
+                    Value::Array(a) => Ok(Value::Int(a.len() as i64)),
+                    _ => Err(IntentError::TypeError(
+                        "len() requires a string or array".to_string(),
+                    )),
                 },
             },
         );
@@ -525,17 +538,15 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "int".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::Int(n) => Ok(Value::Int(*n)),
-                        Value::Float(f) => Ok(Value::Int(*f as i64)),
-                        Value::String(s) => s
-                            .parse::<i64>()
-                            .map(Value::Int)
-                            .map_err(|_| IntentError::TypeError("Cannot parse as int".to_string())),
-                        Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
-                        _ => Err(IntentError::TypeError("Cannot convert to int".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::Int(n) => Ok(Value::Int(*n)),
+                    Value::Float(f) => Ok(Value::Int(*f as i64)),
+                    Value::String(s) => s
+                        .parse::<i64>()
+                        .map(Value::Int)
+                        .map_err(|_| IntentError::TypeError("Cannot parse as int".to_string())),
+                    Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
+                    _ => Err(IntentError::TypeError("Cannot convert to int".to_string())),
                 },
             },
         );
@@ -546,16 +557,16 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "float".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::Int(n) => Ok(Value::Float(*n as f64)),
-                        Value::Float(f) => Ok(Value::Float(*f)),
-                        Value::String(s) => s
-                            .parse::<f64>()
-                            .map(Value::Float)
-                            .map_err(|_| IntentError::TypeError("Cannot parse as float".to_string())),
-                        _ => Err(IntentError::TypeError("Cannot convert to float".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::Int(n) => Ok(Value::Float(*n as f64)),
+                    Value::Float(f) => Ok(Value::Float(*f)),
+                    Value::String(s) => s
+                        .parse::<f64>()
+                        .map(Value::Float)
+                        .map_err(|_| IntentError::TypeError("Cannot parse as float".to_string())),
+                    _ => Err(IntentError::TypeError(
+                        "Cannot convert to float".to_string(),
+                    )),
                 },
             },
         );
@@ -571,7 +582,9 @@ impl Interpreter {
                         arr.push(args[1].clone());
                         Ok(Value::Array(arr))
                     } else {
-                        Err(IntentError::TypeError("push() requires an array".to_string()))
+                        Err(IntentError::TypeError(
+                            "push() requires an array".to_string(),
+                        ))
                     }
                 },
             },
@@ -587,7 +600,9 @@ impl Interpreter {
                     if args[0].is_truthy() {
                         Ok(Value::Unit)
                     } else {
-                        Err(IntentError::ContractViolation("Assertion failed".to_string()))
+                        Err(IntentError::ContractViolation(
+                            "Assertion failed".to_string(),
+                        ))
                     }
                 },
             },
@@ -603,12 +618,12 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "abs".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::Int(n) => Ok(Value::Int(n.abs())),
-                        Value::Float(f) => Ok(Value::Float(f.abs())),
-                        _ => Err(IntentError::TypeError("abs() requires a number".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::Int(n) => Ok(Value::Int(n.abs())),
+                    Value::Float(f) => Ok(Value::Float(f.abs())),
+                    _ => Err(IntentError::TypeError(
+                        "abs() requires a number".to_string(),
+                    )),
                 },
             },
         );
@@ -619,14 +634,12 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "min".to_string(),
                 arity: 2,
-                func: |args| {
-                    match (&args[0], &args[1]) {
-                        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.min(b))),
-                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.min(*b))),
-                        (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).min(*b))),
-                        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.min(*b as f64))),
-                        _ => Err(IntentError::TypeError("min() requires numbers".to_string())),
-                    }
+                func: |args| match (&args[0], &args[1]) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.min(b))),
+                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.min(*b))),
+                    (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).min(*b))),
+                    (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.min(*b as f64))),
+                    _ => Err(IntentError::TypeError("min() requires numbers".to_string())),
                 },
             },
         );
@@ -637,14 +650,12 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "max".to_string(),
                 arity: 2,
-                func: |args| {
-                    match (&args[0], &args[1]) {
-                        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.max(b))),
-                        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.max(*b))),
-                        (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).max(*b))),
-                        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.max(*b as f64))),
-                        _ => Err(IntentError::TypeError("max() requires numbers".to_string())),
-                    }
+                func: |args| match (&args[0], &args[1]) {
+                    (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.max(b))),
+                    (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.max(*b))),
+                    (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).max(*b))),
+                    (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.max(*b as f64))),
+                    _ => Err(IntentError::TypeError("max() requires numbers".to_string())),
                 },
             },
         );
@@ -655,12 +666,12 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "round".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::Int(n) => Ok(Value::Int(*n)),
-                        Value::Float(f) => Ok(Value::Int(f.round() as i64)),
-                        _ => Err(IntentError::TypeError("round() requires a number".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::Int(n) => Ok(Value::Int(*n)),
+                    Value::Float(f) => Ok(Value::Int(f.round() as i64)),
+                    _ => Err(IntentError::TypeError(
+                        "round() requires a number".to_string(),
+                    )),
                 },
             },
         );
@@ -671,12 +682,12 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "floor".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::Int(n) => Ok(Value::Int(*n)),
-                        Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
-                        _ => Err(IntentError::TypeError("floor() requires a number".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::Int(n) => Ok(Value::Int(*n)),
+                    Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
+                    _ => Err(IntentError::TypeError(
+                        "floor() requires a number".to_string(),
+                    )),
                 },
             },
         );
@@ -687,12 +698,12 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "ceil".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::Int(n) => Ok(Value::Int(*n)),
-                        Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
-                        _ => Err(IntentError::TypeError("ceil() requires a number".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::Int(n) => Ok(Value::Int(*n)),
+                    Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
+                    _ => Err(IntentError::TypeError(
+                        "ceil() requires a number".to_string(),
+                    )),
                 },
             },
         );
@@ -703,12 +714,12 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "trunc".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::Int(n) => Ok(Value::Int(*n)),
-                        Value::Float(f) => Ok(Value::Int(f.trunc() as i64)),
-                        _ => Err(IntentError::TypeError("trunc() requires a number".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::Int(n) => Ok(Value::Int(*n)),
+                    Value::Float(f) => Ok(Value::Int(f.trunc() as i64)),
+                    _ => Err(IntentError::TypeError(
+                        "trunc() requires a number".to_string(),
+                    )),
                 },
             },
         );
@@ -719,24 +730,28 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "sqrt".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::Int(n) => {
-                            if *n < 0 {
-                                Err(IntentError::RuntimeError("sqrt() of negative number".to_string()))
-                            } else {
-                                Ok(Value::Float((*n as f64).sqrt()))
-                            }
+                func: |args| match &args[0] {
+                    Value::Int(n) => {
+                        if *n < 0 {
+                            Err(IntentError::RuntimeError(
+                                "sqrt() of negative number".to_string(),
+                            ))
+                        } else {
+                            Ok(Value::Float((*n as f64).sqrt()))
                         }
-                        Value::Float(f) => {
-                            if *f < 0.0 {
-                                Err(IntentError::RuntimeError("sqrt() of negative number".to_string()))
-                            } else {
-                                Ok(Value::Float(f.sqrt()))
-                            }
-                        }
-                        _ => Err(IntentError::TypeError("sqrt() requires a number".to_string())),
                     }
+                    Value::Float(f) => {
+                        if *f < 0.0 {
+                            Err(IntentError::RuntimeError(
+                                "sqrt() of negative number".to_string(),
+                            ))
+                        } else {
+                            Ok(Value::Float(f.sqrt()))
+                        }
+                    }
+                    _ => Err(IntentError::TypeError(
+                        "sqrt() requires a number".to_string(),
+                    )),
                 },
             },
         );
@@ -747,26 +762,22 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "pow".to_string(),
                 arity: 2,
-                func: |args| {
-                    match (&args[0], &args[1]) {
-                        (Value::Int(base), Value::Int(exp)) => {
-                            if *exp >= 0 {
-                                Ok(Value::Int(base.pow(*exp as u32)))
-                            } else {
-                                Ok(Value::Float((*base as f64).powi(*exp as i32)))
-                            }
+                func: |args| match (&args[0], &args[1]) {
+                    (Value::Int(base), Value::Int(exp)) => {
+                        if *exp >= 0 {
+                            Ok(Value::Int(base.pow(*exp as u32)))
+                        } else {
+                            Ok(Value::Float((*base as f64).powi(*exp as i32)))
                         }
-                        (Value::Float(base), Value::Int(exp)) => {
-                            Ok(Value::Float(base.powi(*exp as i32)))
-                        }
-                        (Value::Int(base), Value::Float(exp)) => {
-                            Ok(Value::Float((*base as f64).powf(*exp)))
-                        }
-                        (Value::Float(base), Value::Float(exp)) => {
-                            Ok(Value::Float(base.powf(*exp)))
-                        }
-                        _ => Err(IntentError::TypeError("pow() requires numbers".to_string())),
                     }
+                    (Value::Float(base), Value::Int(exp)) => {
+                        Ok(Value::Float(base.powi(*exp as i32)))
+                    }
+                    (Value::Int(base), Value::Float(exp)) => {
+                        Ok(Value::Float((*base as f64).powf(*exp)))
+                    }
+                    (Value::Float(base), Value::Float(exp)) => Ok(Value::Float(base.powf(*exp))),
+                    _ => Err(IntentError::TypeError("pow() requires numbers".to_string())),
                 },
             },
         );
@@ -777,20 +788,20 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "sign".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::Int(n) => Ok(Value::Int(n.signum())),
-                        Value::Float(f) => {
-                            if *f > 0.0 {
-                                Ok(Value::Int(1))
-                            } else if *f < 0.0 {
-                                Ok(Value::Int(-1))
-                            } else {
-                                Ok(Value::Int(0))
-                            }
+                func: |args| match &args[0] {
+                    Value::Int(n) => Ok(Value::Int(n.signum())),
+                    Value::Float(f) => {
+                        if *f > 0.0 {
+                            Ok(Value::Int(1))
+                        } else if *f < 0.0 {
+                            Ok(Value::Int(-1))
+                        } else {
+                            Ok(Value::Int(0))
                         }
-                        _ => Err(IntentError::TypeError("sign() requires a number".to_string())),
                     }
+                    _ => Err(IntentError::TypeError(
+                        "sign() requires a number".to_string(),
+                    )),
                 },
             },
         );
@@ -801,16 +812,16 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "clamp".to_string(),
                 arity: 3,
-                func: |args| {
-                    match (&args[0], &args[1], &args[2]) {
-                        (Value::Int(val), Value::Int(min), Value::Int(max)) => {
-                            Ok(Value::Int(*val.max(min).min(max)))
-                        }
-                        (Value::Float(val), Value::Float(min), Value::Float(max)) => {
-                            Ok(Value::Float(val.max(*min).min(*max)))
-                        }
-                        _ => Err(IntentError::TypeError("clamp() requires numbers of same type".to_string())),
+                func: |args| match (&args[0], &args[1], &args[2]) {
+                    (Value::Int(val), Value::Int(min), Value::Int(max)) => {
+                        Ok(Value::Int(*val.max(min).min(max)))
                     }
+                    (Value::Float(val), Value::Float(min), Value::Float(max)) => {
+                        Ok(Value::Float(val.max(*min).min(*max)))
+                    }
+                    _ => Err(IntentError::TypeError(
+                        "clamp() requires numbers of same type".to_string(),
+                    )),
                 },
             },
         );
@@ -819,29 +830,35 @@ impl Interpreter {
     /// Define built-in types: Option<T>, Result<T, E>
     fn define_builtin_types(&mut self) {
         // Option<T> = Some(T) | None
-        self.enums.insert("Option".to_string(), vec![
-            EnumVariant {
-                name: "Some".to_string(),
-                fields: Some(vec![TypeExpr::Named("T".to_string())]),
-            },
-            EnumVariant {
-                name: "None".to_string(),
-                fields: None,
-            },
-        ]);
-        
+        self.enums.insert(
+            "Option".to_string(),
+            vec![
+                EnumVariant {
+                    name: "Some".to_string(),
+                    fields: Some(vec![TypeExpr::Named("T".to_string())]),
+                },
+                EnumVariant {
+                    name: "None".to_string(),
+                    fields: None,
+                },
+            ],
+        );
+
         // Result<T, E> = Ok(T) | Err(E)
-        self.enums.insert("Result".to_string(), vec![
-            EnumVariant {
-                name: "Ok".to_string(),
-                fields: Some(vec![TypeExpr::Named("T".to_string())]),
-            },
-            EnumVariant {
-                name: "Err".to_string(),
-                fields: Some(vec![TypeExpr::Named("E".to_string())]),
-            },
-        ]);
-        
+        self.enums.insert(
+            "Result".to_string(),
+            vec![
+                EnumVariant {
+                    name: "Ok".to_string(),
+                    fields: Some(vec![TypeExpr::Named("T".to_string())]),
+                },
+                EnumVariant {
+                    name: "Err".to_string(),
+                    fields: Some(vec![TypeExpr::Named("E".to_string())]),
+                },
+            ],
+        );
+
         // Define constructors for Option
         self.environment.borrow_mut().define(
             "Some".to_string(),
@@ -857,7 +874,7 @@ impl Interpreter {
                 },
             },
         );
-        
+
         self.environment.borrow_mut().define(
             "None".to_string(),
             Value::EnumValue {
@@ -866,7 +883,7 @@ impl Interpreter {
                 values: vec![],
             },
         );
-        
+
         // Define constructors for Result
         self.environment.borrow_mut().define(
             "Ok".to_string(),
@@ -882,7 +899,7 @@ impl Interpreter {
                 },
             },
         );
-        
+
         self.environment.borrow_mut().define(
             "Err".to_string(),
             Value::NativeFunction {
@@ -897,137 +914,140 @@ impl Interpreter {
                 },
             },
         );
-        
+
         // is_some() helper for Option
         self.environment.borrow_mut().define(
             "is_some".to_string(),
             Value::NativeFunction {
                 name: "is_some".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::EnumValue { enum_name, variant, .. } 
-                            if enum_name == "Option" => {
-                            Ok(Value::Bool(variant == "Some"))
-                        }
-                        _ => Err(IntentError::TypeError("is_some() requires an Option".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::EnumValue {
+                        enum_name, variant, ..
+                    } if enum_name == "Option" => Ok(Value::Bool(variant == "Some")),
+                    _ => Err(IntentError::TypeError(
+                        "is_some() requires an Option".to_string(),
+                    )),
                 },
             },
         );
-        
+
         // is_none() helper for Option
         self.environment.borrow_mut().define(
             "is_none".to_string(),
             Value::NativeFunction {
                 name: "is_none".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::EnumValue { enum_name, variant, .. } 
-                            if enum_name == "Option" => {
-                            Ok(Value::Bool(variant == "None"))
-                        }
-                        _ => Err(IntentError::TypeError("is_none() requires an Option".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::EnumValue {
+                        enum_name, variant, ..
+                    } if enum_name == "Option" => Ok(Value::Bool(variant == "None")),
+                    _ => Err(IntentError::TypeError(
+                        "is_none() requires an Option".to_string(),
+                    )),
                 },
             },
         );
-        
+
         // is_ok() helper for Result
         self.environment.borrow_mut().define(
             "is_ok".to_string(),
             Value::NativeFunction {
                 name: "is_ok".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::EnumValue { enum_name, variant, .. } 
-                            if enum_name == "Result" => {
-                            Ok(Value::Bool(variant == "Ok"))
-                        }
-                        _ => Err(IntentError::TypeError("is_ok() requires a Result".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::EnumValue {
+                        enum_name, variant, ..
+                    } if enum_name == "Result" => Ok(Value::Bool(variant == "Ok")),
+                    _ => Err(IntentError::TypeError(
+                        "is_ok() requires a Result".to_string(),
+                    )),
                 },
             },
         );
-        
+
         // is_err() helper for Result
         self.environment.borrow_mut().define(
             "is_err".to_string(),
             Value::NativeFunction {
                 name: "is_err".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::EnumValue { enum_name, variant, .. } 
-                            if enum_name == "Result" => {
-                            Ok(Value::Bool(variant == "Err"))
-                        }
-                        _ => Err(IntentError::TypeError("is_err() requires a Result".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::EnumValue {
+                        enum_name, variant, ..
+                    } if enum_name == "Result" => Ok(Value::Bool(variant == "Err")),
+                    _ => Err(IntentError::TypeError(
+                        "is_err() requires a Result".to_string(),
+                    )),
                 },
             },
         );
-        
+
         // unwrap() for Option and Result
         self.environment.borrow_mut().define(
             "unwrap".to_string(),
             Value::NativeFunction {
                 name: "unwrap".to_string(),
                 arity: 1,
-                func: |args| {
-                    match &args[0] {
-                        Value::EnumValue { enum_name, variant, values } => {
-                            match (enum_name.as_str(), variant.as_str()) {
-                                ("Option", "Some") | ("Result", "Ok") => {
-                                    values.first().cloned().ok_or_else(|| {
-                                        IntentError::RuntimeError("Empty variant".to_string())
-                                    })
-                                }
-                                ("Option", "None") => {
-                                    Err(IntentError::RuntimeError("Called unwrap() on None".to_string()))
-                                }
-                                ("Result", "Err") => {
-                                    let err_val = values.first().map(|v| v.to_string()).unwrap_or_default();
-                                    Err(IntentError::RuntimeError(format!("Called unwrap() on Err({})", err_val)))
-                                }
-                                _ => Err(IntentError::TypeError("unwrap() requires Option or Result".to_string())),
-                            }
+                func: |args| match &args[0] {
+                    Value::EnumValue {
+                        enum_name,
+                        variant,
+                        values,
+                    } => match (enum_name.as_str(), variant.as_str()) {
+                        ("Option", "Some") | ("Result", "Ok") => values
+                            .first()
+                            .cloned()
+                            .ok_or_else(|| IntentError::RuntimeError("Empty variant".to_string())),
+                        ("Option", "None") => Err(IntentError::RuntimeError(
+                            "Called unwrap() on None".to_string(),
+                        )),
+                        ("Result", "Err") => {
+                            let err_val = values.first().map(|v| v.to_string()).unwrap_or_default();
+                            Err(IntentError::RuntimeError(format!(
+                                "Called unwrap() on Err({})",
+                                err_val
+                            )))
                         }
-                        _ => Err(IntentError::TypeError("unwrap() requires Option or Result".to_string())),
-                    }
+                        _ => Err(IntentError::TypeError(
+                            "unwrap() requires Option or Result".to_string(),
+                        )),
+                    },
+                    _ => Err(IntentError::TypeError(
+                        "unwrap() requires Option or Result".to_string(),
+                    )),
                 },
             },
         );
-        
+
         // unwrap_or() for Option and Result
         self.environment.borrow_mut().define(
             "unwrap_or".to_string(),
             Value::NativeFunction {
                 name: "unwrap_or".to_string(),
                 arity: 2,
-                func: |args| {
-                    match &args[0] {
-                        Value::EnumValue { enum_name, variant, values } => {
-                            match (enum_name.as_str(), variant.as_str()) {
-                                ("Option", "Some") | ("Result", "Ok") => {
-                                    values.first().cloned().ok_or_else(|| {
-                                        IntentError::RuntimeError("Empty variant".to_string())
-                                    })
-                                }
-                                ("Option", "None") | ("Result", "Err") => {
-                                    Ok(args[1].clone())
-                                }
-                                _ => Err(IntentError::TypeError("unwrap_or() requires Option or Result".to_string())),
-                            }
-                        }
-                        _ => Err(IntentError::TypeError("unwrap_or() requires Option or Result".to_string())),
-                    }
+                func: |args| match &args[0] {
+                    Value::EnumValue {
+                        enum_name,
+                        variant,
+                        values,
+                    } => match (enum_name.as_str(), variant.as_str()) {
+                        ("Option", "Some") | ("Result", "Ok") => values
+                            .first()
+                            .cloned()
+                            .ok_or_else(|| IntentError::RuntimeError("Empty variant".to_string())),
+                        ("Option", "None") | ("Result", "Err") => Ok(args[1].clone()),
+                        _ => Err(IntentError::TypeError(
+                            "unwrap_or() requires Option or Result".to_string(),
+                        )),
+                    },
+                    _ => Err(IntentError::TypeError(
+                        "unwrap_or() requires Option or Result".to_string(),
+                    )),
                 },
             },
         );
-        
+
         // listen(port) - Start HTTP server on given port
         // This is a special built-in because it needs to call Intent handler functions
         self.environment.borrow_mut().define(
@@ -1039,12 +1059,12 @@ impl Interpreter {
                     // This is a placeholder - actual implementation is in eval_call
                     // because we need access to the interpreter to call handlers
                     Err(IntentError::RuntimeError(
-                        "listen() must be called directly, not stored in a variable".to_string()
+                        "listen() must be called directly, not stored in a variable".to_string(),
                     ))
                 },
             },
         );
-        
+
         // HTTP routing functions - these need special handling in eval_call
         // because they need to store handlers in the interpreter's server_state
         for method in &["get", "post", "put", "delete", "patch"] {
@@ -1056,13 +1076,13 @@ impl Interpreter {
                     arity: 2,
                     func: |_args| {
                         Err(IntentError::RuntimeError(
-                            "HTTP route functions must be called directly".to_string()
+                            "HTTP route functions must be called directly".to_string(),
                         ))
                     },
                 },
             );
         }
-        
+
         // new_server() - create a new server (resets routes)
         self.environment.borrow_mut().define(
             "new_server".to_string(),
@@ -1072,13 +1092,13 @@ impl Interpreter {
                 func: |_args| {
                     // Placeholder - actual implementation clears server_state
                     Err(IntentError::RuntimeError(
-                        "new_server() must be called directly".to_string()
+                        "new_server() must be called directly".to_string(),
                     ))
                 },
             },
         );
     }
-    
+
     /// Define standard library functions that are always available
     fn define_stdlib(&mut self) {
         // Initialize standard library modules from the stdlib module
@@ -1088,36 +1108,51 @@ impl Interpreter {
             self.loaded_modules.insert(name, module);
         }
     }
-    
+
     /// Handle import statement
-    fn handle_import(&mut self, items: &[ImportItem], source: &str, alias: Option<&str>) -> Result<Value> {
+    fn handle_import(
+        &mut self,
+        items: &[ImportItem],
+        source: &str,
+        alias: Option<&str>,
+    ) -> Result<Value> {
         // Check if it's a standard library module
         if source.starts_with("std/") {
             return self.import_std_module(items, source, alias);
         }
-        
+
         // Check if it's already loaded
         if let Some(module) = self.loaded_modules.get(source).cloned() {
             return self.bind_imports(items, &module, source, alias);
         }
-        
+
         // Try to load from file
         self.import_file_module(items, source, alias)
     }
-    
-    fn import_std_module(&mut self, items: &[ImportItem], source: &str, alias: Option<&str>) -> Result<Value> {
-        let module = self.loaded_modules.get(source).cloned()
-            .ok_or_else(|| IntentError::RuntimeError(format!("Unknown standard library module: {}", source)))?;
-        
+
+    fn import_std_module(
+        &mut self,
+        items: &[ImportItem],
+        source: &str,
+        alias: Option<&str>,
+    ) -> Result<Value> {
+        let module = self.loaded_modules.get(source).cloned().ok_or_else(|| {
+            IntentError::RuntimeError(format!("Unknown standard library module: {}", source))
+        })?;
+
         self.bind_imports(items, &module, source, alias)
     }
-    
-    fn bind_imports(&mut self, items: &[ImportItem], module: &HashMap<String, Value>, source: &str, alias: Option<&str>) -> Result<Value> {
+
+    fn bind_imports(
+        &mut self,
+        items: &[ImportItem],
+        module: &HashMap<String, Value>,
+        source: &str,
+        alias: Option<&str>,
+    ) -> Result<Value> {
         if items.is_empty() {
             // Import entire module
-            let module_name = alias.unwrap_or_else(|| {
-                source.rsplit('/').next().unwrap_or(source)
-            });
+            let module_name = alias.unwrap_or_else(|| source.rsplit('/').next().unwrap_or(source));
             // Create a struct-like value for the module
             let mut fields = HashMap::new();
             for (name, value) in module {
@@ -1125,32 +1160,46 @@ impl Interpreter {
             }
             self.environment.borrow_mut().define(
                 module_name.to_string(),
-                Value::Struct { name: format!("module:{}", source), fields },
+                Value::Struct {
+                    name: format!("module:{}", source),
+                    fields,
+                },
             );
         } else {
             // Import specific items
             for item in items {
-                let value = module.get(&item.name)
-                    .ok_or_else(|| IntentError::RuntimeError(
-                        format!("'{}' is not exported from '{}'", item.name, source)
-                    ))?;
+                let value = module.get(&item.name).ok_or_else(|| {
+                    IntentError::RuntimeError(format!(
+                        "'{}' is not exported from '{}'",
+                        item.name, source
+                    ))
+                })?;
                 let bind_name = item.alias.as_ref().unwrap_or(&item.name);
-                self.environment.borrow_mut().define(bind_name.clone(), value.clone());
+                self.environment
+                    .borrow_mut()
+                    .define(bind_name.clone(), value.clone());
             }
         }
         Ok(Value::Unit)
     }
-    
-    fn import_file_module(&mut self, items: &[ImportItem], source: &str, alias: Option<&str>) -> Result<Value> {
-        use std::fs;
+
+    fn import_file_module(
+        &mut self,
+        items: &[ImportItem],
+        source: &str,
+        alias: Option<&str>,
+    ) -> Result<Value> {
         use crate::lexer::Lexer;
         use crate::parser::Parser;
-        
+        use std::fs;
+
         // Resolve the file path
         let file_path = if source.starts_with("./") || source.starts_with("../") {
             // Relative import
             if let Some(ref current) = self.current_file {
-                let current_dir = std::path::Path::new(current).parent().unwrap_or(std::path::Path::new("."));
+                let current_dir = std::path::Path::new(current)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."));
                 current_dir.join(source)
             } else {
                 std::path::PathBuf::from(source)
@@ -1158,36 +1207,41 @@ impl Interpreter {
         } else {
             std::path::PathBuf::from(source)
         };
-        
+
         // Add .tnt extension if not present
         let file_path = if file_path.extension().is_none() {
             file_path.with_extension("tnt")
         } else {
             file_path
         };
-        
+
         // Read and parse the file
-        let source_code = fs::read_to_string(&file_path)
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to read module '{}': {}", file_path.display(), e)))?;
-        
+        let source_code = fs::read_to_string(&file_path).map_err(|e| {
+            IntentError::RuntimeError(format!(
+                "Failed to read module '{}': {}",
+                file_path.display(),
+                e
+            ))
+        })?;
+
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
         let mut parser = Parser::new(tokens);
         let ast = parser.parse()?;
-        
+
         // Create a new environment for the module
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
-        
+
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
-        
+
         // Evaluate the module
         self.eval(&ast)?;
-        
+
         // Collect exported items
         let mut module_exports: HashMap<String, Value> = HashMap::new();
-        
+
         // For now, export everything defined at module level
         // In the future, we'd track explicit exports
         let env = self.environment.borrow();
@@ -1195,33 +1249,34 @@ impl Interpreter {
             module_exports.insert(name.clone(), value.clone());
         }
         drop(env);
-        
+
         // Restore environment
         self.environment = previous_env;
         self.current_file = previous_file;
-        
+
         // Cache the module
         let source_key = file_path.to_string_lossy().to_string();
-        self.loaded_modules.insert(source_key.clone(), module_exports.clone());
-        
+        self.loaded_modules
+            .insert(source_key.clone(), module_exports.clone());
+
         // Bind imports
         self.bind_imports(items, &module_exports, &source_key, alias)
     }
 
     /// Load file-based routes from a directory
-    /// 
+    ///
     /// Scans a directory for .tnt files and registers routes based on:
     /// - File path = URL path (e.g., routes/users/[id].tnt → /users/{id})
     /// - Exported functions = HTTP methods (e.g., export fn get(req) → GET)
     /// - index.tnt = directory root (e.g., routes/users/index.tnt → /users)
     /// - [param].tnt = dynamic segments (e.g., [id].tnt → {id})
-    /// 
+    ///
     /// Also auto-loads:
     /// - lib/ directory as shared modules available in routes
     /// - middleware/ directory in alphabetical order
     fn load_file_based_routes(&mut self, dir_path: &str) -> Result<Value> {
         use std::fs;
-        
+
         // Resolve the directory path
         let base_dir = if std::path::Path::new(dir_path).is_relative() {
             std::env::current_dir()
@@ -1230,23 +1285,25 @@ impl Interpreter {
         } else {
             std::path::PathBuf::from(dir_path)
         };
-        
+
         // Check for lib/ directory and load shared modules
-        let lib_dir = base_dir.parent()
+        let lib_dir = base_dir
+            .parent()
             .map(|p| p.join("lib"))
             .unwrap_or_else(|| std::path::PathBuf::from("lib"));
-        
+
         let mut lib_modules: HashMap<String, HashMap<String, Value>> = HashMap::new();
-        
+
         if lib_dir.exists() && lib_dir.is_dir() {
             if let Ok(entries) = fs::read_dir(&lib_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().map(|e| e == "tnt").unwrap_or(false) {
-                        let module_name = path.file_stem()
+                        let module_name = path
+                            .file_stem()
                             .map(|s| s.to_string_lossy().to_string())
                             .unwrap_or_default();
-                        
+
                         if let Ok(exports) = self.load_module_exports(&path) {
                             lib_modules.insert(module_name, exports);
                         }
@@ -1254,29 +1311,38 @@ impl Interpreter {
                 }
             }
         }
-        
+
         // Check for middleware/ directory and load middleware in order
-        let middleware_dir = base_dir.parent()
+        let middleware_dir = base_dir
+            .parent()
             .map(|p| p.join("middleware"))
             .unwrap_or_else(|| std::path::PathBuf::from("middleware"));
-        
+
         if middleware_dir.exists() && middleware_dir.is_dir() {
             if let Ok(entries) = fs::read_dir(&middleware_dir) {
                 let mut middleware_files: Vec<_> = entries
                     .flatten()
-                    .filter(|e| e.path().extension().map(|ext| ext == "tnt").unwrap_or(false))
+                    .filter(|e| {
+                        e.path()
+                            .extension()
+                            .map(|ext| ext == "tnt")
+                            .unwrap_or(false)
+                    })
                     .collect();
-                
+
                 // Sort alphabetically for predictable order (01_logger.tnt, 02_auth.tnt, etc.)
                 middleware_files.sort_by_key(|e| e.path());
-                
+
                 for entry in middleware_files {
                     let path = entry.path();
                     if let Ok(exports) = self.load_module_exports(&path) {
                         // Look for a handler function (middleware or handler)
-                        if let Some(handler) = exports.get("middleware").or_else(|| exports.get("handler")) {
+                        if let Some(handler) =
+                            exports.get("middleware").or_else(|| exports.get("handler"))
+                        {
                             self.server_state.add_middleware(handler.clone());
-                            let name = path.file_stem()
+                            let name = path
+                                .file_stem()
                                 .map(|s| s.to_string_lossy().to_string())
                                 .unwrap_or_else(|| "unknown".to_string());
                             println!("  Loaded middleware: {}", name);
@@ -1285,49 +1351,58 @@ impl Interpreter {
                 }
             }
         }
-        
+
         // Scan routes directory recursively
         let routes = self.discover_routes(&base_dir, &base_dir, &lib_modules)?;
-        
+
         // Register all discovered routes with source info for hot-reload
         for (method, pattern, handler, file) in &routes {
-            self.server_state.add_route_with_source(method, pattern, handler.clone(), Some(file.clone()));
+            self.server_state.add_route_with_source(
+                method,
+                pattern,
+                handler.clone(),
+                Some(file.clone()),
+            );
             println!("  {} {} -> {}", method, pattern, file);
         }
-        
+
         println!("");
         println!("Hot-reload enabled: edit route files and changes take effect on next request");
-        
+
         Ok(Value::Int(routes.len() as i64))
     }
-    
+
     /// Load a module and return its exports
-    fn load_module_exports(&mut self, file_path: &std::path::Path) -> Result<HashMap<String, Value>> {
-        use std::fs;
+    fn load_module_exports(
+        &mut self,
+        file_path: &std::path::Path,
+    ) -> Result<HashMap<String, Value>> {
         use crate::lexer::Lexer;
         use crate::parser::Parser;
-        
-        let source_code = fs::read_to_string(file_path)
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path.display(), e)))?;
-        
+        use std::fs;
+
+        let source_code = fs::read_to_string(file_path).map_err(|e| {
+            IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path.display(), e))
+        })?;
+
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
         let mut parser = Parser::new(tokens);
         let ast = parser.parse()?;
-        
+
         // Create a fresh environment for the module
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
-        
+
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
-        
+
         // Re-define builtins in the new environment
         self.define_builtins();
-        
+
         // Evaluate the module
         self.eval(&ast)?;
-        
+
         // Collect exports (everything defined at module level)
         let mut exports: HashMap<String, Value> = HashMap::new();
         let env = self.environment.borrow();
@@ -1338,14 +1413,14 @@ impl Interpreter {
             }
         }
         drop(env);
-        
+
         // Restore environment
         self.environment = previous_env;
         self.current_file = previous_file;
-        
+
         Ok(exports)
     }
-    
+
     /// Recursively discover routes in a directory
     fn discover_routes(
         &mut self,
@@ -1354,26 +1429,27 @@ impl Interpreter {
         lib_modules: &HashMap<String, HashMap<String, Value>>,
     ) -> Result<Vec<(String, String, Value, String)>> {
         use std::fs;
-        
+
         let mut routes = Vec::new();
-        
+
         if !dir.exists() || !dir.is_dir() {
             return Err(IntentError::RuntimeError(format!(
-                "Routes directory does not exist: {}", dir.display()
+                "Routes directory does not exist: {}",
+                dir.display()
             )));
         }
-        
+
         let mut entries: Vec<_> = fs::read_dir(dir)
             .map_err(|e| IntentError::RuntimeError(format!("Failed to read directory: {}", e)))?
             .flatten()
             .collect();
-        
+
         // Sort for consistent ordering
         entries.sort_by_key(|e| e.path());
-        
+
         for entry in entries {
             let path = entry.path();
-            
+
             if path.is_dir() {
                 // Recurse into subdirectory
                 let sub_routes = self.discover_routes(&path, base_dir, lib_modules)?;
@@ -1384,10 +1460,10 @@ impl Interpreter {
                 routes.extend(file_routes);
             }
         }
-        
+
         Ok(routes)
     }
-    
+
     /// Process a single route file and extract HTTP method handlers
     fn process_route_file(
         &mut self,
@@ -1395,37 +1471,39 @@ impl Interpreter {
         base_dir: &std::path::Path,
         lib_modules: &HashMap<String, HashMap<String, Value>>,
     ) -> Result<Vec<(String, String, Value, String)>> {
-        use std::fs;
         use crate::lexer::Lexer;
         use crate::parser::Parser;
-        
+        use std::fs;
+
         let mut routes = Vec::new();
-        
+
         // Convert file path to URL pattern
-        let relative_path = file_path.strip_prefix(base_dir)
+        let relative_path = file_path
+            .strip_prefix(base_dir)
             .map_err(|_| IntentError::RuntimeError("Failed to get relative path".to_string()))?;
-        
+
         let url_pattern = self.file_path_to_url_pattern(relative_path);
-        
+
         // Read and parse the file
-        let source_code = fs::read_to_string(file_path)
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path.display(), e)))?;
-        
+        let source_code = fs::read_to_string(file_path).map_err(|e| {
+            IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path.display(), e))
+        })?;
+
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
         let mut parser = Parser::new(tokens);
         let ast = parser.parse()?;
-        
+
         // Create a fresh environment for the route module
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
-        
+
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
-        
+
         // Re-define builtins
         self.define_builtins();
-        
+
         // Inject lib modules into the environment
         for (name, exports) in lib_modules {
             let mut fields = HashMap::new();
@@ -1434,16 +1512,19 @@ impl Interpreter {
             }
             self.environment.borrow_mut().define(
                 name.clone(),
-                Value::Struct { name: format!("lib:{}", name), fields },
+                Value::Struct {
+                    name: format!("lib:{}", name),
+                    fields,
+                },
             );
         }
-        
+
         // Evaluate the module
         self.eval(&ast)?;
-        
+
         // Find exported HTTP method handlers
         let http_methods = ["get", "post", "put", "delete", "patch", "head", "options"];
-        
+
         let env = self.environment.borrow();
         for method in http_methods {
             if let Some(handler) = env.values.get(method) {
@@ -1460,61 +1541,65 @@ impl Interpreter {
             }
         }
         drop(env);
-        
+
         // Restore environment
         self.environment = previous_env;
         self.current_file = previous_file;
-        
+
         Ok(routes)
     }
-    
+
     /// Reload a single route handler from a file (for hot-reload)
     fn reload_route_handler(&mut self, file_path: &str, method: &str) -> Result<Value> {
-        use std::fs;
         use crate::lexer::Lexer;
         use crate::parser::Parser;
-        
+        use std::fs;
+
         let path = std::path::Path::new(file_path);
-        
+
         // Read and parse the file
-        let source_code = fs::read_to_string(path)
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path, e)))?;
-        
+        let source_code = fs::read_to_string(path).map_err(|e| {
+            IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path, e))
+        })?;
+
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
         let mut parser = Parser::new(tokens);
         let ast = parser.parse()?;
-        
+
         // Create a fresh environment
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
-        
+
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string());
-        
+
         // Re-define builtins
         self.define_builtins();
-        
+
         // Evaluate the module
         self.eval(&ast)?;
-        
+
         // Find the handler for the specified method
         let method_name = method.to_lowercase();
         let env = self.environment.borrow();
         let handler = env.values.get(&method_name).cloned();
         drop(env);
-        
+
         // Restore environment
         self.environment = previous_env;
         self.current_file = previous_file;
-        
-        handler.ok_or_else(|| IntentError::RuntimeError(
-            format!("Handler '{}' not found in {}", method_name, file_path)
-        ))
+
+        handler.ok_or_else(|| {
+            IntentError::RuntimeError(format!(
+                "Handler '{}' not found in {}",
+                method_name, file_path
+            ))
+        })
     }
 
     /// Convert a file path to a URL pattern
-    /// 
+    ///
     /// Examples:
     /// - index.tnt → /
     /// - about.tnt → /about
@@ -1523,31 +1608,31 @@ impl Interpreter {
     /// - api/products/[id]/reviews.tnt → /api/products/{id}/reviews
     fn file_path_to_url_pattern(&self, path: &std::path::Path) -> String {
         let mut segments: Vec<String> = Vec::new();
-        
+
         for component in path.components() {
             if let std::path::Component::Normal(os_str) = component {
                 let segment = os_str.to_string_lossy().to_string();
-                
+
                 // Remove .tnt extension
                 let segment = segment.strip_suffix(".tnt").unwrap_or(&segment).to_string();
-                
+
                 // Skip index files (they represent the directory root)
                 if segment == "index" {
                     continue;
                 }
-                
+
                 // Convert [param] to {param}
                 let segment = if segment.starts_with('[') && segment.ends_with(']') {
-                    let param_name = &segment[1..segment.len()-1];
+                    let param_name = &segment[1..segment.len() - 1];
                     format!("{{{}}}", param_name)
                 } else {
                     segment
                 };
-                
+
                 segments.push(segment);
             }
         }
-        
+
         if segments.is_empty() {
             "/".to_string()
         } else {
@@ -1582,7 +1667,7 @@ impl Interpreter {
                 } else {
                     Value::Unit
                 };
-                
+
                 // Handle pattern destructuring
                 if let Some(pat) = pattern {
                     self.bind_pattern(pat, &val)?;
@@ -1591,8 +1676,12 @@ impl Interpreter {
                 }
                 Ok(Value::Unit)
             }
-            
-            Statement::TypeAlias { name, type_params: _, target } => {
+
+            Statement::TypeAlias {
+                name,
+                type_params: _,
+                target,
+            } => {
                 // Store type alias for later resolution
                 self.type_aliases.insert(name.clone(), target.clone());
                 Ok(Value::Unit)
@@ -1609,11 +1698,9 @@ impl Interpreter {
                 effects: _, // Effects are tracked but not enforced at runtime yet
             } => {
                 // Convert AST Contract to FunctionContract with expressions
-                let func_contract = contract.as_ref().map(|c| {
-                    FunctionContract {
-                        requires: c.requires.clone(),
-                        ensures: c.ensures.clone(),
-                    }
+                let func_contract = contract.as_ref().map(|c| FunctionContract {
+                    requires: c.requires.clone(),
+                    ensures: c.ensures.clone(),
                 });
 
                 let func = Value::Function {
@@ -1723,29 +1810,35 @@ impl Interpreter {
                         .or_insert_with(Vec::new)
                         .push(trait_name.clone());
                 }
-                
+
                 // Store invariants for this type
                 if !invariants.is_empty() {
-                    self.struct_invariants.insert(type_name.clone(), invariants.clone());
+                    self.struct_invariants
+                        .insert(type_name.clone(), invariants.clone());
                 }
-                
+
                 for method in methods {
                     self.eval_statement(method)?;
                 }
                 Ok(Value::Unit)
             }
 
-            Statement::Enum { name, variants, attributes: _, type_params: _ } => {
+            Statement::Enum {
+                name,
+                variants,
+                attributes: _,
+                type_params: _,
+            } => {
                 // Register the enum type
                 self.enums.insert(name.clone(), variants.clone());
-                
+
                 // Create constructors for each variant
                 for variant in variants {
                     let variant_name = variant.name.clone();
                     let enum_name = name.clone();
                     let has_fields = variant.fields.is_some();
                     let field_count = variant.fields.as_ref().map(|f| f.len()).unwrap_or(0);
-                    
+
                     if has_fields {
                         // Variant with data - create an enum constructor
                         self.environment.borrow_mut().define(
@@ -1768,7 +1861,7 @@ impl Interpreter {
                         );
                     }
                 }
-                
+
                 Ok(Value::Unit)
             }
 
@@ -1777,15 +1870,21 @@ impl Interpreter {
                 Ok(Value::Unit)
             }
 
-            Statement::Intent { description: _, target } => {
-                self.eval_statement(target)
-            }
-            
-            Statement::Import { items, source, alias } => {
-                self.handle_import(items, source, alias.as_deref())
-            }
-            
-            Statement::Export { items: _, statement } => {
+            Statement::Intent {
+                description: _,
+                target,
+            } => self.eval_statement(target),
+
+            Statement::Import {
+                items,
+                source,
+                alias,
+            } => self.handle_import(items, source, alias.as_deref()),
+
+            Statement::Export {
+                items: _,
+                statement,
+            } => {
                 // For now, just evaluate the exported statement
                 // The export metadata would be used by the module system
                 if let Some(stmt) = statement {
@@ -1793,63 +1892,80 @@ impl Interpreter {
                 }
                 Ok(Value::Unit)
             }
-            
-            Statement::Trait { name, type_params: _, methods, supertraits } => {
+
+            Statement::Trait {
+                name,
+                type_params: _,
+                methods,
+                supertraits,
+            } => {
                 // Register the trait definition
-                let method_infos: Vec<TraitMethodInfo> = methods.iter().map(|m| {
-                    TraitMethodInfo {
+                let method_infos: Vec<TraitMethodInfo> = methods
+                    .iter()
+                    .map(|m| TraitMethodInfo {
                         name: m.name.clone(),
                         params: m.params.clone(),
                         return_type: m.return_type.clone(),
                         has_default: m.default_body.is_some(),
-                    }
-                }).collect();
-                
-                self.trait_definitions.insert(name.clone(), TraitInfo {
-                    name: name.clone(),
-                    methods: method_infos,
-                    supertraits: supertraits.clone(),
-                });
-                
+                    })
+                    .collect();
+
+                self.trait_definitions.insert(
+                    name.clone(),
+                    TraitInfo {
+                        name: name.clone(),
+                        methods: method_infos,
+                        supertraits: supertraits.clone(),
+                    },
+                );
+
                 Ok(Value::Unit)
             }
-            
-            Statement::ForIn { variable, iterable, body } => {
+
+            Statement::ForIn {
+                variable,
+                iterable,
+                body,
+            } => {
                 let iterable_value = self.eval_expression(iterable)?;
-                
+
                 // Convert iterable to something we can iterate over
                 let items: Vec<Value> = match &iterable_value {
                     Value::Array(arr) => arr.clone(),
-                    Value::Range { start, end, inclusive } => {
+                    Value::Range {
+                        start,
+                        end,
+                        inclusive,
+                    } => {
                         let end_val = if *inclusive { *end + 1 } else { *end };
                         (*start..end_val).map(Value::Int).collect()
                     }
-                    Value::String(s) => {
-                        s.chars().map(|c| Value::String(c.to_string())).collect()
+                    Value::String(s) => s.chars().map(|c| Value::String(c.to_string())).collect(),
+                    Value::Map(map) => map.keys().map(|k| Value::String(k.clone())).collect(),
+                    _ => {
+                        return Err(IntentError::RuntimeError(format!(
+                            "Cannot iterate over {}",
+                            iterable_value.type_name()
+                        )))
                     }
-                    Value::Map(map) => {
-                        map.keys().map(|k| Value::String(k.clone())).collect()
-                    }
-                    _ => return Err(IntentError::RuntimeError(
-                        format!("Cannot iterate over {}", iterable_value.type_name())
-                    )),
                 };
-                
+
                 let mut result = Value::Unit;
                 for item in items {
                     // Create new scope for each iteration
                     let previous = Rc::clone(&self.environment);
-                    self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
-                    
+                    self.environment =
+                        Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+
                     // Bind the loop variable
                     self.environment.borrow_mut().define(variable.clone(), item);
-                    
+
                     // Execute the loop body
                     result = self.eval_block(body)?;
-                    
+
                     // Restore environment
                     self.environment = previous;
-                    
+
                     // Handle control flow
                     match result {
                         Value::Break => {
@@ -1864,10 +1980,10 @@ impl Interpreter {
                         _ => {}
                     }
                 }
-                
+
                 Ok(result)
             }
-            
+
             Statement::Defer(expr) => {
                 // Push the deferred expression onto the stack
                 // It will be executed when the current scope exits
@@ -1880,7 +1996,7 @@ impl Interpreter {
     fn eval_block(&mut self, block: &Block) -> Result<Value> {
         let previous = Rc::clone(&self.environment);
         self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
-        
+
         // Track deferred statements for this block
         let deferred_count_before = self.deferred_statements.len();
 
@@ -1893,12 +2009,13 @@ impl Interpreter {
                 _ => {}
             }
         }
-        
+
         // Execute deferred statements in reverse order (LIFO)
-        let deferred_to_run: Vec<Expression> = self.deferred_statements
+        let deferred_to_run: Vec<Expression> = self
+            .deferred_statements
             .drain(deferred_count_before..)
             .collect();
-        
+
         for deferred_expr in deferred_to_run.into_iter().rev() {
             // Deferred expressions execute even if there was an error
             // For now, we ignore any errors in deferred statements
@@ -1917,12 +2034,11 @@ impl Interpreter {
             Expression::Bool(b) => Ok(Value::Bool(*b)),
             Expression::Unit => Ok(Value::Unit),
 
-            Expression::Identifier(name) => {
-                self.environment
-                    .borrow()
-                    .get(name)
-                    .ok_or_else(|| IntentError::UndefinedVariable(name.clone()))
-            }
+            Expression::Identifier(name) => self
+                .environment
+                .borrow()
+                .get(name)
+                .ok_or_else(|| IntentError::UndefinedVariable(name.clone())),
 
             Expression::Binary {
                 left,
@@ -1930,7 +2046,7 @@ impl Interpreter {
                 right,
             } => {
                 let lhs = self.eval_expression(left)?;
-                
+
                 // Short-circuit evaluation for logical operators
                 match operator {
                     BinaryOp::And => {
@@ -1950,13 +2066,17 @@ impl Interpreter {
                     BinaryOp::NullCoalesce => {
                         // Return unwrapped left if it's Some, otherwise evaluate and return right
                         match &lhs {
-                            Value::EnumValue { enum_name, variant, values } 
-                                if enum_name == "Option" && variant == "Some" => {
+                            Value::EnumValue {
+                                enum_name,
+                                variant,
+                                values,
+                            } if enum_name == "Option" && variant == "Some" => {
                                 // Unwrap the Some value
                                 return Ok(values.first().cloned().unwrap_or(Value::Unit));
                             }
-                            Value::EnumValue { enum_name, variant, .. } 
-                                if enum_name == "Option" && variant == "None" => {
+                            Value::EnumValue {
+                                enum_name, variant, ..
+                            } if enum_name == "Option" && variant == "None" => {
                                 return self.eval_expression(right);
                             }
                             // For non-Option values, return as-is (like JavaScript's ??)
@@ -2001,7 +2121,7 @@ impl Interpreter {
                         // If not in postcondition context, just evaluate normally
                         return self.eval_expression(&arguments[0]);
                     }
-                    
+
                     // Special handling for listen() - starts HTTP server
                     if name == "listen" && arguments.len() == 1 {
                         // During hot-reload, skip listen() since server is already running
@@ -2012,10 +2132,12 @@ impl Interpreter {
                         if let Value::Int(port_num) = port {
                             return self.run_http_server(port_num as u16);
                         } else {
-                            return Err(IntentError::TypeError("listen() requires an integer port".to_string()));
+                            return Err(IntentError::TypeError(
+                                "listen() requires an integer port".to_string(),
+                            ));
                         }
                     }
-                    
+
                     // Special handling for new_server() - resets routes
                     if name == "new_server" && arguments.is_empty() {
                         self.server_state.clear();
@@ -2023,12 +2145,12 @@ impl Interpreter {
                         server.insert("_type".to_string(), Value::String("Server".to_string()));
                         return Ok(Value::Map(server));
                     }
-                    
+
                     // Special handling for serve_static(url_prefix, directory)
                     if name == "serve_static" && arguments.len() == 2 {
                         let prefix = self.eval_expression(&arguments[0])?;
                         let directory = self.eval_expression(&arguments[1])?;
-                        
+
                         match (&prefix, &directory) {
                             (Value::String(prefix_str), Value::String(dir_str)) => {
                                 // Resolve relative paths
@@ -2039,7 +2161,8 @@ impl Interpreter {
                                 } else {
                                     dir_str.clone()
                                 };
-                                self.server_state.add_static_dir(prefix_str.clone(), resolved_dir);
+                                self.server_state
+                                    .add_static_dir(prefix_str.clone(), resolved_dir);
                                 return Ok(Value::Unit);
                             }
                             _ => {
@@ -2049,7 +2172,7 @@ impl Interpreter {
                             }
                         }
                     }
-                    
+
                     // Special handling for routes(directory) - file-based routing
                     if name == "routes" && arguments.len() == 1 {
                         let directory = self.eval_expression(&arguments[0])?;
@@ -2057,25 +2180,25 @@ impl Interpreter {
                             return self.load_file_based_routes(&dir_str);
                         } else {
                             return Err(IntentError::TypeError(
-                                "routes() requires a string directory path".to_string()
+                                "routes() requires a string directory path".to_string(),
                             ));
                         }
                     }
-                    
+
                     // Special handling for use_middleware(handler_fn)
                     if name == "use_middleware" && arguments.len() == 1 {
                         let handler = self.eval_expression(&arguments[0])?;
                         self.server_state.add_middleware(handler);
                         return Ok(Value::Unit);
                     }
-                    
+
                     // Special handling for HTTP route registration
                     // Only intercept if first arg is a route pattern (starts with /)
                     // NOT if it's a URL (starts with http:// or https://) - those are HTTP client calls
                     let http_methods = ["get", "post", "put", "delete", "patch"];
                     if http_methods.contains(&name.as_str()) && arguments.len() == 2 {
                         let pattern = self.eval_expression(&arguments[0])?;
-                        
+
                         // Check if this is a route pattern vs a URL
                         if let Value::String(pattern_str) = &pattern {
                             // Route patterns start with /, URLs start with http
@@ -2089,7 +2212,7 @@ impl Interpreter {
                         }
                     }
                 }
-                
+
                 let callee = self.eval_expression(function)?;
                 let args: Result<Vec<Value>> = arguments
                     .iter()
@@ -2101,10 +2224,8 @@ impl Interpreter {
             }
 
             Expression::Array(elements) => {
-                let vals: Result<Vec<Value>> = elements
-                    .iter()
-                    .map(|e| self.eval_expression(e))
-                    .collect();
+                let vals: Result<Vec<Value>> =
+                    elements.iter().map(|e| self.eval_expression(e)).collect();
                 Ok(Value::Array(vals?))
             }
 
@@ -2119,12 +2240,12 @@ impl Interpreter {
                         } else {
                             i as usize
                         };
-                        arr.get(index).cloned().ok_or_else(|| {
-                            IntentError::IndexOutOfBounds {
+                        arr.get(index)
+                            .cloned()
+                            .ok_or_else(|| IntentError::IndexOutOfBounds {
                                 index: i,
                                 length: arr.len(),
-                            }
-                        })
+                            })
                     }
                     (Value::String(s), Value::Int(i)) => {
                         let index = if i < 0 {
@@ -2141,34 +2262,31 @@ impl Interpreter {
                             })
                     }
                     // Map access with string key: map["key"]
-                    (Value::Map(map), Value::String(key)) => {
-                        map.get(&key).cloned().ok_or_else(|| {
-                            IntentError::RuntimeError(format!("Unknown key: {}", key))
-                        })
-                    }
+                    (Value::Map(map), Value::String(key)) => map
+                        .get(&key)
+                        .cloned()
+                        .ok_or_else(|| IntentError::RuntimeError(format!("Unknown key: {}", key))),
                     // Struct access with string key: struct["field"]
                     (Value::Struct { fields, .. }, Value::String(key)) => {
                         fields.get(&key).cloned().ok_or_else(|| {
                             IntentError::RuntimeError(format!("Unknown field: {}", key))
                         })
                     }
-                    _ => Err(IntentError::TypeError("Invalid index operation".to_string())),
+                    _ => Err(IntentError::TypeError(
+                        "Invalid index operation".to_string(),
+                    )),
                 }
             }
 
             Expression::FieldAccess { object, field } => {
                 let obj = self.eval_expression(object)?;
                 match obj {
-                    Value::Struct { fields, .. } => {
-                        fields.get(field).cloned().ok_or_else(|| {
-                            IntentError::RuntimeError(format!("Unknown field: {}", field))
-                        })
-                    }
-                    Value::Map(map) => {
-                        map.get(field).cloned().ok_or_else(|| {
-                            IntentError::RuntimeError(format!("Unknown key: {}", field))
-                        })
-                    }
+                    Value::Struct { fields, .. } => fields.get(field).cloned().ok_or_else(|| {
+                        IntentError::RuntimeError(format!("Unknown field: {}", field))
+                    }),
+                    Value::Map(map) => map.get(field).cloned().ok_or_else(|| {
+                        IntentError::RuntimeError(format!("Unknown key: {}", field))
+                    }),
                     _ => Err(IntentError::TypeError(
                         "Field access on non-struct value".to_string(),
                     )),
@@ -2180,25 +2298,29 @@ impl Interpreter {
                 for (field_name, expr) in fields {
                     field_values.insert(field_name.clone(), self.eval_expression(expr)?);
                 }
-                
+
                 let struct_val = Value::Struct {
                     name: name.clone(),
                     fields: field_values,
                 };
-                
+
                 // Check invariants on construction
                 self.check_struct_invariants(name, &struct_val)?;
-                
+
                 Ok(struct_val)
             }
-            
-            Expression::EnumVariant { enum_name, variant, arguments } => {
+
+            Expression::EnumVariant {
+                enum_name,
+                variant,
+                arguments,
+            } => {
                 // Evaluate any arguments
                 let mut arg_values = Vec::new();
                 for arg in arguments {
                     arg_values.push(self.eval_expression(arg)?);
                 }
-                
+
                 // Create the enum value
                 Ok(Value::EnumValue {
                     enum_name: enum_name.clone(),
@@ -2213,7 +2335,10 @@ impl Interpreter {
                     Expression::Identifier(name) => {
                         if self.environment.borrow_mut().set(name, val.clone()) {
                             // After assignment, check if this is a struct and verify invariants
-                            if let Value::Struct { name: struct_name, .. } = &val {
+                            if let Value::Struct {
+                                name: struct_name, ..
+                            } = &val
+                            {
                                 self.check_struct_invariants(struct_name, &val)?;
                             }
                             Ok(val)
@@ -2225,38 +2350,45 @@ impl Interpreter {
                         // Handle field assignment (e.g., obj.field = value)
                         if let Expression::Identifier(var_name) = object.as_ref() {
                             // Get the current struct
-                            let current = self.environment.borrow().get(var_name)
-                                .ok_or_else(|| IntentError::UndefinedVariable(var_name.clone()))?;
-                            
-                            if let Value::Struct { name: struct_name, mut fields } = current {
+                            let current =
+                                self.environment.borrow().get(var_name).ok_or_else(|| {
+                                    IntentError::UndefinedVariable(var_name.clone())
+                                })?;
+
+                            if let Value::Struct {
+                                name: struct_name,
+                                mut fields,
+                            } = current
+                            {
                                 // Update the field
                                 if fields.contains_key(field) {
                                     fields.insert(field.clone(), val.clone());
-                                    
+
                                     let new_struct = Value::Struct {
                                         name: struct_name.clone(),
                                         fields: fields.clone(),
                                     };
-                                    
+
                                     // Check invariants after field mutation
                                     self.check_struct_invariants(&struct_name, &new_struct)?;
-                                    
+
                                     // Update the variable
                                     self.environment.borrow_mut().set(var_name, new_struct);
                                     Ok(val)
                                 } else {
-                                    Err(IntentError::RuntimeError(
-                                        format!("Unknown field '{}' on struct '{}'", field, struct_name)
-                                    ))
+                                    Err(IntentError::RuntimeError(format!(
+                                        "Unknown field '{}' on struct '{}'",
+                                        field, struct_name
+                                    )))
                                 }
                             } else {
-                                Err(IntentError::RuntimeError(
-                                    format!("Cannot assign field on non-struct value")
-                                ))
+                                Err(IntentError::RuntimeError(format!(
+                                    "Cannot assign field on non-struct value"
+                                )))
                             }
                         } else {
                             Err(IntentError::RuntimeError(
-                                "Cannot assign to complex field access".to_string()
+                                "Cannot assign to complex field access".to_string(),
                             ))
                         }
                     }
@@ -2281,34 +2413,36 @@ impl Interpreter {
                 }
             }
 
-            Expression::Lambda { params, body } => {
-                Ok(Value::Function {
-                    name: "<lambda>".to_string(),
-                    params: params.clone(),
-                    body: Block {
-                        statements: vec![Statement::Return(Some(body.as_ref().clone()))],
-                    },
-                    closure: Rc::clone(&self.environment),
-                    contract: None,
-                    type_params: vec![],
-                })
-            }
+            Expression::Lambda { params, body } => Ok(Value::Function {
+                name: "<lambda>".to_string(),
+                params: params.clone(),
+                body: Block {
+                    statements: vec![Statement::Return(Some(body.as_ref().clone()))],
+                },
+                closure: Rc::clone(&self.environment),
+                contract: None,
+                type_params: vec![],
+            }),
 
-            Expression::MethodCall { object, method, arguments } => {
+            Expression::MethodCall {
+                object,
+                method,
+                arguments,
+            } => {
                 let obj = self.eval_expression(object)?;
                 let args: Result<Vec<Value>> = arguments
                     .iter()
                     .map(|arg| self.eval_expression(arg))
                     .collect();
                 let mut args = args?;
-                
+
                 // Keep track of struct name for invariant checking
                 let struct_name = if let Value::Struct { name, .. } = &obj {
                     Some(name.clone())
                 } else {
                     None
                 };
-                
+
                 // Check if this is a module call (struct with function field)
                 if let Value::Struct { name, fields } = &obj {
                     if name.starts_with("module:") {
@@ -2316,20 +2450,22 @@ impl Interpreter {
                         if let Some(func) = fields.get(method) {
                             return self.call_function(func.clone(), args);
                         } else {
-                            return Err(IntentError::RuntimeError(
-                                format!("Module '{}' has no function '{}'", name.strip_prefix("module:").unwrap_or(name), method)
-                            ));
+                            return Err(IntentError::RuntimeError(format!(
+                                "Module '{}' has no function '{}'",
+                                name.strip_prefix("module:").unwrap_or(name),
+                                method
+                            )));
                         }
                     }
                 }
-                
+
                 args.insert(0, obj);
-                
+
                 // Look up method in environment
                 let func = self.environment.borrow().get(method);
                 if let Some(func) = func {
                     let result = self.call_function(func, args)?;
-                    
+
                     // After method call, check if self (first arg) was modified and verify invariants
                     // This requires looking up the updated value if it was bound to a variable
                     if let Some(struct_name) = struct_name {
@@ -2346,7 +2482,7 @@ impl Interpreter {
                             }
                         }
                     }
-                    
+
                     Ok(result)
                 } else {
                     Err(IntentError::UndefinedFunction(method.clone()))
@@ -2355,32 +2491,36 @@ impl Interpreter {
 
             Expression::Match { scrutinee, arms } => {
                 let value = self.eval_expression(scrutinee)?;
-                
+
                 // Check exhaustiveness for enum values
                 if let Value::EnumValue { enum_name, .. } = &value {
                     self.check_exhaustiveness(enum_name, arms)?;
                 }
-                
+
                 for arm in arms {
                     if let Some(bindings) = self.match_pattern(&arm.pattern, &value)? {
                         // Check guard if present
                         if let Some(guard) = &arm.guard {
                             // Create new scope with pattern bindings
                             let previous = Rc::clone(&self.environment);
-                            self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
-                            
+                            self.environment = Rc::new(RefCell::new(Environment::with_parent(
+                                Rc::clone(&previous),
+                            )));
+
                             // Bind pattern variables
                             for (name, val) in &bindings {
-                                self.environment.borrow_mut().define(name.clone(), val.clone());
+                                self.environment
+                                    .borrow_mut()
+                                    .define(name.clone(), val.clone());
                             }
-                            
+
                             let guard_result = self.eval_expression(guard)?;
-                            
+
                             if !guard_result.is_truthy() {
                                 self.environment = previous;
                                 continue; // Guard failed, try next arm
                             }
-                            
+
                             // Guard passed, evaluate body
                             let result = self.eval_expression(&arm.body)?;
                             self.environment = previous;
@@ -2388,22 +2528,26 @@ impl Interpreter {
                         } else {
                             // No guard, create scope and evaluate body
                             let previous = Rc::clone(&self.environment);
-                            self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
-                            
+                            self.environment = Rc::new(RefCell::new(Environment::with_parent(
+                                Rc::clone(&previous),
+                            )));
+
                             // Bind pattern variables
                             for (name, val) in &bindings {
-                                self.environment.borrow_mut().define(name.clone(), val.clone());
+                                self.environment
+                                    .borrow_mut()
+                                    .define(name.clone(), val.clone());
                             }
-                            
+
                             let result = self.eval_expression(&arm.body)?;
                             self.environment = previous;
                             return Ok(result);
                         }
                     }
                 }
-                
+
                 Err(IntentError::RuntimeError(
-                    "No pattern matched in match expression".to_string()
+                    "No pattern matched in match expression".to_string(),
                 ))
             }
 
@@ -2413,44 +2557,48 @@ impl Interpreter {
                     "Async/Try not yet implemented".to_string(),
                 ))
             }
-            
+
             Expression::MapLiteral(pairs) => {
                 let mut map = HashMap::new();
                 for (key_expr, value_expr) in pairs {
                     let key = self.eval_expression(key_expr)?;
                     let value = self.eval_expression(value_expr)?;
-                    
+
                     // Keys must be hashable (strings or integers for now)
                     let key_str = match &key {
                         Value::String(s) => s.clone(),
                         Value::Int(n) => n.to_string(),
-                        _ => return Err(IntentError::RuntimeError(
-                            "Map keys must be strings or integers".to_string()
-                        )),
+                        _ => {
+                            return Err(IntentError::RuntimeError(
+                                "Map keys must be strings or integers".to_string(),
+                            ))
+                        }
                     };
                     map.insert(key_str, value);
                 }
                 Ok(Value::Map(map))
             }
-            
-            Expression::Range { start, end, inclusive } => {
+
+            Expression::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 let start_val = self.eval_expression(start)?;
                 let end_val = self.eval_expression(end)?;
-                
+
                 match (&start_val, &end_val) {
-                    (Value::Int(s), Value::Int(e)) => {
-                        Ok(Value::Range {
-                            start: *s,
-                            end: *e,
-                            inclusive: *inclusive,
-                        })
-                    }
+                    (Value::Int(s), Value::Int(e)) => Ok(Value::Range {
+                        start: *s,
+                        end: *e,
+                        inclusive: *inclusive,
+                    }),
                     _ => Err(IntentError::RuntimeError(
-                        "Range bounds must be integers".to_string()
+                        "Range bounds must be integers".to_string(),
                     )),
                 }
             }
-            
+
             Expression::InterpolatedString(parts) => {
                 use crate::ast::StringPart;
                 let mut result = String::new();
@@ -2465,17 +2613,15 @@ impl Interpreter {
                 }
                 Ok(Value::String(result))
             }
-            
-            Expression::TemplateString(parts) => {
-                self.eval_template_parts(parts)
-            }
+
+            Expression::TemplateString(parts) => self.eval_template_parts(parts),
         }
     }
-    
+
     /// Evaluate template string parts
     fn eval_template_parts(&mut self, parts: &[TemplatePart]) -> Result<Value> {
         let mut result = String::new();
-        
+
         for part in parts {
             match part {
                 TemplatePart::Literal(s) => result.push_str(s),
@@ -2483,25 +2629,31 @@ impl Interpreter {
                     let value = self.eval_expression(expr)?;
                     result.push_str(&value.to_string());
                 }
-                TemplatePart::ForLoop { var, iterable, body } => {
+                TemplatePart::ForLoop {
+                    var,
+                    iterable,
+                    body,
+                } => {
                     let iterable_value = self.eval_expression(iterable)?;
-                    
+
                     match iterable_value {
                         Value::Array(items) => {
                             for item in items {
                                 // Create new scope for each iteration
                                 let previous = Rc::clone(&self.environment);
-                                self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
-                                
+                                self.environment = Rc::new(RefCell::new(Environment::with_parent(
+                                    Rc::clone(&previous),
+                                )));
+
                                 // Bind the loop variable
                                 self.environment.borrow_mut().define(var.clone(), item);
-                                
+
                                 // Evaluate the body and append to result
                                 let body_result = self.eval_template_parts(body)?;
                                 if let Value::String(s) = body_result {
                                     result.push_str(&s);
                                 }
-                                
+
                                 // Restore environment
                                 self.environment = previous;
                             }
@@ -2511,34 +2663,38 @@ impl Interpreter {
                             for (k, v) in map.iter() {
                                 // Create new scope for each iteration
                                 let previous = Rc::clone(&self.environment);
-                                self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
-                                
+                                self.environment = Rc::new(RefCell::new(Environment::with_parent(
+                                    Rc::clone(&previous),
+                                )));
+
                                 // Create a tuple-like array for the pair
-                                let pair = Value::Array(vec![
-                                    Value::String(k.clone()),
-                                    v.clone(),
-                                ]);
+                                let pair = Value::Array(vec![Value::String(k.clone()), v.clone()]);
                                 self.environment.borrow_mut().define(var.clone(), pair);
-                                
+
                                 let body_result = self.eval_template_parts(body)?;
                                 if let Value::String(s) = body_result {
                                     result.push_str(&s);
                                 }
-                                
+
                                 // Restore environment
                                 self.environment = previous;
                             }
                         }
                         _ => {
-                            return Err(IntentError::RuntimeError(
-                                format!("Template for loop requires array or map, got {}", iterable_value.type_name())
-                            ));
+                            return Err(IntentError::RuntimeError(format!(
+                                "Template for loop requires array or map, got {}",
+                                iterable_value.type_name()
+                            )));
                         }
                     }
                 }
-                TemplatePart::IfBlock { condition, then_parts, else_parts } => {
+                TemplatePart::IfBlock {
+                    condition,
+                    then_parts,
+                    else_parts,
+                } => {
                     let condition_value = self.eval_expression(condition)?;
-                    
+
                     if condition_value.is_truthy() {
                         let then_result = self.eval_template_parts(then_parts)?;
                         if let Value::String(s) = then_result {
@@ -2553,19 +2709,21 @@ impl Interpreter {
                 }
             }
         }
-        
+
         Ok(Value::String(result))
     }
-    
+
     /// Try to match a pattern against a value, returning variable bindings if successful
-    fn match_pattern(&self, pattern: &Pattern, value: &Value) -> Result<Option<Vec<(String, Value)>>> {
+    fn match_pattern(
+        &self,
+        pattern: &Pattern,
+        value: &Value,
+    ) -> Result<Option<Vec<(String, Value)>>> {
         match pattern {
             Pattern::Wildcard => Ok(Some(vec![])),
-            
-            Pattern::Variable(name) => {
-                Ok(Some(vec![(name.clone(), value.clone())]))
-            }
-            
+
+            Pattern::Variable(name) => Ok(Some(vec![(name.clone(), value.clone())])),
+
             Pattern::Literal(expr) => {
                 // For literals, we need to check if the value matches
                 match expr {
@@ -2606,7 +2764,7 @@ impl Interpreter {
                 }
                 Ok(None)
             }
-            
+
             Pattern::Tuple(patterns) => {
                 // For now, treat tuple patterns as array patterns
                 if let Value::Array(values) = value {
@@ -2625,7 +2783,7 @@ impl Interpreter {
                 }
                 Ok(None)
             }
-            
+
             Pattern::Array(patterns) => {
                 if let Value::Array(values) = value {
                     if values.len() != patterns.len() {
@@ -2643,9 +2801,13 @@ impl Interpreter {
                 }
                 Ok(None)
             }
-            
+
             Pattern::Struct { name, fields } => {
-                if let Value::Struct { name: struct_name, fields: struct_fields } = value {
+                if let Value::Struct {
+                    name: struct_name,
+                    fields: struct_fields,
+                } = value
+                {
                     if name != struct_name {
                         return Ok(None);
                     }
@@ -2665,17 +2827,26 @@ impl Interpreter {
                 }
                 Ok(None)
             }
-            
-            Pattern::Variant { name, variant, fields } => {
-                if let Value::EnumValue { enum_name, variant: value_variant, values } = value {
+
+            Pattern::Variant {
+                name,
+                variant,
+                fields,
+            } => {
+                if let Value::EnumValue {
+                    enum_name,
+                    variant: value_variant,
+                    values,
+                } = value
+                {
                     // Check if enum and variant match (handling qualified and unqualified names)
                     let enum_matches = name.is_empty() || name == enum_name;
                     let variant_matches = variant == value_variant;
-                    
+
                     if !enum_matches || !variant_matches {
                         return Ok(None);
                     }
-                    
+
                     // Match field patterns against values
                     match fields {
                         Some(patterns) => {
@@ -2706,7 +2877,7 @@ impl Interpreter {
             }
         }
     }
-    
+
     /// Bind variables from a pattern destructuring
     fn bind_pattern(&mut self, pattern: &Pattern, value: &Value) -> Result<()> {
         match self.match_pattern(pattern, value)? {
@@ -2717,11 +2888,11 @@ impl Interpreter {
                 Ok(())
             }
             None => Err(IntentError::RuntimeError(
-                "Pattern destructuring failed: value does not match pattern".to_string()
+                "Pattern destructuring failed: value does not match pattern".to_string(),
             )),
         }
     }
-    
+
     /// Check exhaustiveness of match arms against an enum type
     fn check_exhaustiveness(&self, enum_name: &str, arms: &[MatchArm]) -> Result<()> {
         // Get the enum variants
@@ -2729,11 +2900,11 @@ impl Interpreter {
             Some(v) => v,
             None => return Ok(()), // Unknown enum, skip check
         };
-        
+
         let variant_names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
         let mut covered = std::collections::HashSet::new();
         let mut has_wildcard = false;
-        
+
         for arm in arms {
             match &arm.pattern {
                 Pattern::Wildcard => {
@@ -2748,21 +2919,23 @@ impl Interpreter {
                 _ => {}
             }
         }
-        
+
         if has_wildcard {
             return Ok(()); // Wildcard covers everything
         }
-        
-        let missing: Vec<&&str> = variant_names.iter()
+
+        let missing: Vec<&&str> = variant_names
+            .iter()
             .filter(|v| !covered.contains(*v))
             .collect();
-        
+
         if !missing.is_empty() {
             return Err(IntentError::RuntimeError(format!(
-                "Non-exhaustive match: missing variants {:?}", missing
+                "Non-exhaustive match: missing variants {:?}",
+                missing
             )));
         }
-        
+
         Ok(())
     }
 
@@ -2788,13 +2961,15 @@ impl Interpreter {
 
                 // Bind parameters
                 for (param, arg) in params.iter().zip(args.iter()) {
-                    func_env.borrow_mut().define(param.name.clone(), arg.clone());
+                    func_env
+                        .borrow_mut()
+                        .define(param.name.clone(), arg.clone());
                 }
 
                 // Save current environment and switch to function's environment
                 let previous = Rc::clone(&self.environment);
                 self.environment = Rc::clone(&func_env);
-                
+
                 // Track deferred statements for this function call
                 let deferred_count_before = self.deferred_statements.len();
 
@@ -2805,15 +2980,18 @@ impl Interpreter {
                         let result = self.eval_expression(req_expr)?;
                         if !result.is_truthy() {
                             self.environment = previous;
-                            return Err(IntentError::ContractViolation(
-                                format!("Precondition failed in '{}': {}", name, condition_str)
-                            ));
+                            return Err(IntentError::ContractViolation(format!(
+                                "Precondition failed in '{}': {}",
+                                name, condition_str
+                            )));
                         }
-                        self.contracts.check_precondition(&condition_str, true, None)?;
+                        self.contracts
+                            .check_precondition(&condition_str, true, None)?;
                     }
 
                     // Capture old values for postconditions containing old()
-                    self.current_old_values = Some(self.capture_old_values(&func_contract.ensures)?);
+                    self.current_old_values =
+                        Some(self.capture_old_values(&func_contract.ensures)?);
                 }
 
                 // Execute function body
@@ -2825,12 +3003,13 @@ impl Interpreter {
                         break;
                     }
                 }
-                
+
                 // Execute deferred statements in reverse order (LIFO) before returning
-                let deferred_to_run: Vec<Expression> = self.deferred_statements
+                let deferred_to_run: Vec<Expression> = self
+                    .deferred_statements
                     .drain(deferred_count_before..)
                     .collect();
-                
+
                 for deferred_expr in deferred_to_run.into_iter().rev() {
                     // Deferred expressions execute even if there was a return
                     let _ = self.eval_expression(&deferred_expr);
@@ -2838,9 +3017,11 @@ impl Interpreter {
 
                 // Store result for postcondition evaluation
                 self.current_result = Some(result.clone());
-                
+
                 // Bind 'result' in environment for postcondition evaluation
-                self.environment.borrow_mut().define("result".to_string(), result.clone());
+                self.environment
+                    .borrow_mut()
+                    .define("result".to_string(), result.clone());
 
                 // Check postconditions AFTER execution
                 if let Some(ref func_contract) = contract {
@@ -2852,25 +3033,31 @@ impl Interpreter {
                             self.current_old_values = None;
                             self.current_result = None;
                             self.environment = previous;
-                            return Err(IntentError::ContractViolation(
-                                format!("Postcondition failed in '{}': {}", name, condition_str)
-                            ));
+                            return Err(IntentError::ContractViolation(format!(
+                                "Postcondition failed in '{}': {}",
+                                name, condition_str
+                            )));
                         }
-                        self.contracts.check_postcondition(&condition_str, true, None)?;
+                        self.contracts
+                            .check_postcondition(&condition_str, true, None)?;
                     }
                 }
 
                 // Clear contract evaluation state
                 self.current_old_values = None;
                 self.current_result = None;
-                
+
                 // Restore environment
                 self.environment = previous;
 
                 Ok(result)
             }
 
-            Value::NativeFunction { name: _, arity, func } => {
+            Value::NativeFunction {
+                name: _,
+                arity,
+                func,
+            } => {
                 if args.len() != arity && arity != 0 {
                     return Err(IntentError::ArityMismatch {
                         expected: arity,
@@ -2879,8 +3066,12 @@ impl Interpreter {
                 }
                 func(&args)
             }
-            
-            Value::EnumConstructor { enum_name, variant, arity } => {
+
+            Value::EnumConstructor {
+                enum_name,
+                variant,
+                arity,
+            } => {
                 if args.len() != arity {
                     return Err(IntentError::ArityMismatch {
                         expected: arity,
@@ -2899,46 +3090,49 @@ impl Interpreter {
             )),
         }
     }
-    
+
     /// Run the HTTP server on the specified port
     fn run_http_server(&mut self, port: u16) -> Result<Value> {
         use crate::stdlib::http_server;
         use std::sync::atomic::Ordering;
         use std::time::Duration;
-        
+
         // Check for NTNT_LISTEN_PORT env var override (used by Intent Studio)
         let env_port = std::env::var("NTNT_LISTEN_PORT")
             .ok()
             .and_then(|s| s.parse::<u16>().ok());
-        
+
         // Check if we're in test mode
         let (actual_port, is_test_mode, shutdown_flag) = match &self.test_mode {
             Some((test_port, _max_req, flag)) => (*test_port, true, Some(flag.clone())),
             None => (env_port.unwrap_or(port), false, None),
         };
-        
+
         // Check if any routes or static dirs are registered
         let has_routes = self.server_state.route_count() > 0;
         let has_static = !self.server_state.static_dirs.is_empty();
-        
+
         if !has_routes && !has_static {
             return Err(IntentError::RuntimeError(
                 "No routes or static directories registered. Use get(), post(), serve_static(), etc. before calling listen()".to_string()
             ));
         }
-        
+
         // Print startup message
         if is_test_mode {
             println!("Starting test server on http://127.0.0.1:{}", actual_port);
         } else {
             println!("Starting server on http://0.0.0.0:{}", actual_port);
         }
-        
+
         if has_routes {
             println!("Routes registered: {}", self.server_state.route_count());
         }
         if has_static {
-            println!("Static directories: {}", self.server_state.static_dirs.len());
+            println!(
+                "Static directories: {}",
+                self.server_state.static_dirs.len()
+            );
             if !is_test_mode {
                 for (prefix, dir) in &self.server_state.static_dirs {
                     println!("  {} -> {}", prefix, dir);
@@ -2949,24 +3143,26 @@ impl Interpreter {
         if middleware_count > 0 {
             println!("Middleware: {}", middleware_count);
         }
-        
+
         // Show hot-reload status
         if self.server_state.hot_reload && self.main_source_file.is_some() {
-            println!("\n🔥 Hot-reload enabled: edit your .tnt file and changes apply on next request");
+            println!(
+                "\n🔥 Hot-reload enabled: edit your .tnt file and changes apply on next request"
+            );
         }
-        
+
         if !is_test_mode {
             println!("Press Ctrl+C to stop");
         }
         println!();
-        
+
         // Start the server
         let server = if is_test_mode {
             http_server::start_server_with_timeout(actual_port, Duration::from_secs(60))?
         } else {
             http_server::start_server(actual_port)?
         };
-        
+
         // Handle requests in a loop
         // In test mode, use recv_timeout and check shutdown flag
         loop {
@@ -2976,13 +3172,13 @@ impl Interpreter {
                     break;
                 }
             }
-            
+
             // Get next request (with timeout in test mode)
             let request = if is_test_mode {
                 match server.recv_timeout(Duration::from_millis(50)) {
                     Ok(Some(req)) => req,
-                    Ok(None) => continue,  // Timeout, check shutdown flag
-                    Err(_) => break,  // Server error
+                    Ok(None) => continue, // Timeout, check shutdown flag
+                    Err(_) => break,      // Server error
                 }
             } else {
                 match server.recv() {
@@ -2990,17 +3186,19 @@ impl Interpreter {
                     Err(_) => break,
                 }
             };
-            
+
             // Hot-reload check: if main source file changed, reload it
             // This runs on each request to pick up changes without restart
             self.check_and_reload_main_source();
-            
+
             let method = request.method().to_string();
             let url = request.url().to_string();
             let path = url.split('?').next().unwrap_or(&url).to_string();
-            
+
             // First, try to find a matching route
-            if let Some((mut handler, route_params, route_index)) = self.server_state.find_route(&method, &path) {
+            if let Some((mut handler, route_params, route_index)) =
+                self.server_state.find_route(&method, &path)
+            {
                 // Hot-reload check: if file changed, reload the handler
                 if self.server_state.needs_reload(route_index) {
                     if let Some(source) = self.server_state.get_route_source(route_index).cloned() {
@@ -3008,7 +3206,8 @@ impl Interpreter {
                             // Re-parse and reload the handler
                             match self.reload_route_handler(file_path, &method) {
                                 Ok(new_handler) => {
-                                    self.server_state.update_route_handler(route_index, new_handler.clone());
+                                    self.server_state
+                                        .update_route_handler(route_index, new_handler.clone());
                                     handler = new_handler;
                                     println!("[hot-reload] Reloaded: {}", file_path);
                                 }
@@ -3019,14 +3218,15 @@ impl Interpreter {
                         }
                     }
                 }
-                
+
                 // Process request to get request Value
                 match http_server::process_request(request, route_params) {
                     Ok((mut req_value, http_request)) => {
                         // Run middleware chain and determine final response
-                        let middleware_handlers: Vec<Value> = self.server_state.get_middleware().to_vec();
+                        let middleware_handlers: Vec<Value> =
+                            self.server_state.get_middleware().to_vec();
                         let mut early_response: Option<Value> = None;
-                        
+
                         for mw in middleware_handlers {
                             match self.call_function(mw.clone(), vec![req_value.clone()]) {
                                 Ok(result) => {
@@ -3051,12 +3251,15 @@ impl Interpreter {
                                 }
                                 Err(e) => {
                                     eprintln!("Middleware error: {}", e);
-                                    early_response = Some(http_server::create_error_response(500, &e.to_string()));
+                                    early_response = Some(http_server::create_error_response(
+                                        500,
+                                        &e.to_string(),
+                                    ));
                                     break;
                                 }
                             }
                         }
-                        
+
                         // Determine final response
                         let final_response = if let Some(resp) = early_response {
                             resp
@@ -3070,10 +3273,16 @@ impl Interpreter {
                                     if let IntentError::ContractViolation(msg) = &e {
                                         if msg.contains("Precondition failed") {
                                             // Precondition = bad request from client
-                                            http_server::create_error_response(400, &format!("Bad Request: {}", msg))
+                                            http_server::create_error_response(
+                                                400,
+                                                &format!("Bad Request: {}", msg),
+                                            )
                                         } else if msg.contains("Postcondition failed") {
                                             // Postcondition = server logic error
-                                            http_server::create_error_response(500, &format!("Internal Error: {}", msg))
+                                            http_server::create_error_response(
+                                                500,
+                                                &format!("Internal Error: {}", msg),
+                                            )
                                         } else {
                                             http_server::create_error_response(500, &e.to_string())
                                         }
@@ -3083,7 +3292,7 @@ impl Interpreter {
                                 }
                             }
                         };
-                        
+
                         // Send the response (only once)
                         if let Err(e) = http_server::send_response(http_request, &final_response) {
                             eprintln!("Error sending response: {}", e);
@@ -3095,7 +3304,7 @@ impl Interpreter {
                 }
                 continue;
             }
-            
+
             // No matching route - check static files (only for GET requests)
             if method == "GET" {
                 if let Some((file_path, _relative)) = self.server_state.find_static_file(&path) {
@@ -3106,36 +3315,42 @@ impl Interpreter {
                     continue;
                 }
             }
-            
+
             // No matching route or static file - send 404
             let path_clone = path.clone();
             match http_server::process_request(request, HashMap::new()) {
                 Ok((_, http_request)) => {
-                    let not_found = http_server::create_error_response(404, &format!("Not Found: {} {}", method, path_clone));
+                    let not_found = http_server::create_error_response(
+                        404,
+                        &format!("Not Found: {} {}", method, path_clone),
+                    );
                     let _ = http_server::send_response(http_request, &not_found);
                 }
                 Err(_) => {}
             }
         }
-        
+
         Ok(Value::Unit)
     }
-    
+
     /// Capture old values from expressions in postconditions
     fn capture_old_values(&mut self, ensures: &[Expression]) -> Result<OldValues> {
         let mut old_values = OldValues::new();
-        
+
         for expr in ensures {
             self.extract_old_calls(expr, &mut old_values)?;
         }
-        
+
         Ok(old_values)
     }
-    
+
     /// Recursively find old() calls in an expression and capture their values
     fn extract_old_calls(&mut self, expr: &Expression, old_values: &mut OldValues) -> Result<()> {
         match expr {
-            Expression::Call { function, arguments } => {
+            Expression::Call {
+                function,
+                arguments,
+            } => {
                 // Check if this is an old() call
                 if let Expression::Identifier(name) = function.as_ref() {
                     if name == "old" && arguments.len() == 1 {
@@ -3164,7 +3379,7 @@ impl Interpreter {
         }
         Ok(())
     }
-    
+
     /// Convert a runtime Value to a StoredValue for old() tracking
     fn value_to_stored(&self, value: &Value) -> StoredValue {
         match value {
@@ -3172,14 +3387,14 @@ impl Interpreter {
             Value::Float(f) => StoredValue::Float(*f),
             Value::Bool(b) => StoredValue::Bool(*b),
             Value::String(s) => StoredValue::String(s.clone()),
-            Value::Array(arr) => StoredValue::Array(
-                arr.iter().map(|v| self.value_to_stored(v)).collect()
-            ),
+            Value::Array(arr) => {
+                StoredValue::Array(arr.iter().map(|v| self.value_to_stored(v)).collect())
+            }
             Value::Unit => StoredValue::Unit,
             _ => StoredValue::Unit, // Functions and other complex types stored as Unit
         }
     }
-    
+
     /// Convert a StoredValue back to a runtime Value
     fn stored_to_value(&self, stored: &StoredValue) -> Value {
         match stored {
@@ -3187,13 +3402,13 @@ impl Interpreter {
             StoredValue::Float(f) => Value::Float(*f),
             StoredValue::Bool(b) => Value::Bool(*b),
             StoredValue::String(s) => Value::String(s.clone()),
-            StoredValue::Array(arr) => Value::Array(
-                arr.iter().map(|v| self.stored_to_value(v)).collect()
-            ),
+            StoredValue::Array(arr) => {
+                Value::Array(arr.iter().map(|v| self.stored_to_value(v)).collect())
+            }
             StoredValue::Unit => Value::Unit,
         }
     }
-    
+
     /// Format an expression as a human-readable string for error messages
     fn format_expression(expr: &Expression) -> String {
         match expr {
@@ -3203,7 +3418,11 @@ impl Interpreter {
             Expression::Bool(b) => b.to_string(),
             Expression::Unit => "()".to_string(),
             Expression::Identifier(name) => name.clone(),
-            Expression::Binary { left, operator, right } => {
+            Expression::Binary {
+                left,
+                operator,
+                right,
+            } => {
                 let op_str = match operator {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
@@ -3221,7 +3440,12 @@ impl Interpreter {
                     BinaryOp::Or => "||",
                     BinaryOp::NullCoalesce => "??",
                 };
-                format!("{} {} {}", Self::format_expression(left), op_str, Self::format_expression(right))
+                format!(
+                    "{} {} {}",
+                    Self::format_expression(left),
+                    op_str,
+                    Self::format_expression(right)
+                )
             }
             Expression::Unary { operator, operand } => {
                 let op_str = match operator {
@@ -3230,7 +3454,10 @@ impl Interpreter {
                 };
                 format!("{}{}", op_str, Self::format_expression(operand))
             }
-            Expression::Call { function, arguments } => {
+            Expression::Call {
+                function,
+                arguments,
+            } => {
                 let func_str = Self::format_expression(function);
                 let args_str: Vec<String> = arguments.iter().map(Self::format_expression).collect();
                 format!("{}({})", func_str, args_str.join(", "))
@@ -3239,7 +3466,11 @@ impl Interpreter {
                 format!("{}.{}", Self::format_expression(object), field)
             }
             Expression::Index { object, index } => {
-                format!("{}[{}]", Self::format_expression(object), Self::format_expression(index))
+                format!(
+                    "{}[{}]",
+                    Self::format_expression(object),
+                    Self::format_expression(index)
+                )
             }
             Expression::Array(elements) => {
                 let elems: Vec<String> = elements.iter().map(Self::format_expression).collect();
@@ -3248,7 +3479,7 @@ impl Interpreter {
             _ => format!("{:?}", expr),
         }
     }
-    
+
     /// Check struct invariants after construction or mutation
     fn check_struct_invariants(&mut self, struct_name: &str, struct_val: &Value) -> Result<()> {
         // Look up invariants for this struct type
@@ -3256,43 +3487,48 @@ impl Interpreter {
             Some(inv) => inv.clone(),
             None => return Ok(()), // No invariants defined
         };
-        
+
         if invariants.is_empty() {
             return Ok(());
         }
-        
+
         // Get struct fields
         let fields = match struct_val {
             Value::Struct { fields, .. } => fields,
             _ => return Ok(()),
         };
-        
+
         // Create a temporary environment with struct fields as variables
         let previous = Rc::clone(&self.environment);
         let inv_env = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
-        
+
         // Bind struct fields to environment (also bind 'self' to the struct)
         for (field_name, field_val) in fields {
-            inv_env.borrow_mut().define(field_name.clone(), field_val.clone());
+            inv_env
+                .borrow_mut()
+                .define(field_name.clone(), field_val.clone());
         }
-        inv_env.borrow_mut().define("self".to_string(), struct_val.clone());
-        
+        inv_env
+            .borrow_mut()
+            .define("self".to_string(), struct_val.clone());
+
         self.environment = inv_env;
-        
+
         // Check each invariant
         for inv_expr in &invariants {
             let condition_str = Self::format_expression(inv_expr);
             let result = self.eval_expression(inv_expr)?;
-            
+
             if !result.is_truthy() {
                 self.environment = previous;
-                return Err(IntentError::ContractViolation(
-                    format!("Invariant violated for '{}': {}", struct_name, condition_str)
-                ));
+                return Err(IntentError::ContractViolation(format!(
+                    "Invariant violated for '{}': {}",
+                    struct_name, condition_str
+                )));
             }
             self.contracts.check_invariant(&condition_str, true, None)?;
         }
-        
+
         self.environment = previous;
         Ok(())
     }
@@ -3306,9 +3542,7 @@ impl Interpreter {
             (BinaryOp::Div, Value::Int(_), Value::Int(0)) => Err(IntentError::DivisionByZero),
             (BinaryOp::Div, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a / b)),
             (BinaryOp::Mod, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a % b)),
-            (BinaryOp::Pow, Value::Int(a), Value::Int(b)) => {
-                Ok(Value::Int(a.pow(b as u32)))
-            }
+            (BinaryOp::Pow, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.pow(b as u32))),
 
             // Float arithmetic
             (BinaryOp::Add, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
@@ -3332,12 +3566,8 @@ impl Interpreter {
             (BinaryOp::Add, Value::String(a), Value::String(b)) => {
                 Ok(Value::String(format!("{}{}", a, b)))
             }
-            (BinaryOp::Add, Value::String(a), b) => {
-                Ok(Value::String(format!("{}{}", a, b)))
-            }
-            (BinaryOp::Add, a, Value::String(b)) => {
-                Ok(Value::String(format!("{}{}", a, b)))
-            }
+            (BinaryOp::Add, Value::String(a), b) => Ok(Value::String(format!("{}{}", a, b))),
+            (BinaryOp::Add, a, Value::String(b)) => Ok(Value::String(format!("{}{}", a, b))),
 
             // Array concatenation
             (BinaryOp::Add, Value::Array(mut a), Value::Array(b)) => {
@@ -3468,29 +3698,32 @@ mod tests {
 
     #[test]
     fn test_loops() {
-        let result = eval(
-            "let x = 0; while x < 5 { x = x + 1; } x"
-        ).unwrap();
+        let result = eval("let x = 0; while x < 5 { x = x + 1; } x").unwrap();
         assert!(matches!(result, Value::Int(5)));
     }
 
     #[test]
     fn test_contract_precondition_passes() {
         // Precondition passes when b != 0
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn divide(a, b) requires b != 0 { return a / b; }
             divide(10, 2)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(5)));
     }
 
     #[test]
     fn test_contract_precondition_fails() {
         // Precondition fails when b == 0
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn divide(a, b) requires b != 0 { return a / b; }
             divide(10, 0)
-        "#);
+        "#,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Precondition failed"));
@@ -3499,26 +3732,31 @@ mod tests {
     #[test]
     fn test_contract_postcondition_passes() {
         // Postcondition passes when result >= 0
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn absolute(x) ensures result >= 0 { 
                 if x < 0 { return -x; } 
                 return x; 
             }
             absolute(-5)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(5)));
     }
 
     #[test]
     fn test_contract_postcondition_fails() {
         // Postcondition fails intentionally
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn bad_absolute(x) ensures result > 100 { 
                 if x < 0 { return -x; } 
                 return x; 
             }
             bad_absolute(5)
-        "#);
+        "#,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Postcondition failed"));
@@ -3527,31 +3765,38 @@ mod tests {
     #[test]
     fn test_contract_with_result() {
         // Use result keyword in postcondition
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn double(x) ensures result == x * 2 { 
                 return x * 2; 
             }
             double(7)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(14)));
     }
 
     #[test]
     fn test_contract_with_old() {
         // Use old() to capture pre-execution value
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn increment(x) ensures result == old(x) + 1 { 
                 return x + 1; 
             }
             increment(10)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(11)));
     }
 
     #[test]
     fn test_multiple_contracts() {
         // Multiple requires and ensures
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn clamp(value, min_val, max_val) 
                 requires min_val <= max_val
                 ensures result >= min_val
@@ -3562,28 +3807,34 @@ mod tests {
                 return value;
             }
             clamp(15, 0, 10)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(10)));
     }
 
     #[test]
     fn test_struct_literal() {
         // Basic struct literal creation
-        let result = eval(r#"
+        let result = eval(
+            r#"
             struct Point {
                 x: Int,
                 y: Int
             }
             let p = Point { x: 10, y: 20 };
             p.x + p.y
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(30)));
     }
 
     #[test]
     fn test_struct_invariant_passes() {
         // Struct invariant passes on construction
-        let result = eval(r#"
+        let result = eval(
+            r#"
             struct Counter {
                 value: Int
             }
@@ -3592,14 +3843,17 @@ mod tests {
             }
             let c = Counter { value: 5 };
             c.value
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(5)));
     }
 
     #[test]
     fn test_struct_invariant_fails() {
         // Struct invariant fails on construction
-        let result = eval(r#"
+        let result = eval(
+            r#"
             struct Counter {
                 value: Int
             }
@@ -3608,7 +3862,8 @@ mod tests {
             }
             let c = Counter { value: -1 };
             c.value
-        "#);
+        "#,
+        );
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("Invariant violated"));
@@ -3652,7 +3907,7 @@ mod tests {
         assert!(matches!(eval("round(3.5)").unwrap(), Value::Int(4)));
         assert!(matches!(eval("round(3.6)").unwrap(), Value::Int(4)));
         assert!(matches!(eval("round(-2.5)").unwrap(), Value::Int(-3))); // rounds away from zero
-        // floor
+                                                                         // floor
         assert!(matches!(eval("floor(3.9)").unwrap(), Value::Int(3)));
         assert!(matches!(eval("floor(-3.1)").unwrap(), Value::Int(-4)));
         // ceil
@@ -3712,126 +3967,160 @@ mod tests {
     #[test]
     fn test_option_some() {
         // Test Some constructor and is_some helper
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = Some(42);
             is_some(x)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_option_none() {
         // Test None constructor and is_none helper
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = None;
             is_none(x)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_option_unwrap() {
         // Test unwrap on Some
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = Some(100);
             unwrap(x)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(100)));
     }
 
     #[test]
     fn test_option_unwrap_or() {
         // Test unwrap_or on None
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = None;
             unwrap_or(x, 50)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(50)));
 
         // Test unwrap_or on Some
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = Some(100);
             unwrap_or(x, 50)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(100)));
     }
 
     #[test]
     fn test_result_ok() {
         // Test Ok constructor and is_ok helper
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = Ok(42);
             is_ok(x)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_result_err() {
         // Test Err constructor and is_err helper
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = Err("error message");
             is_err(x)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_match_option_some() {
         // Match on Some variant
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = Some(10);
             match x {
                 Some(v) => v * 2,
                 None => 0
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(20)));
     }
 
     #[test]
     fn test_match_option_none() {
         // Match on None variant
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = None;
             match x {
                 Some(v) => v * 2,
                 None => -1
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(-1)));
     }
 
     #[test]
     fn test_match_result_ok() {
         // Match on Ok variant
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = Ok(42);
             match x {
                 Ok(v) => v + 1,
                 Err(e) => 0
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(43)));
     }
 
     #[test]
     fn test_match_result_err() {
         // Match on Err variant
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = Err("failed");
             match x {
                 Ok(v) => v,
                 Err(e) => -1
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(-1)));
     }
 
     #[test]
     fn test_match_literal_int() {
         // Match on literal integer patterns
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = 2;
             match x {
                 1 => 100,
@@ -3839,40 +4128,49 @@ mod tests {
                 3 => 300,
                 _ => 0
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(200)));
     }
 
     #[test]
     fn test_match_wildcard() {
         // Match wildcard pattern
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = 999;
             match x {
                 1 => 100,
                 2 => 200,
                 _ => -1
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(-1)));
     }
 
     #[test]
     fn test_match_binding() {
         // Match with variable binding
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = 42;
             match x {
                 n => n + 8
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(50)));
     }
 
     #[test]
     fn test_user_enum_definition() {
         // User-defined enum
-        let result = eval(r#"
+        let result = eval(
+            r#"
             enum Color {
                 Red,
                 Green,
@@ -3884,14 +4182,17 @@ mod tests {
                 Color::Green => 2,
                 Color::Blue => 3
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(1)));
     }
 
     #[test]
     fn test_user_enum_with_data() {
         // User-defined enum with data
-        let result = eval(r#"
+        let result = eval(
+            r#"
             enum Shape {
                 Circle(Float),
                 Rectangle(Float, Float)
@@ -3901,7 +4202,9 @@ mod tests {
                 Shape::Circle(r) => r * 2.0,
                 Shape::Rectangle(w, h) => w * h
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::Float(f) = result {
             assert!((f - 10.0).abs() < 0.001);
         } else {
@@ -3912,7 +4215,8 @@ mod tests {
     #[test]
     fn test_user_enum_rectangle() {
         // User-defined enum Rectangle variant
-        let result = eval(r#"
+        let result = eval(
+            r#"
             enum Shape {
                 Circle(Float),
                 Rectangle(Float, Float)
@@ -3922,7 +4226,9 @@ mod tests {
                 Shape::Circle(r) => r * 2.0,
                 Shape::Rectangle(w, h) => w * h
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::Float(f) = result {
             assert!((f - 12.0).abs() < 0.001);
         } else {
@@ -3933,32 +4239,41 @@ mod tests {
     #[test]
     fn test_type_alias() {
         // Type alias (currently just parses, doesn't enforce types)
-        let result = eval(r#"
+        let result = eval(
+            r#"
             type UserId = Int;
             let id: UserId = 12345;
             id
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(12345)));
     }
 
     #[test]
     fn test_union_type() {
         // Union type annotation (parses, runtime is dynamically typed)
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn accepts_either(x: String | Int) {
                 return x;
             }
             accepts_either(42)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(42)));
-        
+
         // Also works with strings
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn accepts_either(x: String | Int) {
                 return x;
             }
             accepts_either("hello")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello");
         } else {
@@ -3969,36 +4284,45 @@ mod tests {
     #[test]
     fn test_union_type_multiple() {
         // Union with multiple types
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn flexible(x: Int | Float | String | Bool) {
                 return x;
             }
             flexible(true)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_generic_function_declaration() {
         // Generic function declaration (parses, generics not enforced at runtime)
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn identity<T>(x: T) -> T {
                 return x;
             }
             identity(42)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(42)));
     }
 
     #[test]
     fn test_generic_function_with_string() {
         // Generic function with string
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn identity<T>(x: T) -> T {
                 return x;
             }
             identity("hello")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello");
         } else {
@@ -4009,12 +4333,15 @@ mod tests {
     #[test]
     fn test_effects_annotation() {
         // Function with effects annotation (parses, not enforced)
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn read_file(path: String) -> String with io {
                 return "file contents";
             }
             read_file("test.txt")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "file contents");
         } else {
@@ -4025,19 +4352,23 @@ mod tests {
     #[test]
     fn test_pure_function() {
         // Pure function annotation
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn add(a: Int, b: Int) -> Int pure {
                 return a + b;
             }
             add(3, 4)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(7)));
     }
 
     #[test]
     fn test_nested_option() {
         // Nested Option handling
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let outer = Some(Some(42));
             match outer {
                 Some(inner) => match inner {
@@ -4046,14 +4377,17 @@ mod tests {
                 },
                 None => -2
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(42)));
     }
 
     #[test]
     fn test_match_in_function() {
         // Match expression inside a function
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn safe_div(a, b) {
                 if b == 0 {
                     return None;
@@ -4066,14 +4400,17 @@ mod tests {
                 Some(v) => v,
                 None => -1
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(5)));
     }
 
     #[test]
     fn test_match_division_by_zero() {
         // Match on None from safe division
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn safe_div(a, b) {
                 if b == 0 {
                     return None;
@@ -4086,41 +4423,50 @@ mod tests {
                 Some(v) => v,
                 None => -1
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(-1)));
     }
 
     #[test]
     fn test_match_bool_pattern() {
         // Match on boolean values
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let flag = true;
             match flag {
                 true => 1,
                 false => 0
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(1)));
     }
 
     #[test]
     fn test_match_string_pattern() {
         // Match on string values
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let cmd = "start";
             match cmd {
                 "start" => 1,
                 "stop" => 2,
                 _ => 0
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(1)));
     }
 
     #[test]
     fn test_enum_unit_variants() {
         // Enum with only unit variants
-        let result = eval(r#"
+        let result = eval(
+            r#"
             enum Status {
                 Pending,
                 Active,
@@ -4132,7 +4478,9 @@ mod tests {
                 Status::Active => 1,
                 Status::Completed => 2
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(1)));
     }
 
@@ -4140,21 +4488,27 @@ mod tests {
 
     #[test]
     fn test_import_std_string_split() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { split } from "std/string"
             let parts = split("hello,world", ",")
             len(parts)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(2)));
     }
 
     #[test]
     fn test_import_std_string_join() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { join, split } from "std/string"
             let parts = split("a-b-c", "-")
             join(parts, "_")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "a_b_c");
         } else {
@@ -4164,10 +4518,13 @@ mod tests {
 
     #[test]
     fn test_import_std_string_trim() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { trim } from "std/string"
             trim("  hello world  ")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello world");
         } else {
@@ -4177,10 +4534,13 @@ mod tests {
 
     #[test]
     fn test_import_std_string_replace() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { replace } from "std/string"
             replace("hello world", "world", "rust")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello rust");
         } else {
@@ -4190,38 +4550,50 @@ mod tests {
 
     #[test]
     fn test_import_std_string_contains() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { contains } from "std/string"
             contains("hello world", "wor")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_import_std_string_starts_ends_with() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { starts_with, ends_with } from "std/string"
             let s = "hello.txt"
             starts_with(s, "hello") && ends_with(s, ".txt")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_import_std_string_case_conversion() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { to_upper, to_lower } from "std/string"
             to_upper("hello") == "HELLO" && to_lower("WORLD") == "world"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_import_std_string_char_at() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { char_at } from "std/string"
             char_at("hello", 1)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "e");
         } else {
@@ -4231,10 +4603,13 @@ mod tests {
 
     #[test]
     fn test_import_std_string_substring() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { substring } from "std/string"
             substring("hello world", 0, 5)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello");
         } else {
@@ -4243,143 +4618,177 @@ mod tests {
     }
 
     // ==================== New std/string tests ====================
-    
+
     #[test]
     fn test_std_string_trim_left_right() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { trim_left, trim_right } from "std/string"
             let s = "  hello  "
             trim_left(s) == "hello  " && trim_right(s) == "  hello"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_string_trim_chars() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { trim_chars } from "std/string"
             trim_chars("***hello***", "*")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello");
         } else {
             panic!("Expected string");
         }
     }
-    
+
     #[test]
     fn test_std_string_capitalize_title() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { capitalize, title } from "std/string"
             capitalize("hello world") == "Hello world" && title("hello world") == "Hello World"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_string_case_conversion() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { to_snake_case, to_camel_case, to_pascal_case, to_kebab_case } from "std/string"
             to_snake_case("helloWorld") == "hello_world" &&
             to_camel_case("hello_world") == "helloWorld" &&
             to_pascal_case("hello_world") == "HelloWorld" &&
             to_kebab_case("helloWorld") == "hello-world"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_string_slugify() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { slugify } from "std/string"
             slugify("Hello World! This is NTNT.")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello-world-this-is-ntnt");
         } else {
             panic!("Expected string");
         }
     }
-    
+
     #[test]
     fn test_std_string_last_index_of() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { last_index_of } from "std/string"
             last_index_of("hello hello", "hello")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::Int(i) = result {
             assert_eq!(i, 6);
         } else {
             panic!("Expected int");
         }
     }
-    
+
     #[test]
     fn test_std_string_count() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { count } from "std/string"
             count("the quick brown fox jumps over the lazy dog", "the")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::Int(i) = result {
             assert_eq!(i, 2);
         } else {
             panic!("Expected int");
         }
     }
-    
+
     #[test]
     fn test_std_string_replace_all() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { replace_all } from "std/string"
             replace_all("hello hello", "hello", "hi")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hi hi");
         } else {
             panic!("Expected string");
         }
     }
-    
+
     #[test]
     fn test_std_string_lines_words() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { lines, words } from "std/string"
             let l = lines("a
 b
 c")
             let w = words("  hello   world  ")
             len(l) == 3 && len(w) == 2
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_string_truncate() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { truncate } from "std/string"
             truncate("hello world", 8, "...")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello...");
         } else {
             panic!("Expected string");
         }
     }
-    
+
     #[test]
     fn test_std_string_padding() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { pad_left, pad_right, center } from "std/string"
             pad_left("42", 5, "0") == "00042" &&
             pad_right("hi", 5, ".") == "hi..." &&
             center("hi", 6, "*") == "**hi**"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_string_validation() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { is_empty, is_blank, is_numeric, is_alpha, is_alphanumeric } from "std/string"
             is_empty("") == true &&
             is_empty("x") == false &&
@@ -4390,97 +4799,124 @@ c")
             is_alpha("abc") == true &&
             is_alpha("ab3") == false &&
             is_alphanumeric("abc123") == true
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_string_case_validation() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { is_lowercase, is_uppercase, is_whitespace } from "std/string"
             is_lowercase("hello") == true &&
             is_uppercase("HELLO") == true &&
             is_whitespace("   ") == true
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_string_matches() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { matches } from "std/string"
             matches("hello", "h*o") == true &&
             matches("hello", "h?llo") == true &&
             matches("hello", "world") == false &&
             matches("test.txt", "*.txt") == true
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_string_repeat_reverse() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { repeat, reverse } from "std/string"
             repeat("ab", 3) == "ababab" && reverse("hello") == "olleh"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_string_chars() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { chars } from "std/string"
             let c = chars("abc")
             len(c) == 3 && c[0] == "a" && c[1] == "b" && c[2] == "c"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_import_std_math_constants() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { PI, E } from "std/math"
             PI > 3.14 && PI < 3.15 && E > 2.71 && E < 2.72
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_import_std_math_trig() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { sin, cos, PI } from "std/math"
             let s = sin(0.0)
             let c = cos(0.0)
             s < 0.001 && s > -0.001 && c > 0.999
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_import_std_math_log_exp() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { log, exp, E } from "std/math"
             let log_e = log(E)
             let exp_0 = exp(0.0)
             log_e > 0.99 && log_e < 1.01 && exp_0 > 0.99 && exp_0 < 1.01
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_import_std_collections_push() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { push } from "std/collections"
             let arr = [1, 2, 3]
             let arr2 = push(arr, 4)
             len(arr2)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(4)));
     }
 
     #[test]
     fn test_import_std_collections_first_last() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { first, last } from "std/collections"
             let arr = [10, 20, 30]
             let f = first(arr)
@@ -4492,81 +4928,104 @@ c")
                 },
                 None => -1
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(40)));
     }
 
     #[test]
     fn test_import_std_collections_reverse() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { reverse } from "std/collections"
             let arr = [1, 2, 3]
             let rev = reverse(arr)
             rev[0]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(3)));
     }
 
     #[test]
     fn test_import_std_collections_slice() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { slice } from "std/collections"
             let arr = [1, 2, 3, 4, 5]
             let sub = slice(arr, 1, 4)
             len(sub)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(3)));
     }
 
     #[test]
     fn test_import_std_collections_concat() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { concat } from "std/collections"
             let a = [1, 2]
             let b = [3, 4]
             let c = concat(a, b)
             len(c)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(4)));
     }
 
     #[test]
     fn test_import_std_collections_is_empty() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { is_empty } from "std/collections"
             let empty = []
             let full = [1]
             is_empty(empty) && !is_empty(full)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_import_std_env_cwd() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { cwd } from "std/env"
             let dir = cwd()
             len(dir) > 0
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_import_std_env_args() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { args } from "std/env"
             let argv = args()
             len(argv) >= 0
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_import_entire_module() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import "std/string" as str
             str.trim("  test  ")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "test");
         } else {
@@ -4576,48 +5035,58 @@ c")
 
     #[test]
     fn test_import_with_alias() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { split as divide } from "std/string"
             let parts = divide("a:b:c", ":")
             len(parts)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(3)));
     }
-    
+
     // ===== Phase 4 Tests: Traits & Essential Features =====
-    
+
     #[test]
     fn test_trait_declaration() {
         // Test that trait declarations parse and eval without error
-        let result = eval(r#"
+        let result = eval(
+            r#"
             trait Show {
                 fn show(self) -> String;
             }
             42
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(42)));
     }
-    
+
     #[test]
     fn test_trait_with_default() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             trait Greet {
                 fn greet(name: String) -> String {
                     return "Hello, " + name;
                 }
             }
             "ok"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "ok");
         } else {
             panic!("Expected string");
         }
     }
-    
+
     #[test]
     fn test_impl_trait_for_type() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             trait Printable {
                 fn describe(self) -> String;
             }
@@ -4634,63 +5103,78 @@ c")
             }
             
             42
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(42)));
     }
-    
+
     #[test]
     fn test_for_in_array() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let sum = 0
             for x in [1, 2, 3, 4, 5] {
                 sum = sum + x
             }
             sum
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(15)));
     }
-    
+
     #[test]
     fn test_for_in_range() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let sum = 0
             for i in 1..5 {
                 sum = sum + i
             }
             sum
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // 1 + 2 + 3 + 4 = 10 (exclusive end)
         assert!(matches!(result, Value::Int(10)));
     }
-    
+
     #[test]
     fn test_for_in_range_inclusive() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let sum = 0
             for i in 1..=5 {
                 sum = sum + i
             }
             sum
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // 1 + 2 + 3 + 4 + 5 = 15 (inclusive end)
         assert!(matches!(result, Value::Int(15)));
     }
-    
+
     #[test]
     fn test_for_in_string() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let count = 0
             for c in "hello" {
                 count = count + 1
             }
             count
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(5)));
     }
-    
+
     #[test]
     fn test_for_in_with_break() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let sum = 0
             for x in [1, 2, 3, 4, 5] {
                 if x > 3 {
@@ -4699,14 +5183,17 @@ c")
                 sum = sum + x
             }
             sum
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // 1 + 2 + 3 = 6
         assert!(matches!(result, Value::Int(6)));
     }
-    
+
     #[test]
     fn test_for_in_with_continue() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let sum = 0
             for x in [1, 2, 3, 4, 5] {
                 if x == 3 {
@@ -4715,19 +5202,28 @@ c")
                 sum = sum + x
             }
             sum
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // 1 + 2 + 4 + 5 = 12 (skip 3)
         assert!(matches!(result, Value::Int(12)));
     }
-    
+
     #[test]
     fn test_range_expression() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let r = 1..10
             r
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         match result {
-            Value::Range { start, end, inclusive } => {
+            Value::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 assert_eq!(start, 1);
                 assert_eq!(end, 10);
                 assert!(!inclusive);
@@ -4735,15 +5231,22 @@ c")
             _ => panic!("Expected Range value"),
         }
     }
-    
+
     #[test]
     fn test_range_inclusive_expression() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let r = 5..=15
             r
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         match result {
-            Value::Range { start, end, inclusive } => {
+            Value::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 assert_eq!(start, 5);
                 assert_eq!(end, 15);
                 assert!(inclusive);
@@ -4751,13 +5254,16 @@ c")
             _ => panic!("Expected Range value"),
         }
     }
-    
+
     #[test]
     fn test_map_literal() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let m = map { "a": 1, "b": 2 }
             m
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         match result {
             Value::Map(map) => {
                 assert_eq!(map.len(), 2);
@@ -4767,36 +5273,45 @@ c")
             _ => panic!("Expected Map value"),
         }
     }
-    
+
     #[test]
     fn test_map_bracket_access() {
         // Test bracket notation for map keys (including hyphenated keys)
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let headers = map { "content-type": "application/json", "x-custom-header": "value" }
             headers["content-type"]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "application/json");
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_map_bracket_hyphenated_key() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let m = map { "my-key": 42 }
             m["my-key"]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(42)));
     }
-    
+
     #[test]
     fn test_map_empty() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let m = map {}
             m
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         match result {
             Value::Map(map) => {
                 assert!(map.is_empty());
@@ -4804,52 +5319,62 @@ c")
             _ => panic!("Expected Map value"),
         }
     }
-    
+
     #[test]
     fn test_for_in_map_keys() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let m = map { "x": 10, "y": 20 }
             let count = 0
             for key in m {
                 count = count + 1
             }
             count
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(2)));
     }
-    
+
     #[test]
     fn test_interpolated_string() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let name = "World"
             let greeting = "Hello, {name}!"
             greeting
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "Hello, World!");
         } else {
             panic!("Expected string, got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_interpolated_string_with_expression() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let a = 5
             let b = 3
             "Sum: {a + b}"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "Sum: 8");
         } else {
             panic!("Expected string, got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_defer_basic() {
         // Defer should execute when scope exits
-        let result = eval(r#"
+        let result = eval(
+            r#"
             let x = 0
             fn test() {
                 x = 1
@@ -4859,17 +5384,20 @@ c")
             }
             test()
             x
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // The function returns 2, but defer sets x to 10 after return
         // Since x is captured, the final x should be 10
         // Actually in our simple implementation, defer runs in block scope
         // Let's test a simpler case
         assert!(matches!(result, Value::Int(2) | Value::Int(10)));
     }
-    
+
     #[test]
     fn test_trait_with_supertrait() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             trait Base {
                 fn base_method(self);
             }
@@ -4879,116 +5407,140 @@ c")
             }
             
             "ok"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "ok");
         } else {
             panic!("Expected string");
         }
     }
-    
+
     #[test]
     fn test_raw_string_simple() {
-        let result = eval(r##"
+        let result = eval(
+            r##"
             r"hello world"
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello world");
         } else {
             panic!("Expected string, got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_raw_string_with_escapes() {
         // Raw strings don't process escape sequences
-        let result = eval(r##"
+        let result = eval(
+            r##"
             r"hello\nworld"
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello\\nworld");
         } else {
             panic!("Expected string, got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_raw_string_with_hashes() {
-        let result = eval(r###"
+        let result = eval(
+            r###"
             r#"he said "hello""#
-        "###).unwrap();
+        "###,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "he said \"hello\"");
         } else {
             panic!("Expected string, got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_raw_string_sql() {
-        let result = eval(r##"
+        let result = eval(
+            r##"
             r"SELECT * FROM users WHERE name = 'test'"
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "SELECT * FROM users WHERE name = 'test'");
         } else {
             panic!("Expected string, got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_trait_bounds_parsing() {
         // Test that trait bounds syntax is parsed correctly
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn identity<T: Clone>(x: T) -> T {
                 return x
             }
             identity(42)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::Int(n) = result {
             assert_eq!(n, 42);
         } else {
             panic!("Expected Int(42), got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_multiple_trait_bounds() {
         // Test multiple bounds with + syntax
-        let result = eval(r#"
+        let result = eval(
+            r#"
             fn process<T: Serializable + Comparable>(x: T) -> T {
                 return x
             }
             process("hello")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello");
         } else {
             panic!("Expected string");
         }
     }
-    
+
     #[test]
     fn test_struct_with_bounded_type_param() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             struct Container<T: Clone> {
                 value: T,
             }
             let c = Container { value: 42 }
             c.value
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::Int(n) = result {
             assert_eq!(n, 42);
         } else {
             panic!("Expected Int(42), got {:?}", result);
         }
     }
-    
+
     // ==================== std/fs tests ====================
-    
+
     #[test]
     fn test_std_fs_write_and_read_file() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { write_file, read_file, remove } from "std/fs"
             
             let path = "/tmp/intent_test_file.txt"
@@ -5008,29 +5560,37 @@ c")
                 Ok(c) => c,
                 Err(e) => e,
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "Hello, Intent!");
         } else {
             panic!("Expected String, got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_std_fs_exists() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { exists } from "std/fs"
             exists("/tmp")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_fs_is_file_and_is_dir() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { is_dir, is_file } from "std/fs"
             [is_dir("/tmp"), is_file("/tmp")]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::Array(arr) = result {
             assert!(matches!(&arr[0], Value::Bool(true)));
             assert!(matches!(&arr[1], Value::Bool(false)));
@@ -5038,11 +5598,12 @@ c")
             panic!("Expected Array");
         }
     }
-    
+
     #[test]
     fn test_std_fs_mkdir_and_remove() {
         // Use a unique test directory name
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { mkdir, remove_dir, exists } from "std/fs"
             import { now_millis } from "std/time"
             
@@ -5058,78 +5619,95 @@ c")
             remove_dir(test_dir)
             let exists_after = exists(test_dir)
             existed && !exists_after
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     // ==================== std/path tests ====================
-    
+
     #[test]
     fn test_std_path_join() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { join } from "std/path"
             join(["home", "user", "documents"])
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert!(s.contains("home") && s.contains("user") && s.contains("documents"));
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_path_dirname_basename() {
         // Test dirname
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { dirname } from "std/path"
             match dirname("/home/user/file.txt") {
                 Some(d) => d,
                 None => "",
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(dir) = result {
             assert_eq!(dir, "/home/user");
         } else {
             panic!("Expected String for dirname");
         }
-        
+
         // Test basename
-        let result2 = eval(r#"
+        let result2 = eval(
+            r#"
             import { basename } from "std/path"
             match basename("/home/user/file.txt") {
                 Some(b) => b,
                 None => "",
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(base) = result2 {
             assert_eq!(base, "file.txt");
         } else {
             panic!("Expected String for basename");
         }
     }
-    
+
     #[test]
     fn test_std_path_extension() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { extension } from "std/path"
             match extension("/home/user/file.txt") {
                 Some(e) => e,
                 None => "",
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "txt");
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_path_is_absolute() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { is_absolute, is_relative } from "std/path"
             [is_absolute("/home/user"), is_relative("./file.txt")]
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::Array(arr) = result {
             assert!(matches!(&arr[0], Value::Bool(true)));
             assert!(matches!(&arr[1], Value::Bool(true)));
@@ -5137,56 +5715,66 @@ c")
             panic!("Expected Array");
         }
     }
-    
+
     // ==================== std/json tests ====================
-    
+
     #[test]
     fn test_std_json_parse_simple() {
         // Test JSON parsing - use raw string for JSON
-        let result = eval(r##"
+        let result = eval(
+            r##"
             import { parse } from "std/json"
             let json_str = r#"{"name": "Alice", "age": 30}"#
             match parse(json_str) {
                 Ok(obj) => obj.name,
                 Err(e) => e,
             }
-        "##).unwrap();
+        "##,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "Alice");
         } else {
             panic!("Expected String, got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_std_json_parse_array() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { parse } from "std/json"
             match parse("[1, 2, 3]") {
                 Ok(arr) => len(arr),
                 Err(e) => 0,
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(3)));
     }
-    
+
     #[test]
     fn test_std_json_stringify() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { stringify } from "std/json"
             let data = map { "name": "Bob", "score": 100 }
             stringify(data)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert!(s.contains("Bob") && s.contains("100"));
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_json_roundtrip() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { parse, stringify } from "std/json"
             let original = map { "x": 1, "y": 2 }
             let json_str = stringify(original)
@@ -5194,226 +5782,285 @@ c")
                 Ok(parsed) => parsed.x,
                 Err(_) => -1,
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(1)));
     }
-    
+
     // ==================== std/time tests ====================
-    
+
     #[test]
     fn test_std_time_now() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { now } from "std/time"
             let ts = now()
             ts > 0
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_time_now_millis() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { now_millis } from "std/time"
             let ts = now_millis()
             ts > 1000000000000  // Should be after year 2001
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_time_elapsed() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { now_millis, elapsed, sleep } from "std/time"
             let start = now_millis()
             sleep(10)
             let e = elapsed(start)
             e >= 10
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
-    
+
     #[test]
     fn test_std_time_format_timestamp() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { format_timestamp } from "std/time"
             // Unix timestamp for 2024-01-15 12:30:45 UTC
             let ts = 1705322445
             format_timestamp(ts, "%Y-%m-%d")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "2024-01-15");
         } else {
             panic!("Expected String, got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_std_time_duration() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { duration_secs } from "std/time"
             let d = duration_secs(5)
             d.millis
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(5000)));
     }
-    
+
     // ==================== std/crypto tests ====================
-    
+
     #[test]
     fn test_std_crypto_sha256() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { sha256 } from "std/crypto"
             sha256("hello")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             // SHA256 of "hello" is well-known
-            assert_eq!(s, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+            assert_eq!(
+                s,
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            );
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_crypto_sha256_bytes() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { sha256_bytes } from "std/crypto"
             let hash = sha256_bytes("test")
             len(hash)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // SHA256 produces 32 bytes
         assert!(matches!(result, Value::Int(32)));
     }
-    
+
     #[test]
     fn test_std_crypto_hmac() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { hmac_sha256 } from "std/crypto"
             hmac_sha256("key", "data")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             // HMAC-SHA256("key", "data") is known
-            assert_eq!(s, "5031fe3d989c6d1537a013fa6e739da23463fdaec3b70137d828e36ace221bd0");
+            assert_eq!(
+                s,
+                "5031fe3d989c6d1537a013fa6e739da23463fdaec3b70137d828e36ace221bd0"
+            );
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_crypto_uuid() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { uuid } from "std/crypto"
             let id = uuid()
             len(id)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // UUID v4 is 36 characters (with hyphens)
         assert!(matches!(result, Value::Int(36)));
     }
-    
+
     #[test]
     fn test_std_crypto_random_bytes() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { random_bytes } from "std/crypto"
             let bytes = random_bytes(16)
             len(bytes)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(16)));
     }
-    
+
     #[test]
     fn test_std_crypto_random_hex() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { random_hex } from "std/crypto"
             let hex = random_hex(8)
             len(hex)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // 8 bytes = 16 hex characters
         assert!(matches!(result, Value::Int(16)));
     }
-    
+
     #[test]
     fn test_std_crypto_hex_encode_decode() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { hex_encode, hex_decode } from "std/crypto"
             let hex = hex_encode("hello")
             match hex_decode(hex) {
                 Ok(bytes) => len(bytes),
                 Err(_) => -1,
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         // "hello" is 5 bytes
         assert!(matches!(result, Value::Int(5)));
     }
-    
+
     // ==================== std/url tests ====================
-    
+
     #[test]
     fn test_std_url_parse() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { parse } from "std/url"
             match parse("https://example.com:8080/path?foo=bar#section") {
                 Ok(url) => url.host,
                 Err(_) => "error",
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "example.com");
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_url_parse_port() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { parse } from "std/url"
             match parse("https://example.com:8080/path") {
                 Ok(url) => url.port,
                 Err(_) => -1,
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::Int(8080)));
     }
-    
+
     #[test]
     fn test_std_url_parse_query_params() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { parse } from "std/url"
             match parse("https://example.com?name=alice&age=30") {
                 Ok(url) => url.params.name,
                 Err(_) => "error",
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "alice");
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_url_encode_decode() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { encode_component, decode } from "std/url"
             let encoded = encode_component("hello world!")
             match decode(encoded) {
                 Ok(decoded) => decoded,
                 Err(_) => "error",
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "hello world!");
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_url_build_query() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { build_query } from "std/url"
             let params = map { "name": "alice", "age": "30" }
             build_query(params)
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             // Order may vary, but should contain both params
             assert!(s.contains("name=alice"));
@@ -5423,22 +6070,25 @@ c")
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_url_join() {
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { join } from "std/url"
             join("https://example.com/api", "users/123")
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "https://example.com/api/users/123");
         } else {
             panic!("Expected String");
         }
     }
-    
+
     // ========== std/http tests ==========
-    
+
     #[test]
     fn test_std_http_module_exists() {
         // Verify the HTTP module can be imported
@@ -5452,65 +6102,75 @@ c")
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_http_fetch_invalid_url() {
         // Test error handling for invalid URL
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { fetch } from "std/http"
             match fetch("not-a-valid-url") {
                 Ok(resp) => "unexpected success",
                 Err(e) => "got error as expected",
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "got error as expected");
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_http_request_with_options() {
         // Test that request() accepts options map
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { request } from "std/http"
             match request(map { "url": "invalid://test", "method": "GET" }) {
                 Ok(resp) => "unexpected success",
                 Err(e) => "got error as expected",
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "got error as expected");
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_http_post_json_structure() {
         // Test post_json with invalid URL (verifies JSON serialization)
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { post_json } from "std/http"
             let data = map { "name": "test", "value": 42 }
             match post_json("invalid://test", data) {
                 Ok(resp) => "unexpected success",
                 Err(e) => "got error as expected",
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "got error as expected");
         } else {
             panic!("Expected String");
         }
     }
-    
+
     #[test]
     fn test_std_http_post_returns_result_not_unit() {
         // Test that post() with a URL returns a Result, not Unit
         // This tests the fix for the bug where post() was being intercepted
         // by the HTTP server route registration code
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { post } from "std/http"
             let result = post("invalid://test", "body")
             // Should return Err(...) for invalid URL, not Unit
@@ -5518,18 +6178,21 @@ c")
                 Ok(resp) => "got ok",
                 Err(e) => "got error as expected",
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "got error as expected");
         } else {
             panic!("Expected String, got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_std_http_new_functions_exist() {
         // Test that all new HTTP functions exist and are callable
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { fetch, basic_auth, post_form, download, upload } from "std/http"
             
             // Test that basic_auth returns a Result (will fail with invalid URL)
@@ -5538,14 +6201,17 @@ c")
                 Ok(r) => "ok",
                 Err(e) => "error"
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::String(_)));
     }
-    
+
     #[test]
     fn test_std_http_post_form_structure() {
         // Test that post_form accepts a map and returns a Result
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { post_form } from "std/http"
             
             let form = map { "username": "test", "password": "secret" }
@@ -5554,14 +6220,17 @@ c")
                 Ok(r) => "ok",
                 Err(e) => "error"
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::String(_)));
     }
-    
+
     #[test]
     fn test_std_http_fetch_with_cookies() {
         // Test that fetch accepts cookies option
-        let result = eval(r#"
+        let result = eval(
+            r#"
             import { fetch } from "std/http"
             
             let cookies = map { "session": "abc123" }
@@ -5575,7 +6244,9 @@ c")
                 Ok(r) => "ok",
                 Err(e) => "error"
             }
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(result, Value::String(_)));
     }
 }

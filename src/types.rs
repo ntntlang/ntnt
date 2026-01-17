@@ -10,46 +10,43 @@ use std::collections::HashMap;
 pub enum Type {
     /// Unit type
     Unit,
-    
+
     /// Integer type
     Int,
-    
+
     /// Floating point type
     Float,
-    
+
     /// Boolean type
     Bool,
-    
+
     /// String type
     String,
-    
+
     /// Array type
     Array(Box<Type>),
-    
+
     /// Tuple type
     Tuple(Vec<Type>),
-    
+
     /// Function type
     Function {
         params: Vec<Type>,
         return_type: Box<Type>,
     },
-    
+
     /// Named type (struct, enum, etc.)
     Named(String),
-    
+
     /// Generic type
-    Generic {
-        name: String,
-        args: Vec<Type>,
-    },
-    
+    Generic { name: String, args: Vec<Type> },
+
     /// Optional type
     Optional(Box<Type>),
-    
+
     /// Any type (for gradual typing)
     Any,
-    
+
     /// Never type (for functions that don't return)
     Never,
 }
@@ -59,22 +56,22 @@ pub enum Type {
 pub enum Effect {
     /// Pure computation (no effects)
     Pure,
-    
+
     /// I/O effect
     IO,
-    
+
     /// Error effect with type
     Error(Box<Type>),
-    
+
     /// State effect
     State(Box<Type>),
-    
+
     /// Async effect
     Async,
-    
+
     /// Requires human approval
     Approval(String),
-    
+
     /// Combined effects
     Combined(Vec<Effect>),
 }
@@ -170,7 +167,10 @@ impl Type {
                 let names: Vec<_> = types.iter().map(|t| t.name()).collect();
                 format!("({})", names.join(", "))
             }
-            Type::Function { params, return_type } => {
+            Type::Function {
+                params,
+                return_type,
+            } => {
                 let param_names: Vec<_> = params.iter().map(|t| t.name()).collect();
                 format!("({}) -> {}", param_names.join(", "), return_type.name())
             }

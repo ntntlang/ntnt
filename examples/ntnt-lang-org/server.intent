@@ -11,8 +11,8 @@ Built with NTNT's HTTP server, router, middleware, and PostgreSQL for the blog.
 - Logo in upper left header
 - Title: "The NTNT Programming Language"
 - Clean, modern aesthetic
-- Hero: Full 100vw edge-to-edge, navy-to-indigo gradient
-- Header: Transparent glass effect with backdrop blur, fixed position floating over hero
+- Hero: Full 100vw edge-to-edge, warm premium gradient (indigo → violet → orange glow)
+- Header: Dark glass effect with backdrop blur, floating over hero
 
 ---
 
@@ -20,9 +20,11 @@ Feature: Homepage
   id: feature.homepage
   description: "Landing page introducing NTNT with modern full-width hero and glass header"
   design:
-    - Hero: Full 100vw edge-to-edge, navy-to-indigo gradient
-    - Header: Transparent glass effect with backdrop blur, fixed position floating over hero
-    - Color palette: Uses brand colors (navy #192F52, indigo #2C2A74, teal #137EA2, orange #F1993F)
+    - Hero: Full 100vw edge-to-edge, warm premium gradient (indigo → violet → orange glow)
+    - Header: Dark glass effect with backdrop blur, floating over hero
+    - Typography: Ensure hero headline has enough line-height/padding to avoid bottom clipping
+    - Separation: Add soft spacing/fade between hero and next section
+    - Color palette: Uses brand colors (indigo #2C2A74, orange #F1993F, teal #137EA2) with warmer accents
   test:
     - request: GET /
       assert:

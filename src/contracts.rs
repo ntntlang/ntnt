@@ -1,16 +1,16 @@
 //! Contract system for Intent
 //!
 //! Implements design-by-contract with preconditions, postconditions, and invariants.
-//! 
+//!
 //! # Design-by-Contract
-//! 
+//!
 //! Intent supports three types of contracts:
 //! - **Preconditions** (`requires`): Conditions that must be true before a function executes
 //! - **Postconditions** (`ensures`): Conditions that must be true after a function executes
 //! - **Invariants** (`invariant`): Conditions that must be true throughout an object's lifetime
-//! 
+//!
 //! # Special Variables in Contracts
-//! 
+//!
 //! - `result`: Refers to the return value in postconditions
 //! - `old(expr)`: Refers to the value of an expression before function execution
 
@@ -24,10 +24,10 @@ use std::fmt;
 pub struct ContractSpec {
     /// Preconditions that must hold before execution
     pub requires: Vec<ContractClause>,
-    
+
     /// Postconditions that must hold after execution
     pub ensures: Vec<ContractClause>,
-    
+
     /// Invariants that must hold throughout execution
     pub invariants: Vec<ContractClause>,
 }
@@ -37,13 +37,13 @@ pub struct ContractSpec {
 pub struct ContractClause {
     /// The condition expression as AST (for evaluation)
     pub expression: Expression,
-    
+
     /// The condition as source code (for error messages)
     pub condition: String,
-    
+
     /// Human-readable description/message
     pub message: Option<String>,
-    
+
     /// Whether this requires human approval to modify
     pub requires_approval: bool,
 }
@@ -88,17 +88,17 @@ impl OldValues {
             values: HashMap::new(),
         }
     }
-    
+
     /// Store an old value
     pub fn store(&mut self, key: String, value: StoredValue) {
         self.values.insert(key, value);
     }
-    
+
     /// Retrieve an old value
     pub fn get(&self, key: &str) -> Option<&StoredValue> {
         self.values.get(key)
     }
-    
+
     /// Check if a key exists
     pub fn contains(&self, key: &str) -> bool {
         self.values.contains_key(key)
@@ -137,16 +137,16 @@ impl fmt::Display for ContractType {
 pub struct ContractChecker {
     /// Named contracts that can be referenced
     contracts: HashMap<String, ContractSpec>,
-    
+
     /// Whether contract checking is enabled
     enabled: bool,
-    
+
     /// Callback for approval requests
     approval_handler: Option<Box<dyn Fn(&str) -> bool>>,
-    
+
     /// Contract violation count for statistics
     violation_count: usize,
-    
+
     /// Contract check count for statistics
     check_count: usize,
 }
@@ -166,7 +166,7 @@ impl ContractChecker {
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
-    
+
     /// Check if contract checking is enabled
     pub fn is_enabled(&self) -> bool {
         self.enabled
@@ -200,67 +200,82 @@ impl ContractChecker {
     }
 
     /// Verify a precondition and return a detailed result
-    pub fn check_precondition(&mut self, condition: &str, result: bool, message: Option<&str>) -> Result<()> {
+    pub fn check_precondition(
+        &mut self,
+        condition: &str,
+        result: bool,
+        message: Option<&str>,
+    ) -> Result<()> {
         self.check_count += 1;
-        
+
         if !self.enabled {
             return Ok(());
         }
 
         if !result {
             self.violation_count += 1;
-            let msg = message.map(|s| s.to_string()).unwrap_or_else(|| {
-                format!("Precondition failed: {}", condition)
-            });
+            let msg = message
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("Precondition failed: {}", condition));
             return Err(IntentError::ContractViolation(msg));
         }
-        
+
         Ok(())
     }
 
     /// Verify a postcondition and return a detailed result
-    pub fn check_postcondition(&mut self, condition: &str, result: bool, message: Option<&str>) -> Result<()> {
+    pub fn check_postcondition(
+        &mut self,
+        condition: &str,
+        result: bool,
+        message: Option<&str>,
+    ) -> Result<()> {
         self.check_count += 1;
-        
+
         if !self.enabled {
             return Ok(());
         }
 
         if !result {
             self.violation_count += 1;
-            let msg = message.map(|s| s.to_string()).unwrap_or_else(|| {
-                format!("Postcondition failed: {}", condition)
-            });
+            let msg = message
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("Postcondition failed: {}", condition));
             return Err(IntentError::ContractViolation(msg));
         }
-        
+
         Ok(())
     }
 
     /// Verify an invariant and return a detailed result
-    pub fn check_invariant(&mut self, condition: &str, result: bool, message: Option<&str>) -> Result<()> {
+    pub fn check_invariant(
+        &mut self,
+        condition: &str,
+        result: bool,
+        message: Option<&str>,
+    ) -> Result<()> {
         self.check_count += 1;
-        
+
         if !self.enabled {
             return Ok(());
         }
 
         if !result {
             self.violation_count += 1;
-            let msg = message.map(|s| s.to_string()).unwrap_or_else(|| {
-                format!("Invariant violated: {}", condition)
-            });
+            let msg = message
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("Invariant violated: {}", condition));
             return Err(IntentError::ContractViolation(msg));
         }
-        
+
         Ok(())
     }
-    
+
     /// Get contract statistics
     pub fn stats(&self) -> (usize, usize) {
         (self.check_count, self.violation_count)
     }
-    
+
     /// Reset statistics
     pub fn reset_stats(&mut self) {
         self.check_count = 0;
@@ -312,7 +327,7 @@ impl ContractSpec {
             requires_approval: false,
         });
     }
-    
+
     /// Check if this contract spec has any clauses
     pub fn is_empty(&self) -> bool {
         self.requires.is_empty() && self.ensures.is_empty() && self.invariants.is_empty()
@@ -332,10 +347,10 @@ mod tests {
     #[test]
     fn test_contract_checker_precondition() {
         let mut checker = ContractChecker::new();
-        
+
         // Should pass when condition is true
         assert!(checker.check_precondition("x > 0", true, None).is_ok());
-        
+
         // Should fail when condition is false
         assert!(checker.check_precondition("x > 0", false, None).is_err());
     }
@@ -343,24 +358,30 @@ mod tests {
     #[test]
     fn test_contract_checker_postcondition() {
         let mut checker = ContractChecker::new();
-        
-        assert!(checker.check_postcondition("result >= 0", true, None).is_ok());
-        assert!(checker.check_postcondition("result >= 0", false, None).is_err());
+
+        assert!(checker
+            .check_postcondition("result >= 0", true, None)
+            .is_ok());
+        assert!(checker
+            .check_postcondition("result >= 0", false, None)
+            .is_err());
     }
 
     #[test]
     fn test_contract_checker_invariant() {
         let mut checker = ContractChecker::new();
-        
+
         assert!(checker.check_invariant("balance >= 0", true, None).is_ok());
-        assert!(checker.check_invariant("balance >= 0", false, None).is_err());
+        assert!(checker
+            .check_invariant("balance >= 0", false, None)
+            .is_err());
     }
 
     #[test]
     fn test_contract_checker_disabled() {
         let mut checker = ContractChecker::new();
         checker.set_enabled(false);
-        
+
         // Should pass even when condition is false if disabled
         assert!(checker.check_precondition("x > 0", false, None).is_ok());
     }
@@ -368,11 +389,11 @@ mod tests {
     #[test]
     fn test_contract_stats() {
         let mut checker = ContractChecker::new();
-        
+
         let _ = checker.check_precondition("x > 0", true, None);
         let _ = checker.check_postcondition("result > 0", true, None);
         let _ = checker.check_invariant("y > 0", false, None);
-        
+
         let (checks, violations) = checker.stats();
         assert_eq!(checks, 3);
         assert_eq!(violations, 1);
@@ -383,10 +404,10 @@ mod tests {
         let mut old = OldValues::new();
         old.store("x".to_string(), StoredValue::Int(42));
         old.store("name".to_string(), StoredValue::String("test".to_string()));
-        
+
         assert!(old.contains("x"));
         assert!(!old.contains("y"));
-        
+
         match old.get("x") {
             Some(StoredValue::Int(n)) => assert_eq!(*n, 42),
             _ => panic!("Expected Int"),

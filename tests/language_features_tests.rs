@@ -5,9 +5,9 @@
 //! - Nested map inference
 //! - CSV parsing
 
-use std::process::Command;
 use std::fs;
 use std::io::Write;
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -16,54 +16,60 @@ static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn unique_test_file(prefix: &str) -> String {
     let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
     let thread_id = format!("{:?}", std::thread::current().id());
-    format!("/tmp/ntnt_{}_{}_{}_{}.tnt", prefix, std::process::id(), thread_id.replace(|c: char| !c.is_alphanumeric(), "_"), counter)
+    format!(
+        "/tmp/ntnt_{}_{}_{}_{}.tnt",
+        prefix,
+        std::process::id(),
+        thread_id.replace(|c: char| !c.is_alphanumeric(), "_"),
+        counter
+    )
 }
 
 /// Helper to run ntnt with a code string
 fn run_ntnt_code(code: &str) -> (String, String, i32) {
     let test_file = unique_test_file("feature_test");
-    
+
     let mut file = fs::File::create(&test_file).expect("Failed to create test file");
     writeln!(file, "{}", code).expect("Failed to write test file");
     drop(file);
-    
+
     let output = Command::new("./target/release/ntnt")
         .args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Failed to execute ntnt");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let exit_code = output.status.code().unwrap_or(-1);
-    
+
     // Clean up
     fs::remove_file(&test_file).ok();
-    
+
     (stdout, stderr, exit_code)
 }
 
 /// Helper to run ntnt parse on code
 fn run_ntnt_parse(code: &str) -> (String, String, i32) {
     let test_file = unique_test_file("parse_test");
-    
+
     let mut file = fs::File::create(&test_file).expect("Failed to create test file");
     writeln!(file, "{}", code).expect("Failed to write test file");
     drop(file);
-    
+
     let output = Command::new("./target/release/ntnt")
         .args(&["parse", &test_file, "--json"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Failed to execute ntnt");
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let exit_code = output.status.code().unwrap_or(-1);
-    
+
     // Clean up
     fs::remove_file(&test_file).ok();
-    
+
     (stdout, stderr, exit_code)
 }
 
@@ -123,7 +129,10 @@ for entry in e {
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "entries() should work");
     assert!(stdout.contains("2"), "Should have 2 entries");
-    assert!(stdout.contains("name: Alice") || stdout.contains("age: 30"), "Should contain entry data");
+    assert!(
+        stdout.contains("name: Alice") || stdout.contains("age: 30"),
+        "Should contain entry data"
+    );
 }
 
 #[test]
@@ -137,7 +146,7 @@ print(has_key(data, "also_here"))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "has_key() should work");
-    
+
     let lines: Vec<&str> = stdout.trim().lines().collect();
     assert_eq!(lines.len(), 3, "Should have 3 output lines");
     assert_eq!(lines[0], "true", "has_key for 'present' should be true");
@@ -166,7 +175,10 @@ print(has_key(empty, "anything"))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "has_key() on empty map should work");
-    assert!(stdout.contains("false"), "Empty map should not have any key");
+    assert!(
+        stdout.contains("false"),
+        "Empty map should not have any key"
+    );
 }
 
 #[test]
@@ -250,7 +262,7 @@ print(len(keys(data["nested_empty"]["inner"])))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Empty nested maps should work");
-    
+
     let lines: Vec<&str> = stdout.trim().lines().collect();
     assert_eq!(lines[0], "0", "Empty map should have 0 keys");
     assert_eq!(lines[1], "0", "Nested empty map should have 0 keys");
@@ -278,7 +290,10 @@ print(has_key(users["alice"], "missing"))
     assert_eq!(exit_code, 0, "Nested maps with iteration should work");
     assert!(stdout.contains("185"), "Total score should be 185");
     assert!(stdout.contains("true"), "has_key should find 'score'");
-    assert!(stdout.contains("false"), "has_key should not find 'missing'");
+    assert!(
+        stdout.contains("false"),
+        "has_key should not find 'missing'"
+    );
 }
 
 #[test]
@@ -306,7 +321,7 @@ let data = map {
 "#;
     let (stdout, _, exit_code) = run_ntnt_parse(code);
     assert_eq!(exit_code, 0, "Nested map should parse");
-    
+
     // The AST should contain MapLiteral nodes
     assert!(stdout.contains("MapLiteral"), "Should parse as MapLiteral");
 }
@@ -340,8 +355,10 @@ print(data)
     let (_, stderr, exit_code) = run_ntnt_code(code);
     // This should either fail to parse or produce unexpected behavior
     // because {} at top level is a block, not a map
-    assert!(exit_code != 0 || stderr.contains("error") || stderr.contains("Error"), 
-        "Top-level {{}} without map keyword should not work as a map");
+    assert!(
+        exit_code != 0 || stderr.contains("error") || stderr.contains("Error"),
+        "Top-level {{}} without map keyword should not work as a map"
+    );
 }
 
 // ============================================================================
@@ -364,7 +381,10 @@ print(rows[2][1])
     assert_eq!(exit_code, 0, "CSV parsing should work");
     assert!(stdout.contains("3"), "Should have 3 rows (header + 2 data)");
     assert!(stdout.contains("name"), "First cell should be 'name'");
-    assert!(stdout.contains("25"), "Should access Bob's age (row 2, col 1)");
+    assert!(
+        stdout.contains("25"),
+        "Should access Bob's age (row 2, col 1)"
+    );
 }
 // ============================================================================
 // Truthy/Falsy Values
@@ -396,8 +416,14 @@ if full { print("full-truthy") }
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "String truthiness should work");
-    assert!(stdout.contains("empty-falsy"), "Empty string should be falsy");
-    assert!(stdout.contains("full-truthy"), "Non-empty string should be truthy");
+    assert!(
+        stdout.contains("empty-falsy"),
+        "Empty string should be falsy"
+    );
+    assert!(
+        stdout.contains("full-truthy"),
+        "Non-empty string should be truthy"
+    );
 }
 
 #[test]
@@ -410,8 +436,14 @@ if full { print("full-truthy") }
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Array truthiness should work");
-    assert!(stdout.contains("empty-falsy"), "Empty array should be falsy");
-    assert!(stdout.contains("full-truthy"), "Non-empty array should be truthy");
+    assert!(
+        stdout.contains("empty-falsy"),
+        "Empty array should be falsy"
+    );
+    assert!(
+        stdout.contains("full-truthy"),
+        "Non-empty array should be truthy"
+    );
 }
 
 #[test]
@@ -425,7 +457,10 @@ if full { print("full-truthy") }
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Map truthiness should work");
     assert!(stdout.contains("empty-falsy"), "Empty map should be falsy");
-    assert!(stdout.contains("full-truthy"), "Non-empty map should be truthy");
+    assert!(
+        stdout.contains("full-truthy"),
+        "Non-empty map should be truthy"
+    );
 }
 
 #[test]
@@ -459,8 +494,14 @@ if !empty {
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Truthy conditionals should work");
-    assert!(stdout.contains("query-present"), "Non-empty string in && should work");
-    assert!(stdout.contains("empty-absent"), "!empty_string should be true");
+    assert!(
+        stdout.contains("query-present"),
+        "Non-empty string in && should work"
+    );
+    assert!(
+        stdout.contains("empty-absent"),
+        "!empty_string should be true"
+    );
 }
 
 // ==========================================================================
@@ -475,8 +516,14 @@ let greeting = """Hello, {{name}}!"""
 print(greeting)
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
-    assert_eq!(exit_code, 0, "Template string basic interpolation should work");
-    assert!(stdout.contains("Hello, World!"), "Should interpolate {{name}}");
+    assert_eq!(
+        exit_code, 0,
+        "Template string basic interpolation should work"
+    );
+    assert!(
+        stdout.contains("Hello, World!"),
+        "Should interpolate {{name}}"
+    );
 }
 
 #[test]
@@ -487,7 +534,10 @@ print(css)
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "CSS in template string should work");
-    assert!(stdout.contains("h1 { color: blue; }"), "Single braces should pass through unchanged");
+    assert!(
+        stdout.contains("h1 { color: blue; }"),
+        "Single braces should pass through unchanged"
+    );
 }
 
 #[test]
@@ -513,7 +563,10 @@ print(out)
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Template if condition should work");
-    assert!(stdout.contains("visible"), "Should show content when condition is true");
+    assert!(
+        stdout.contains("visible"),
+        "Should show content when condition is true"
+    );
 }
 
 #[test]
@@ -525,8 +578,14 @@ print(nav)
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Template if-else should work");
-    assert!(stdout.contains("login"), "Should show else branch when condition is false");
-    assert!(!stdout.contains("profile"), "Should not show then branch when condition is false");
+    assert!(
+        stdout.contains("login"),
+        "Should show else branch when condition is false"
+    );
+    assert!(
+        !stdout.contains("profile"),
+        "Should not show then branch when condition is false"
+    );
 }
 
 #[test]
@@ -537,7 +596,10 @@ print(out)
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Template escaped braces should work");
-    assert!(stdout.contains("{{ and }}"), "Should output literal double braces");
+    assert!(
+        stdout.contains("{{ and }}"),
+        "Should output literal double braces"
+    );
 }
 
 #[test]
@@ -551,7 +613,10 @@ print(out)
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Template complex expressions should work");
-    assert!(stdout.contains("Widget: $99"), "Should interpolate map access expressions");
+    assert!(
+        stdout.contains("Widget: $99"),
+        "Should interpolate map access expressions"
+    );
 }
 
 #[test]
@@ -569,7 +634,10 @@ print(page)
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Multiline template string should work");
-    assert!(stdout.contains("<h1>Test</h1>"), "Should interpolate in multiline content");
+    assert!(
+        stdout.contains("<h1>Test</h1>"),
+        "Should interpolate in multiline content"
+    );
     assert!(stdout.contains("<html>"), "Should preserve HTML tags");
 }
 
@@ -589,8 +657,14 @@ print(missing)
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "get_key() with 2 args should work");
-    assert!(stdout.contains("Some(Alice)") || stdout.contains("Option::Some(Alice)"), "Should return Some for existing key");
-    assert!(stdout.contains("None") || stdout.contains("Option::None"), "Should return None for missing key");
+    assert!(
+        stdout.contains("Some(Alice)") || stdout.contains("Option::Some(Alice)"),
+        "Should return Some for existing key"
+    );
+    assert!(
+        stdout.contains("None") || stdout.contains("Option::None"),
+        "Should return None for missing key"
+    );
 }
 
 #[test]
@@ -609,8 +683,14 @@ print(city)
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "get_key() with default should work");
-    assert!(stdout.contains("Alice"), "Should return value for existing key");
-    assert!(stdout.contains("Boston"), "Should return default for missing key");
+    assert!(
+        stdout.contains("Alice"),
+        "Should return value for existing key"
+    );
+    assert!(
+        stdout.contains("Boston"),
+        "Should return default for missing key"
+    );
 }
 
 #[test]
@@ -641,6 +721,9 @@ print(val)
     assert_eq!(exit_code, 0, "?? operator should work");
     assert!(stdout.contains("Alice"), "Should unwrap Some to Alice");
     assert!(stdout.contains("Unknown"), "Should return default for None");
-    assert!(stdout.contains("Fallback"), "Should return fallback for explicit None");
+    assert!(
+        stdout.contains("Fallback"),
+        "Should return fallback for explicit None"
+    );
     assert!(stdout.contains("42"), "Should unwrap Some(42)");
 }

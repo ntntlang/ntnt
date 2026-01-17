@@ -1,29 +1,29 @@
 //! HTTP Server module for NTNT
-//! 
+//!
 //! Provides a simple HTTP server with routing support for building web applications.
-//! 
+//!
 //! Example usage:
 //! ```ntnt
 //! use "std/http/server"
-//! 
+//!
 //! fn home(req) {
 //!     return text("Hello, World!")
 //! }
-//! 
+//!
 //! fn get_user(req) {
 //!     let id = req.params.id
 //!     return json({ "id": id, "name": "User " + id })
 //! }
-//! 
+//!
 //! get("/", home)
 //! get("/users/{id}", get_user)
 //! listen(8080)
 //! ```
 
-use std::collections::HashMap;
-use std::time::SystemTime;
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
+use std::collections::HashMap;
+use std::time::SystemTime;
 
 /// Represents a route segment - either static text or a parameter
 #[derive(Debug, Clone)]
@@ -43,17 +43,17 @@ pub struct Route {
 /// Information about a route's source file for hot-reload
 #[derive(Debug, Clone)]
 pub struct RouteSource {
-    pub file_path: Option<String>,  // None for inline routes
-    pub mtime: Option<SystemTime>,  // Last modification time
+    pub file_path: Option<String>, // None for inline routes
+    pub mtime: Option<SystemTime>, // Last modification time
 }
 
 /// Server state stored in the interpreter
 #[derive(Debug, Clone)]
 pub struct ServerState {
-    pub routes: Vec<(Route, Value, RouteSource)>,  // Routes with handlers and source info
-    pub static_dirs: Vec<(String, String)>,  // (url_prefix, filesystem_path)
-    pub middleware: Vec<Value>,  // Middleware functions to run before handlers
-    pub hot_reload: bool,  // Whether hot-reload is enabled
+    pub routes: Vec<(Route, Value, RouteSource)>, // Routes with handlers and source info
+    pub static_dirs: Vec<(String, String)>,       // (url_prefix, filesystem_path)
+    pub middleware: Vec<Value>,                   // Middleware functions to run before handlers
+    pub hot_reload: bool,                         // Whether hot-reload is enabled
 }
 
 impl ServerState {
@@ -62,44 +62,54 @@ impl ServerState {
             routes: Vec::new(),
             static_dirs: Vec::new(),
             middleware: Vec::new(),
-            hot_reload: true,  // Enable hot-reload by default in dev
+            hot_reload: true, // Enable hot-reload by default in dev
         }
     }
-    
+
     pub fn clear(&mut self) {
         self.routes.clear();
         self.static_dirs.clear();
         self.middleware.clear();
     }
-    
+
     /// Add a route without source file info (inline routes)
     pub fn add_route(&mut self, method: &str, pattern: &str, handler: Value) {
         self.add_route_with_source(method, pattern, handler, None);
     }
-    
+
     /// Add a route with source file info for hot-reload
-    pub fn add_route_with_source(&mut self, method: &str, pattern: &str, handler: Value, file_path: Option<String>) {
+    pub fn add_route_with_source(
+        &mut self,
+        method: &str,
+        pattern: &str,
+        handler: Value,
+        file_path: Option<String>,
+    ) {
         let route = Route {
             method: method.to_string(),
             pattern: pattern.to_string(),
             segments: parse_route_pattern(pattern),
         };
-        
+
         // Get file mtime if path provided
-        let mtime = file_path.as_ref().and_then(|p| {
-            std::fs::metadata(p).ok().and_then(|m| m.modified().ok())
-        });
-        
+        let mtime = file_path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok().and_then(|m| m.modified().ok()));
+
         let source = RouteSource { file_path, mtime };
         self.routes.push((route, handler, source));
     }
-    
+
     pub fn route_count(&self) -> usize {
         self.routes.len()
     }
-    
+
     /// Find a route and return its index for potential hot-reload
-    pub fn find_route(&self, method: &str, path: &str) -> Option<(Value, HashMap<String, String>, usize)> {
+    pub fn find_route(
+        &self,
+        method: &str,
+        path: &str,
+    ) -> Option<(Value, HashMap<String, String>, usize)> {
         for (index, (route, handler, _source)) in self.routes.iter().enumerate() {
             if route.method == method {
                 if let Some(params) = match_route(path, route) {
@@ -109,13 +119,13 @@ impl ServerState {
         }
         None
     }
-    
+
     /// Check if a route needs reloading based on file mtime
     pub fn needs_reload(&self, route_index: usize) -> bool {
         if !self.hot_reload {
             return false;
         }
-        
+
         if let Some((_, _, source)) = self.routes.get(route_index) {
             if let (Some(file_path), Some(cached_mtime)) = (&source.file_path, &source.mtime) {
                 // Check current file mtime
@@ -128,35 +138,41 @@ impl ServerState {
         }
         false
     }
-    
+
     /// Update a route's handler after hot-reload
     pub fn update_route_handler(&mut self, route_index: usize, new_handler: Value) {
         if let Some((_, handler, source)) = self.routes.get_mut(route_index) {
             *handler = new_handler;
             // Update mtime
             if let Some(file_path) = &source.file_path {
-                source.mtime = std::fs::metadata(file_path).ok().and_then(|m| m.modified().ok());
+                source.mtime = std::fs::metadata(file_path)
+                    .ok()
+                    .and_then(|m| m.modified().ok());
             }
         }
     }
-    
+
     /// Get the source info for a route
     pub fn get_route_source(&self, route_index: usize) -> Option<&RouteSource> {
         self.routes.get(route_index).map(|(_, _, source)| source)
     }
-    
+
     pub fn add_static_dir(&mut self, prefix: String, directory: String) {
         self.static_dirs.push((prefix, directory));
     }
-    
+
     pub fn add_middleware(&mut self, handler: Value) {
         self.middleware.push(handler);
     }
-    
+
     pub fn find_static_file(&self, path: &str) -> Option<(String, String)> {
         for (prefix, directory) in &self.static_dirs {
             // Check if path starts with prefix
-            let prefix_path = if prefix.ends_with('/') { prefix.clone() } else { format!("{}/", prefix) };
+            let prefix_path = if prefix.ends_with('/') {
+                prefix.clone()
+            } else {
+                format!("{}/", prefix)
+            };
             if path.starts_with(&prefix_path) || path == prefix.trim_end_matches('/') {
                 // Get the relative path after the prefix
                 let relative = if path == prefix.trim_end_matches('/') {
@@ -164,13 +180,17 @@ impl ServerState {
                 } else {
                     path.strip_prefix(&prefix_path).unwrap_or("").to_string()
                 };
-                
+
                 // Handle empty relative path (root of static dir)
-                let relative = if relative.is_empty() { "index.html".to_string() } else { relative };
-                
+                let relative = if relative.is_empty() {
+                    "index.html".to_string()
+                } else {
+                    relative
+                };
+
                 // Construct full filesystem path
                 let full_path = std::path::Path::new(directory).join(&relative);
-                
+
                 // Security: ensure we're not escaping the directory (path traversal)
                 if let Ok(canonical) = full_path.canonicalize() {
                     if let Ok(base_canonical) = std::path::Path::new(directory).canonicalize() {
@@ -179,14 +199,14 @@ impl ServerState {
                         }
                     }
                 }
-                
+
                 // If canonicalize fails (file doesn't exist), try the raw path
                 return Some((full_path.to_string_lossy().to_string(), relative));
             }
         }
         None
     }
-    
+
     pub fn get_middleware(&self) -> &[Value] {
         &self.middleware
     }
@@ -206,7 +226,7 @@ fn parse_route_pattern(pattern: &str) -> Vec<RouteSegment> {
         .filter(|s| !s.is_empty())
         .map(|segment| {
             if segment.starts_with('{') && segment.ends_with('}') {
-                RouteSegment::Param(segment[1..segment.len()-1].to_string())
+                RouteSegment::Param(segment[1..segment.len() - 1].to_string())
             } else {
                 RouteSegment::Static(segment.to_string())
             }
@@ -217,13 +237,13 @@ fn parse_route_pattern(pattern: &str) -> Vec<RouteSegment> {
 /// Match a URL path against a route, returning extracted parameters if matched
 fn match_route(path: &str, route: &Route) -> Option<HashMap<String, String>> {
     let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    
+
     if path_segments.len() != route.segments.len() {
         return None;
     }
-    
+
     let mut params = HashMap::new();
-    
+
     for (path_seg, route_seg) in path_segments.iter().zip(route.segments.iter()) {
         match route_seg {
             RouteSegment::Static(expected) => {
@@ -236,7 +256,7 @@ fn match_route(path: &str, route: &Route) -> Option<HashMap<String, String>> {
             }
         }
     }
-    
+
     Some(params)
 }
 
@@ -247,16 +267,19 @@ pub fn request_to_value(
     body: String,
 ) -> Value {
     let mut req_map: HashMap<String, Value> = HashMap::new();
-    
+
     // Method
-    req_map.insert("method".to_string(), Value::String(request.method().to_string()));
-    
+    req_map.insert(
+        "method".to_string(),
+        Value::String(request.method().to_string()),
+    );
+
     // URL and path
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or(&url).to_string();
     req_map.insert("url".to_string(), Value::String(url.clone()));
     req_map.insert("path".to_string(), Value::String(path));
-    
+
     // Query string
     let query = if url.contains('?') {
         url.split('?').nth(1).unwrap_or("").to_string()
@@ -264,7 +287,7 @@ pub fn request_to_value(
         String::new()
     };
     req_map.insert("query".to_string(), Value::String(query.clone()));
-    
+
     // Parse query params into a map
     let mut query_params: HashMap<String, Value> = HashMap::new();
     if !query.is_empty() {
@@ -275,14 +298,14 @@ pub fn request_to_value(
         }
     }
     req_map.insert("query_params".to_string(), Value::Map(query_params));
-    
+
     // Route params (from path like /users/{id})
     let param_map: HashMap<String, Value> = params
         .into_iter()
         .map(|(k, v)| (k, Value::String(v)))
         .collect();
     req_map.insert("params".to_string(), Value::Map(param_map));
-    
+
     // Headers
     let mut headers: HashMap<String, Value> = HashMap::new();
     for header in request.headers() {
@@ -292,10 +315,10 @@ pub fn request_to_value(
         );
     }
     req_map.insert("headers".to_string(), Value::Map(headers));
-    
+
     // Body
     req_map.insert("body".to_string(), Value::String(body));
-    
+
     Value::Map(req_map)
 }
 
@@ -304,7 +327,7 @@ fn intent_value_to_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Int(n) => serde_json::Value::Number((*n).into()),
         Value::Float(f) => serde_json::Value::Number(
-            serde_json::Number::from_f64(*f).unwrap_or_else(|| serde_json::Number::from(0))
+            serde_json::Number::from_f64(*f).unwrap_or_else(|| serde_json::Number::from(0)),
         ),
         Value::String(s) => serde_json::Value::String(s.clone()),
         Value::Bool(b) => serde_json::Value::Bool(*b),
@@ -335,123 +358,140 @@ fn create_response_value(status: i64, headers: HashMap<String, Value>, body: Str
 /// Initialize the std/http/server module
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
-    
+
     // Response.text(body) -> Response - Create a text response
-    module.insert("text".to_string(), Value::NativeFunction {
-        name: "text".to_string(),
-        arity: 1,
-        func: |args| {
-            match &args[0] {
-                Value::String(body) => {
-                    let mut headers = HashMap::new();
-                    headers.insert(
-                        "content-type".to_string(),
-                        Value::String("text/plain; charset=utf-8".to_string()),
-                    );
-                    // Prevent caching for dynamic text content
-                    headers.insert(
-                        "cache-control".to_string(),
-                        Value::String("no-cache, no-store, must-revalidate".to_string()),
-                    );
-                    Ok(create_response_value(200, headers, body.clone()))
-                }
-                _ => Err(IntentError::TypeError("text() requires a string".to_string())),
-            }
-        },
-    });
-    
-    // Response.html(body, status_code?) -> Response - Create an HTML response
-    // Includes cache-control headers to prevent browser caching
-    module.insert("html".to_string(), Value::NativeFunction {
-        name: "html".to_string(),
-        arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
-        func: |args| {
-            if args.is_empty() || args.len() > 2 {
-                return Err(IntentError::TypeError(
-                    "html() requires 1 or 2 arguments (body, optional status_code)".to_string()
-                ));
-            }
-            
-            let body = match &args[0] {
-                Value::String(s) => s.clone(),
-                _ => return Err(IntentError::TypeError("html() body must be a string".to_string())),
-            };
-            
-            let status_code = if args.len() == 2 {
-                match &args[1] {
-                    Value::Int(code) => *code,
-                    _ => return Err(IntentError::TypeError(
-                        "html() status code must be an integer".to_string()
+    module.insert(
+        "text".to_string(),
+        Value::NativeFunction {
+            name: "text".to_string(),
+            arity: 1,
+            func: |args| {
+                match &args[0] {
+                    Value::String(body) => {
+                        let mut headers = HashMap::new();
+                        headers.insert(
+                            "content-type".to_string(),
+                            Value::String("text/plain; charset=utf-8".to_string()),
+                        );
+                        // Prevent caching for dynamic text content
+                        headers.insert(
+                            "cache-control".to_string(),
+                            Value::String("no-cache, no-store, must-revalidate".to_string()),
+                        );
+                        Ok(create_response_value(200, headers, body.clone()))
+                    }
+                    _ => Err(IntentError::TypeError(
+                        "text() requires a string".to_string(),
                     )),
                 }
-            } else {
-                200
-            };
-            
-            let mut headers = HashMap::new();
-            headers.insert(
-                "content-type".to_string(),
-                Value::String("text/html; charset=utf-8".to_string()),
-            );
-            // Prevent browser caching of dynamic HTML content
-            headers.insert(
-                "cache-control".to_string(),
-                Value::String("no-cache, no-store, must-revalidate".to_string()),
-            );
-            headers.insert(
-                "pragma".to_string(),
-                Value::String("no-cache".to_string()),
-            );
-            Ok(create_response_value(status_code, headers, body))
+            },
         },
-    });
-    
+    );
+
+    // Response.html(body, status_code?) -> Response - Create an HTML response
+    // Includes cache-control headers to prevent browser caching
+    module.insert(
+        "html".to_string(),
+        Value::NativeFunction {
+            name: "html".to_string(),
+            arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::TypeError(
+                        "html() requires 1 or 2 arguments (body, optional status_code)".to_string(),
+                    ));
+                }
+
+                let body = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "html() body must be a string".to_string(),
+                        ))
+                    }
+                };
+
+                let status_code = if args.len() == 2 {
+                    match &args[1] {
+                        Value::Int(code) => *code,
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "html() status code must be an integer".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    200
+                };
+
+                let mut headers = HashMap::new();
+                headers.insert(
+                    "content-type".to_string(),
+                    Value::String("text/html; charset=utf-8".to_string()),
+                );
+                // Prevent browser caching of dynamic HTML content
+                headers.insert(
+                    "cache-control".to_string(),
+                    Value::String("no-cache, no-store, must-revalidate".to_string()),
+                );
+                headers.insert("pragma".to_string(), Value::String("no-cache".to_string()));
+                Ok(create_response_value(status_code, headers, body))
+            },
+        },
+    );
+
     // Response.json(data, status_code?) -> Response - Create a JSON response
     // If status_code is provided, use it; otherwise default to 200
     // Includes cache-control headers to prevent browser caching
-    module.insert("json".to_string(), Value::NativeFunction {
-        name: "json".to_string(),
-        arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
-        func: |args| {
-            if args.is_empty() || args.len() > 2 {
-                return Err(IntentError::TypeError(
-                    "json() requires 1 or 2 arguments (data, optional status_code)".to_string()
-                ));
-            }
-            
-            let status_code = if args.len() == 2 {
-                match &args[1] {
-                    Value::Int(code) => *code,
-                    _ => return Err(IntentError::TypeError(
-                        "json() status code must be an integer".to_string()
-                    )),
+    module.insert(
+        "json".to_string(),
+        Value::NativeFunction {
+            name: "json".to_string(),
+            arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::TypeError(
+                        "json() requires 1 or 2 arguments (data, optional status_code)".to_string(),
+                    ));
                 }
-            } else {
-                200
-            };
-            
-            let json_value = intent_value_to_json(&args[0]);
-            let body = json_value.to_string();
-            let mut headers = HashMap::new();
-            headers.insert(
-                "content-type".to_string(),
-                Value::String("application/json".to_string()),
-            );
-            // Prevent browser caching of API responses
-            headers.insert(
-                "cache-control".to_string(),
-                Value::String("no-cache, no-store, must-revalidate".to_string()),
-            );
-            Ok(create_response_value(status_code, headers, body))
+
+                let status_code = if args.len() == 2 {
+                    match &args[1] {
+                        Value::Int(code) => *code,
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "json() status code must be an integer".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    200
+                };
+
+                let json_value = intent_value_to_json(&args[0]);
+                let body = json_value.to_string();
+                let mut headers = HashMap::new();
+                headers.insert(
+                    "content-type".to_string(),
+                    Value::String("application/json".to_string()),
+                );
+                // Prevent browser caching of API responses
+                headers.insert(
+                    "cache-control".to_string(),
+                    Value::String("no-cache, no-store, must-revalidate".to_string()),
+                );
+                Ok(create_response_value(status_code, headers, body))
+            },
         },
-    });
-    
+    );
+
     // Response.status(code, body) -> Response - Create response with status code
-    module.insert("status".to_string(), Value::NativeFunction {
-        name: "status".to_string(),
-        arity: 2,
-        func: |args| {
-            match (&args[0], &args[1]) {
+    module.insert(
+        "status".to_string(),
+        Value::NativeFunction {
+            name: "status".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
                 (Value::Int(code), Value::String(body)) => {
                     let mut headers = HashMap::new();
                     headers.insert(
@@ -460,50 +500,56 @@ pub fn init() -> HashMap<String, Value> {
                     );
                     Ok(create_response_value(*code, headers, body.clone()))
                 }
-                _ => Err(IntentError::TypeError("status() requires int and string".to_string())),
-            }
+                _ => Err(IntentError::TypeError(
+                    "status() requires int and string".to_string(),
+                )),
+            },
         },
-    });
-    
+    );
+
     // Response.redirect(url) -> Response - Create a redirect response
-    module.insert("redirect".to_string(), Value::NativeFunction {
-        name: "redirect".to_string(),
-        arity: 1,
-        func: |args| {
-            match &args[0] {
+    module.insert(
+        "redirect".to_string(),
+        Value::NativeFunction {
+            name: "redirect".to_string(),
+            arity: 1,
+            func: |args| match &args[0] {
                 Value::String(url) => {
                     let mut headers = HashMap::new();
-                    headers.insert(
-                        "location".to_string(),
-                        Value::String(url.clone()),
-                    );
+                    headers.insert("location".to_string(), Value::String(url.clone()));
                     Ok(create_response_value(302, headers, String::new()))
                 }
-                _ => Err(IntentError::TypeError("redirect() requires a URL string".to_string())),
-            }
+                _ => Err(IntentError::TypeError(
+                    "redirect() requires a URL string".to_string(),
+                )),
+            },
         },
-    });
-    
+    );
+
     // Response.not_found() -> Response - Create a 404 response
-    module.insert("not_found".to_string(), Value::NativeFunction {
-        name: "not_found".to_string(),
-        arity: 0,
-        func: |_args| {
-            let mut headers = HashMap::new();
-            headers.insert(
-                "content-type".to_string(),
-                Value::String("text/plain; charset=utf-8".to_string()),
-            );
-            Ok(create_response_value(404, headers, "Not Found".to_string()))
+    module.insert(
+        "not_found".to_string(),
+        Value::NativeFunction {
+            name: "not_found".to_string(),
+            arity: 0,
+            func: |_args| {
+                let mut headers = HashMap::new();
+                headers.insert(
+                    "content-type".to_string(),
+                    Value::String("text/plain; charset=utf-8".to_string()),
+                );
+                Ok(create_response_value(404, headers, "Not Found".to_string()))
+            },
         },
-    });
-    
+    );
+
     // Response.error(message) -> Response - Create a 500 error response
-    module.insert("error".to_string(), Value::NativeFunction {
-        name: "error".to_string(),
-        arity: 1,
-        func: |args| {
-            match &args[0] {
+    module.insert(
+        "error".to_string(),
+        Value::NativeFunction {
+            name: "error".to_string(),
+            arity: 1,
+            func: |args| match &args[0] {
                 Value::String(msg) => {
                     let mut headers = HashMap::new();
                     headers.insert(
@@ -512,11 +558,13 @@ pub fn init() -> HashMap<String, Value> {
                     );
                     Ok(create_response_value(500, headers, msg.clone()))
                 }
-                _ => Err(IntentError::TypeError("error() requires a string".to_string())),
-            }
+                _ => Err(IntentError::TypeError(
+                    "error() requires a string".to_string(),
+                )),
+            },
         },
-    });
-    
+    );
+
     // Response.static_file(content, content_type, max_age?) -> Response
     // Create a response with caching enabled for static assets
     // max_age is in seconds, defaults to 3600 (1 hour)
@@ -529,17 +577,17 @@ pub fn init() -> HashMap<String, Value> {
                     "static_file() requires 2-3 arguments (content, content_type, optional max_age)".to_string()
                 ));
             }
-            
+
             let content = match &args[0] {
                 Value::String(s) => s.clone(),
                 _ => return Err(IntentError::TypeError("static_file() content must be a string".to_string())),
             };
-            
+
             let content_type = match &args[1] {
                 Value::String(s) => s.clone(),
                 _ => return Err(IntentError::TypeError("static_file() content_type must be a string".to_string())),
             };
-            
+
             let max_age = if args.len() == 3 {
                 match &args[2] {
                     Value::Int(n) => *n,
@@ -548,7 +596,7 @@ pub fn init() -> HashMap<String, Value> {
             } else {
                 3600 // Default 1 hour
             };
-            
+
             let mut headers = HashMap::new();
             headers.insert(
                 "content-type".to_string(),
@@ -561,40 +609,55 @@ pub fn init() -> HashMap<String, Value> {
             Ok(create_response_value(200, headers, content))
         },
     });
-    
+
     // Response.response(status, headers, body) -> Response
     // Create a fully custom response with complete control over headers
-    module.insert("response".to_string(), Value::NativeFunction {
-        name: "response".to_string(),
-        arity: 3,
-        func: |args| {
-            let status = match &args[0] {
-                Value::Int(code) => *code,
-                _ => return Err(IntentError::TypeError("response() status must be an integer".to_string())),
-            };
-            
-            let custom_headers = match &args[1] {
-                Value::Map(map) => map.clone(),
-                _ => return Err(IntentError::TypeError("response() headers must be a map".to_string())),
-            };
-            
-            let body = match &args[2] {
-                Value::String(s) => s.clone(),
-                _ => return Err(IntentError::TypeError("response() body must be a string".to_string())),
-            };
-            
-            let mut headers = HashMap::new();
-            for (key, value) in custom_headers {
-                headers.insert(key.to_lowercase(), value);
-            }
-            
-            Ok(create_response_value(status, headers, body))
+    module.insert(
+        "response".to_string(),
+        Value::NativeFunction {
+            name: "response".to_string(),
+            arity: 3,
+            func: |args| {
+                let status = match &args[0] {
+                    Value::Int(code) => *code,
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "response() status must be an integer".to_string(),
+                        ))
+                    }
+                };
+
+                let custom_headers = match &args[1] {
+                    Value::Map(map) => map.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "response() headers must be a map".to_string(),
+                        ))
+                    }
+                };
+
+                let body = match &args[2] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "response() body must be a string".to_string(),
+                        ))
+                    }
+                };
+
+                let mut headers = HashMap::new();
+                for (key, value) in custom_headers {
+                    headers.insert(key.to_lowercase(), value);
+                }
+
+                Ok(create_response_value(status, headers, body))
+            },
         },
-    });
-    
+    );
+
     // Note: new_server, get, post, put, delete, patch, and listen are handled
     // specially in the interpreter because they need access to interpreter state
-    
+
     module
 }
 
@@ -607,7 +670,10 @@ pub fn start_server(port: u16) -> Result<tiny_http::Server> {
 
 /// Start the HTTP server with timeout support (for test mode)
 /// Binds to 127.0.0.1 only for security in test mode
-pub fn start_server_with_timeout(port: u16, _timeout: std::time::Duration) -> Result<tiny_http::Server> {
+pub fn start_server_with_timeout(
+    port: u16,
+    _timeout: std::time::Duration,
+) -> Result<tiny_http::Server> {
     let addr = format!("127.0.0.1:{}", port);
     tiny_http::Server::http(&addr)
         .map_err(|e| IntentError::RuntimeError(format!("Failed to start test server: {}", e)))
@@ -621,12 +687,15 @@ pub fn process_request(
     // Read the request body
     let mut body = String::new();
     if let Err(e) = request.as_reader().read_to_string(&mut body) {
-        return Err(IntentError::RuntimeError(format!("Failed to read request body: {}", e)));
+        return Err(IntentError::RuntimeError(format!(
+            "Failed to read request body: {}",
+            e
+        )));
     }
-    
+
     // Create request value
     let req_value = request_to_value(&request, params, body);
-    
+
     Ok((req_value, request))
 }
 
@@ -638,26 +707,25 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
                 Some(Value::Int(s)) => *s as u16,
                 _ => 200,
             };
-            
+
             let headers = match map.get("headers") {
                 Some(Value::Map(h)) => h.clone(),
                 _ => HashMap::new(),
             };
-            
+
             let body = match map.get("body") {
                 Some(Value::String(b)) => b.clone(),
                 _ => String::new(),
             };
-            
+
             (status, headers, body)
         }
         _ => return Err(IntentError::TypeError("Response must be a map".to_string())),
     };
-    
+
     // Build tiny_http response
-    let mut response_builder = tiny_http::Response::from_string(body)
-        .with_status_code(status);
-    
+    let mut response_builder = tiny_http::Response::from_string(body).with_status_code(status);
+
     // Add headers
     for (key, value) in headers {
         if let Value::String(v) = value {
@@ -666,18 +734,19 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
             }
         }
     }
-    
+
     // Force connection close to prevent stale responses on keep-alive connections
     if let Ok(header) = tiny_http::Header::from_bytes("Connection".as_bytes(), "close".as_bytes()) {
         response_builder = response_builder.with_header(header);
     }
-    
+
     // Add server identifier
     if let Ok(header) = tiny_http::Header::from_bytes("Server".as_bytes(), "ntnt-http".as_bytes()) {
         response_builder = response_builder.with_header(header);
     }
-    
-    request.respond(response_builder)
+
+    request
+        .respond(response_builder)
         .map_err(|e| IntentError::RuntimeError(format!("Failed to send response: {}", e)))
 }
 
@@ -698,7 +767,7 @@ pub fn get_mime_type(path: &str) -> &'static str {
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
         .to_lowercase();
-    
+
     match extension.as_str() {
         // HTML/Web
         "html" | "htm" => "text/html; charset=utf-8",
@@ -706,7 +775,7 @@ pub fn get_mime_type(path: &str) -> &'static str {
         "js" | "mjs" => "application/javascript; charset=utf-8",
         "json" => "application/json; charset=utf-8",
         "xml" => "application/xml; charset=utf-8",
-        
+
         // Images
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -714,35 +783,35 @@ pub fn get_mime_type(path: &str) -> &'static str {
         "svg" => "image/svg+xml",
         "ico" => "image/x-icon",
         "webp" => "image/webp",
-        
+
         // Fonts
         "woff" => "font/woff",
         "woff2" => "font/woff2",
         "ttf" => "font/ttf",
         "otf" => "font/otf",
         "eot" => "application/vnd.ms-fontobject",
-        
+
         // Documents
         "pdf" => "application/pdf",
         "txt" => "text/plain; charset=utf-8",
         "md" => "text/markdown; charset=utf-8",
-        
+
         // Data
         "csv" => "text/csv; charset=utf-8",
         "yaml" | "yml" => "application/x-yaml; charset=utf-8",
-        
+
         // Archives
         "zip" => "application/zip",
         "gz" | "gzip" => "application/gzip",
         "tar" => "application/x-tar",
-        
+
         // Media
         "mp3" => "audio/mpeg",
         "mp4" => "video/mp4",
         "webm" => "video/webm",
         "ogg" => "audio/ogg",
         "wav" => "audio/wav",
-        
+
         // Catch-all
         _ => "application/octet-stream",
     }
@@ -752,14 +821,14 @@ pub fn get_mime_type(path: &str) -> &'static str {
 pub fn serve_static_file(file_path: &str) -> Result<Value> {
     use std::fs;
     use std::io::Read;
-    
+
     let path = std::path::Path::new(file_path);
-    
+
     // Check if file exists
     if !path.exists() {
         return Ok(create_error_response(404, "File not found"));
     }
-    
+
     // Check if it's a file (not directory)
     if !path.is_file() {
         // If it's a directory, try index.html
@@ -769,16 +838,17 @@ pub fn serve_static_file(file_path: &str) -> Result<Value> {
         }
         return Ok(create_error_response(404, "Not a file"));
     }
-    
+
     // Get MIME type
     let mime_type = get_mime_type(file_path);
-    
+
     // Read file content
-    let content = if mime_type.starts_with("text/") || 
-                     mime_type.contains("javascript") || 
-                     mime_type.contains("json") ||
-                     mime_type.contains("xml") ||
-                     mime_type.contains("yaml") {
+    let content = if mime_type.starts_with("text/")
+        || mime_type.contains("javascript")
+        || mime_type.contains("json")
+        || mime_type.contains("xml")
+        || mime_type.contains("yaml")
+    {
         // Text files - read as string
         fs::read_to_string(path)
             .map_err(|e| IntentError::RuntimeError(format!("Failed to read file: {}", e)))?
@@ -791,24 +861,24 @@ pub fn serve_static_file(file_path: &str) -> Result<Value> {
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)
             .map_err(|e| IntentError::RuntimeError(format!("Failed to read file: {}", e)))?;
-        
+
         // For binary files, we need to handle them differently
         // For now, return raw bytes (this works with tiny_http's response)
         String::from_utf8_lossy(&buffer).to_string()
     };
-    
+
     let mut headers = HashMap::new();
     headers.insert(
         "content-type".to_string(),
         Value::String(mime_type.to_string()),
     );
-    
+
     // Add cache control for static files
     headers.insert(
         "cache-control".to_string(),
         Value::String("public, max-age=3600".to_string()),
     );
-    
+
     Ok(create_response_value(200, headers, content))
 }
 
@@ -816,25 +886,25 @@ pub fn serve_static_file(file_path: &str) -> Result<Value> {
 pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Result<()> {
     use std::fs::File;
     use std::io::Read;
-    
+
     let path = std::path::Path::new(file_path);
-    
+
     // Check if file exists and is a file
     if !path.exists() || !path.is_file() {
         let not_found = create_error_response(404, "File not found");
         return send_response(request, &not_found);
     }
-    
+
     // Get MIME type
     let mime_type = get_mime_type(file_path);
-    
+
     // Open and read the file
     let mut file = File::open(path)
         .map_err(|e| IntentError::RuntimeError(format!("Failed to open file: {}", e)))?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)
         .map_err(|e| IntentError::RuntimeError(format!("Failed to read file: {}", e)))?;
-    
+
     // Build response with proper headers
     let content_type = tiny_http::Header::from_bytes(b"Content-Type", mime_type.as_bytes())
         .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
@@ -844,15 +914,16 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
         .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
     let server_header = tiny_http::Header::from_bytes(b"Server", b"ntnt-http")
         .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
-    
+
     let response = tiny_http::Response::from_data(buffer)
         .with_status_code(200)
         .with_header(content_type)
         .with_header(cache_control)
         .with_header(connection_close)
         .with_header(server_header);
-    
-    request.respond(response)
+
+    request
+        .respond(response)
         .map_err(|e| IntentError::RuntimeError(format!("Failed to send response: {}", e)))
 }
 
@@ -1027,7 +1098,7 @@ mod tests {
         // Too few segments
         let result = match_route("/users", &route);
         assert!(result.is_none());
-        
+
         // Too many segments
         let result = match_route("/users/123/extra", &route);
         assert!(result.is_none());
@@ -1066,7 +1137,7 @@ mod tests {
     fn test_server_state_find_route() {
         let mut state = ServerState::new();
         state.add_route("GET", "/users/{id}", Value::String("handler".to_string()));
-        
+
         let result = state.find_route("GET", "/users/123");
         assert!(result.is_some());
         let (handler, params, _index) = result.unwrap();
@@ -1078,7 +1149,7 @@ mod tests {
     fn test_server_state_find_route_wrong_method() {
         let mut state = ServerState::new();
         state.add_route("GET", "/users", Value::Unit);
-        
+
         let result = state.find_route("POST", "/users");
         assert!(result.is_none());
     }
@@ -1087,7 +1158,7 @@ mod tests {
     fn test_server_state_find_route_no_match() {
         let mut state = ServerState::new();
         state.add_route("GET", "/users", Value::Unit);
-        
+
         let result = state.find_route("GET", "/posts");
         assert!(result.is_none());
     }
@@ -1098,7 +1169,7 @@ mod tests {
         state.add_route("GET", "/users", Value::Unit);
         state.add_route("POST", "/users", Value::Unit);
         assert_eq!(state.route_count(), 2);
-        
+
         state.clear();
         assert_eq!(state.route_count(), 0);
     }
@@ -1110,20 +1181,20 @@ mod tests {
         state.add_route("GET", "/users", Value::String("list_users".to_string()));
         state.add_route("GET", "/users/{id}", Value::String("get_user".to_string()));
         state.add_route("POST", "/users", Value::String("create_user".to_string()));
-        
+
         assert_eq!(state.route_count(), 4);
-        
+
         // Test finding each route
         let (handler, _, _) = state.find_route("GET", "/").unwrap();
         assert_value_string(&handler, "home");
-        
+
         let (handler, _, _) = state.find_route("GET", "/users").unwrap();
         assert_value_string(&handler, "list_users");
-        
+
         let (handler, params, _) = state.find_route("GET", "/users/42").unwrap();
         assert_value_string(&handler, "get_user");
         assert_eq!(params.get("id"), Some(&"42".to_string()));
-        
+
         let (handler, _, _) = state.find_route("POST", "/users").unwrap();
         assert_value_string(&handler, "create_user");
     }
@@ -1162,11 +1233,7 @@ mod tests {
 
     #[test]
     fn test_intent_value_to_json_array() {
-        let value = Value::Array(vec![
-            Value::Int(1),
-            Value::Int(2),
-            Value::Int(3),
-        ]);
+        let value = Value::Array(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
         let json = intent_value_to_json(&value);
         assert_eq!(json, serde_json::json!([1, 2, 3]));
     }
@@ -1178,7 +1245,7 @@ mod tests {
         map.insert("age".to_string(), Value::Int(30));
         let value = Value::Map(map);
         let json = intent_value_to_json(&value);
-        
+
         assert_eq!(json["name"], serde_json::json!("Alice"));
         assert_eq!(json["age"], serde_json::json!(30));
     }
@@ -1194,18 +1261,18 @@ mod tests {
     fn test_intent_value_to_json_nested() {
         let mut inner_map = HashMap::new();
         inner_map.insert("city".to_string(), Value::String("NYC".to_string()));
-        
+
         let mut map = HashMap::new();
         map.insert("user".to_string(), Value::String("Bob".to_string()));
         map.insert("address".to_string(), Value::Map(inner_map));
-        map.insert("scores".to_string(), Value::Array(vec![
-            Value::Int(100),
-            Value::Int(95),
-        ]));
-        
+        map.insert(
+            "scores".to_string(),
+            Value::Array(vec![Value::Int(100), Value::Int(95)]),
+        );
+
         let value = Value::Map(map);
         let json = intent_value_to_json(&value);
-        
+
         assert_eq!(json["user"], serde_json::json!("Bob"));
         assert_eq!(json["address"]["city"], serde_json::json!("NYC"));
         assert_eq!(json["scores"], serde_json::json!([100, 95]));
@@ -1219,14 +1286,14 @@ mod tests {
     fn test_create_response_value() {
         let mut headers = HashMap::new();
         headers.insert("x-custom".to_string(), Value::String("test".to_string()));
-        
+
         let response = create_response_value(201, headers, "Created".to_string());
-        
+
         match response {
             Value::Map(map) => {
                 assert_eq!(get_map_int(&map, "status"), 201);
                 assert_eq!(get_map_string(&map, "body"), "Created");
-                
+
                 let hdrs = get_map_map(&map, "headers");
                 assert_eq!(get_map_string(&hdrs, "x-custom"), "test");
             }
@@ -1237,7 +1304,7 @@ mod tests {
     #[test]
     fn test_create_error_response() {
         let response = create_error_response(500, "Internal Server Error");
-        
+
         match response {
             Value::Map(map) => {
                 assert_eq!(get_map_int(&map, "status"), 500);
@@ -1254,7 +1321,7 @@ mod tests {
     #[test]
     fn test_init_module_has_all_functions() {
         let module = init();
-        
+
         // Check all response helper functions exist
         assert!(module.contains_key("text"));
         assert!(module.contains_key("html"));
@@ -1272,13 +1339,16 @@ mod tests {
             let args = vec![Value::String("Hello".to_string())];
             let result = func(&args);
             assert!(result.is_ok());
-            
+
             if let Value::Map(map) = result.unwrap() {
                 assert_eq!(get_map_int(&map, "status"), 200);
                 assert_eq!(get_map_string(&map, "body"), "Hello");
-                
+
                 let headers = get_map_map(&map, "headers");
-                assert_eq!(get_map_string(&headers, "content-type"), "text/plain; charset=utf-8");
+                assert_eq!(
+                    get_map_string(&headers, "content-type"),
+                    "text/plain; charset=utf-8"
+                );
             } else {
                 panic!("Expected Map response");
             }
@@ -1294,13 +1364,16 @@ mod tests {
             let args = vec![Value::String("<h1>Test</h1>".to_string())];
             let result = func(&args);
             assert!(result.is_ok());
-            
+
             if let Value::Map(map) = result.unwrap() {
                 assert_eq!(get_map_int(&map, "status"), 200);
                 assert_eq!(get_map_string(&map, "body"), "<h1>Test</h1>");
-                
+
                 let headers = get_map_map(&map, "headers");
-                assert_eq!(get_map_string(&headers, "content-type"), "text/html; charset=utf-8");
+                assert_eq!(
+                    get_map_string(&headers, "content-type"),
+                    "text/html; charset=utf-8"
+                );
             } else {
                 panic!("Expected Map response");
             }
@@ -1315,17 +1388,17 @@ mod tests {
         if let Some(Value::NativeFunction { func, .. }) = module.get("json") {
             let mut map = HashMap::new();
             map.insert("key".to_string(), Value::String("value".to_string()));
-            
+
             let args = vec![Value::Map(map)];
             let result = func(&args);
             assert!(result.is_ok());
-            
+
             if let Value::Map(resp) = result.unwrap() {
                 assert_eq!(get_map_int(&resp, "status"), 200);
-                
+
                 let headers = get_map_map(&resp, "headers");
                 assert_eq!(get_map_string(&headers, "content-type"), "application/json");
-                
+
                 // Verify body is valid JSON
                 let body = get_map_string(&resp, "body");
                 let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -1342,13 +1415,10 @@ mod tests {
     fn test_status_function() {
         let module = init();
         if let Some(Value::NativeFunction { func, .. }) = module.get("status") {
-            let args = vec![
-                Value::Int(404),
-                Value::String("Not Found".to_string()),
-            ];
+            let args = vec![Value::Int(404), Value::String("Not Found".to_string())];
             let result = func(&args);
             assert!(result.is_ok());
-            
+
             if let Value::Map(map) = result.unwrap() {
                 assert_eq!(get_map_int(&map, "status"), 404);
                 assert_eq!(get_map_string(&map, "body"), "Not Found");
@@ -1367,10 +1437,10 @@ mod tests {
             let args = vec![Value::String("/new-location".to_string())];
             let result = func(&args);
             assert!(result.is_ok());
-            
+
             if let Value::Map(map) = result.unwrap() {
                 assert_eq!(get_map_int(&map, "status"), 302);
-                
+
                 let headers = get_map_map(&map, "headers");
                 assert_eq!(get_map_string(&headers, "location"), "/new-location");
             } else {
@@ -1388,7 +1458,7 @@ mod tests {
             let args: Vec<Value> = vec![];
             let result = func(&args);
             assert!(result.is_ok());
-            
+
             if let Value::Map(map) = result.unwrap() {
                 assert_eq!(get_map_int(&map, "status"), 404);
                 assert_eq!(get_map_string(&map, "body"), "Not Found");
@@ -1407,7 +1477,7 @@ mod tests {
             let args = vec![Value::String("Something went wrong".to_string())];
             let result = func(&args);
             assert!(result.is_ok());
-            
+
             if let Value::Map(map) = result.unwrap() {
                 assert_eq!(get_map_int(&map, "status"), 500);
                 assert_eq!(get_map_string(&map, "body"), "Something went wrong");
@@ -1494,13 +1564,22 @@ mod tests {
 
     #[test]
     fn test_mime_type_javascript() {
-        assert_eq!(get_mime_type("app.js"), "application/javascript; charset=utf-8");
-        assert_eq!(get_mime_type("module.mjs"), "application/javascript; charset=utf-8");
+        assert_eq!(
+            get_mime_type("app.js"),
+            "application/javascript; charset=utf-8"
+        );
+        assert_eq!(
+            get_mime_type("module.mjs"),
+            "application/javascript; charset=utf-8"
+        );
     }
 
     #[test]
     fn test_mime_type_json() {
-        assert_eq!(get_mime_type("data.json"), "application/json; charset=utf-8");
+        assert_eq!(
+            get_mime_type("data.json"),
+            "application/json; charset=utf-8"
+        );
     }
 
     #[test]
@@ -1560,9 +1639,9 @@ mod tests {
         state.add_route("GET", "/", Value::Unit);
         state.add_static_dir("/static".to_string(), "./public".to_string());
         state.add_middleware(Value::Unit);
-        
+
         state.clear();
-        
+
         assert_eq!(state.route_count(), 0);
         assert_eq!(state.static_dirs.len(), 0);
         assert_eq!(state.middleware.len(), 0);
@@ -1593,7 +1672,7 @@ mod tests {
         let mut state = ServerState::new();
         state.add_middleware(Value::String("logger".to_string()));
         state.add_middleware(Value::String("auth".to_string()));
-        
+
         let middleware = state.get_middleware();
         assert_eq!(middleware.len(), 2);
     }
@@ -1611,12 +1690,15 @@ mod tests {
         let _ = std::fs::create_dir_all(&test_dir);
         let test_file = test_dir.join("test.txt");
         let _ = std::fs::write(&test_file, "test content");
-        
-        state.add_static_dir("/static".to_string(), test_dir.to_string_lossy().to_string());
-        
+
+        state.add_static_dir(
+            "/static".to_string(),
+            test_dir.to_string_lossy().to_string(),
+        );
+
         let result = state.find_static_file("/static/test.txt");
         assert!(result.is_some());
-        
+
         // Cleanup
         let _ = std::fs::remove_file(&test_file);
         let _ = std::fs::remove_dir(&test_dir);
@@ -1626,7 +1708,7 @@ mod tests {
     fn test_find_static_file_no_match() {
         let mut state = ServerState::new();
         state.add_static_dir("/static".to_string(), "./nonexistent".to_string());
-        
+
         // Path doesn't match prefix
         let result = state.find_static_file("/other/file.txt");
         assert!(result.is_none());
@@ -1641,10 +1723,16 @@ mod tests {
         let resp = create_error_response(400, "Bad Request: Precondition failed");
         if let Value::Map(map) = resp {
             assert_eq!(get_map_int(&map, "status"), 400);
-            assert_eq!(get_map_string(&map, "body"), "Bad Request: Precondition failed");
+            assert_eq!(
+                get_map_string(&map, "body"),
+                "Bad Request: Precondition failed"
+            );
             // Content-type is in the headers sub-map
             let headers = get_map_map(&map, "headers");
-            assert_eq!(get_map_string(&headers, "content-type"), "text/plain; charset=utf-8");
+            assert_eq!(
+                get_map_string(&headers, "content-type"),
+                "text/plain; charset=utf-8"
+            );
         } else {
             panic!("Expected Map response");
         }
@@ -1655,7 +1743,10 @@ mod tests {
         let resp = create_error_response(500, "Internal Error: Postcondition failed");
         if let Value::Map(map) = resp {
             assert_eq!(get_map_int(&map, "status"), 500);
-            assert_eq!(get_map_string(&map, "body"), "Internal Error: Postcondition failed");
+            assert_eq!(
+                get_map_string(&map, "body"),
+                "Internal Error: Postcondition failed"
+            );
         } else {
             panic!("Expected Map response");
         }

@@ -23,9 +23,12 @@ pub struct TypeParam {
 impl TypeParam {
     /// Create a type parameter with no bounds
     pub fn simple(name: String) -> Self {
-        TypeParam { name, bounds: Vec::new() }
+        TypeParam {
+            name,
+            bounds: Vec::new(),
+        }
     }
-    
+
     /// Create a type parameter with bounds
     pub fn with_bounds(name: String, bounds: Vec<String>) -> Self {
         TypeParam { name, bounds }
@@ -44,7 +47,7 @@ pub enum Statement {
         /// Optional pattern for destructuring: `let (a, b) = expr;`
         pattern: Option<Pattern>,
     },
-    
+
     /// Function declaration
     Function {
         name: String,
@@ -58,14 +61,14 @@ pub enum Statement {
         /// Effect annotation: `fn foo() with io`
         effects: Vec<String>,
     },
-    
+
     /// Type alias declaration: `type Name = Type;`
     TypeAlias {
         name: String,
         type_params: Vec<TypeParam>,
         target: TypeExpr,
     },
-    
+
     /// Struct declaration
     Struct {
         name: String,
@@ -74,7 +77,7 @@ pub enum Statement {
         /// Generic type parameters: `struct Foo<T>` or `struct Foo<T: Trait>`
         type_params: Vec<TypeParam>,
     },
-    
+
     /// Enum declaration
     Enum {
         name: String,
@@ -83,7 +86,7 @@ pub enum Statement {
         /// Generic type parameters: `enum Option<T>` or `enum Foo<T: Trait>`
         type_params: Vec<TypeParam>,
     },
-    
+
     /// Implementation block
     Impl {
         type_name: String,
@@ -92,7 +95,7 @@ pub enum Statement {
         methods: Vec<Statement>,
         invariants: Vec<Expression>,
     },
-    
+
     /// Trait declaration
     Trait {
         name: String,
@@ -103,18 +106,13 @@ pub enum Statement {
         /// Parent traits (trait inheritance)
         supertraits: Vec<String>,
     },
-    
+
     /// Module declaration
-    Module {
-        name: String,
-        body: Vec<Statement>,
-    },
-    
+    Module { name: String, body: Vec<Statement> },
+
     /// Use/import statement (Rust-style): `use std::collections::HashMap`
-    Use {
-        path: Vec<String>,
-    },
-    
+    Use { path: Vec<String> },
+
     /// Import statement (JS-style): `import { a, b } from "module"`
     Import {
         /// Items to import (empty means import all / default)
@@ -124,7 +122,7 @@ pub enum Statement {
         /// Optional alias for entire module: `import http as web`
         alias: Option<String>,
     },
-    
+
     /// Export statement: `export fn foo()` or `export { a, b }`
     Export {
         /// Items to export (if specified)
@@ -132,53 +130,48 @@ pub enum Statement {
         /// Statement being exported (e.g., function or struct definition)
         statement: Option<Box<Statement>>,
     },
-    
+
     /// Expression statement
     Expression(Expression),
-    
+
     /// Return statement
     Return(Option<Expression>),
-    
+
     /// If statement
     If {
         condition: Expression,
         then_branch: Block,
         else_branch: Option<Block>,
     },
-    
+
     /// While loop
-    While {
-        condition: Expression,
-        body: Block,
-    },
-    
+    While { condition: Expression, body: Block },
+
     /// For-in loop: `for item in items { }`
     ForIn {
         variable: String,
         iterable: Expression,
         body: Block,
     },
-    
+
     /// Infinite loop
-    Loop {
-        body: Block,
-    },
-    
+    Loop { body: Block },
+
     /// Break statement
     Break,
-    
+
     /// Continue statement
     Continue,
-    
+
     /// Defer statement: `defer expr` - executes when scope exits
     Defer(Expression),
-    
+
     /// Protocol declaration for concurrency
     Protocol {
         name: String,
         steps: Vec<ProtocolStep>,
     },
-    
+
     /// Intent annotation
     Intent {
         description: String,
@@ -191,123 +184,123 @@ pub enum Statement {
 pub enum Expression {
     /// Integer literal
     Integer(i64),
-    
+
     /// Float literal
     Float(f64),
-    
+
     /// String literal
     String(String),
-    
+
     /// Boolean literal
     Bool(bool),
-    
+
     /// Unit value ()
     Unit,
-    
+
     /// Variable reference
     Identifier(String),
-    
+
     /// Binary operation
     Binary {
         left: Box<Expression>,
         operator: BinaryOp,
         right: Box<Expression>,
     },
-    
+
     /// Unary operation
     Unary {
         operator: UnaryOp,
         operand: Box<Expression>,
     },
-    
+
     /// Function call
     Call {
         function: Box<Expression>,
         arguments: Vec<Expression>,
     },
-    
+
     /// Method call
     MethodCall {
         object: Box<Expression>,
         method: String,
         arguments: Vec<Expression>,
     },
-    
+
     /// Field access
     FieldAccess {
         object: Box<Expression>,
         field: String,
     },
-    
+
     /// Index access
     Index {
         object: Box<Expression>,
         index: Box<Expression>,
     },
-    
+
     /// Array literal
     Array(Vec<Expression>),
-    
+
     /// Map literal: `{ "key": value, ... }`
     MapLiteral(Vec<(Expression, Expression)>),
-    
+
     /// Range expression: `start..end` or `start..=end`
     Range {
         start: Box<Expression>,
         end: Box<Expression>,
         inclusive: bool,
     },
-    
+
     /// Interpolated string: `"Hello, {name}!"`
     InterpolatedString(Vec<StringPart>),
-    
+
     /// Template string: `"""Hello, {{name}}!"""`
     TemplateString(Vec<TemplatePart>),
-    
+
     /// Struct literal
     StructLiteral {
         name: String,
         fields: Vec<(String, Expression)>,
     },
-    
+
     /// Enum variant access (EnumName::Variant or EnumName::Variant(args))
     EnumVariant {
         enum_name: String,
         variant: String,
         arguments: Vec<Expression>,
     },
-    
+
     /// Lambda/closure
     Lambda {
         params: Vec<Parameter>,
         body: Box<Expression>,
     },
-    
+
     /// Block expression
     Block(Block),
-    
+
     /// If expression
     IfExpr {
         condition: Box<Expression>,
         then_branch: Box<Expression>,
         else_branch: Box<Expression>,
     },
-    
+
     /// Match expression
     Match {
         scrutinee: Box<Expression>,
         arms: Vec<MatchArm>,
     },
-    
+
     /// Assignment
     Assign {
         target: Box<Expression>,
         value: Box<Expression>,
     },
-    
+
     /// Await expression
     Await(Box<Expression>),
-    
+
     /// Try expression (for error propagation)
     Try(Box<Expression>),
 }
@@ -322,7 +315,7 @@ pub enum BinaryOp {
     Div,
     Mod,
     Pow,
-    
+
     // Comparison
     Eq,
     Ne,
@@ -330,11 +323,11 @@ pub enum BinaryOp {
     Le,
     Gt,
     Ge,
-    
+
     // Logical
     And,
     Or,
-    
+
     // Null coalescing
     NullCoalesce,
 }
@@ -423,37 +416,34 @@ pub struct EnumVariant {
 pub enum TypeExpr {
     /// Named type like `Int`, `String`, `MyStruct`
     Named(String),
-    
+
     /// Array type `[T]`
     Array(Box<TypeExpr>),
-    
+
     /// Map type `Map<K, V>`
     Map {
         key_type: Box<TypeExpr>,
         value_type: Box<TypeExpr>,
     },
-    
+
     /// Tuple type `(T1, T2, ...)`
     Tuple(Vec<TypeExpr>),
-    
+
     /// Function type `(T1, T2) -> T3`
     Function {
         params: Vec<TypeExpr>,
         return_type: Box<TypeExpr>,
     },
-    
+
     /// Generic type `T<A, B>`
-    Generic {
-        name: String,
-        args: Vec<TypeExpr>,
-    },
-    
+    Generic { name: String, args: Vec<TypeExpr> },
+
     /// Optional type `T?`
     Optional(Box<TypeExpr>),
-    
+
     /// Union type `T | U`
     Union(Vec<TypeExpr>),
-    
+
     /// Result type with effect `T / E`
     WithEffect {
         value_type: Box<TypeExpr>,
@@ -487,29 +477,29 @@ pub struct MatchArm {
 pub enum Pattern {
     /// Wildcard `_`
     Wildcard,
-    
+
     /// Variable binding
     Variable(String),
-    
+
     /// Literal pattern
     Literal(Expression),
-    
+
     /// Struct pattern
     Struct {
         name: String,
         fields: Vec<(String, Pattern)>,
     },
-    
+
     /// Enum variant pattern
     Variant {
         name: String,
         variant: String,
         fields: Option<Vec<Pattern>>,
     },
-    
+
     /// Tuple pattern
     Tuple(Vec<Pattern>),
-    
+
     /// Array pattern
     Array(Vec<Pattern>),
 }

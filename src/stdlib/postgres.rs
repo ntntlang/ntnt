@@ -9,19 +9,19 @@
 //! let users = query(db, "SELECT * FROM users WHERE active = $1", [true])
 //! ```
 
+use crate::error::IntentError;
+use crate::interpreter::Value;
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use postgres::{types::ToSql, Client, NoTls, Row};
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use crate::interpreter::Value;
-use crate::error::IntentError;
-use postgres::{Client, NoTls, Row, types::ToSql};
-use rust_decimal::Decimal;
-use chrono::{NaiveDate, NaiveTime, NaiveDateTime, DateTime, Utc};
 
 type Result<T> = std::result::Result<T, IntentError>;
 
 /// Thread-safe wrapper for PostgreSQL client
 /// We use a unique ID to track connections and store them in a global registry
-static CONNECTION_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Arc<Mutex<Client>>>>> = 
+static CONNECTION_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Arc<Mutex<Client>>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 static CONNECTION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -40,7 +40,12 @@ enum SqlParam {
 }
 
 impl ToSql for SqlParam {
-    fn to_sql(&self, ty: &postgres::types::Type, out: &mut postgres::types::private::BytesMut) -> std::result::Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+    fn to_sql(
+        &self,
+        ty: &postgres::types::Type,
+        out: &mut postgres::types::private::BytesMut,
+    ) -> std::result::Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>>
+    {
         match self {
             SqlParam::Int(v) => v.to_sql(ty, out),
             SqlParam::BigInt(v) => v.to_sql(ty, out),
@@ -52,17 +57,17 @@ impl ToSql for SqlParam {
             SqlParam::StringArray(v) => v.to_sql(ty, out),
         }
     }
-    
+
     fn accepts(ty: &postgres::types::Type) -> bool {
-        <i32 as ToSql>::accepts(ty) ||
-        <i64 as ToSql>::accepts(ty) ||
-        <f64 as ToSql>::accepts(ty) ||
-        <String as ToSql>::accepts(ty) ||
-        <bool as ToSql>::accepts(ty) ||
-        <Vec<i32> as ToSql>::accepts(ty) ||
-        <Vec<String> as ToSql>::accepts(ty)
+        <i32 as ToSql>::accepts(ty)
+            || <i64 as ToSql>::accepts(ty)
+            || <f64 as ToSql>::accepts(ty)
+            || <String as ToSql>::accepts(ty)
+            || <bool as ToSql>::accepts(ty)
+            || <Vec<i32> as ToSql>::accepts(ty)
+            || <Vec<String> as ToSql>::accepts(ty)
     }
-    
+
     postgres::types::to_sql_checked!();
 }
 
@@ -88,18 +93,26 @@ fn value_to_sql_param(value: &Value) -> SqlParam {
             } else {
                 match &arr[0] {
                     Value::Int(_) => {
-                        let ints: Vec<i32> = arr.iter().filter_map(|v| {
-                            if let Value::Int(i) = v { Some(*i as i32) } else { None }
-                        }).collect();
+                        let ints: Vec<i32> = arr
+                            .iter()
+                            .filter_map(|v| {
+                                if let Value::Int(i) = v {
+                                    Some(*i as i32)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
                         SqlParam::IntArray(ints)
                     }
                     _ => {
-                        let strings: Vec<String> = arr.iter().map(|v| {
-                            match v {
+                        let strings: Vec<String> = arr
+                            .iter()
+                            .map(|v| match v {
                                 Value::String(s) => s.clone(),
                                 _ => format!("{}", v),
-                            }
-                        }).collect();
+                            })
+                            .collect();
                         SqlParam::StringArray(strings)
                     }
                 }
@@ -112,69 +125,57 @@ fn value_to_sql_param(value: &Value) -> SqlParam {
 /// Convert a PostgreSQL row to an Intent Map
 fn row_to_value(row: &Row) -> Value {
     let mut map = HashMap::new();
-    
+
     for (idx, column) in row.columns().iter().enumerate() {
         let name = column.name().to_string();
         let value = postgres_value_to_intent(row, idx, column.type_());
         map.insert(name, value);
     }
-    
+
     Value::Map(map)
 }
 
 /// Convert a PostgreSQL value to an Intent Value based on type
 fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Type) -> Value {
     use postgres::types::Type;
-    
+
     match *pg_type {
         // Boolean
-        Type::BOOL => {
-            match row.try_get::<_, Option<bool>>(idx) {
-                Ok(Some(v)) => Value::Bool(v),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::BOOL => match row.try_get::<_, Option<bool>>(idx) {
+            Ok(Some(v)) => Value::Bool(v),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // Integers
-        Type::INT2 => {
-            match row.try_get::<_, Option<i16>>(idx) {
-                Ok(Some(v)) => Value::Int(v as i64),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        Type::INT4 => {
-            match row.try_get::<_, Option<i32>>(idx) {
-                Ok(Some(v)) => Value::Int(v as i64),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        Type::INT8 => {
-            match row.try_get::<_, Option<i64>>(idx) {
-                Ok(Some(v)) => Value::Int(v),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::INT2 => match row.try_get::<_, Option<i16>>(idx) {
+            Ok(Some(v)) => Value::Int(v as i64),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+        Type::INT4 => match row.try_get::<_, Option<i32>>(idx) {
+            Ok(Some(v)) => Value::Int(v as i64),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+        Type::INT8 => match row.try_get::<_, Option<i64>>(idx) {
+            Ok(Some(v)) => Value::Int(v),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // Floats
-        Type::FLOAT4 => {
-            match row.try_get::<_, Option<f32>>(idx) {
-                Ok(Some(v)) => Value::Float(v as f64),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        Type::FLOAT8 => {
-            match row.try_get::<_, Option<f64>>(idx) {
-                Ok(Some(v)) => Value::Float(v),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::FLOAT4 => match row.try_get::<_, Option<f32>>(idx) {
+            Ok(Some(v)) => Value::Float(v as f64),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+        Type::FLOAT8 => match row.try_get::<_, Option<f64>>(idx) {
+            Ok(Some(v)) => Value::Float(v),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // NUMERIC/DECIMAL - proper handling via rust_decimal
         Type::NUMERIC => {
             match row.try_get::<_, Option<Decimal>>(idx) {
@@ -190,7 +191,7 @@ fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Ty
                 Err(_) => Value::Unit,
             }
         }
-        
+
         // Strings
         Type::VARCHAR | Type::TEXT | Type::BPCHAR | Type::NAME => {
             match row.try_get::<_, Option<String>>(idx) {
@@ -199,77 +200,61 @@ fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Ty
                 Err(_) => Value::Unit,
             }
         }
-        
+
         // JSON/JSONB
-        Type::JSON | Type::JSONB => {
-            match row.try_get::<_, Option<serde_json::Value>>(idx) {
-                Ok(Some(v)) => json_to_intent_value(&v),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::JSON | Type::JSONB => match row.try_get::<_, Option<serde_json::Value>>(idx) {
+            Ok(Some(v)) => json_to_intent_value(&v),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // Date
-        Type::DATE => {
-            match row.try_get::<_, Option<NaiveDate>>(idx) {
-                Ok(Some(v)) => Value::String(v.format("%Y-%m-%d").to_string()),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::DATE => match row.try_get::<_, Option<NaiveDate>>(idx) {
+            Ok(Some(v)) => Value::String(v.format("%Y-%m-%d").to_string()),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // Time
-        Type::TIME => {
-            match row.try_get::<_, Option<NaiveTime>>(idx) {
-                Ok(Some(v)) => Value::String(v.format("%H:%M:%S").to_string()),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::TIME => match row.try_get::<_, Option<NaiveTime>>(idx) {
+            Ok(Some(v)) => Value::String(v.format("%H:%M:%S").to_string()),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // Timestamp without timezone
-        Type::TIMESTAMP => {
-            match row.try_get::<_, Option<NaiveDateTime>>(idx) {
-                Ok(Some(v)) => Value::String(v.format("%Y-%m-%dT%H:%M:%S").to_string()),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::TIMESTAMP => match row.try_get::<_, Option<NaiveDateTime>>(idx) {
+            Ok(Some(v)) => Value::String(v.format("%Y-%m-%dT%H:%M:%S").to_string()),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // Timestamp with timezone
-        Type::TIMESTAMPTZ => {
-            match row.try_get::<_, Option<DateTime<Utc>>>(idx) {
-                Ok(Some(v)) => Value::String(v.to_rfc3339()),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::TIMESTAMPTZ => match row.try_get::<_, Option<DateTime<Utc>>>(idx) {
+            Ok(Some(v)) => Value::String(v.to_rfc3339()),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // UUID
-        Type::UUID => {
-            match row.try_get::<_, Option<uuid::Uuid>>(idx) {
-                Ok(Some(v)) => Value::String(v.to_string()),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::UUID => match row.try_get::<_, Option<uuid::Uuid>>(idx) {
+            Ok(Some(v)) => Value::String(v.to_string()),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // Integer arrays
-        Type::INT4_ARRAY => {
-            match row.try_get::<_, Option<Vec<i32>>>(idx) {
-                Ok(Some(v)) => Value::Array(v.into_iter().map(|i| Value::Int(i as i64)).collect()),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        Type::INT8_ARRAY => {
-            match row.try_get::<_, Option<Vec<i64>>>(idx) {
-                Ok(Some(v)) => Value::Array(v.into_iter().map(Value::Int).collect()),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::INT4_ARRAY => match row.try_get::<_, Option<Vec<i32>>>(idx) {
+            Ok(Some(v)) => Value::Array(v.into_iter().map(|i| Value::Int(i as i64)).collect()),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+        Type::INT8_ARRAY => match row.try_get::<_, Option<Vec<i64>>>(idx) {
+            Ok(Some(v)) => Value::Array(v.into_iter().map(Value::Int).collect()),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // String arrays
         Type::TEXT_ARRAY | Type::VARCHAR_ARRAY => {
             match row.try_get::<_, Option<Vec<String>>>(idx) {
@@ -278,25 +263,21 @@ fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Ty
                 Err(_) => Value::Unit,
             }
         }
-        
+
         // Float arrays
-        Type::FLOAT8_ARRAY => {
-            match row.try_get::<_, Option<Vec<f64>>>(idx) {
-                Ok(Some(v)) => Value::Array(v.into_iter().map(Value::Float).collect()),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::FLOAT8_ARRAY => match row.try_get::<_, Option<Vec<f64>>>(idx) {
+            Ok(Some(v)) => Value::Array(v.into_iter().map(Value::Float).collect()),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // Boolean arrays
-        Type::BOOL_ARRAY => {
-            match row.try_get::<_, Option<Vec<bool>>>(idx) {
-                Ok(Some(v)) => Value::Array(v.into_iter().map(Value::Bool).collect()),
-                Ok(None) => Value::Unit,
-                Err(_) => Value::Unit,
-            }
-        }
-        
+        Type::BOOL_ARRAY => match row.try_get::<_, Option<Vec<bool>>>(idx) {
+            Ok(Some(v)) => Value::Array(v.into_iter().map(Value::Bool).collect()),
+            Ok(None) => Value::Unit,
+            Err(_) => Value::Unit,
+        },
+
         // Fallback for unknown types
         _ => {
             // Try common types in order of likelihood
@@ -351,17 +332,17 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
         Ok(client) => {
             let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let wrapped = Arc::new(Mutex::new(client));
-            
+
             // Store in registry
             if let Ok(mut registry) = CONNECTION_REGISTRY.lock() {
                 registry.insert(id, wrapped);
             }
-            
+
             // Return a connection handle as a map
             let mut handle = HashMap::new();
             handle.insert("_pg_connection_id".to_string(), Value::Int(id as i64));
             handle.insert("connected".to_string(), Value::Bool(true));
-            
+
             Ok(Value::EnumValue {
                 enum_name: "Result".to_string(),
                 variant: "Ok".to_string(),
@@ -386,29 +367,37 @@ fn get_client(conn: &Value) -> Result<Arc<Mutex<Client>>> {
                         return Ok(Arc::clone(client));
                     }
                 }
-                Err(IntentError::RuntimeError("Invalid or closed database connection".to_string()))
+                Err(IntentError::RuntimeError(
+                    "Invalid or closed database connection".to_string(),
+                ))
             } else {
-                Err(IntentError::TypeError("Expected a database connection handle".to_string()))
+                Err(IntentError::TypeError(
+                    "Expected a database connection handle".to_string(),
+                ))
             }
         }
-        _ => Err(IntentError::TypeError("Expected a database connection handle".to_string())),
+        _ => Err(IntentError::TypeError(
+            "Expected a database connection handle".to_string(),
+        )),
     }
 }
 
 /// Execute a query and return rows
 fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     let client_arc = get_client(conn)?;
-    let mut client = client_arc.lock().map_err(|e| 
-        IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
-    
+    let mut client = client_arc
+        .lock()
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+
     // Convert params to SqlParam
     let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
-    
+
     // Create references for the query
-    let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params.iter()
+    let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
+        .iter()
         .map(|p| p as &(dyn ToSql + Sync))
         .collect();
-    
+
     match client.query(sql, &param_refs) {
         Ok(rows) => {
             let result: Vec<Value> = rows.iter().map(row_to_value).collect();
@@ -429,29 +418,27 @@ fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
 /// Execute a query and return a single row (or null)
 fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     let client_arc = get_client(conn)?;
-    let mut client = client_arc.lock().map_err(|e| 
-        IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
-    
+    let mut client = client_arc
+        .lock()
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+
     let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
-    let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params.iter()
+    let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
+        .iter()
         .map(|p| p as &(dyn ToSql + Sync))
         .collect();
-    
+
     match client.query_opt(sql, &param_refs) {
-        Ok(Some(row)) => {
-            Ok(Value::EnumValue {
-                enum_name: "Result".to_string(),
-                variant: "Ok".to_string(),
-                values: vec![row_to_value(&row)],
-            })
-        }
-        Ok(None) => {
-            Ok(Value::EnumValue {
-                enum_name: "Result".to_string(),
-                variant: "Ok".to_string(),
-                values: vec![Value::Unit],
-            })
-        }
+        Ok(Some(row)) => Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            values: vec![row_to_value(&row)],
+        }),
+        Ok(None) => Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            values: vec![Value::Unit],
+        }),
         Err(e) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
             variant: "Err".to_string(),
@@ -463,22 +450,22 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
 /// Execute a statement (INSERT/UPDATE/DELETE) and return affected row count
 fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     let client_arc = get_client(conn)?;
-    let mut client = client_arc.lock().map_err(|e| 
-        IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
-    
+    let mut client = client_arc
+        .lock()
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+
     let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
-    let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params.iter()
+    let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
+        .iter()
         .map(|p| p as &(dyn ToSql + Sync))
         .collect();
-    
+
     match client.execute(sql, &param_refs) {
-        Ok(count) => {
-            Ok(Value::EnumValue {
-                enum_name: "Result".to_string(),
-                variant: "Ok".to_string(),
-                values: vec![Value::Int(count as i64)],
-            })
-        }
+        Ok(count) => Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            values: vec![Value::Int(count as i64)],
+        }),
         Err(e) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
             variant: "Err".to_string(),
@@ -499,16 +486,19 @@ fn pg_close(conn: &Value) -> Result<Value> {
             }
             Ok(Value::Bool(false))
         }
-        _ => Err(IntentError::TypeError("Expected a database connection handle".to_string())),
+        _ => Err(IntentError::TypeError(
+            "Expected a database connection handle".to_string(),
+        )),
     }
 }
 
 /// Begin a transaction - returns a transaction handle
 fn pg_begin(conn: &Value) -> Result<Value> {
     let client_arc = get_client(conn)?;
-    let mut client = client_arc.lock().map_err(|e| 
-        IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
-    
+    let mut client = client_arc
+        .lock()
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+
     match client.execute("BEGIN", &[]) {
         Ok(_) => {
             // Return the same connection handle (transaction is implicit)
@@ -529,9 +519,10 @@ fn pg_begin(conn: &Value) -> Result<Value> {
 /// Commit a transaction
 fn pg_commit(conn: &Value) -> Result<Value> {
     let client_arc = get_client(conn)?;
-    let mut client = client_arc.lock().map_err(|e| 
-        IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
-    
+    let mut client = client_arc
+        .lock()
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+
     match client.execute("COMMIT", &[]) {
         Ok(_) => Ok(Value::Bool(true)),
         Err(e) => Ok(Value::EnumValue {
@@ -545,9 +536,10 @@ fn pg_commit(conn: &Value) -> Result<Value> {
 /// Rollback a transaction
 fn pg_rollback(conn: &Value) -> Result<Value> {
     let client_arc = get_client(conn)?;
-    let mut client = client_arc.lock().map_err(|e| 
-        IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
-    
+    let mut client = client_arc
+        .lock()
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+
     match client.execute("ROLLBACK", &[]) {
         Ok(_) => Ok(Value::Bool(true)),
         Err(e) => Ok(Value::EnumValue {
@@ -561,101 +553,117 @@ fn pg_rollback(conn: &Value) -> Result<Value> {
 /// Initialize the std/db/postgres module
 pub fn init() -> HashMap<String, Value> {
     let mut module = HashMap::new();
-    
+
     // connect(connection_string) -> Result<Connection, Error>
-    module.insert("connect".to_string(), Value::NativeFunction {
-        name: "connect".to_string(),
-        arity: 1,
-        func: |args| {
-            match &args[0] {
+    module.insert(
+        "connect".to_string(),
+        Value::NativeFunction {
+            name: "connect".to_string(),
+            arity: 1,
+            func: |args| match &args[0] {
                 Value::String(conn_str) => pg_connect(conn_str),
-                _ => Err(IntentError::TypeError("connect() requires a connection string".to_string())),
-            }
+                _ => Err(IntentError::TypeError(
+                    "connect() requires a connection string".to_string(),
+                )),
+            },
         },
-    });
-    
+    );
+
     // query(conn, sql, params?) -> Result<Array<Row>, Error>
-    module.insert("query".to_string(), Value::NativeFunction {
-        name: "query".to_string(),
-        arity: 3,
-        func: |args| {
-            match (&args[0], &args[1], &args[2]) {
+    module.insert(
+        "query".to_string(),
+        Value::NativeFunction {
+            name: "query".to_string(),
+            arity: 3,
+            func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => pg_query(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => pg_query(conn, sql, &[]),
-                _ => Err(IntentError::TypeError("query() requires (connection, sql_string, params_array)".to_string())),
-            }
+                _ => Err(IntentError::TypeError(
+                    "query() requires (connection, sql_string, params_array)".to_string(),
+                )),
+            },
         },
-    });
-    
+    );
+
     // query_one(conn, sql, params?) -> Result<Row | null, Error>
-    module.insert("query_one".to_string(), Value::NativeFunction {
-        name: "query_one".to_string(),
-        arity: 3,
-        func: |args| {
-            match (&args[0], &args[1], &args[2]) {
+    module.insert(
+        "query_one".to_string(),
+        Value::NativeFunction {
+            name: "query_one".to_string(),
+            arity: 3,
+            func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => pg_query_one(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => pg_query_one(conn, sql, &[]),
-                _ => Err(IntentError::TypeError("query_one() requires (connection, sql_string, params_array)".to_string())),
-            }
+                _ => Err(IntentError::TypeError(
+                    "query_one() requires (connection, sql_string, params_array)".to_string(),
+                )),
+            },
         },
-    });
-    
+    );
+
     // execute(conn, sql, params?) -> Result<int, Error> (returns affected row count)
-    module.insert("execute".to_string(), Value::NativeFunction {
-        name: "execute".to_string(),
-        arity: 3,
-        func: |args| {
-            match (&args[0], &args[1], &args[2]) {
+    module.insert(
+        "execute".to_string(),
+        Value::NativeFunction {
+            name: "execute".to_string(),
+            arity: 3,
+            func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => pg_execute(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => pg_execute(conn, sql, &[]),
-                _ => Err(IntentError::TypeError("execute() requires (connection, sql_string, params_array)".to_string())),
-            }
+                _ => Err(IntentError::TypeError(
+                    "execute() requires (connection, sql_string, params_array)".to_string(),
+                )),
+            },
         },
-    });
-    
+    );
+
     // close(conn) -> bool
-    module.insert("close".to_string(), Value::NativeFunction {
-        name: "close".to_string(),
-        arity: 1,
-        func: |args| {
-            pg_close(&args[0])
+    module.insert(
+        "close".to_string(),
+        Value::NativeFunction {
+            name: "close".to_string(),
+            arity: 1,
+            func: |args| pg_close(&args[0]),
         },
-    });
-    
+    );
+
     // begin(conn) -> Result<Connection, Error> (starts transaction)
-    module.insert("begin".to_string(), Value::NativeFunction {
-        name: "begin".to_string(),
-        arity: 1,
-        func: |args| {
-            pg_begin(&args[0])
+    module.insert(
+        "begin".to_string(),
+        Value::NativeFunction {
+            name: "begin".to_string(),
+            arity: 1,
+            func: |args| pg_begin(&args[0]),
         },
-    });
-    
+    );
+
     // commit(conn) -> Result<bool, Error>
-    module.insert("commit".to_string(), Value::NativeFunction {
-        name: "commit".to_string(),
-        arity: 1,
-        func: |args| {
-            pg_commit(&args[0])
+    module.insert(
+        "commit".to_string(),
+        Value::NativeFunction {
+            name: "commit".to_string(),
+            arity: 1,
+            func: |args| pg_commit(&args[0]),
         },
-    });
-    
+    );
+
     // rollback(conn) -> Result<bool, Error>
-    module.insert("rollback".to_string(), Value::NativeFunction {
-        name: "rollback".to_string(),
-        arity: 1,
-        func: |args| {
-            pg_rollback(&args[0])
+    module.insert(
+        "rollback".to_string(),
+        Value::NativeFunction {
+            name: "rollback".to_string(),
+            arity: 1,
+            func: |args| pg_rollback(&args[0]),
         },
-    });
-    
+    );
+
     module
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_module_init() {
         let module = init();
@@ -668,7 +676,7 @@ mod tests {
         assert!(module.contains_key("commit"));
         assert!(module.contains_key("rollback"));
     }
-    
+
     #[test]
     fn test_json_to_intent_value() {
         let json = serde_json::json!({
@@ -677,7 +685,7 @@ mod tests {
             "active": true,
             "tags": ["a", "b"]
         });
-        
+
         let value = json_to_intent_value(&json);
         match value {
             Value::Map(map) => {
@@ -701,7 +709,7 @@ mod tests {
             _ => panic!("Expected Map"),
         }
     }
-    
+
     #[test]
     fn test_value_to_sql_param() {
         // Test integer conversion
@@ -710,14 +718,14 @@ mod tests {
             SqlParam::Int(v) => assert_eq!(v, 42),
             _ => panic!("Expected Int"),
         }
-        
+
         // Test boolean conversion
         let param = value_to_sql_param(&Value::Bool(true));
         match param {
             SqlParam::Bool(v) => assert!(v),
             _ => panic!("Expected Bool"),
         }
-        
+
         // Test string conversion
         let param = value_to_sql_param(&Value::String("test".to_string()));
         match param {
