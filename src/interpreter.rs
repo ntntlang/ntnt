@@ -5545,11 +5545,15 @@ c")
 
     #[test]
     fn test_std_fs_write_and_read_file() {
-        let result = eval(
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("intent_test_file.txt");
+        let test_path = test_file.to_string_lossy().replace('\\', "/");
+
+        let code = format!(
             r#"
-            import { write_file, read_file, remove } from "std/fs"
+            import {{ write_file, read_file, remove }} from "std/fs"
             
-            let path = "/tmp/intent_test_file.txt"
+            let path = "{}"
             let content = "Hello, Intent!"
             
             // Write file
@@ -5562,13 +5566,14 @@ c")
             remove(path)
             
             // Return the read content (extracting from Result)
-            match read_result {
+            match read_result {{
                 Ok(c) => c,
                 Err(e) => e,
-            }
+            }}
         "#,
-        )
-        .unwrap();
+            test_path
+        );
+        let result = eval(&code).unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "Hello, Intent!");
         } else {
@@ -5578,25 +5583,31 @@ c")
 
     #[test]
     fn test_std_fs_exists() {
-        let result = eval(
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.to_string_lossy().replace('\\', "/");
+        let code = format!(
             r#"
-            import { exists } from "std/fs"
-            exists("/tmp")
+            import {{ exists }} from "std/fs"
+            exists("{}")
         "#,
-        )
-        .unwrap();
+            temp_path
+        );
+        let result = eval(&code).unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
     fn test_std_fs_is_file_and_is_dir() {
-        let result = eval(
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.to_string_lossy().replace('\\', "/");
+        let code = format!(
             r#"
-            import { is_dir, is_file } from "std/fs"
-            [is_dir("/tmp"), is_file("/tmp")]
+            import {{ is_dir, is_file }} from "std/fs"
+            [is_dir("{}"), is_file("{}")]
         "#,
-        )
-        .unwrap();
+            temp_path, temp_path
+        );
+        let result = eval(&code).unwrap();
         if let Value::Array(arr) = result {
             assert!(matches!(&arr[0], Value::Bool(true)));
             assert!(matches!(&arr[1], Value::Bool(false)));
@@ -5608,17 +5619,20 @@ c")
     #[test]
     fn test_std_fs_mkdir_and_remove() {
         // Use a unique test directory name
-        let result = eval(
+        let temp_dir = std::env::temp_dir();
+        let test_dir = temp_dir.join("intent_test_dir_mkdir");
+        let test_path = test_dir.to_string_lossy().replace('\\', "/");
+
+        let code = format!(
             r#"
-            import { mkdir, remove_dir, exists } from "std/fs"
-            import { now_millis } from "std/time"
+            import {{ mkdir, remove_dir, exists }} from "std/fs"
             
-            let test_dir = "/tmp/intent_test_dir_mkdir"
+            let test_dir = "{}"
             
             // Ensure clean state
-            if exists(test_dir) {
+            if exists(test_dir) {{
                 remove_dir(test_dir)
-            }
+            }}
             
             mkdir(test_dir)
             let existed = exists(test_dir)
@@ -5626,8 +5640,9 @@ c")
             let exists_after = exists(test_dir)
             existed && !exists_after
         "#,
-        )
-        .unwrap();
+            test_path
+        );
+        let result = eval(&code).unwrap();
         assert!(matches!(result, Value::Bool(true)));
     }
 
@@ -5707,13 +5722,21 @@ c")
 
     #[test]
     fn test_std_path_is_absolute() {
-        let result = eval(
+        // Use platform-appropriate absolute path
+        let abs_path = if cfg!(windows) {
+            "C:/Users/test"
+        } else {
+            "/home/user"
+        };
+
+        let code = format!(
             r#"
-            import { is_absolute, is_relative } from "std/path"
-            [is_absolute("/home/user"), is_relative("./file.txt")]
+            import {{ is_absolute, is_relative }} from "std/path"
+            [is_absolute("{}"), is_relative("./file.txt")]
         "#,
-        )
-        .unwrap();
+            abs_path
+        );
+        let result = eval(&code).unwrap();
         if let Value::Array(arr) = result {
             assert!(matches!(&arr[0], Value::Bool(true)));
             assert!(matches!(&arr[1], Value::Bool(true)));
