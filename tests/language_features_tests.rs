@@ -64,7 +64,14 @@ fn run_ntnt_parse(code: &str) -> (String, String, i32) {
     writeln!(file, "{}", code).expect("Failed to write test file");
     drop(file);
 
-    let output = Command::new("./target/release/ntnt")
+    // Try release binary first, fall back to debug
+    let binary = if std::path::Path::new("./target/release/ntnt").exists() {
+        "./target/release/ntnt"
+    } else {
+        "./target/debug/ntnt"
+    };
+
+    let output = Command::new(binary)
         .args(&["parse", &test_file, "--json"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
