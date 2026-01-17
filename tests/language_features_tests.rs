@@ -16,13 +16,17 @@ static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn unique_test_file(prefix: &str) -> String {
     let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
     let thread_id = format!("{:?}", std::thread::current().id());
-    format!(
-        "/tmp/ntnt_{}_{}_{}_{}.tnt",
-        prefix,
-        std::process::id(),
-        thread_id.replace(|c: char| !c.is_alphanumeric(), "_"),
-        counter
-    )
+    let temp_dir = std::env::temp_dir();
+    temp_dir
+        .join(format!(
+            "ntnt_{}_{}_{}_{}.tnt",
+            prefix,
+            std::process::id(),
+            thread_id.replace(|c: char| !c.is_alphanumeric(), "_"),
+            counter
+        ))
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Helper to run ntnt with a code string
