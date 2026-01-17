@@ -12,7 +12,7 @@ fn run_ntnt(args: &[&str]) -> (String, String, i32) {
     } else {
         "./target/debug/ntnt"
     };
-    
+
     let output = Command::new(binary)
         .args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
