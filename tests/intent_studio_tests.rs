@@ -9,7 +9,14 @@ use std::time::Duration;
 
 /// Helper to run ntnt command and capture output
 fn run_ntnt(args: &[&str]) -> (String, String, i32) {
-    let output = Command::new("./target/release/ntnt")
+    // Try release binary first, fall back to debug
+    let binary = if std::path::Path::new("./target/release/ntnt").exists() {
+        "./target/release/ntnt"
+    } else {
+        "./target/debug/ntnt"
+    };
+
+    let output = Command::new(binary)
         .args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
@@ -24,7 +31,14 @@ fn run_ntnt(args: &[&str]) -> (String, String, i32) {
 
 /// Helper to start Intent Studio as a background process
 fn start_intent_studio(intent_file: &str, studio_port: u16, app_port: u16) -> Child {
-    Command::new("./target/release/ntnt")
+    // Try release binary first, fall back to debug
+    let binary = if std::path::Path::new("./target/release/ntnt").exists() {
+        "./target/release/ntnt"
+    } else {
+        "./target/debug/ntnt"
+    };
+
+    Command::new(binary)
         .args(&[
             "intent",
             "studio",
