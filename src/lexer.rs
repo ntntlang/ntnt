@@ -459,6 +459,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Parse template string content into parts
+    #[allow(clippy::only_used_in_recursion)]
     fn parse_template_content(&self, content: &str) -> Vec<TemplatePart> {
         let mut parts = Vec::new();
         let mut chars = content.chars().peekable();
@@ -1057,7 +1058,7 @@ impl<'a> Lexer<'a> {
     }
 }
 
-impl<'a> Iterator for Lexer<'a> {
+impl Iterator for Lexer<'_> {
     type Item = Token;
 
     fn next(&mut self) -> Option<Self::Item> {

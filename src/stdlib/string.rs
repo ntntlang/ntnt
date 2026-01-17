@@ -739,9 +739,8 @@ pub fn init() -> HashMap<String, Value> {
                     if s.len() >= target_len {
                         Ok(Value::String(s.clone()))
                     } else {
-                        let padding = std::iter::repeat(pad)
-                            .take(target_len - s.len())
-                            .collect::<String>();
+                        let padding =
+                            std::iter::repeat_n(pad, target_len - s.len()).collect::<String>();
                         Ok(Value::String(format!("{}{}", padding, s)))
                     }
                 }
@@ -765,9 +764,8 @@ pub fn init() -> HashMap<String, Value> {
                     if s.len() >= target_len {
                         Ok(Value::String(s.clone()))
                     } else {
-                        let padding = std::iter::repeat(pad)
-                            .take(target_len - s.len())
-                            .collect::<String>();
+                        let padding =
+                            std::iter::repeat_n(pad, target_len - s.len()).collect::<String>();
                         Ok(Value::String(format!("{}{}", s, padding)))
                     }
                 }
@@ -794,8 +792,8 @@ pub fn init() -> HashMap<String, Value> {
                         let total_padding = target_len - s.len();
                         let left_padding = total_padding / 2;
                         let right_padding = total_padding - left_padding;
-                        let left: String = std::iter::repeat(pad).take(left_padding).collect();
-                        let right: String = std::iter::repeat(pad).take(right_padding).collect();
+                        let left: String = std::iter::repeat_n(pad, left_padding).collect();
+                        let right: String = std::iter::repeat_n(pad, right_padding).collect();
                         Ok(Value::String(format!("{}{}{}", left, s, right)))
                     }
                 }

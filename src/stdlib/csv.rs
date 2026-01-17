@@ -263,37 +263,35 @@ fn parse_csv_string(input: &str, delimiter: char) -> Result<Vec<Vec<String>>, In
             } else {
                 current_field.push(ch);
             }
-        } else {
-            if ch == '"' {
-                // Start of quoted field
-                in_quotes = true;
-            } else if ch == delimiter {
-                // End of field
-                current_row.push(current_field.trim().to_string());
-                current_field = String::new();
-            } else if ch == '\n' {
-                // End of row
-                current_row.push(current_field.trim().to_string());
-                // Only add non-empty rows
-                if !current_row.iter().all(|f| f.is_empty()) || current_row.len() > 1 {
-                    rows.push(current_row);
-                }
-                current_row = Vec::new();
-                current_field = String::new();
-            } else if ch == '\r' {
-                // Handle \r\n line endings
-                if chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                current_row.push(current_field.trim().to_string());
-                if !current_row.iter().all(|f| f.is_empty()) || current_row.len() > 1 {
-                    rows.push(current_row);
-                }
-                current_row = Vec::new();
-                current_field = String::new();
-            } else {
-                current_field.push(ch);
+        } else if ch == '"' {
+            // Start of quoted field
+            in_quotes = true;
+        } else if ch == delimiter {
+            // End of field
+            current_row.push(current_field.trim().to_string());
+            current_field = String::new();
+        } else if ch == '\n' {
+            // End of row
+            current_row.push(current_field.trim().to_string());
+            // Only add non-empty rows
+            if !current_row.iter().all(|f| f.is_empty()) || current_row.len() > 1 {
+                rows.push(current_row);
             }
+            current_row = Vec::new();
+            current_field = String::new();
+        } else if ch == '\r' {
+            // Handle \r\n line endings
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            current_row.push(current_field.trim().to_string());
+            if !current_row.iter().all(|f| f.is_empty()) || current_row.len() > 1 {
+                rows.push(current_row);
+            }
+            current_row = Vec::new();
+            current_field = String::new();
+        } else {
+            current_field.push(ch);
         }
     }
 

@@ -245,7 +245,7 @@ impl IntentFile {
 
                     // Parse "METHOD /path"
                     let parts: Vec<&str> = request_str.splitn(2, ' ').collect();
-                    let method = parts.get(0).unwrap_or(&"GET").to_string();
+                    let method = parts.first().unwrap_or(&"GET").to_string();
                     let path = parts.get(1).unwrap_or(&"/").to_string();
 
                     current_test = Some(TestCase {
@@ -522,6 +522,7 @@ fn run_single_test(test: &TestCase, port: u16) -> TestResult {
     let max_attempts = 20;
 
     while attempts < max_attempts {
+        #[allow(clippy::single_match)]
         match TcpStream::connect(format!("127.0.0.1:{}", port)) {
             Ok(mut stream) => {
                 stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
@@ -534,7 +535,7 @@ fn run_single_test(test: &TestCase, port: u16) -> TestResult {
                     if !response.is_empty() {
                         let response_str = String::from_utf8_lossy(&response).to_string();
                         let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
-                        let headers_str = parts.get(0).unwrap_or(&"");
+                        let headers_str = parts.first().unwrap_or(&"");
                         let body = parts.get(1).unwrap_or(&"").to_string();
 
                         // Parse status code
@@ -1287,16 +1288,16 @@ pub fn generate_scaffolding(intent: &IntentFile) -> String {
             .unwrap_or_else(|| feature.name.to_lowercase().replace(' ', "_"));
 
         // Add feature comment block
-        output.push_str(&format!(
-            "// =============================================================================\n"
-        ));
+        output.push_str(
+            "// =============================================================================\n",
+        );
         output.push_str(&format!("// Feature: {}\n", feature.name));
         if let Some(ref desc) = feature.description {
             output.push_str(&format!("// {}\n", desc));
         }
-        output.push_str(&format!(
-            "// =============================================================================\n\n"
-        ));
+        output.push_str(
+            "// =============================================================================\n\n",
+        );
 
         // Generate handler for each test's route
         let mut seen_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1392,11 +1393,9 @@ fn generate_function_name(path: &str, method: &str) -> String {
     let clean_path = path
         .trim_start_matches('/')
         .replace('/', "_")
-        .replace('{', "")
-        .replace('}', "")
+        .replace(['{', '}'], "")
         .replace('?', "_query")
-        .replace('&', "_")
-        .replace('=', "_");
+        .replace(['&', '='], "_");
 
     let base = if clean_path.is_empty() {
         "index".to_string()

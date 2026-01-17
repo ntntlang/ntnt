@@ -1366,7 +1366,7 @@ impl Interpreter {
             println!("  {} {} -> {}", method, pattern, file);
         }
 
-        println!("");
+        println!();
         println!("Hot-reload enabled: edit route files and changes take effect on next request");
 
         Ok(Value::Int(routes.len() as i64))
@@ -1807,7 +1807,7 @@ impl Interpreter {
                     // Register that this type implements this trait
                     self.trait_implementations
                         .entry(type_name.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(trait_name.clone());
                 }
 
@@ -2240,6 +2240,7 @@ impl Interpreter {
                         } else {
                             i as usize
                         };
+                        #[allow(clippy::unnecessary_lazy_evaluations)]
                         arr.get(index)
                             .cloned()
                             .ok_or_else(|| IntentError::IndexOutOfBounds {
@@ -2253,6 +2254,7 @@ impl Interpreter {
                         } else {
                             i as usize
                         };
+                        #[allow(clippy::unnecessary_lazy_evaluations)]
                         s.chars()
                             .nth(index)
                             .map(|c| Value::String(c.to_string()))
@@ -2382,9 +2384,9 @@ impl Interpreter {
                                     )))
                                 }
                             } else {
-                                Err(IntentError::RuntimeError(format!(
-                                    "Cannot assign field on non-struct value"
-                                )))
+                                Err(IntentError::RuntimeError(
+                                    "Cannot assign field on non-struct value".to_string(),
+                                ))
                             }
                         } else {
                             Err(IntentError::RuntimeError(
@@ -2714,6 +2716,7 @@ impl Interpreter {
     }
 
     /// Try to match a pattern against a value, returning variable bindings if successful
+    #[allow(clippy::only_used_in_recursion)]
     fn match_pattern(
         &self,
         pattern: &Pattern,
@@ -3318,6 +3321,7 @@ impl Interpreter {
 
             // No matching route or static file - send 404
             let path_clone = path.clone();
+            #[allow(clippy::single_match)]
             match http_server::process_request(request, HashMap::new()) {
                 Ok((_, http_request)) => {
                     let not_found = http_server::create_error_response(
@@ -3381,6 +3385,7 @@ impl Interpreter {
     }
 
     /// Convert a runtime Value to a StoredValue for old() tracking
+    #[allow(clippy::only_used_in_recursion)]
     fn value_to_stored(&self, value: &Value) -> StoredValue {
         match value {
             Value::Int(n) => StoredValue::Int(*n),
@@ -3396,6 +3401,7 @@ impl Interpreter {
     }
 
     /// Convert a StoredValue back to a runtime Value
+    #[allow(clippy::only_used_in_recursion)]
     fn stored_to_value(&self, stored: &StoredValue) -> Value {
         match stored {
             StoredValue::Int(n) => Value::Int(*n),

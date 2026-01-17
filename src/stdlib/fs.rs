@@ -235,12 +235,10 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::String(path) => match fs::read_dir(path) {
                     Ok(entries) => {
-                        let mut files: Vec<Value> = Vec::new();
-                        for entry in entries {
-                            if let Ok(e) = entry {
-                                files.push(Value::String(e.path().to_string_lossy().to_string()));
-                            }
-                        }
+                        let files: Vec<Value> = entries
+                            .flatten()
+                            .map(|e| Value::String(e.path().to_string_lossy().to_string()))
+                            .collect();
                         Ok(Value::EnumValue {
                             enum_name: "Result".to_string(),
                             variant: "Ok".to_string(),

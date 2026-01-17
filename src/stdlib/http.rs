@@ -61,7 +61,7 @@ fn response_to_value(
     response_map.insert("body".to_string(), Value::String(body.clone()));
 
     // ok flag
-    response_map.insert("ok".to_string(), Value::Bool(status >= 200 && status < 300));
+    response_map.insert("ok".to_string(), Value::Bool((200..300).contains(&status)));
 
     // Final URL after redirects
     response_map.insert("url".to_string(), Value::String(final_url.to_string()));
@@ -448,7 +448,7 @@ fn http_get_json(url: &str) -> Result<Value> {
     match client.get(url).header("Accept", "application/json").send() {
         Ok(response) => {
             let status = response.status().as_u16();
-            if status >= 200 && status < 300 {
+            if (200..300).contains(&status) {
                 match response.text() {
                     Ok(body) => match serde_json::from_str::<serde_json::Value>(&body) {
                         Ok(json) => {
@@ -505,7 +505,7 @@ fn http_post_json(url: &str, data: &Value) -> Result<Value> {
     {
         Ok(response) => {
             let status = response.status().as_u16();
-            if status >= 200 && status < 300 {
+            if (200..300).contains(&status) {
                 match response.text() {
                     Ok(body) => {
                         if body.is_empty() {
@@ -665,7 +665,7 @@ fn http_download(url: &str, file_path: &str) -> Result<Value> {
     match client.get(url).send() {
         Ok(response) => {
             let status = response.status().as_u16();
-            if status >= 200 && status < 300 {
+            if (200..300).contains(&status) {
                 match response.bytes() {
                     Ok(bytes) => match File::create(path) {
                         Ok(mut file) => match file.write_all(&bytes) {

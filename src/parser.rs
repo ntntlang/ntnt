@@ -1501,6 +1501,7 @@ impl Parser {
     }
 
     /// Recursively parse template parts from lexer format to AST format
+    #[allow(clippy::only_used_in_recursion)]
     fn parse_template_parts(&mut self, parts: &[LexerTemplatePart]) -> Result<Vec<TemplatePart>> {
         let mut ast_parts = Vec::new();
 
@@ -1820,10 +1821,8 @@ impl Parser {
         }
 
         // Check for array type
-        if name == "Array" || self.match_token(&[TokenKind::LeftBracket]) {
-            if name != "Array" {
-                self.consume(&TokenKind::RightBracket, "Expected ']' for array type")?;
-            }
+        if name != "Array" && self.match_token(&[TokenKind::LeftBracket]) {
+            self.consume(&TokenKind::RightBracket, "Expected ']' for array type")?;
             // Simplified: just return named type for now
         }
 

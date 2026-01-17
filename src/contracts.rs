@@ -142,6 +142,7 @@ pub struct ContractChecker {
     enabled: bool,
 
     /// Callback for approval requests
+    #[allow(clippy::type_complexity)]
     approval_handler: Option<Box<dyn Fn(&str) -> bool>>,
 
     /// Contract violation count for statistics
