@@ -125,12 +125,16 @@ fn test_intent_coverage_command() {
 
 #[test]
 fn test_intent_init_generates_stub() {
-    let test_intent = "/tmp/test_init.intent";
-    let test_tnt = "/tmp/test_init.tnt";
+    let temp_dir = std::env::temp_dir();
+    let test_intent = temp_dir
+        .join("test_init.intent")
+        .to_string_lossy()
+        .to_string();
+    let test_tnt = temp_dir.join("test_init.tnt").to_string_lossy().to_string();
 
     // Create a simple intent file
     fs::write(
-        test_intent,
+        &test_intent,
         r#"# Test Project
 # A simple test
 
@@ -151,26 +155,26 @@ Feature: Hello World
     )
     .unwrap();
 
-    let (_stdout, _stderr, code) = run_ntnt(&["intent", "init", test_intent, "-o", test_tnt]);
+    let (_stdout, _stderr, code) = run_ntnt(&["intent", "init", &test_intent, "-o", &test_tnt]);
 
     // Clean up
-    fs::remove_file(test_intent).ok();
+    fs::remove_file(&test_intent).ok();
 
     if code == 0 {
         // Check that output file was created
         assert!(
-            fs::metadata(test_tnt).is_ok(),
+            fs::metadata(&test_tnt).is_ok(),
             "Should create output .tnt file"
         );
 
-        let content = fs::read_to_string(test_tnt).unwrap_or_default();
+        let content = fs::read_to_string(&test_tnt).unwrap_or_default();
         // Should contain @implements annotation
         assert!(
             content.contains("@implements") || content.contains("feature.hello_world"),
             "Generated file should have @implements annotations"
         );
 
-        fs::remove_file(test_tnt).ok();
+        fs::remove_file(&test_tnt).ok();
     }
 }
 
@@ -480,9 +484,13 @@ fn test_intent_studio_custom_ports() {
 #[test]
 fn test_hot_reload_env_var_override() {
     // Test that NTNT_LISTEN_PORT environment variable works
-    let test_file = "/tmp/test_hot_reload.tnt";
+    let temp_dir = std::env::temp_dir();
+    let test_file = temp_dir
+        .join("test_hot_reload.tnt")
+        .to_string_lossy()
+        .to_string();
     fs::write(
-        test_file,
+        &test_file,
         r#"
 import { json } from "std/http/server"
 
@@ -497,8 +505,14 @@ listen(8080)
     .unwrap();
 
     // Start with custom port via env var
-    let child = Command::new("./target/release/ntnt")
-        .args(&["run", test_file])
+    let binary = if std::path::Path::new("./target/release/ntnt").exists() {
+        "./target/release/ntnt"
+    } else {
+        "./target/debug/ntnt"
+    };
+
+    let child = Command::new(binary)
+        .args(&["run", &test_file])
         .env("NTNT_LISTEN_PORT", "19999")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdout(Stdio::piped())
@@ -527,9 +541,13 @@ listen(8080)
 
 #[test]
 fn test_intent_file_parsing_features() {
-    let test_intent = "/tmp/test_features.intent";
+    let temp_dir = std::env::temp_dir();
+    let test_intent = temp_dir
+        .join("test_features.intent")
+        .to_string_lossy()
+        .to_string();
     fs::write(
-        test_intent,
+        &test_intent,
         r#"# Test Project
 
 ## Overview
@@ -565,9 +583,9 @@ Constraint: Rate Limiting
     .unwrap();
 
     // Parse should work (we just verify file is readable)
-    let content = fs::read_to_string(test_intent).unwrap();
+    let content = fs::read_to_string(&test_intent).unwrap();
 
-    fs::remove_file(test_intent).ok();
+    fs::remove_file(&test_intent).ok();
 
     assert!(content.contains("Feature: User Login"));
     assert!(content.contains("id: feature.user_login"));
