@@ -6,7 +6,14 @@ use std::process::Command;
 
 /// Helper to run ntnt command and capture output
 fn run_ntnt(args: &[&str]) -> (String, String, i32) {
-    let output = Command::new("./target/release/ntnt")
+    // Try release binary first, fall back to debug
+    let binary = if std::path::Path::new("./target/release/ntnt").exists() {
+        "./target/release/ntnt"
+    } else {
+        "./target/debug/ntnt"
+    };
+    
+    let output = Command::new(binary)
         .args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
