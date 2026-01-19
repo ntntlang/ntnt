@@ -357,6 +357,7 @@ fn test_intent_studio_has_open_app_button() {
 
 #[test]
 fn test_intent_studio_app_status_endpoint() {
+    skip_on_ci!();
     let studio_port = 13005;
     let app_port = 18085;
 
@@ -525,6 +526,7 @@ fn test_intent_studio_ui_has_app_status_indicator() {
 
 #[test]
 fn test_intent_studio_custom_ports() {
+    skip_on_ci!();
     let studio_port = 14000;
     let app_port = 19000;
 

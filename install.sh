@@ -126,24 +126,32 @@ cargo install --path . --locked --quiet
 echo ""
 echo -e "${GREEN}✓ NTNT installed successfully!${NC}"
 echo ""
+echo "Version: $($HOME/.cargo/bin/ntnt --version)"
+echo ""
 
-# Check if ntnt is accessible
-if command -v ntnt &> /dev/null; then
-    echo "Version: $(ntnt --version)"
-else
-    echo -e "${YELLOW}Note: You may need to add cargo's bin directory to your PATH.${NC}"
+# Check if ntnt is in PATH
+if ! command -v ntnt &> /dev/null; then
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}  To use 'ntnt' command, add cargo's bin directory to your PATH.${NC}"
+    echo -e "${YELLOW}  Run ONE of these commands based on your shell:${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo "Add this to your ~/.zshrc or ~/.bashrc:"
+    echo "  Zsh (default on macOS):"
+    echo -e "    ${GREEN}echo 'export PATH=\"\$HOME/.cargo/bin:\$PATH\"' >> ~/.zshrc && source ~/.zshrc${NC}"
     echo ""
-    echo '  export PATH="$HOME/.cargo/bin:$PATH"'
+    echo "  Bash:"
+    echo -e "    ${GREEN}echo 'export PATH=\"\$HOME/.cargo/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc${NC}"
     echo ""
-    echo "Then restart your terminal or run: source ~/.zshrc"
+    echo "  Fish:"
+    echo -e "    ${GREEN}fish_add_path ~/.cargo/bin${NC}"
+    echo ""
+    echo "  Or just restart your terminal."
+    echo ""
 fi
 
-echo ""
 echo "Get started:"
-echo '  echo '\''print("Hello, World!")'\'' > hello.tnt'
-echo "  ntnt run hello.tnt"
+echo -e "  ${GREEN}ntnt run hello.tnt${NC}     # Run a file"
+echo -e "  ${GREEN}ntnt --help${NC}            # See all commands"
 echo ""
 echo "Learn more: https://github.com/ntntlang/ntnt"
 echo ""
