@@ -104,23 +104,23 @@ else
     echo -e "${GREEN}✓ Rust found: $(rustc --version)${NC}"
 fi
 
-# Clone or update repo
-NTNT_DIR="$HOME/.ntnt-src"
+# Clone or update repo in current directory
+NTNT_DIR="$(pwd)/ntnt-src"
 if [ -d "$NTNT_DIR" ]; then
-    echo "Updating existing installation..."
+    echo "Updating NTNT source in ./ntnt-src..."
     cd "$NTNT_DIR"
     # Always reset to match remote (handles force pushes, conflicts, etc.)
     git fetch --quiet origin
     git reset --quiet --hard origin/main
     git clean --quiet -fd
 else
-    echo "Downloading NTNT..."
+    echo "Downloading NTNT source to ./ntnt-src..."
     git clone --quiet https://github.com/ntntlang/ntnt.git "$NTNT_DIR"
     cd "$NTNT_DIR"
 fi
 
 # Build and install
-echo "Building NTNT (this may take a minute)..."
+echo "Building and installing to ~/.cargo/bin/ntnt..."
 cargo install --path . --locked --quiet
 
 echo ""
@@ -152,6 +152,9 @@ fi
 echo "Get started:"
 echo -e "  ${GREEN}ntnt run hello.tnt${NC}     # Run a file"
 echo -e "  ${GREEN}ntnt --help${NC}            # See all commands"
+echo ""
+echo "Examples are available in ./ntnt-src/examples/"
+echo -e "  ${GREEN}ls ntnt-src/examples/${NC}"
 echo ""
 echo "Learn more: https://github.com/ntntlang/ntnt"
 echo ""
