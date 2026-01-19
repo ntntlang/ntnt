@@ -25,17 +25,17 @@ fn get(req) {
     let posts = [
         map {
             "slug": "welcome",
-            "title": "Welcome to the NTNT Blog",
+            "title": "Introducing NTNT: A Programming Language for the AI Era",
             "date": "January 15, 2026",
             "author": "NTNT Team",
-            "excerpt": "Introducing the NTNT programming language and Intent-Driven Development."
+            "excerpt": "NTNT is a full-featured language with contracts, pattern matching, generics, and a comprehensive stdlib. Designed for AI-assisted development with built-in verification."
         },
         map {
             "slug": "idd-explained",
-            "title": "Intent-Driven Development Explained",
+            "title": "Intent-Driven Development: From Requirements to Verified Code",
             "date": "January 10, 2026",
             "author": "NTNT Team",
-            "excerpt": "A deep dive into how IDD bridges human requirements and AI implementation."
+            "excerpt": "Write what your software should do in .intent files. The system verifies your code actually does it. Full traceability from requirement to implementation."
         }
     ]
 

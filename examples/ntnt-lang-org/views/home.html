@@ -18,24 +18,32 @@
 
 <section class="section">
   <h3>Why NTNT?</h3>
-  <p class="section-subtitle">Traditional languages were designed as a human user interface for software creation. NTNT attempts to re-envision programming from an agent-first perspective.</p>
+  <p class="section-subtitle">A modern programming language designed for AI-assisted development with built-in verification.</p>
 
   <div class="why-grid">
     <div class="why-item">
-      <h4>Intent-Driven Development</h4>
-      <p>Write what your software should do in plain language <code>.intent</code> files. Annotate your code with <code>@implements</code>. Run <code>ntnt intent check</code> to verify they match. Full traceability from requirement to implementation.</p>
+      <h4>Full-Featured Language</h4>
+      <p>Not a toy. NTNT has contracts, pattern matching, generics, enums, structs, traits, and a comprehensive standard library. Build real applications with HTTP servers, PostgreSQL, JSON, CSV, file I/O, crypto, and concurrency.</p>
     </div>
     <div class="why-item">
-      <h4>Contracts as Specification</h4>
-      <p>Preconditions, postconditions, and invariants are part of the syntax. Agents read them as machine-readable specs. Humans read them as documentation. HTTP routes get automatic validation.</p>
+      <h4>Intent-Driven Development</h4>
+      <p>Write requirements in <code>.intent</code> files. Link code with <code>@implements</code>. Run <code>ntnt intent check</code> to verify they match. Full traceability from requirement to implementation.</p>
+    </div>
+    <div class="why-item">
+      <h4>Design by Contract</h4>
+      <p><code>requires</code> and <code>ensures</code> are built into the syntax. Agents read them as specs. Humans read them as docs. In HTTP routes, contract violations automatically return proper error responses.</p>
+    </div>
+    <div class="why-item">
+      <h4>Intent Studio</h4>
+      <p>Visual development environment with live test execution. See pass/fail indicators update in real-time as you code. One command: <code>ntnt intent studio server.intent</code></p>
+    </div>
+    <div class="why-item">
+      <h4>Native Hot-Reload</h4>
+      <p>HTTP servers automatically reload when you save. No restart needed. Edit your code, refresh the browser, see changes instantly.</p>
     </div>
     <div class="why-item">
       <h4>Agent-Native Tooling</h4>
-      <p><code>ntnt inspect</code> outputs JSON describing every function, route, and contract. Agents understand codebases in a single call. No parsing, no guessing.</p>
-    </div>
-    <div class="why-item">
-      <h4>Batteries Included</h4>
-      <p>HTTP server, HTTP client, PostgreSQL, JSON, CSV, file I/O, crypto, time. No package manager, no dependency decisions. Just import and use.</p>
+      <p><code>ntnt inspect</code> outputs structured JSON describing every function, route, and contract. AI agents understand your codebase in a single call.</p>
     </div>
   </div>
 </section>
@@ -64,32 +72,33 @@ listen(3000)</code></pre>
 </section>
 
 <section class="section">
-  <h3>Key Features</h3>
+  <h3>Standard Library</h3>
+  <p class="section-subtitle">Batteries included. No package manager needed.</p>
 
   <div class="features">
     <div class="feature-card">
-      <h4>Intent Files</h4>
-      <p>Describe features in natural language. The system verifies your code implements them correctly.</p>
+      <h4>Web</h4>
+      <p>HTTP server with routing, middleware, static files. HTTP client with fetch, auth, and cookies.</p>
     </div>
     <div class="feature-card">
-      <h4>Design by Contract</h4>
-      <p><code>requires</code>, <code>ensures</code>, and <code>invariant</code> syntax built into the language.</p>
+      <h4>Database</h4>
+      <p>Native PostgreSQL with parameterized queries, transactions, and connection pooling.</p>
     </div>
     <div class="feature-card">
-      <h4>Machine Introspection</h4>
-      <p><code>ntnt inspect</code> gives agents structured JSON about your entire codebase.</p>
+      <h4>Data Formats</h4>
+      <p>JSON and CSV parsing and serialization. URL encoding and query string handling.</p>
     </div>
     <div class="feature-card">
-      <h4>HTTP Server</h4>
-      <p>Built-in routing, middleware, static files. Contract violations become proper HTTP errors.</p>
+      <h4>File System</h4>
+      <p>Read, write, copy, move files. Directory operations. Path manipulation.</p>
     </div>
     <div class="feature-card">
-      <h4>PostgreSQL</h4>
-      <p>Native PostgreSQL support with parameterized queries and transactions.</p>
+      <h4>Crypto</h4>
+      <p>SHA256, HMAC, UUID generation, random bytes, hex encoding.</p>
     </div>
     <div class="feature-card">
-      <h4>Single Binary</h4>
-      <p>No runtime dependencies. Compile and run anywhere.</p>
+      <h4>Concurrency</h4>
+      <p>Go-style channels with send, recv, and timeouts. No async/await complexity.</p>
     </div>
   </div>
 </section>

@@ -2,28 +2,59 @@
 <a href="/blog" class="back-link">&larr; Back to Blog</a>
 
 <article class="blog-post">
-    <h2>Welcome to the NTNT Blog</h2>
+    <h2>Introducing NTNT: A Programming Language for the AI Era</h2>
     <div class="blog-meta" style="margin-bottom: 2rem;">January 15, 2026 - NTNT Team</div>
 
     <div class="content">
-        <p>Welcome to the official blog for the NTNT programming language!</p>
+        <p>We're excited to introduce NTNT (pronounced "Intent"), a new programming language designed from the ground up for AI-assisted software development.</p>
 
-        <p>NTNT (pronounced "Intent") is an experimental programming language designed for AI-assisted software development. It introduces Intent-Driven Development (IDD), where human requirements become executable specifications that AI agents implement and the system verifies.</p>
+        <h3>A Real Programming Language</h3>
+
+        <p>NTNT is not a toy or a DSL. It's a full-featured language with everything you need to build real applications:</p>
+
+        <ul>
+            <li><strong>Modern type system</strong> - Generics, enums, pattern matching, structs, and traits</li>
+            <li><strong>Design by contract</strong> - <code>requires</code> and <code>ensures</code> clauses built into the syntax</li>
+            <li><strong>Comprehensive stdlib</strong> - HTTP server/client, PostgreSQL, JSON, CSV, file I/O, crypto, and concurrency</li>
+            <li><strong>No package manager needed</strong> - Batteries included, just import and use</li>
+        </ul>
 
         <h3>What Makes NTNT Different?</h3>
 
-        <p>Traditional programming languages were designed for humans typing code character by character. As AI agents become capable of generating software, the requirements shift:</p>
+        <p>Traditional languages were designed for humans typing code character by character. NTNT is designed for a world where AI agents generate code and humans verify it works correctly.</p>
+
+        <p>The key innovation is <strong>Intent-Driven Development (IDD)</strong>:</p>
+
+        <ol>
+            <li>Write requirements in plain language <code>.intent</code> files</li>
+            <li>Link code to requirements with <code>@implements</code> annotations</li>
+            <li>Run <code>ntnt intent check</code> to verify they match</li>
+        </ol>
+
+        <p>This creates full traceability from requirement to implementation. You can always answer: "What is this code supposed to do?" and "Does it actually do that?"</p>
+
+        <h3>Developer Experience</h3>
+
+        <p>We've focused on making NTNT a joy to use:</p>
 
         <ul>
-            <li><strong>Agents need structured validation</strong> - machine-readable contracts and introspection</li>
-            <li><strong>Humans need intent clarity</strong> - understand what code should do without reading every line</li>
-            <li><strong>Both need traceability</strong> - connect requirements to implementation</li>
+            <li><strong>Native hot-reload</strong> - HTTP servers automatically reload when you save. No restart needed.</li>
+            <li><strong>Intent Studio</strong> - Visual development environment with live test execution</li>
+            <li><strong>Single binary</strong> - No runtime dependencies, runs anywhere</li>
+            <li><strong>Agent-native tooling</strong> - <code>ntnt inspect</code> outputs structured JSON for AI agents</li>
         </ul>
 
-        <h3>Getting Started</h3>
+        <h3>Who Should Use NTNT?</h3>
 
-        <p>Check out the <a href="/learn">Learn</a> page to get started with NTNT, or visit our <a href="https://github.com/ntntlang/ntnt">GitHub repository</a> for the source code and documentation.</p>
+        <p>NTNT is experimental and not production-ready. It's a great fit for:</p>
 
-        <p>Remember: NTNT is experimental and not ready for production use. We are exploring ideas at the intersection of programming languages and AI assistance.</p>
+        <ul>
+            <li>Exploring AI-assisted development workflows</li>
+            <li>Prototypes and proof-of-concepts</li>
+            <li>Learning about contracts and formal specifications</li>
+            <li>Internal tools where you control the environment</li>
+        </ul>
+
+        <p>Check out the <a href="/learn">Learn</a> page to get started, or visit our <a href="https://github.com/ntntlang/ntnt">GitHub repository</a> for the source code.</p>
     </div>
 </article>

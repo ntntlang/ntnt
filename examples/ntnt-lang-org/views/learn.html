@@ -1,97 +1,141 @@
 {{! Learn page content }}
 <h2 style="margin-bottom: 0.5rem">Learn NTNT</h2>
-<p style="color: var(--text-muted); margin-bottom: 2rem">Get started with the NTNT programming language.</p>
+<p style="color: var(--text-muted); margin-bottom: 1.5rem">Get started with the NTNT programming language.</p>
+
+<div style="background: rgba(255, 193, 7, 0.1); border: 1px solid rgba(255, 193, 7, 0.3); border-radius: 6px; padding: 1rem; margin-bottom: 2rem">
+  <strong style="color: #ffc107">Experimental</strong>
+  <p style="margin: 0.5rem 0 0 0; color: var(--text-muted); font-size: 0.9rem">NTNT is experimental and not production-ready. Use it for learning, prototyping, and exploring Intent-Driven Development.</p>
+</div>
 
 <div class="learn-section">
-  <h4>Quick Start</h4>
+  <h4>Installation</h4>
 
   <div class="step">
     <span class="step-number">1</span>
-    <strong>Install Prerequisites</strong>
+    <strong>Install NTNT</strong>
   </div>
-  <p style="margin-bottom: 1rem">NTNT is built with the Rust programming language. You need the <a href="https://rustup.rs/" target="_blank">Rust toolchain</a> installed.</p>
-  <pre><code>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"</code></pre>
+  <p style="margin-bottom: 1rem">Run one command to install NTNT. This automatically installs Rust if needed, clones the repo, and builds NTNT.</p>
 
-  <div class="step">
-    <span class="step-number">2</span>
-    <strong>Clone and build</strong>
-  </div>
-  <pre><code>git clone https://github.com/ntntlang/ntnt.git
+  <p style="margin-bottom: 0.5rem; color: var(--text-muted); font-size: 0.9rem"><strong>macOS / Linux:</strong></p>
+  <pre><code>curl -sSf https://raw.githubusercontent.com/ntntlang/ntnt/main/install.sh | bash</code></pre>
+
+  <p style="margin-bottom: 0.5rem; color: var(--text-muted); font-size: 0.9rem"><strong>Windows (PowerShell):</strong></p>
+  <pre><code>irm https://raw.githubusercontent.com/ntntlang/ntnt/main/install.ps1 | iex</code></pre>
+
+  <details style="margin-top: 1rem; margin-bottom: 1.5rem">
+    <summary style="cursor: pointer; color: var(--accent)">Manual Installation</summary>
+    <div style="margin-top: 1rem; padding-left: 1rem; border-left: 2px solid var(--border)">
+      <p style="margin-bottom: 0.5rem">1. Install Rust via <a href="https://rustup.rs/" target="_blank">rustup.rs</a></p>
+      <pre><code>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"</code></pre>
+      <p style="margin-bottom: 0.5rem">2. Clone and build:</p>
+      <pre><code>git clone https://github.com/ntntlang/ntnt.git
 cd ntnt
 cargo build --release
 cargo install --path . --locked</code></pre>
+    </div>
+  </details>
 
   <div class="step">
-    <span class="step-number">3</span>
+    <span class="step-number">2</span>
     <strong>Hello World</strong>
   </div>
+  <p style="margin-bottom: 0.5rem; color: var(--text-muted); font-size: 0.9rem"><strong>macOS / Linux:</strong></p>
   <pre><code>echo 'print("Hello, World!")' &gt; hello.tnt
+ntnt run hello.tnt</code></pre>
+  <p style="margin-bottom: 0.5rem; color: var(--text-muted); font-size: 0.9rem"><strong>Windows (PowerShell):</strong></p>
+  <pre><code>Set-Content -Path hello.tnt -Value 'print("Hello, World!")' -Encoding UTF8
 ntnt run hello.tnt</code></pre>
 
   <div class="step">
-    <span class="step-number">4</span>
+    <span class="step-number">3</span>
     <strong>A Web API</strong>
   </div>
   <pre><code>// api.tnt
 import \{ json \} from "std/http/server"
 
-fn hello(req) \{
+fn home(req) \{
     return json(map \{ "message": "Hello!" \})
 \}
 
-get("/", hello)
+fn get_user(req) \{
+    return json(map \{ "id": req.params["id"] \})
+\}
+
+get("/", home)
+get(r"/users/\{id\}", get_user)
+
 listen(3000)</code></pre>
   <pre><code>ntnt run api.tnt
 # Visit http://localhost:3000</code></pre>
+  <p style="margin-top: 1rem; color: var(--text-muted); font-size: 0.9rem"><strong>Hot-reload:</strong> HTTP servers automatically reload when you edit the source file. No restart needed.</p>
 </div>
 
 <div class="learn-section">
   <h4>Intent-Driven Development</h4>
-  <p style="margin-bottom: 1.5rem">IDD bridges human requirements and AI implementation with verifiable traceability.</p>
+  <p style="margin-bottom: 1.5rem">IDD bridges human requirements and AI implementation with verifiable traceability. Write <code>.intent</code> files describing features, link code with <code>@implements</code>, and verify everything matches.</p>
 
   <div class="step">
     <span class="step-number">1</span>
     <strong>Write an intent file</strong>
   </div>
-  <pre><code># myapp.intent
+  <pre><code># server.intent
 
-Feature: User API
-  id: feature.user_api
-  description: "REST API for user management"
+Feature: User Greeting
+  id: feature.greeting
+  description: "Display a personalized greeting"
 
-  Scenario: Get user by ID
-    When: GET /users/123
+  Scenario: Greet by name
+    When: GET /?name=Alice
     Then:
       - status 200
-      - body contains "id"</code></pre>
+      - body contains "Hello, Alice"
+
+  Scenario: Default greeting
+    When: GET /
+    Then:
+      - status 200
+      - body contains "Hello, World"</code></pre>
 
   <div class="step">
     <span class="step-number">2</span>
     <strong>Annotate your implementation</strong>
   </div>
-  <pre><code>import \{ json \} from "std/http/server"
+  <pre><code>// server.tnt
+import \{ html \} from "std/http/server"
 
-// @implements: feature.user_api
-fn get_user(req) \{
-    return json(map \{ "id": req.params["id"], "name": "Alice" \})
+// @implements: feature.greeting
+fn home(req) \{
+    let name = req.query_params["name"] ?? "World"
+    return html("&lt;h1&gt;Hello, \{name\}!&lt;/h1&gt;")
 \}
 
-get(r"/users/\{id\}", get_user)
+get("/", home)
 listen(8080)</code></pre>
 
   <div class="step">
     <span class="step-number">3</span>
     <strong>Verify with intent check</strong>
   </div>
-  <pre><code>$ ntnt intent check myapp.tnt
+  <pre><code>$ ntnt intent check server.tnt
 
-Feature: User API
-  Scenario: Get user by ID
-    ✓ GET /users/123 returns status 200
-    ✓ body contains "id"
+Feature: User Greeting
+  Scenario: Greet by name
+    ✓ GET /?name=Alice returns status 200
+    ✓ body contains "Hello, Alice"
+  Scenario: Default greeting
+    ✓ GET / returns status 200
+    ✓ body contains "Hello, World"
 
-1/1 features passing (2/2 assertions)</code></pre>
+1/1 features passing (4/4 assertions)</code></pre>
+
+  <div class="step">
+    <span class="step-number">4</span>
+    <strong>Visual development with Intent Studio</strong>
+  </div>
+  <p style="margin-bottom: 0.75rem; color: var(--text-muted)">See live test results as you code:</p>
+  <pre><code>ntnt intent studio server.intent
+# Opens http://127.0.0.1:3001 with live pass/fail indicators</code></pre>
 </div>
 
 <div class="learn-section">
@@ -110,6 +154,44 @@ Feature: User API
 // In HTTP routes, contract violations become proper errors:
 // - Failed precondition: 400 Bad Request
 // - Failed postcondition: 500 Internal Server Error</code></pre>
+</div>
+
+<div class="learn-section">
+  <h4>Standard Library</h4>
+  <p style="margin-bottom: 1.5rem">Batteries included. No package manager needed.</p>
+
+  <table style="width: 100%; border-collapse: collapse">
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0; font-weight: 500">Web</td>
+      <td style="padding: 0.75rem 0"><code>std/http/server</code>, <code>std/http</code></td>
+      <td style="padding: 0.75rem 0; color: var(--text-muted)">HTTP server with routing, middleware, static files; HTTP client</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0; font-weight: 500">Data</td>
+      <td style="padding: 0.75rem 0"><code>std/json</code>, <code>std/csv</code>, <code>std/db/postgres</code></td>
+      <td style="padding: 0.75rem 0; color: var(--text-muted)">Parse and stringify; PostgreSQL with transactions</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0; font-weight: 500">I/O</td>
+      <td style="padding: 0.75rem 0"><code>std/fs</code>, <code>std/path</code>, <code>std/env</code></td>
+      <td style="padding: 0.75rem 0; color: var(--text-muted)">File operations, path manipulation, environment variables</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0; font-weight: 500">Text</td>
+      <td style="padding: 0.75rem 0"><code>std/string</code>, <code>std/url</code></td>
+      <td style="padding: 0.75rem 0; color: var(--text-muted)">Split, join, trim, replace; URL encode/decode/parse</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0; font-weight: 500">Utilities</td>
+      <td style="padding: 0.75rem 0"><code>std/time</code>, <code>std/math</code>, <code>std/crypto</code></td>
+      <td style="padding: 0.75rem 0; color: var(--text-muted)">Timestamps, formatting; trig, log, exp; SHA256, UUID</td>
+    </tr>
+    <tr>
+      <td style="padding: 0.75rem 0; font-weight: 500">Concurrency</td>
+      <td style="padding: 0.75rem 0"><code>std/concurrent</code></td>
+      <td style="padding: 0.75rem 0; color: var(--text-muted)">Go-style channels: send, recv, try_recv</td>
+    </tr>
+  </table>
 </div>
 
 <div class="learn-section">
@@ -157,6 +239,20 @@ Feature: User API
       <td style="padding: 0.75rem 0">Launch visual studio with live tests</td>
     </tr>
   </table>
+</div>
+
+<div class="learn-section">
+  <h4>Editor Support</h4>
+  <p style="margin-bottom: 1rem">Install the VS Code extension for syntax highlighting:</p>
+  <pre><code>cp -r ntnt-src/editors/vscode/intent-lang ~/.vscode/extensions/</code></pre>
+  <p style="margin-top: 0.75rem; color: var(--text-muted); font-size: 0.9rem">Then restart VS Code. The extension provides syntax highlighting, code snippets, and bracket matching for <code>.tnt</code> files.</p>
+</div>
+
+<div class="learn-section">
+  <h4>Examples</h4>
+  <p style="margin-bottom: 1rem">After installation, explore the example programs:</p>
+  <pre><code>ls ntnt-src/examples/</code></pre>
+  <p style="margin-top: 0.75rem; color: var(--text-muted); font-size: 0.9rem">Includes HTTP servers, database examples, JSON/CSV processing, and more.</p>
 </div>
 
 <div class="learn-section">

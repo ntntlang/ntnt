@@ -2,36 +2,95 @@
 <a href="/blog" class="back-link">&larr; Back to Blog</a>
 
 <article class="blog-post">
-    <h2>Intent-Driven Development Explained</h2>
+    <h2>Intent-Driven Development: From Requirements to Verified Code</h2>
     <div class="blog-meta" style="margin-bottom: 2rem;">January 10, 2026 - NTNT Team</div>
 
     <div class="content">
-        <p>Intent-Driven Development (IDD) is a methodology where human requirements are written as structured intent files, code is annotated with implementation markers, and the system verifies that implementations match their intents.</p>
+        <p>Intent-Driven Development (IDD) is a methodology where human requirements become executable specifications. You write what your software should do, the system verifies that your code actually does it.</p>
 
-        <h3>The IDD Workflow</h3>
+        <h3>A Concrete Example</h3>
 
-        <p>IDD follows a simple cycle:</p>
+        <p>Let's say you're building a greeting API. First, write an intent file describing what it should do:</p>
+
+        <pre><code># server.intent
+
+Feature: User Greeting
+  id: feature.greeting
+  description: "Display a personalized greeting"
+
+  Scenario: Greet by name
+    When: GET /?name=Alice
+    Then:
+      - status 200
+      - body contains "Hello, Alice"
+
+  Scenario: Default greeting
+    When: GET /
+    Then:
+      - status 200
+      - body contains "Hello, World"</code></pre>
+
+        <p>Now implement it in NTNT, linking your code to the intent:</p>
+
+        <pre><code>// server.tnt
+import { html } from "std/http/server"
+
+// @implements: feature.greeting
+fn home(req) {
+    let name = req.query_params["name"] ?? "World"
+    return html("&lt;h1&gt;Hello, {name}!&lt;/h1&gt;")
+}
+
+get("/", home)
+listen(8080)</code></pre>
+
+        <p>Run <code>ntnt intent check server.tnt</code> and the system automatically:</p>
 
         <ol>
-            <li><strong>Human writes intent</strong> - Describe what the software should do in a <code>.intent</code> file</li>
-            <li><strong>Agent implements</strong> - AI generates code with <code>@implements</code> annotations</li>
-            <li><strong>System verifies</strong> - <code>ntnt intent check</code> confirms the implementation matches</li>
-            <li><strong>Human reviews</strong> - Approve, refine intent, or request changes</li>
+            <li>Starts your server</li>
+            <li>Makes the HTTP requests defined in scenarios</li>
+            <li>Verifies the assertions pass</li>
+            <li>Reports results</li>
         </ol>
 
-        <h3>Why Intent Files?</h3>
+        <h3>Why This Matters</h3>
 
-        <p>Intent files serve multiple purposes:</p>
+        <p>Traditional development has a gap between requirements and code. Requirements live in documents that quickly become outdated. Tests verify behavior but don't explain intent. Code comments try to bridge the gap but are often ignored.</p>
+
+        <p>IDD closes this gap:</p>
 
         <ul>
-            <li>They are human-readable specifications that do not require reading code</li>
-            <li>They are machine-parseable, so agents know exactly what to build</li>
-            <li>They create a permanent record of requirements separate from implementation</li>
-            <li>They enable automatic verification that code does what it should</li>
+            <li><strong>Requirements are executable</strong> - They're not just documentation, they're tests</li>
+            <li><strong>Code is traceable</strong> - Every function links back to its requirement</li>
+            <li><strong>Changes are verifiable</strong> - Modify code, run check, know if you broke anything</li>
+            <li><strong>AI agents have clear targets</strong> - Tell an agent to implement <code>feature.greeting</code> and it knows exactly what success looks like</li>
         </ul>
 
-        <h3>Traceability</h3>
+        <h3>Intent Studio: Visual Development</h3>
 
-        <p>Every function can be traced back to its intent. Run <code>ntnt intent coverage</code> to see which intents have implementations and which are missing. This makes it easy to audit a codebase and understand its purpose.</p>
+        <p>For the best experience, use Intent Studio:</p>
+
+        <pre><code>ntnt intent studio server.intent</code></pre>
+
+        <p>This opens a visual interface at <code>http://127.0.0.1:3001</code> showing your intent file with live pass/fail indicators. As you edit your code, tests re-run automatically and you see results update in real-time.</p>
+
+        <h3>Design by Contract Integration</h3>
+
+        <p>IDD works hand-in-hand with NTNT's contract system. Contracts define function-level specifications:</p>
+
+        <pre><code>fn withdraw(amount: Int) -> Int
+    requires amount > 0
+    requires amount <= self.balance
+    ensures result >= 0
+{
+    self.balance = self.balance - amount
+    return self.balance
+}</code></pre>
+
+        <p>In HTTP routes, contract violations automatically return proper error responses: failed preconditions return 400 Bad Request, failed postconditions return 500 Internal Server Error.</p>
+
+        <h3>Getting Started</h3>
+
+        <p>Ready to try IDD? Check out the <a href="/learn">Learn</a> page for installation instructions and a complete walkthrough.</p>
     </div>
 </article>
