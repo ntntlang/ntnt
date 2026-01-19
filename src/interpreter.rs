@@ -1595,55 +1595,6 @@ impl Interpreter {
         Ok(routes)
     }
 
-    /// Reload a single route handler from a file (for hot-reload)
-    fn reload_route_handler(&mut self, file_path: &str, method: &str) -> Result<Value> {
-        use crate::lexer::Lexer;
-        use crate::parser::Parser;
-        use std::fs;
-
-        let path = std::path::Path::new(file_path);
-
-        // Read and parse the file
-        let source_code = fs::read_to_string(path).map_err(|e| {
-            IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path, e))
-        })?;
-
-        let lexer = Lexer::new(&source_code);
-        let tokens: Vec<_> = lexer.collect();
-        let mut parser = Parser::new(tokens);
-        let ast = parser.parse()?;
-
-        // Create a fresh environment
-        let previous_env = Rc::clone(&self.environment);
-        let previous_file = self.current_file.clone();
-
-        self.environment = Rc::new(RefCell::new(Environment::new()));
-        self.current_file = Some(file_path.to_string());
-
-        // Re-define builtins
-        self.define_builtins();
-
-        // Evaluate the module
-        self.eval(&ast)?;
-
-        // Find the handler for the specified method
-        let method_name = method.to_lowercase();
-        let env = self.environment.borrow();
-        let handler = env.values.get(&method_name).cloned();
-        drop(env);
-
-        // Restore environment
-        self.environment = previous_env;
-        self.current_file = previous_file;
-
-        handler.ok_or_else(|| {
-            IntentError::RuntimeError(format!(
-                "Handler '{}' not found in {}",
-                method_name, file_path
-            ))
-        })
-    }
-
     /// Convert a file path to a URL pattern
     ///
     /// Examples:

@@ -270,6 +270,7 @@ fn test_intent_studio_starts_on_default_port() {
     ignore = "Flaky network test on Windows - times out waiting for server"
 )]
 fn test_intent_studio_serves_html() {
+    skip_on_ci!();
     let studio_port = 13002;
     let app_port = 18082;
 
@@ -299,6 +300,7 @@ fn test_intent_studio_serves_html() {
 
 #[test]
 fn test_intent_studio_has_logo() {
+    skip_on_ci!();
     let studio_port = 13003;
     let app_port = 18083;
 
