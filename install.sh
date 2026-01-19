@@ -37,6 +37,36 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     echo -e "${GREEN}✓ Xcode Command Line Tools found${NC}"
 fi
 
+# Linux: Check for C compiler (build-essential)
+if [[ "$OSTYPE" == "linux"* ]]; then
+    if ! command -v cc &> /dev/null && ! command -v gcc &> /dev/null; then
+        echo -e "${RED}❌ C compiler not found${NC}"
+        echo ""
+        echo "NTNT requires a C compiler to build on Linux."
+        echo ""
+        if command -v apt-get &> /dev/null; then
+            echo "Install build tools by running:"
+            echo ""
+            echo -e "  ${GREEN}sudo apt-get install build-essential${NC}"
+        elif command -v dnf &> /dev/null; then
+            echo "Install build tools by running:"
+            echo ""
+            echo -e "  ${GREEN}sudo dnf groupinstall 'Development Tools'${NC}"
+        elif command -v pacman &> /dev/null; then
+            echo "Install build tools by running:"
+            echo ""
+            echo -e "  ${GREEN}sudo pacman -S base-devel${NC}"
+        else
+            echo "Please install gcc/build tools using your system's package manager."
+        fi
+        echo ""
+        echo "After installation completes, re-run this installer."
+        echo ""
+        exit 1
+    fi
+    echo -e "${GREEN}✓ C compiler found${NC}"
+fi
+
 # Check for git
 if ! command -v git &> /dev/null; then
     echo -e "${RED}❌ Git not found${NC}"
