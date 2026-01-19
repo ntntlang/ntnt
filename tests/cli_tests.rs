@@ -63,7 +63,11 @@ fn test_validate_valid_file() {
 #[test]
 fn test_validate_directory() {
     let (stdout, stderr, code) = run_ntnt(&["validate", "examples/"]);
-    assert_eq!(code, 0, "validate should succeed when all files are valid");
+    assert_eq!(
+        code, 0,
+        "validate should succeed when all files are valid.\nstderr:\n{}\nstdout:\n{}",
+        stderr, stdout
+    );
 
     // Should output JSON with multiple files
     let json: serde_json::Value =
