@@ -314,6 +314,8 @@ pub struct Interpreter {
     main_source_mtime: Option<std::time::SystemTime>,
     /// Flag to track if we're currently in a hot-reload evaluation
     is_hot_reloading: bool,
+    /// Request timeout in seconds for HTTP server
+    request_timeout_secs: u64,
 }
 
 /// Information about a trait definition
@@ -355,6 +357,7 @@ impl Interpreter {
             main_source_file: None,
             main_source_mtime: None,
             is_hot_reloading: false,
+            request_timeout_secs: 30,
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
@@ -370,6 +373,11 @@ impl Interpreter {
         shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
         self.test_mode = Some((port, max_requests, shutdown_flag));
+    }
+
+    /// Set the request timeout for the HTTP server (in seconds)
+    pub fn set_request_timeout(&mut self, seconds: u64) {
+        self.request_timeout_secs = seconds;
     }
 
     /// Set the current file path for relative imports
@@ -2168,7 +2176,7 @@ impl Interpreter {
                         }
                         let port = self.eval_expression(&arguments[0])?;
                         if let Value::Int(port_num) = port {
-                            return self.run_http_server(port_num as u16);
+                            return self.run_async_http_server(port_num as u16);
                         } else {
                             return Err(IntentError::TypeError(
                                 "listen() requires an integer port".to_string(),
@@ -3681,170 +3689,168 @@ impl Interpreter {
         }
     }
 
-    /// Run the HTTP server on the specified port
-    fn run_http_server(&mut self, port: u16) -> Result<Value> {
-        use crate::stdlib::http_server;
-        use std::sync::atomic::Ordering;
-        use std::time::Duration;
-
-        // Check for NTNT_LISTEN_PORT env var override (used by Intent Studio)
-        let env_port = std::env::var("NTNT_LISTEN_PORT")
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok());
-
-        // Check if we're in test mode
-        let (actual_port, is_test_mode, shutdown_flag) = match &self.test_mode {
-            Some((test_port, _max_req, flag)) => (*test_port, true, Some(flag.clone())),
-            None => (env_port.unwrap_or(port), false, None),
+    /// Run the HTTP server using Axum + Tokio
+    /// This provides high-concurrency handling for production workloads
+    fn run_async_http_server(&mut self, port: u16) -> Result<Value> {
+        use crate::stdlib::http_bridge::{
+            create_channel, BridgeConfig, BridgeResponse, HandlerRequest, InterpreterHandle,
         };
+        use crate::stdlib::http_server_async::{
+            start_server_with_bridge, AsyncServerConfig, AsyncServerState,
+        };
+        use std::sync::Arc;
+        use std::thread;
 
-        // Check if any routes or static dirs are registered
-        let has_routes = self.server_state.route_count() > 0;
-        let has_static = !self.server_state.static_dirs.is_empty();
-
-        if !has_routes && !has_static {
+        // Check if any routes are registered
+        if self.server_state.route_count() == 0 && self.server_state.static_dirs.is_empty() {
             return Err(IntentError::RuntimeError(
                 "No routes or static directories registered. Use get(), post(), serve_static(), etc. before calling listen()".to_string()
             ));
         }
 
-        // Print startup message
-        if is_test_mode {
-            println!("Starting test server on http://127.0.0.1:{}", actual_port);
-        } else {
-            println!("Starting server on http://0.0.0.0:{}", actual_port);
-        }
+        // Enable hot-reload by default for the async server
+        self.server_state.hot_reload = true;
 
-        if has_routes {
-            println!("Routes registered: {}", self.server_state.route_count());
-        }
-        if has_static {
-            println!(
-                "Static directories: {}",
-                self.server_state.static_dirs.len()
-            );
-            if !is_test_mode {
-                for (prefix, dir) in &self.server_state.static_dirs {
-                    println!("  {} -> {}", prefix, dir);
-                }
-            }
-        }
-        let middleware_count = self.server_state.middleware.len();
-        if middleware_count > 0 {
-            println!("Middleware: {}", middleware_count);
-        }
-
-        // Show hot-reload status
+        println!("🚀 Starting NTNT async server (Axum + Tokio)...");
+        println!("   Routes registered: {}", self.server_state.route_count());
+        println!(
+            "   Static directories: {}",
+            self.server_state.static_dirs.len()
+        );
         if self.server_state.hot_reload && self.main_source_file.is_some() {
-            println!(
-                "\n🔥 Hot-reload enabled: edit your .tnt file and changes apply on next request"
-            );
-        }
-
-        if !is_test_mode {
-            println!("Press Ctrl+C to stop");
+            println!("   Hot-reload: enabled");
         }
         println!();
 
-        // Start the server
-        let server = if is_test_mode {
-            http_server::start_server_with_timeout(actual_port, Duration::from_secs(60))?
-        } else {
-            http_server::start_server(actual_port)?
-        };
+        // Create the channel for interpreter communication
+        let config = BridgeConfig::default();
+        let (tx, mut rx) = create_channel(&config);
 
-        // Handle requests in a loop
-        // In test mode, use recv_timeout and check shutdown flag
-        loop {
-            // Check shutdown flag in test mode
-            if let Some(ref flag) = shutdown_flag {
-                if flag.load(Ordering::SeqCst) {
-                    break;
-                }
+        // Create async server state with registered routes
+        let async_routes = Arc::new(AsyncServerState::new());
+
+        // Helper function to sync routes from interpreter to async state
+        fn sync_routes_to_async(
+            server_state: &crate::stdlib::http_server::ServerState,
+            async_routes: &AsyncServerState,
+            rt: &tokio::runtime::Runtime,
+        ) {
+            // Clear existing async routes
+            async_routes.clear_blocking(rt);
+
+            // Copy routes
+            for (route, _handler, _source) in &server_state.routes {
+                async_routes.register_route_blocking(rt, &route.method, &route.pattern, "handler");
             }
 
-            // Get next request (with timeout in test mode)
-            let request = if is_test_mode {
-                match server.recv_timeout(Duration::from_millis(50)) {
-                    Ok(Some(req)) => req,
-                    Ok(None) => continue, // Timeout, check shutdown flag
-                    Err(_) => break,      // Server error
+            // Copy static directories
+            for (url_prefix, fs_path) in &server_state.static_dirs {
+                async_routes.register_static_dir_blocking(rt, url_prefix, fs_path);
+            }
+        }
+
+        // Create the async runtime for route registration and hot-reload sync
+        let sync_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| IntentError::RuntimeError(format!("Failed to create runtime: {}", e)))?;
+
+        // Initial route sync from interpreter to async state
+        sync_routes_to_async(&self.server_state, &async_routes, &sync_rt);
+
+        // Create interpreter handle for async handlers
+        let interpreter_handle = Arc::new(InterpreterHandle::new(tx));
+
+        // Create server config
+        let server_config = AsyncServerConfig {
+            port,
+            host: "0.0.0.0".to_string(),
+            enable_compression: true,
+            request_timeout_secs: self.request_timeout_secs,
+            max_connections: 10_000,
+        };
+
+        // Spawn async server in a separate thread
+        let routes_clone = async_routes.clone();
+        let handle_clone = interpreter_handle.clone();
+        let server_handle = thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime");
+
+            rt.block_on(async {
+                if let Err(e) =
+                    start_server_with_bridge(server_config, handle_clone, routes_clone).await
+                {
+                    eprintln!("Server error: {}", e);
                 }
-            } else {
-                match server.recv() {
-                    Ok(req) => req,
-                    Err(_) => break,
-                }
-            };
+            });
+        });
 
-            // Hot-reload check: if main source file changed, reload it
-            // This runs on each request to pick up changes without restart
-            self.check_and_reload_main_source();
+        // Main thread: process requests from the channel
+        // This runs the interpreter in a single thread (required since it's not Send+Sync)
+        println!("Interpreter ready, processing requests...");
+        if self.server_state.hot_reload && self.main_source_file.is_some() {
+            println!(
+                "🔥 Hot-reload enabled: edit your .tnt file and changes apply on next request"
+            );
+        }
+        println!();
 
-            let method = request.method().to_string();
-            let url = request.url().to_string();
-            let path = url.split('?').next().unwrap_or(&url).to_string();
+        loop {
+            // Block waiting for requests
+            match rx.blocking_recv() {
+                Some(handler_request) => {
+                    let HandlerRequest { request, reply_tx } = handler_request;
 
-            // First, try to find a matching route
-            if let Some((mut handler, route_params, route_index)) =
-                self.server_state.find_route(&method, &path)
-            {
-                // Hot-reload check: if file changed, reload the handler
-                if self.server_state.needs_reload(route_index) {
-                    if let Some(source) = self.server_state.get_route_source(route_index).cloned() {
-                        if let Some(file_path) = &source.file_path {
-                            // Re-parse and reload the handler
-                            match self.reload_route_handler(file_path, &method) {
-                                Ok(new_handler) => {
-                                    self.server_state
-                                        .update_route_handler(route_index, new_handler.clone());
-                                    handler = new_handler;
-                                    println!("[hot-reload] Reloaded: {}", file_path);
-                                }
-                                Err(e) => {
-                                    eprintln!("[hot-reload] Error reloading {}: {}", file_path, e);
-                                }
-                            }
-                        }
+                    // Hot-reload check: if main source file changed, reload it
+                    if self.check_and_reload_main_source() {
+                        // Routes changed - sync to async state
+                        sync_routes_to_async(&self.server_state, &async_routes, &sync_rt);
                     }
-                }
 
-                // Process request to get request Value
-                match http_server::process_request(request, route_params) {
-                    Ok((mut req_value, http_request)) => {
-                        // Run middleware chain and determine final response
+                    // Find the matching route handler
+                    let method = &request.method;
+                    let path = &request.path;
+
+                    if let Some((handler, route_params, _route_index)) =
+                        self.server_state.find_route(method, path)
+                    {
+                        // Merge route params with request params
+                        let mut full_request = request.clone();
+                        for (k, v) in route_params {
+                            full_request.params.insert(k, v);
+                        }
+
+                        // Convert to NTNT Value
+                        let req_value = full_request.to_value();
+
+                        // Run middleware
                         let middleware_handlers: Vec<Value> =
                             self.server_state.get_middleware().to_vec();
+                        let mut current_req = req_value;
                         let mut early_response: Option<Value> = None;
 
                         for mw in middleware_handlers {
-                            match self.call_function(mw.clone(), vec![req_value.clone()]) {
-                                Ok(result) => {
-                                    // Check if middleware returned a response (early exit) or modified request
-                                    match &result {
-                                        Value::Map(map) if map.contains_key("status") => {
-                                            // Middleware returned a response - use it and stop
-                                            early_response = Some(result);
-                                            break;
-                                        }
-                                        Value::Map(_) => {
-                                            // Middleware returned modified request - continue with it
-                                            req_value = result;
-                                        }
-                                        Value::Unit => {
-                                            // Middleware returned unit - continue with original request
-                                        }
-                                        _ => {
-                                            // Other return - continue with original request
-                                        }
+                            match self.call_function(mw.clone(), vec![current_req.clone()]) {
+                                Ok(result) => match &result {
+                                    Value::Map(map) if map.contains_key("status") => {
+                                        early_response = Some(result);
+                                        break;
                                     }
-                                }
+                                    Value::Map(_) => {
+                                        current_req = result;
+                                    }
+                                    _ => {}
+                                },
                                 Err(e) => {
                                     eprintln!("Middleware error: {}", e);
-                                    early_response = Some(http_server::create_error_response(
-                                        500,
-                                        &e.to_string(),
-                                    ));
+                                    early_response =
+                                        Some(crate::stdlib::http_server::create_error_response(
+                                            500,
+                                            &e.to_string(),
+                                        ));
                                     break;
                                 }
                             }
@@ -3854,83 +3860,36 @@ impl Interpreter {
                         let final_response = if let Some(resp) = early_response {
                             resp
                         } else {
-                            // Call the route handler
-                            match self.call_function(handler, vec![req_value]) {
+                            match self.call_function(handler, vec![current_req]) {
                                 Ok(response) => response,
                                 Err(e) => {
                                     eprintln!("Handler error: {}", e);
-                                    // Check for contract violations and return appropriate HTTP status
-                                    if let IntentError::ContractViolation(msg) = &e {
-                                        if msg.contains("Precondition failed") {
-                                            // Precondition = bad request from client
-                                            http_server::create_error_response(
-                                                400,
-                                                &format!("Bad Request: {}", msg),
-                                            )
-                                        } else if msg.contains("Postcondition failed") {
-                                            // Postcondition = server logic error
-                                            http_server::create_error_response(
-                                                500,
-                                                &format!("Internal Error: {}", msg),
-                                            )
-                                        } else {
-                                            http_server::create_error_response(500, &e.to_string())
-                                        }
-                                    } else {
-                                        http_server::create_error_response(500, &e.to_string())
-                                    }
+                                    crate::stdlib::http_server::create_error_response(
+                                        500,
+                                        &e.to_string(),
+                                    )
                                 }
                             }
                         };
 
-                        // Send the response (only once)
-                        if let Err(e) = http_server::send_response(http_request, &final_response) {
-                            eprintln!("Error sending response: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error processing request: {}", e);
+                        // Convert to BridgeResponse and send back
+                        let bridge_response = BridgeResponse::from_value(&final_response);
+                        let _ = reply_tx.send(bridge_response);
+                    } else {
+                        // No route found
+                        let _ = reply_tx.send(BridgeResponse::not_found());
                     }
                 }
-                continue;
-            }
-
-            // No matching route - check static files (only for GET requests)
-            if method == "GET" {
-                if let Some((file_path, _relative)) = self.server_state.find_static_file(&path) {
-                    // Serve static file
-                    if let Err(e) = http_server::send_static_response(request, &file_path) {
-                        eprintln!("Error serving static file: {}", e);
-                    }
-                    continue;
+                None => {
+                    // Channel closed, server shutting down
+                    println!("\n🛑 Server shutting down...");
+                    break;
                 }
-            }
-
-            // No matching route or static file - send 404
-            let path_clone = path.clone();
-            #[allow(clippy::single_match)]
-            match http_server::process_request(request, HashMap::new()) {
-                Ok((_, http_request)) => {
-                    let not_found = http_server::create_error_response(
-                        404,
-                        &format!("Not Found: {} {}", method, path_clone),
-                    );
-                    let _ = http_server::send_response(http_request, &not_found);
-                }
-                Err(_) => {}
             }
         }
 
-        // Server is shutting down - call shutdown handlers
-        let shutdown_handlers: Vec<Value> = self.server_state.get_shutdown_handlers().to_vec();
-        if !shutdown_handlers.is_empty() {
-            println!("\nRunning shutdown handlers...");
-            for handler in shutdown_handlers {
-                if let Err(e) = self.call_function(handler, vec![]) {
-                    eprintln!("Shutdown handler error: {}", e);
-                }
-            }
-        }
+        // Wait for server thread to finish
+        let _ = server_handle.join();
 
         Ok(Value::Unit)
     }

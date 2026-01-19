@@ -1,0 +1,30 @@
+# Rust build artifacts (can be several GB)
+target/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Docker
+.dockerignore
+Dockerfile
+
+# Environment files (secrets)
+.env
+.env.*
+!.env.example
+
+# Documentation
+*.md
+!README.md
+
+# Plans and notes
+plans/
+
+# Test files
+tests/

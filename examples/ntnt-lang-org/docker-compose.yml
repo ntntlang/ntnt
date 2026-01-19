@@ -1,0 +1,47 @@
+# NTNT Language Website - Docker Compose
+#
+# Services:
+#   - ntnt: The NTNT web server
+#   - cloudflared: Cloudflare tunnel for secure public access
+#
+# Usage:
+#   1. Create a Cloudflare tunnel at https://dash.cloudflare.com
+#   2. Copy your tunnel token
+#   3. Create .env file with CLOUDFLARE_TUNNEL_TOKEN=<your-token>
+#   4. Run: docker-compose up -d
+
+services:
+  ntnt:
+    build:
+      context: ../..
+      dockerfile: examples/ntnt-lang-org/Dockerfile
+    container_name: ntnt-lang-org
+    restart: unless-stopped
+    environment:
+      - NTNT_TIMEOUT=${NTNT_TIMEOUT:-30}
+    networks:
+      - ntnt-network
+    # No ports exposed - only accessible via cloudflared tunnel
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ntnt-cloudflared
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - ntnt-network
+    depends_on:
+      ntnt:
+        condition: service_healthy
+
+networks:
+  ntnt-network:
+    driver: bridge

@@ -13,7 +13,7 @@ thiserror = "1.0"
 anyhow = "1.0"
 
 # CLI
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.4", features = ["derive", "env"] }
 
 # Serialization (for AST export)
 serde = { version = "1.0", features = ["derive"] }
@@ -45,8 +45,13 @@ urlencoding = "2.1"
 # HTTP Client
 reqwest = { version = "0.11", features = ["blocking", "json", "multipart", "cookies"] }
 
-# HTTP Server
-tiny_http = "0.12"
+# HTTP Server (Axum + Tokio for high-concurrency)
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "compression-gzip", "trace", "fs", "timeout"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
 
 # Ctrl+C handling
 ctrlc = "3.4"
@@ -65,6 +70,9 @@ reqwest = { version = "0.11", features = ["blocking"] }
 [[bin]]
 name = "ntnt"
 path = "src/main.rs"
+
+[features]
+default = []
 
 [profile.release]
 opt-level = 3

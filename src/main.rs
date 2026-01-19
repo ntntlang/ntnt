@@ -32,10 +32,16 @@ enum Commands {
     ///
     /// For HTTP servers, the program runs until Ctrl+C:
     ///   ntnt run examples/http_server.tnt
+    ///
+    /// The HTTP server uses Axum + Tokio for high-concurrency production use.
     Run {
         /// The source file to run
         #[arg(value_name = "FILE")]
         file: PathBuf,
+
+        /// Request timeout in seconds for HTTP server (default: 30, env: NTNT_TIMEOUT)
+        #[arg(long, default_value = "30", env("NTNT_TIMEOUT"))]
+        timeout: u64,
     },
     /// Test an HTTP server by running it and making requests
     ///
@@ -269,7 +275,7 @@ fn main() {
 
     let result = match cli.command {
         Some(Commands::Repl) => run_repl(),
-        Some(Commands::Run { file }) => run_file(&file),
+        Some(Commands::Run { file, timeout }) => run_file(&file, timeout),
         Some(Commands::Test {
             file,
             get_requests,
@@ -298,7 +304,7 @@ fn main() {
         Some(Commands::Intent(intent_cmd)) => run_intent_command(intent_cmd),
         None => {
             if let Some(file) = cli.file {
-                run_file(&file)
+                run_file(&file, 30)
             } else {
                 run_repl()
             }
@@ -571,7 +577,7 @@ fn evaluate(interpreter: &mut Interpreter, source: &str) -> anyhow::Result<Strin
     Ok(result.to_string())
 }
 
-fn run_file(path: &PathBuf) -> anyhow::Result<()> {
+fn run_file(path: &PathBuf, timeout: u64) -> anyhow::Result<()> {
     let source = fs::read_to_string(path)?;
     let mut interpreter = Interpreter::new();
 
@@ -580,6 +586,9 @@ fn run_file(path: &PathBuf) -> anyhow::Result<()> {
     let path_str = canonical_path.to_string_lossy();
     interpreter.set_current_file(&path_str);
     interpreter.set_main_source_file(&path_str);
+
+    // Set request timeout for HTTP server
+    interpreter.set_request_timeout(timeout);
 
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();

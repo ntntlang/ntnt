@@ -1,19 +1,275 @@
 # Web Deployment for NTNT Applications
 
-For a production setup, the recommended approach (similar to Node.js or Go apps) is to run the application as a **systemd service** behind **Nginx** as a reverse proxy.
+This guide covers deploying NTNT web applications to production.
 
-This creates a robust architecture where:
-*   **Nginx** handles SSL/TLS, compression, caching, and static files.
-*   **Systemd** ensures the app auto-starts on boot and restarts if it crashes.
-*   **NTNT** handles the application logic.
+## Recommended: Docker + Cloudflare Tunnel
 
-## Option 1: Systemd Service + Nginx (Recommended)
+The simplest and most secure deployment uses Docker with Cloudflare Tunnel:
 
-This is the most efficient way to run on a standard Linux server (Ubuntu/Debian).
+```
+Internet → Cloudflare Edge (SSL, CDN, DDoS) → cloudflared tunnel → NTNT server
+```
 
-### 1. Create a Systemd Service
+**Benefits:**
+- **Zero exposed ports** - Your server has no public-facing ports
+- **Automatic SSL** - Cloudflare handles certificates
+- **Built-in CDN** - Static assets cached at edge
+- **DDoS protection** - Included free
+- **Analytics** - Traffic stats in Cloudflare dashboard
+- **Simple setup** - No nginx, no certbot, no firewall rules
 
-Create a file at `/etc/systemd/system/ntnt-app.service`:
+---
+
+## Step 1: Create Your Dockerfile
+
+Create a `Dockerfile` in your project:
+
+```dockerfile
+# Multi-stage build for smaller final image
+FROM rust:1.86-bookworm AS builder
+
+WORKDIR /build
+COPY . /ntnt-source
+WORKDIR /ntnt-source
+RUN cargo build --release
+
+# Runtime image
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1000 ntnt
+
+WORKDIR /app
+
+# Copy binary
+COPY --from=builder /ntnt-source/target/release/ntnt /usr/local/bin/ntnt
+
+# Copy your application files
+COPY server.tnt .
+COPY routes ./routes
+COPY views ./views
+COPY assets ./assets
+
+RUN chown -R ntnt:ntnt /app
+USER ntnt
+
+EXPOSE 8080
+
+# Health check for Docker and Cloudflare
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
+
+ENV NTNT_TIMEOUT=30
+
+CMD ["ntnt", "run", "server.tnt"]
+```
+
+## Step 2: Create docker-compose.yml
+
+```yaml
+services:
+  app:
+    build: .
+    container_name: my-ntnt-app
+    restart: unless-stopped
+    environment:
+      - NTNT_TIMEOUT=${NTNT_TIMEOUT:-30}
+      - DATABASE_URL=${DATABASE_URL:-}
+    networks:
+      - app-network
+    # No ports exposed - only accessible via tunnel
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - app-network
+    depends_on:
+      app:
+        condition: service_healthy
+
+networks:
+  app-network:
+    driver: bridge
+```
+
+## Step 3: Set Up Cloudflare Tunnel
+
+### 3.1 Add Your Domain to Cloudflare
+
+If you haven't already:
+
+1. Sign up at [cloudflare.com](https://cloudflare.com)
+2. Click **Add a site** and enter your domain
+3. Select the **Free** plan (sufficient for most sites)
+4. Update your domain's nameservers to the ones Cloudflare provides
+5. Wait for DNS propagation (usually 5-30 minutes)
+
+Once active, your domain dashboard will show **DNS Setup: Full** in the overview.
+
+### 3.2 Create a Tunnel (Zero Trust)
+
+Tunnels are managed in Cloudflare's **Zero Trust** section, separate from your domain settings:
+
+1. Go to [Cloudflare Dashboard](https://dash.cloudflare.com)
+2. Click **Zero Trust** in the left sidebar (or go to [one.dash.cloudflare.com](https://one.dash.cloudflare.com))
+3. Navigate to **Networks** → **Connectors**
+4. Select the **Cloudflare Tunnels** tab
+5. Click **Add a tunnel**
+6. Select **Cloudflared** as the connector type
+7. Name your tunnel (e.g., `ntnt-lang-org`)
+8. Click **Save tunnel**
+
+### 3.3 Copy Your Tunnel Token
+
+After creating the tunnel, you'll see connector setup instructions. Find the token in the install command:
+
+```bash
+cloudflared service install eyJhIjoiNjk...  # This long string is your token
+```
+
+Copy this entire token string - you'll need it for your `.env` file.
+
+### 3.4 Configure Public Hostname
+
+Still in the tunnel configuration, add a public hostname to route traffic:
+
+1. Click the **Public Hostname** tab
+2. Click **Add a public hostname**
+3. Configure:
+   - **Subdomain**: Leave blank for root domain (`ntnt-lang.org`), or enter `www`
+   - **Domain**: Select your domain from dropdown
+   - **Path**: Leave blank
+   - **Service Type**: `HTTP`
+   - **URL**: `ntnt:8080` (matches your Docker service name and port)
+4. Click **Save hostname**
+
+Add another hostname for `www` if desired (same settings, just add `www` as subdomain).
+
+### 3.5 Configure Domain SSL/TLS Settings
+
+Go back to your domain dashboard (click **Back to Domains** or select your domain):
+
+1. **SSL/TLS** → **Overview**
+   - Verify encryption mode is **Full** (should be set by default)
+
+2. **SSL/TLS** → **Edge Certificates**
+   - Enable **Always Use HTTPS**
+   - Enable **Automatic HTTPS Rewrites**
+
+3. **Security** → **Settings** (optional but recommended)
+   - Enable **Bot Fight Mode** to block malicious bots
+   - Enable **Browser Integrity Check**
+
+4. **Speed** → **Optimization** (optional)
+   - Enable **Auto Minify** for JavaScript, CSS, HTML
+   - Enable **Brotli** compression
+
+## Step 4: Deploy
+
+### 4.1 Create Environment File
+
+```bash
+# Create .env file
+cat > .env << 'EOF'
+CLOUDFLARE_TUNNEL_TOKEN=your-token-here
+NTNT_TIMEOUT=30
+DATABASE_URL=postgres://user:pass@db:5432/myapp
+EOF
+```
+
+**Important:** Add `.env` to your `.gitignore`:
+```bash
+echo ".env" >> .gitignore
+```
+
+### 4.2 Build and Run
+
+```bash
+# Build and start in background
+docker-compose up -d --build
+
+# View logs
+docker-compose logs -f
+
+# Check status
+docker-compose ps
+```
+
+### 4.3 Verify Deployment
+
+1. Check container health: `docker-compose ps`
+2. Check tunnel status in Cloudflare dashboard (should show "Healthy")
+3. Visit your domain - it should load with HTTPS
+
+## Step 5: Enable Cloudflare Analytics
+
+Analytics are automatically available in your Cloudflare dashboard:
+
+1. Go to **Analytics & Logs** → **Traffic**
+2. View:
+   - Total requests and unique visitors
+   - Bandwidth usage
+   - Geographic distribution
+   - Top paths and status codes
+   - Threats blocked
+
+For more detailed analytics, consider **Web Analytics** (free):
+1. Go to **Analytics & Logs** → **Web Analytics**
+2. Add a site and copy the JS snippet
+3. Add to your HTML templates
+
+---
+
+## Optional: Cloudflare Caching
+
+To cache static assets at Cloudflare's edge:
+
+1. Go to **Caching** → **Cache Rules**
+2. Create a rule:
+   - **If**: URI Path starts with `/assets` or `/static`
+   - **Then**: Cache eligible, Edge TTL: 1 month
+3. Your static files are now served from Cloudflare's global CDN
+
+---
+
+## Optional: Rate Limiting
+
+To protect against abuse:
+
+1. Go to **Security** → **WAF** → **Rate limiting rules**
+2. Create a rule:
+   - **If**: URI Path contains `/api`
+   - **Then**: Block for 10 minutes when rate exceeds 100 requests per minute
+
+---
+
+## Alternative: Systemd (No Docker)
+
+For simpler deployments without Docker, you can run NTNT directly with systemd.
+
+### Install NTNT
+
+```bash
+# Build from source
+git clone https://github.com/ntntlang/ntnt
+cd ntnt
+cargo build --release
+sudo cp target/release/ntnt /usr/local/bin/
+```
+
+### Create Systemd Service
+
+Create `/etc/systemd/system/ntnt-app.service`:
 
 ```ini
 [Unit]
@@ -21,23 +277,12 @@ Description=My NTNT Application
 After=network.target
 
 [Service]
-# User that runs the app (create this user for security)
 User=www-data
 Group=www-data
-
-# Path to your application directory
 WorkingDirectory=/var/www/myapp
-
-# Command to start the app using the install location of ntnt
-# Ensure 'ntnt' includes the full path if not in global PATH
 ExecStart=/usr/local/bin/ntnt run server.tnt
-
-# Environment variables
-Environment=PORT=3000
-Environment=NODE_ENV=production
+Environment=NTNT_TIMEOUT=30
 Environment=DATABASE_URL=postgres://user:pass@localhost/db
-
-# Automatically restart on crash
 Restart=always
 RestartSec=3
 
@@ -45,7 +290,7 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-Reload the systemd daemon (required to pick up the new file), then enable and start the service:
+Enable and start:
 
 ```bash
 sudo systemctl daemon-reload
@@ -53,199 +298,60 @@ sudo systemctl enable ntnt-app
 sudo systemctl start ntnt-app
 ```
 
-### 2. Nginx Configuration
+### Connect to Cloudflare Tunnel
 
-Edit your site config (e.g., `/etc/nginx/sites-available/myapp.com`):
-
-```nginx
-server {
-    listen 80;
-    server_name myapp.com;
-
-    # Optional: Serve static files directly with Nginx for performance
-    # Matches the serve_static() path in your .tnt file
-    location /static/ {
-        alias /var/www/myapp/public/;
-        expires 30d;
-        access_log off;
-    }
-
-    location / {
-        # Forward requests to your local ntnt instance
-        proxy_pass http://127.0.0.1:3000;
-        
-        # Standard proxy headers
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        
-        # Pass real client IP
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-Enable the site by linking it to `sites-enabled`, then test and reload Nginx:
+Install cloudflared on your server:
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/myapp.com /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
+# Debian/Ubuntu
+curl -L https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloudflare-archive-keyring.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt update
+sudo apt install cloudflared
 ```
 
-### 3. Setup SSL with Let's Encrypt
-
-The easiest way to secure your site with HTTPS (port 443) is using Certbot.
-
-1.  **Install Certbot and the Nginx plugin:**
-
-    ```bash
-    sudo apt-get update
-    sudo apt-get install certbot python3-certbot-nginx
-    ```
-
-2.  **Run Certbot:**
-
-    ```bash
-    sudo certbot --nginx -d myapp.com
-    ```
-
-    Follow the prompts. Certbot will automatically:
-    *   Obtain a certificate.
-    *   Modify your Nginx config to listen on port 443 (SSL).
-    *   Set up automatic redirection from HTTP to HTTPS.
-    *   Set up a cron job for certificate renewal.
-
-3.  **Verify Configuration:**
-
-    Your Nginx config (`/etc/nginx/sites-available/myapp.com`) will automatically be updated to something like this:
-
-    ```nginx
-    server {
-        server_name myapp.com;
-        
-        # SSL Configuration (Added by Certbot)
-        listen 443 ssl; 
-        ssl_certificate /etc/letsencrypt/live/myapp.com/fullchain.pem; 
-        ssl_certificate_key /etc/letsencrypt/live/myapp.com/privkey.pem; 
-        include /etc/letsencrypt/options-ssl-nginx.conf; 
-        ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
-
-        location /static/ {
-            alias /var/www/myapp/public/;
-            expires 30d;
-        }
-
-        location / {
-            proxy_pass http://127.0.0.1:3000;
-            # ... proxy headers ...
-        }
-    }
-
-    # Redirect HTTP to HTTPS (Force SSL)
-    # We strictly redirect all port 80 traffic to 443. Nothing is served on 80.
-    server {
-        listen 80;
-        server_name myapp.com;
-        return 301 https://$host$request_uri;
-    }
-    ```
-
-## Option 2: Docker Setup
-
-If you prefer containerization (e.g., for easy deployment or scaling), here is a standard `Dockerfile`.
-
-**Dockerfile**:
-
-```dockerfile
-# Use a lightweight Linux base (Debian-based usually easiest for Rust binaries)
-FROM debian:bullseye-slim
-
-# Install dependencies needed for `ntnt` (openssl, cacerts)
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    libssl-dev \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install ntnt
-# (Assuming you download a release binary or copy it from a build stage)
-# Here we copy a local binary, but in production you'd likely curl the release
-COPY ./target/release/ntnt /usr/local/bin/ntnt
-RUN chmod +x /usr/local/bin/ntnt
-
-WORKDIR /app
-
-# Copy application files
-COPY . .
-
-# Expose the port your app listens on
-EXPOSE 3000
-
-# Run the app
-CMD ["ntnt", "run", "server.tnt"]
-```
-
-### 1. Build and Run Container
-
-Build the image and run it. We map port 3000 to the host, and optionally mount the `public` folder if we want Nginx to host static files directly.
+Configure and run as a service:
 
 ```bash
-docker build -t ntnt-app .
-docker run -d \
-  --name ntnt-app \
-  -p 3000:3000 \
-  -v $(pwd)/public:/var/www/myapp/public \
-  --restart always \
-  ntnt-app
+sudo cloudflared service install <YOUR-TUNNEL-TOKEN>
 ```
 
-### 2. Configure Nginx (Host)
+---
 
-Create `/etc/nginx/sites-available/myapp.com`. Note that even though the app is in Docker, Nginx proxies to `127.0.0.1:3000` because we exposed the port to the host.
+## Troubleshooting
 
-```nginx
-server {
-    listen 80;
-    server_name myapp.com;
+### Tunnel shows "Unhealthy"
 
-    # Serve static files from the mounted volume (optional optimization)
-    location /static/ {
-        alias /var/www/myapp/public/;
-        expires 30d;
-    }
+1. Check container logs: `docker-compose logs cloudflared`
+2. Verify token is correct in `.env`
+3. Ensure the app container is running and healthy
 
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
+### 502 Bad Gateway
 
-Enable the site and reload Nginx:
+1. Check app is running: `docker-compose logs app`
+2. Verify the hostname URL matches your service name (`app:8080`)
+3. Check health endpoint responds: `docker-compose exec app curl localhost:8080/`
 
-```bash
-sudo ln -s /etc/nginx/sites-available/myapp.com /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl reload nginx
-```
+### SSL Certificate Errors
 
-### 3. Setup SSL with Certbot
+1. Ensure Cloudflare SSL mode is set to "Full" (not "Flexible")
+2. Wait a few minutes for certificate provisioning
+3. Clear browser cache and try again
 
-Run Certbot to enable HTTPS, auto-configure the certificate, and force redirect HTTP traffic to Port 443.
+### Slow First Request
 
-```bash
-sudo apt-get install certbot python3-certbot-nginx
-sudo certbot --nginx -d myapp.com
-```
+Normal - the first request after deployment may be slower as Cloudflare establishes the tunnel connection. Subsequent requests are fast.
 
-Certbot will automatically update your Nginx config to listen on `443 ssl` and add the `301` redirect for port 80.
+---
+
+## Production Checklist
+
+- [ ] Environment variables configured (not hardcoded)
+- [ ] `.env` file in `.gitignore`
+- [ ] Health check endpoint working
+- [ ] SSL/TLS set to "Full" or "Full (strict)"
+- [ ] "Always Use HTTPS" enabled
+- [ ] Caching rules configured for static assets
+- [ ] Rate limiting configured for API endpoints
+- [ ] Automatic container restart enabled (`restart: unless-stopped`)
+- [ ] Logs accessible (`docker-compose logs`)

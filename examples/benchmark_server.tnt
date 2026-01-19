@@ -1,0 +1,39 @@
+// Simple benchmark server for performance testing
+// Usage:
+//   Sync mode:  ntnt run examples/benchmark_server.tnt
+//   Async mode: ntnt run examples/benchmark_server.tnt --async
+
+import { json, html, text } from "std/http/server"
+
+// Simple JSON endpoint
+fn api_hello(req) {
+    return json(map { "message": "Hello, World!", "status": "ok" })
+}
+
+// Plain text endpoint (minimal processing)
+fn hello_text(req) {
+    return text("Hello, World!")
+}
+
+// Simulated work endpoint
+fn api_compute(req) {
+    let mut sum = 0
+    for i in 0..1000 {
+        sum = sum + i
+    }
+    return json(map { "result": sum })
+}
+
+// Route with parameter
+fn api_echo(req) {
+    let id = req.params["id"]
+    return json(map { "id": id, "echo": true })
+}
+
+// Register routes
+get("/", hello_text)
+get("/json", api_hello)
+get("/compute", api_compute)
+get(r"/echo/{id}", api_echo)
+
+listen(8080)

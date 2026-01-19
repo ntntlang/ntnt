@@ -1,0 +1,17 @@
+# Development overrides - mount local files for hot-reload
+# This file is automatically loaded by docker compose
+#
+# To use production mode without these overrides:
+#   docker compose -f docker-compose.yml up -d
+
+services:
+  ntnt:
+    volumes:
+      - ./server.tnt:/app/server.tnt:ro
+      - ./routes:/app/routes:ro
+      - ./middleware:/app/middleware:ro
+      - ./views:/app/views:ro
+      - ./assets:/app/assets:ro
+    # Expose port for local testing without tunnel
+    ports:
+      - "8080:8080"
