@@ -15,13 +15,19 @@ echo ""
 
 # macOS: Check for Xcode Command Line Tools
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    if ! xcode-select -p &> /dev/null; then
-        echo -e "${RED}❌ Xcode Command Line Tools not found${NC}"
+    # Check both that xcode-select has a path AND that the tools actually work
+    if ! xcode-select -p &> /dev/null || ! xcrun --version &> /dev/null; then
+        echo -e "${RED}❌ Xcode Command Line Tools not found or broken${NC}"
         echo ""
         echo "NTNT requires the Xcode Command Line Tools to compile on macOS."
         echo ""
-        echo "Install them by running:"
+        echo "Install or reinstall them by running:"
         echo ""
+        echo -e "  ${GREEN}xcode-select --install${NC}"
+        echo ""
+        echo "If that doesn't work, try removing and reinstalling:"
+        echo ""
+        echo -e "  ${GREEN}sudo rm -rf /Library/Developer/CommandLineTools${NC}"
         echo -e "  ${GREEN}xcode-select --install${NC}"
         echo ""
         echo "After installation completes, re-run this installer."
