@@ -22,6 +22,7 @@
 
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
+use crate::stdlib::json::json_to_intent_value;
 use std::collections::HashMap;
 use std::time::SystemTime;
 
@@ -54,6 +55,7 @@ pub struct ServerState {
     pub static_dirs: Vec<(String, String)>,       // (url_prefix, filesystem_path)
     pub middleware: Vec<Value>,                   // Middleware functions to run before handlers
     pub hot_reload: bool,                         // Whether hot-reload is enabled
+    pub shutdown_handlers: Vec<Value>,            // Functions to call on server shutdown
 }
 
 impl ServerState {
@@ -63,6 +65,7 @@ impl ServerState {
             static_dirs: Vec::new(),
             middleware: Vec::new(),
             hot_reload: true, // Enable hot-reload by default in dev
+            shutdown_handlers: Vec::new(),
         }
     }
 
@@ -70,6 +73,15 @@ impl ServerState {
         self.routes.clear();
         self.static_dirs.clear();
         self.middleware.clear();
+        self.shutdown_handlers.clear();
+    }
+
+    pub fn add_shutdown_handler(&mut self, handler: Value) {
+        self.shutdown_handlers.push(handler);
+    }
+
+    pub fn get_shutdown_handlers(&self) -> &[Value] {
+        &self.shutdown_handlers
     }
 
     /// Add a route without source file info (inline routes)
@@ -308,18 +320,59 @@ pub fn request_to_value(
 
     // Headers
     let mut headers: HashMap<String, Value> = HashMap::new();
+    let mut client_ip: Option<String> = None;
+    let mut request_id: Option<String> = None;
+
     for header in request.headers() {
-        headers.insert(
-            header.field.to_string().to_lowercase(),
-            Value::String(header.value.to_string()),
-        );
+        let field_lower = header.field.to_string().to_lowercase();
+        let value = header.value.to_string();
+
+        // Extract proxy headers
+        if field_lower == "x-forwarded-for" {
+            // X-Forwarded-For can be comma-separated, take the first (original client)
+            client_ip = Some(value.split(',').next().unwrap_or(&value).trim().to_string());
+        } else if field_lower == "x-real-ip" && client_ip.is_none() {
+            client_ip = Some(value.clone());
+        } else if field_lower == "x-request-id" {
+            request_id = Some(value.clone());
+        }
+
+        headers.insert(field_lower, Value::String(value));
     }
     req_map.insert("headers".to_string(), Value::Map(headers));
 
     // Body
     req_map.insert("body".to_string(), Value::String(body));
 
+    // Client IP (from proxy headers or remote address)
+    let ip = client_ip.unwrap_or_else(|| {
+        request
+            .remote_addr()
+            .map(|addr| addr.ip().to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    });
+    req_map.insert("ip".to_string(), Value::String(ip));
+
+    // Request ID (from header or generate one)
+    let id = request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    req_map.insert("id".to_string(), Value::String(id));
+
+    // Protocol (assume HTTP unless X-Forwarded-Proto says HTTPS)
+    let protocol =
+        headers_get_string(&req_map, "x-forwarded-proto").unwrap_or_else(|| "http".to_string());
+    req_map.insert("protocol".to_string(), Value::String(protocol));
+
     Value::Map(req_map)
+}
+
+/// Helper to get a string from the headers map
+fn headers_get_string(req_map: &HashMap<String, Value>, key: &str) -> Option<String> {
+    if let Some(Value::Map(headers)) = req_map.get("headers") {
+        if let Some(Value::String(value)) = headers.get(key) {
+            return Some(value.clone());
+        }
+    }
+    None
 }
 
 /// Convert Intent Value to JSON for response serialization
@@ -651,6 +704,100 @@ pub fn init() -> HashMap<String, Value> {
                 }
 
                 Ok(create_response_value(status, headers, body))
+            },
+        },
+    );
+
+    // parse_json(req) -> Result<Value, Error> - Parse request body as JSON
+    module.insert(
+        "parse_json".to_string(),
+        Value::NativeFunction {
+            name: "parse_json".to_string(),
+            arity: 1,
+            func: |args| {
+                let body = match &args[0] {
+                    Value::Map(map) => match map.get("body") {
+                        Some(Value::String(b)) => b.clone(),
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "parse_json() requires a request with body".to_string(),
+                            ))
+                        }
+                    },
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "parse_json() requires a request map or body string".to_string(),
+                        ))
+                    }
+                };
+
+                match serde_json::from_str::<serde_json::Value>(&body) {
+                    Ok(json_val) => {
+                        let intent_val = json_to_intent_value(&json_val);
+                        Ok(Value::EnumValue {
+                            enum_name: "Result".to_string(),
+                            variant: "Ok".to_string(),
+                            values: vec![intent_val],
+                        })
+                    }
+                    Err(e) => Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Err".to_string(),
+                        values: vec![Value::String(e.to_string())],
+                    }),
+                }
+            },
+        },
+    );
+
+    // parse_form(req) -> Map - Parse request body as URL-encoded form data
+    module.insert(
+        "parse_form".to_string(),
+        Value::NativeFunction {
+            name: "parse_form".to_string(),
+            arity: 1,
+            func: |args| {
+                let body = match &args[0] {
+                    Value::Map(map) => match map.get("body") {
+                        Some(Value::String(b)) => b.clone(),
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "parse_form() requires a request with body".to_string(),
+                            ))
+                        }
+                    },
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "parse_form() requires a request map or body string".to_string(),
+                        ))
+                    }
+                };
+
+                let mut form_data: HashMap<String, Value> = HashMap::new();
+                for pair in body.split('&') {
+                    if pair.is_empty() {
+                        continue;
+                    }
+                    if let Some((key, value)) = pair.split_once('=') {
+                        // URL decode the key and value
+                        let decoded_key = urlencoding::decode(key)
+                            .unwrap_or_else(|_| key.into())
+                            .to_string();
+                        let decoded_value = urlencoding::decode(value)
+                            .unwrap_or_else(|_| value.into())
+                            .to_string();
+                        form_data.insert(decoded_key, Value::String(decoded_value));
+                    } else {
+                        // Key with no value
+                        let decoded_key = urlencoding::decode(pair)
+                            .unwrap_or_else(|_| pair.into())
+                            .to_string();
+                        form_data.insert(decoded_key, Value::String(String::new()));
+                    }
+                }
+                Ok(Value::Map(form_data))
             },
         },
     );

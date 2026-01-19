@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod contracts;
 pub mod error;
+pub mod ial;
 pub mod intent;
 pub mod interpreter;
 pub mod lexer;

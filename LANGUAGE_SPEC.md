@@ -1,6 +1,6 @@
 # NTNT Language Specification
 
-## Version 0.2.1
+## Version 0.3.0
 
 This document specifies the syntax, semantics, and core features of the NTNT programming language.
 
@@ -15,8 +15,9 @@ This document specifies the syntax, semantics, and core features of the NTNT pro
 7. [Control Flow](#control-flow)
 8. [Effects](#effects)
 9. [Concurrency](#concurrency)
-10. [Modules](#modules)
-11. [Standard Library](#standard-library)
+10. [Intent Assertion Language (IAL)](#intent-assertion-language-ial)
+11. [Modules](#modules)
+12. [Standard Library](#standard-library)
 
 ## Lexical Structure
 
@@ -105,14 +106,18 @@ let page = """
 
 **Template String Features:**
 
-| Syntax                               | Description                  |
-| ------------------------------------ | ---------------------------- |
-| `{{expr}}`                           | Interpolate expression       |
-| `{ ... }`                            | Literal braces (CSS/JS safe) |
-| `{{#for x in arr}}...{{/for}}`       | Loop over array              |
-| `{{#if cond}}...{{/if}}`             | Conditional                  |
-| `{{#if cond}}...{{#else}}...{{/if}}` | If-else                      |
-| `\{{` and `\}}`                      | Literal `{{` and `}}`        |
+| Syntax                                  | Description                     |
+| --------------------------------------- | ------------------------------- |
+| `{{expr}}`                              | Interpolate expression          |
+| `{{expr \| filter}}`                    | Apply filter to expression      |
+| `{ ... }`                               | Literal braces (CSS/JS safe)    |
+| `{{#for x in arr}}...{{/for}}`          | Loop over array                 |
+| `{{#for x in arr}}...{{#empty}}{{/for}}`| Loop with empty fallback        |
+| `{{#if cond}}...{{/if}}`                | Conditional                     |
+| `{{#if cond}}...{{#elif}}...{{/if}}`    | Elif chains                     |
+| `{{#if cond}}...{{#else}}...{{/if}}`    | If-else                         |
+| `{{! comment }}`                        | Template comment (not rendered) |
+| `\{{` and `\}}`                         | Literal `{{` and `}}`           |
 
 **Template Loops:**
 
@@ -122,6 +127,45 @@ let list = """
 <ul>
 {{#for user in users}}
     <li>{{user}}</li>
+{{/for}}
+</ul>
+"""
+```
+
+**Loop Metadata Variables:**
+
+Inside `{{#for}}` loops, these special variables are available:
+
+| Variable    | Type   | Description                      |
+| ----------- | ------ | -------------------------------- |
+| `@index`    | Int    | Current 0-based index            |
+| `@length`   | Int    | Total number of items            |
+| `@first`    | Bool   | True if first iteration          |
+| `@last`     | Bool   | True if last iteration           |
+| `@even`     | Bool   | True if index is even (0, 2, 4)  |
+| `@odd`      | Bool   | True if index is odd (1, 3, 5)   |
+
+```ntnt
+let colors = ["Red", "Green", "Blue"]
+let indexed = """
+{{#for color in colors}}
+    <li class="{{#if @first}}first{{#elif @last}}last{{#else}}middle{{/if}}">
+        {{@index}}/{{@length}}: {{color}}
+    </li>
+{{/for}}
+"""
+```
+
+**Empty Loop Fallback:**
+
+```ntnt
+let items = []
+let list = """
+<ul>
+{{#for item in items}}
+    <li>{{item}}</li>
+{{#empty}}
+    <li class="empty">No items found</li>
 {{/for}}
 </ul>
 """
@@ -140,6 +184,78 @@ let nav = """
 {{/if}}
 </nav>
 """
+```
+
+**Elif Chains:**
+
+```ntnt
+let score = 75
+let grade = """
+{{#if score >= 90}}A
+{{#elif score >= 80}}B
+{{#elif score >= 70}}C
+{{#elif score >= 60}}D
+{{#else}}F{{/if}}
+"""
+```
+
+**Template Comments:**
+
+```ntnt
+let page = """
+{{! This comment will not appear in output }}
+<div>
+    {{! TODO: add more content }}
+    <p>Visible content</p>
+</div>
+"""
+```
+
+**Template Filters:**
+
+Filters transform values using the pipe syntax `{{expr | filter}}`:
+
+```ntnt
+let name = "john doe"
+let html = """
+<p>{{name | capitalize}}</p>
+<p>{{name | uppercase}}</p>
+<p>{{missing_var | default("N/A")}}</p>
+<p>{{user_input | escape}}</p>
+"""
+```
+
+**Available Filters:**
+
+| Filter                    | Description                              |
+| ------------------------- | ---------------------------------------- |
+| `uppercase`               | Convert to UPPERCASE                     |
+| `lowercase`               | Convert to lowercase                     |
+| `capitalize`              | Capitalize first letter                  |
+| `trim`                    | Remove leading/trailing whitespace       |
+| `truncate(n)`             | Truncate to n characters with "..."      |
+| `replace(old, new)`       | Replace occurrences of old with new      |
+| `escape`                  | HTML-escape special characters           |
+| `raw`                     | Output without auto-escaping             |
+| `default(val)`            | Use val if expression is empty/undefined |
+| `length`                  | Get length of string or array            |
+| `first`                   | Get first element                        |
+| `last`                    | Get last element                         |
+| `reverse`                 | Reverse string or array                  |
+| `join(sep)`               | Join array elements with separator       |
+| `slice(start, end)`       | Extract subset of array/string           |
+| `json`                    | Serialize value as JSON                  |
+| `number`                  | Format as number                         |
+| `url_encode`              | URL-encode string                        |
+
+Filters can be chained:
+
+```ntnt
+let items = [3, 1, 4, 1, 5]
+let output = """
+{{items | reverse | join(", ")}}
+"""
+// Output: 5, 1, 4, 1, 3
 ```
 
 ## Types
@@ -560,6 +676,143 @@ match recv_timeout(ch, 5000) {
 close(ch)
 ```
 
+## Intent Assertion Language (IAL)
+
+IAL is a **term rewriting system** that translates natural language assertions into executable tests. It powers the Intent-Driven Development (IDD) workflow.
+
+### Architecture
+
+```
+Natural Language Assertion
+    ↓ vocabulary lookup
+Glossary/Component Reference
+    ↓ expansion
+Standard Terms
+    ↓ resolution
+Primitives (Check, Http, Cli, Sql, ReadFile)
+    ↓ execution
+Pass/Fail Results
+```
+
+### Vocabulary
+
+All IAL knowledge lives in the **Vocabulary**, which contains:
+
+1. **Standard Terms** - Built-in assertions like "status 200", "body contains"
+2. **Glossary Terms** - Domain-specific definitions from `.intent` files
+3. **Components** - Reusable assertion templates with parameters
+
+### Standard Terms (HTTP)
+
+| Pattern | Resolves To |
+|---------|-------------|
+| `status $code` | `Check(Equals, "response.status", $code)` |
+| `status 2xx` | `Check(InRange, "response.status", 200-299)` |
+| `body contains "$text"` | `Check(Contains, "response.body", "$text")` |
+| `body not contains "$text"` | `Check(NotContains, "response.body", "$text")` |
+| `body matches $pattern` | `Check(Matches, "response.body", $pattern)` |
+| `header "$name" contains "$value"` | `Check(Contains, "response.headers.$name", "$value")` |
+| `redirects to $path` | `Check(Contains, "response.headers.Location", "$path")` |
+| `returns JSON` | `Check(Contains, "response.headers.Content-Type", "application/json")` |
+
+### Standard Terms (CLI)
+
+| Pattern | Resolves To |
+|---------|-------------|
+| `exits successfully` | `Check(Equals, "cli.exit_code", 0)` |
+| `exits with code $n` | `Check(Equals, "cli.exit_code", $n)` |
+| `output shows "$text"` | `Check(Contains, "cli.stdout", "$text")` |
+| `error shows "$text"` | `Check(Contains, "cli.stderr", "$text")` |
+
+### Standard Terms (Files)
+
+| Pattern | Resolves To |
+|---------|-------------|
+| `file "$path" exists` | `Check(Exists, "file", "$path")` |
+| `file "$path" contains "$text"` | `ReadFile("$path") + Check(Contains, _, "$text")` |
+| `directory "$path" exists` | `Check(Exists, "directory", "$path")` |
+
+### Glossary Definitions
+
+Define domain-specific terms in `.intent` files:
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+| success response | status 2xx, body contains "ok" |
+| they see "$text" | body contains "$text" |
+| they don't see "$text" | body not contains "$text" |
+| authenticated | header "Authorization" contains "Bearer" |
+```
+
+**Parameter Extraction:** Use `{param}` syntax for dynamic terms:
+
+```yaml
+| they see {n} items | body matches "\\d+ items", count is {n} |
+```
+
+### Components
+
+Components are reusable assertion templates:
+
+```yaml
+Component: Authenticated User
+  id: component.authenticated_user
+  parameters:
+    - username: the user's login name
+  inherent_behavior:
+    - valid session token exists
+    - user appears in session
+
+  preconditions:
+    verify: POST /login with valid credentials returns status 200
+    skip: "User authentication not available"
+```
+
+Reference components in glossary:
+
+```yaml
+| logged in user | component.authenticated_user(username: "testuser") |
+```
+
+### Primitives
+
+IAL resolves all terms to a fixed set of primitives:
+
+**Actions:**
+- `Http(method, path, body?)` - Make HTTP request
+- `Cli(command, args?)` - Run CLI command
+- `Sql(query, params?)` - Execute SQL query
+- `ReadFile(path)` - Read file contents
+
+**Checks:**
+- `Equals` - Exact match
+- `NotEquals` - Not equal
+- `Contains` - Substring/element match
+- `NotContains` - Does not contain
+- `Matches` - Regex match
+- `Exists` - Value/file exists
+- `NotExists` - Does not exist
+- `LessThan` - Numeric comparison
+- `GreaterThan` - Numeric comparison
+- `InRange` - Value in range (e.g., 200-299)
+
+### Preconditions
+
+Scenarios can have `Given` clauses that must pass before the main test:
+
+```yaml
+Scenario: View user profile
+  Given: logged in user
+  When: GET /profile
+  Then:
+    - they see their username
+```
+
+If the precondition fails, the test is **SKIPPED** (not failed).
+
 ## Modules
 
 ### Import Syntax
@@ -704,11 +957,13 @@ let tzs = list_timezones()  // ["UTC", "America/New_York", "Asia/Tokyo", ...]
 
 ### HTTP Client (`std/http`)
 
-```ntnt
-import { fetch, post, put, delete, patch, head, request } from "std/http"
-import { get_json, post_json, post_form, basic_auth, download, upload } from "std/http"
+The HTTP client uses a unified `fetch()` API for all requests.
 
-// Simple GET (fetch)
+```ntnt
+import { fetch, download, Cache } from "std/http"
+import { parse } from "std/json"
+
+// Simple GET
 match fetch("https://api.example.com/data") {
     Ok(response) => {
         if response.ok {
@@ -720,89 +975,90 @@ match fetch("https://api.example.com/data") {
     Err(e) => print("Error: " + e)
 }
 
-// POST with body
-match post("https://api.example.com/users", "{\"name\": \"Alice\"}") {
-    Ok(response) => print(response.status),
+// POST with JSON body
+match fetch(map {
+    "url": "https://api.example.com/users",
+    "method": "POST",
+    "json": map { "name": "Alice", "email": "alice@example.com" }
+}) {
+    Ok(response) => {
+        match parse(response.body) {
+            Ok(data) => print("Created user: " + data["id"]),
+            Err(e) => print("Parse error: " + e)
+        }
+    },
     Err(e) => print("Error: " + e)
 }
 
-// POST form data (application/x-www-form-urlencoded)
-match post_form("https://api.example.com/login", map {
-    "username": "alice",
-    "password": "secret"
+// POST form data
+match fetch(map {
+    "url": "https://api.example.com/login",
+    "method": "POST",
+    "form": map { "username": "alice", "password": "secret" }
 }) {
     Ok(response) => print(response.status),
     Err(e) => print("Error: " + e)
 }
 
 // Basic Authentication
-match basic_auth("https://api.example.com/secure", "user", "pass") {
+match fetch(map {
+    "url": "https://api.example.com/secure",
+    "auth": map { "user": "alice", "pass": "secret" }
+}) {
     Ok(response) => print(response.body),
     Err(e) => print("Auth failed: " + e)
 }
 
 // Download file
 match download("https://example.com/file.pdf", "./downloads/file.pdf") {
-    Ok(result) => print("Downloaded " + result.size + " bytes"),
+    Ok(result) => print("Downloaded " + str(result.size) + " bytes"),
     Err(e) => print("Download failed: " + e)
 }
 
-// Upload file (multipart form)
-match upload("https://api.example.com/upload", "./photo.jpg", "file") {
-    Ok(response) => print(response.body),
-    Err(e) => print("Upload failed: " + e)
-}
-
-// Full request with headers
-match request(map {
-    "url": "https://api.example.com/data",
-    "method": "POST",
-    "headers": map {
-        "Authorization": "Bearer token123",
-        "Content-Type": "application/json"
-    },
-    "body": "{\"key\": \"value\"}",
-    "timeout": 30
-}) {
-    Ok(response) => print(response.body),
-    Err(e) => print("Error: " + e)
-}
-
-// fetch() - Full request with cookies support
+// Full request with headers, cookies, timeout
 match fetch(map {
     "url": "https://api.example.com/session",
-    "method": "GET",
+    "method": "POST",
+    "headers": map { "Authorization": "Bearer token123", "Accept": "application/json" },
     "cookies": map { "session_id": "abc123" },
-    "headers": map { "Accept": "application/json" }
+    "json": map { "action": "refresh" },
+    "timeout": 30
 }) {
     Ok(response) => {
         print(response.body)
         // Response includes cookies from server
-        if response.cookies != nil {
+        if has_key(response, "cookies") {
             print(response.cookies)
         }
     },
     Err(e) => print("Error: " + e)
 }
+
+// Response caching
+let cache = Cache(300)  // 5-minute TTL
+// Use cache_fetch(cache, url) for cached requests
 ```
 
 **HTTP Functions:**
 | Function | Description |
 |----------|-------------|
 | `fetch(url)` | Simple GET request |
-| `post(url, body)` | POST with text body |
-| `put(url, body)` | PUT request |
-| `delete(url)` | DELETE request |
-| `patch(url, body)` | PATCH request |
-| `head(url)` | HEAD request (headers only) |
-| `get_json(url)` | GET with JSON response parsing |
-| `post_json(url, data)` | POST JSON data |
-| `post_form(url, form)` | POST form-urlencoded data |
-| `basic_auth(url, user, pass)` | GET with Basic auth |
-| `download(url, path)` | Download to file |
-| `upload(url, path, field)` | Multipart file upload |
-| `request(opts)` | Full control (method, headers, timeout) |
-| `fetch(opts)` | Full control + cookies |
+| `fetch(options)` | Full request with method, headers, json, form, auth, cookies, timeout |
+| `download(url, path)` | Download file to disk |
+| `Cache(ttl)` | Create response cache with TTL in seconds |
+
+**fetch() Options:**
+| Option | Type | Description |
+|--------|------|-------------|
+| `url` | String | Request URL (required) |
+| `method` | String | HTTP method: GET, POST, PUT, DELETE, PATCH, HEAD |
+| `headers` | Map | Request headers |
+| `body` | String | Raw request body |
+| `json` | Any | JSON body (auto-serializes and sets Content-Type) |
+| `form` | Map | Form data (URL-encoded) |
+| `auth` | Map | Basic auth: `map { "user": "...", "pass": "..." }` |
+| `cookies` | Map | Cookies to send |
+| `timeout` | Int | Timeout in seconds (default: 30) |
 
 **Response Object Properties:**
 | Property | Type | Description |
@@ -814,19 +1070,7 @@ match fetch(map {
 | `body` | String | Response body content |
 | `url` | String | Final URL after redirects |
 | `redirected` | Bool | `true` if request was redirected |
-
-**Request Options (for `request()` and `fetch()`):**
-| Option | Type | Description |
-|--------|------|-------------|
-| `url` | String | Request URL (required) |
-| `method` | String | HTTP method (GET, POST, etc.) |
-| `headers` | Map | Request headers |
-| `body` | String | Request body |
-| `timeout` | Int | Timeout in seconds |
-| `cookies` | Map | Cookies to send (fetch only) |
-| `cache` | String | Cache mode: "default", "no-store", "no-cache", "reload", "force-cache", "only-if-cached" |
-| `referrer` | String | URL to send as Referer header |
-| `referrerPolicy` | String | "no-referrer", "origin", "same-origin", "strict-origin", "origin-when-cross-origin", "strict-origin-when-cross-origin" (default), "unsafe-url" |
+| `cookies` | Map | Cookies from Set-Cookie headers (if any) |
 
 ### HTTP Server (`std/http/server`)
 
@@ -944,4 +1188,4 @@ close(ch)
 
 ---
 
-_This specification reflects NTNT v0.1.8. See [ROADMAP.md](ROADMAP.md) for the implementation plan._
+_This specification reflects NTNT v0.3.0. See [ROADMAP.md](ROADMAP.md) for the implementation plan._

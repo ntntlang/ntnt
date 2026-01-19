@@ -1,10 +1,14 @@
-// HTTP Client Example
-// Demonstrates std/http module for making HTTP requests
+// HTTP Client Example - Unified fetch() API
+// Demonstrates the streamlined std/http module
+//
+// The fetch() function handles ALL HTTP operations:
+//   - fetch(url)           - Simple GET request
+//   - fetch(map { ... })   - Full options: method, json, form, headers, auth, timeout
 
-import { fetch, post, get_json, post_json, request } from "std/http"
-import { stringify } from "std/json"
+import { fetch } from "std/http"
+import { parse } from "std/json"
 
-print("=== HTTP Client Demo ===")
+print("=== HTTP Client Demo (Unified fetch API) ===")
 print("")
 
 // ========== Basic GET Request ==========
@@ -13,45 +17,38 @@ print("Fetching from httpbin.org/get...")
 
 match fetch("https://httpbin.org/get") {
     Ok(response) => {
-        print("Status: ")
-        print(response.status)
-        print("Status Text: ")
-        print(response.status_text)
-        print("OK: ")
-        print(response.ok)
-        print("Content-Type: ")
-        print(response.headers["content-type"])
-        print("Body length: ")
-        print(len(response.body))
+        print("Status: " + str(response.status))
+        print("Status Text: " + response.status_text)
+        print("OK: " + str(response.ok))
+        print("Content-Type: " + response.headers["content-type"])
+        print("Body length: " + str(len(response.body)))
     },
-    Err(e) => {
-        print("Error: ")
-        print(e)
-    },
+    Err(e) => print("Error: " + e)
 }
 
 print("")
 
-// ========== GET JSON ==========
+// ========== GET JSON (using fetch + parse) ==========
 print("--- GET JSON ---")
 print("Fetching JSON data...")
 
-match get_json("https://httpbin.org/json") {
-    Ok(data) => {
-        print("Received JSON with slideshow:")
-        print(data.slideshow.title)
-        print("Author: ")
-        print(data.slideshow.author)
+match fetch("https://httpbin.org/json") {
+    Ok(response) => {
+        match parse(response.body) {
+            Ok(data) => {
+                print("Received JSON with slideshow:")
+                print("Title: " + data["slideshow"]["title"])
+                print("Author: " + data["slideshow"]["author"])
+            },
+            Err(e) => print("Parse error: " + e)
+        }
     },
-    Err(e) => {
-        print("Error: ")
-        print(e)
-    },
+    Err(e) => print("Error: " + e)
 }
 
 print("")
 
-// ========== POST JSON ==========
+// ========== POST JSON (using json option) ==========
 print("--- POST JSON ---")
 let payload = map {
     "name": "NTNT Language",
@@ -60,56 +57,65 @@ let payload = map {
 }
 
 print("Posting JSON data...")
-match post_json("https://httpbin.org/post", payload) {
+match fetch(map { "url": "https://httpbin.org/post", "method": "POST", "json": payload }) {
     Ok(response) => {
-        print("Server echoed our data:")
-        print(response.json.name)
-        print(response.json.version)
+        match parse(response.body) {
+            Ok(data) => {
+                print("Server echoed our data:")
+                print("Name: " + data["json"]["name"])
+                print("Version: " + data["json"]["version"])
+            },
+            Err(e) => print("Parse error: " + e)
+        }
     },
-    Err(e) => {
-        print("Error: ")
-        print(e)
-    },
+    Err(e) => print("Error: " + e)
 }
 
 print("")
 
 // ========== Custom Request with Headers ==========
 print("--- Custom Request with Headers ---")
-let opts = map {
+match fetch(map {
     "url": "https://httpbin.org/headers",
     "method": "GET",
     "headers": map {
         "X-Custom-Header": "NTNT-Lang",
         "Accept": "application/json"
     }
-}
-
-match request(opts) {
+}) {
     Ok(response) => {
-        print("Status: ")
-        print(response.status)
+        print("Status: " + str(response.status))
         print("Custom headers were sent!")
     },
-    Err(e) => {
-        print("Error: ")
-        print(e)
-    },
+    Err(e) => print("Error: " + e)
 }
 
 print("")
 
 // ========== POST with form data ==========
-print("--- POST Request ---")
-match post("https://httpbin.org/post", "key=value&name=ntnt") {
+print("--- POST Form Data ---")
+match fetch(map {
+    "url": "https://httpbin.org/post",
+    "method": "POST",
+    "form": map { "key": "value", "name": "ntnt" }
+}) {
+    Ok(response) => print("POST successful, status: " + str(response.status)),
+    Err(e) => print("Error: " + e)
+}
+
+print("")
+
+// ========== Basic Auth (using auth option) ==========
+print("--- Basic Auth ---")
+match fetch(map {
+    "url": "https://httpbin.org/basic-auth/user/passwd",
+    "auth": map { "user": "user", "pass": "passwd" }
+}) {
     Ok(response) => {
-        print("POST successful, status: ")
-        print(response.status)
+        print("Auth status: " + str(response.status))
+        print("Authenticated: " + str(response.ok))
     },
-    Err(e) => {
-        print("Error: ")
-        print(e)
-    },
+    Err(e) => print("Error: " + e)
 }
 
 print("")

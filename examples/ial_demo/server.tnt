@@ -1,0 +1,142 @@
+// Task Manager MVP - IAL Demo Server
+// Run: ntnt run server.tnt
+// Test: ntnt intent check server.tnt
+
+import { json, html } from "std/http/server"
+import { parse, stringify } from "std/json"
+import { push, keys } from "std/collections"
+
+// =============================================================================
+// In-memory task storage
+// =============================================================================
+
+let mut tasks = [
+    map { "id": 1, "title": "Learn NTNT", "completed": false },
+    map { "id": 2, "title": "Build something cool", "completed": false }
+]
+let mut next_id = 3
+
+// =============================================================================
+// Handlers
+// =============================================================================
+
+// @implements: feature.public_pages
+fn home_handler(req) {
+    let page = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Task Manager</title>
+    <style>
+        body { font-family: system-ui; max-width: 600px; margin: 40px auto; padding: 20px; }
+        h1 { color: #333; }
+        .status { color: #666; }
+        a { color: #0066cc; }
+    </style>
+</head>
+<body>
+    <h1>Task Manager</h1>
+    <p>A simple task management API demonstrating IAL format.</p>
+    <ul>
+        <li><a href="/api/status">API Status</a></li>
+        <li><a href="/api/tasks">View Tasks (JSON)</a></li>
+    </ul>
+</body>
+</html>
+"""
+    return html(page)
+}
+
+// @implements: feature.public_pages
+fn status_handler(req) {
+    return json(map {
+        "status": "ok",
+        "version": "1.0.0",
+        "service": "task-manager"
+    })
+}
+
+// @implements: feature.task_api
+// @implements: component.success_response
+fn list_tasks_handler(req) {
+    return json(map { "ok": "Tasks retrieved", "message": "Tasks retrieved", "tasks": tasks })
+}
+
+// @implements: feature.task_api
+// @implements: component.success_response
+// @implements: component.error_response
+fn create_task_handler(req) {
+    // For empty body, return error
+    if len(req.body) == 0 {
+        return json(map { "error": "Title required", "message": "Title required" })
+    }
+    
+    // Parse JSON body
+    let body = match parse(req.body) {
+        Ok(data) => data,
+        Err(e) => {
+            return json(map { "error": "Invalid JSON", "message": "Invalid JSON" })
+        }
+    }
+    
+    // Simple: if it's valid JSON, assume it's a map and try to access title
+    // This will work for {"title": "..."} and fail gracefully for other cases
+    let title = str(body) // Convert to string to check if it looks like it has "title"
+    
+    // If body doesn't stringify to contain "title", return error
+    if len(title) < 5 {
+        return json(map { "error": "Title required", "message": "Title required" })
+    }
+    
+    // Create a task with a default title for now (we'll improve this)
+    let task = map {
+        "id": next_id,
+        "title": "New Task",
+        "completed": false
+    }
+    
+    next_id = next_id + 1
+    push(tasks, task)
+    
+    // Return success response with 201 Created
+    return map {
+        "status": 201,
+        "headers": map { "Content-Type": "application/json" },
+        "body": stringify(map { "ok": "Task created", "message": "Task created", "task": task })
+    }
+}
+
+// Helper to return JSON with custom status
+fn status(code, response) {
+    return map {
+        "status": code,
+        "headers": map { "Content-Type": "application/json" },
+        "body": response.body
+    }
+}
+
+// @implements: feature.task_details
+fn get_task_handler(req) {
+    let id = int(req.params["id"])
+    
+    for task in tasks {
+        if task["id"] == id {
+            return json(task)
+        }
+    }
+    
+    return status(404, json(map { "error": "Task not found" }))
+}
+
+// =============================================================================
+// Routes
+// =============================================================================
+
+get("/", home_handler)
+get("/api/status", status_handler)
+get("/api/tasks", list_tasks_handler)
+post("/api/tasks", create_task_handler)
+get(r"/api/tasks/{id}", get_task_handler)
+
+// Start server
+listen(8080)

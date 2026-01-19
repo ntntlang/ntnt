@@ -1,15 +1,22 @@
 import { html, json, text } from "std/http/server"
+import { parse_query } from "std/url"
 
 // Simple test server for IDD testing
 
 // @implements: feature.home
+// @implements: component.success_message
 fn home(req) {
     return html("""
     <!DOCTYPE html>
     <html>
-    <head><title>Test Server</title></head>
+    <head>
+        <title>Test Server</title>
+        <style>
+            .success { color: green; font-weight: bold; }
+        </style>
+    </head>
     <body>
-        <h1>Welcome to the Test Server</h1>
+        <div class="success">Welcome to the Test Server</div>
         <p>This is a simple test page.</p>
         <ul>
             <li><a href="/about">About</a></li>
@@ -43,8 +50,17 @@ fn api_status(req) {
     })
 }
 
+// @implements: feature.create_task
+fn create_task(req) {
+    return json(map {
+        "success": true,
+        "message": "Task created"
+    })
+}
+
 get(r"/", home)
 get(r"/about", about)
 get(r"/api/status", api_status)
+post(r"/api/tasks", create_task)
 
 listen(8080)

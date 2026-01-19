@@ -1,0 +1,195 @@
+{{! Learn page content }}
+<h2 style="margin-bottom: 0.5rem">Learn NTNT</h2>
+<p style="color: var(--text-muted); margin-bottom: 2rem">Get started with the NTNT programming language.</p>
+
+<div class="learn-section">
+  <h4>Quick Start</h4>
+
+  <div class="step">
+    <span class="step-number">1</span>
+    <strong>Install Prerequisites</strong>
+  </div>
+  <p style="margin-bottom: 1rem">NTNT is built with the Rust programming language. You need the <a href="https://rustup.rs/" target="_blank">Rust toolchain</a> installed.</p>
+  <pre><code>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"</code></pre>
+
+  <div class="step">
+    <span class="step-number">2</span>
+    <strong>Clone and build</strong>
+  </div>
+  <pre><code>git clone https://github.com/ntntlang/ntnt.git
+cd ntnt
+cargo build --release
+cargo install --path . --locked</code></pre>
+
+  <div class="step">
+    <span class="step-number">3</span>
+    <strong>Hello World</strong>
+  </div>
+  <pre><code>echo 'print("Hello, World!")' &gt; hello.tnt
+ntnt run hello.tnt</code></pre>
+
+  <div class="step">
+    <span class="step-number">4</span>
+    <strong>A Web API</strong>
+  </div>
+  <pre><code>// api.tnt
+import \{ json \} from "std/http/server"
+
+fn hello(req) \{
+    return json(map \{ "message": "Hello!" \})
+\}
+
+get("/", hello)
+listen(3000)</code></pre>
+  <pre><code>ntnt run api.tnt
+# Visit http://localhost:3000</code></pre>
+</div>
+
+<div class="learn-section">
+  <h4>Intent-Driven Development</h4>
+  <p style="margin-bottom: 1.5rem">IDD bridges human requirements and AI implementation with verifiable traceability.</p>
+
+  <div class="step">
+    <span class="step-number">1</span>
+    <strong>Write an intent file</strong>
+  </div>
+  <pre><code># myapp.intent
+
+Feature: User API
+  id: feature.user_api
+  description: "REST API for user management"
+
+  Scenario: Get user by ID
+    When: GET /users/123
+    Then:
+      - status 200
+      - body contains "id"</code></pre>
+
+  <div class="step">
+    <span class="step-number">2</span>
+    <strong>Annotate your implementation</strong>
+  </div>
+  <pre><code>import \{ json \} from "std/http/server"
+
+// @implements: feature.user_api
+fn get_user(req) \{
+    return json(map \{ "id": req.params["id"], "name": "Alice" \})
+\}
+
+get(r"/users/\{id\}", get_user)
+listen(8080)</code></pre>
+
+  <div class="step">
+    <span class="step-number">3</span>
+    <strong>Verify with intent check</strong>
+  </div>
+  <pre><code>$ ntnt intent check myapp.tnt
+
+Feature: User API
+  Scenario: Get user by ID
+    ✓ GET /users/123 returns status 200
+    ✓ body contains "id"
+
+1/1 features passing (2/2 assertions)</code></pre>
+</div>
+
+<div class="learn-section">
+  <h4>Design by Contract</h4>
+  <p style="margin-bottom: 1.5rem">Contracts are executable specifications. Agents read them as machine-readable specs. Humans read them as documentation.</p>
+
+  <pre><code>fn withdraw(amount: Int) -&gt; Int
+    requires amount &gt; 0
+    requires amount &lt;= self.balance
+    ensures result &gt;= 0
+\{
+    self.balance = self.balance - amount
+    return self.balance
+\}
+
+// In HTTP routes, contract violations become proper errors:
+// - Failed precondition: 400 Bad Request
+// - Failed postcondition: 500 Internal Server Error</code></pre>
+</div>
+
+<div class="learn-section">
+  <h4>CLI Commands</h4>
+
+  <table style="width: 100%; border-collapse: collapse">
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0"><code>ntnt run file.tnt</code></td>
+      <td style="padding: 0.75rem 0">Run a program</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0"><code>ntnt repl</code></td>
+      <td style="padding: 0.75rem 0">Interactive REPL</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0"><code>ntnt lint file.tnt</code></td>
+      <td style="padding: 0.75rem 0">Check for errors and warnings</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0"><code>ntnt validate file.tnt</code></td>
+      <td style="padding: 0.75rem 0">Validate with JSON output</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0"><code>ntnt inspect file.tnt</code></td>
+      <td style="padding: 0.75rem 0">Project structure as JSON</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0"><code>ntnt test file.tnt --get /path</code></td>
+      <td style="padding: 0.75rem 0">Test HTTP endpoints</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0"><code>ntnt intent check file.tnt</code></td>
+      <td style="padding: 0.75rem 0">Verify code matches intent</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0"><code>ntnt intent coverage file.tnt</code></td>
+      <td style="padding: 0.75rem 0">Show feature coverage</td>
+    </tr>
+    <tr style="border-bottom: 1px solid var(--border)">
+      <td style="padding: 0.75rem 0"><code>ntnt intent init file.intent</code></td>
+      <td style="padding: 0.75rem 0">Generate scaffolding from intent</td>
+    </tr>
+    <tr>
+      <td style="padding: 0.75rem 0"><code>ntnt intent studio file.intent</code></td>
+      <td style="padding: 0.75rem 0">Launch visual studio with live tests</td>
+    </tr>
+  </table>
+</div>
+
+<div class="learn-section">
+  <h4>Documentation</h4>
+
+  <ul style="list-style: none; padding: 0">
+    <li style="padding: 0.75rem 0; border-bottom: 1px solid var(--border)">
+      <a href="https://github.com/ntntlang/ntnt/blob/main/LANGUAGE_SPEC.md"><strong>Language Specification</strong></a>
+      <p style="color: var(--text-muted); margin-top: 0.25rem">Complete language syntax, types, contracts, and features</p>
+    </li>
+    <li style="padding: 0.75rem 0; border-bottom: 1px solid var(--border)">
+      <a href="https://github.com/ntntlang/ntnt/blob/main/docs/AI_AGENT_GUIDE.md"><strong>AI Agent Guide</strong></a>
+      <p style="color: var(--text-muted); margin-top: 0.25rem">Syntax reference, HTTP server patterns, database patterns for AI agents</p>
+    </li>
+    <li style="padding: 0.75rem 0; border-bottom: 1px solid var(--border)">
+      <a href="https://github.com/ntntlang/ntnt/blob/main/docs/INTENT_DRIVEN_DEVELOPMENT.md"><strong>IDD Design</strong></a>
+      <p style="color: var(--text-muted); margin-top: 0.25rem">Intent-Driven Development design document and workflow</p>
+    </li>
+    <li style="padding: 0.75rem 0; border-bottom: 1px solid var(--border)">
+      <a href="https://github.com/ntntlang/ntnt/blob/main/docs/INTENT_ASSERTION_LANGUAGE.md"><strong>IAL Specification</strong></a>
+      <p style="color: var(--text-muted); margin-top: 0.25rem">Intent Assertion Language term rewriting engine</p>
+    </li>
+    <li style="padding: 0.75rem 0; border-bottom: 1px solid var(--border)">
+      <a href="https://github.com/ntntlang/ntnt/blob/main/ARCHITECTURE.md"><strong>Architecture</strong></a>
+      <p style="color: var(--text-muted); margin-top: 0.25rem">System design and components</p>
+    </li>
+    <li style="padding: 0.75rem 0; border-bottom: 1px solid var(--border)">
+      <a href="https://github.com/ntntlang/ntnt/blob/main/whitepaper.md"><strong>Whitepaper</strong></a>
+      <p style="color: var(--text-muted); margin-top: 0.25rem">Technical specification and motivation</p>
+    </li>
+    <li style="padding: 0.75rem 0">
+      <a href="https://github.com/ntntlang/ntnt/blob/main/ROADMAP.md"><strong>Roadmap</strong></a>
+      <p style="color: var(--text-muted); margin-top: 0.25rem">Implementation phases and future plans</p>
+    </li>
+  </ul>
+</div>

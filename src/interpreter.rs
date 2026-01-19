@@ -377,6 +377,34 @@ impl Interpreter {
         self.current_file = Some(path.to_string());
     }
 
+    /// Resolve a path relative to the current script's directory
+    /// If the path is absolute, return it as-is
+    /// If relative, resolve it relative to the .tnt file's directory (not cwd)
+    fn resolve_path_relative_to_script(&self, path: &str) -> String {
+        let path_obj = std::path::Path::new(path);
+
+        // If already absolute, return as-is
+        if path_obj.is_absolute() {
+            return path.to_string();
+        }
+
+        // Resolve relative to current script's directory
+        if let Some(current_file) = &self.current_file {
+            let script_dir = std::path::Path::new(current_file)
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
+            return script_dir.join(path).to_string_lossy().to_string();
+        }
+
+        // Fallback: return path as-is (will resolve relative to cwd)
+        path.to_string()
+    }
+
+    /// Define a variable in the current environment
+    pub fn define_variable(&mut self, name: String, value: Value) {
+        self.environment.borrow_mut().define(name, value);
+    }
+
     /// Set the main source file for hot-reload tracking
     pub fn set_main_source_file(&mut self, path: &str) {
         self.main_source_file = Some(path.to_string());
@@ -1277,11 +1305,21 @@ impl Interpreter {
     fn load_file_based_routes(&mut self, dir_path: &str) -> Result<Value> {
         use std::fs;
 
-        // Resolve the directory path
+        // Resolve the directory path relative to the current .tnt file's location
+        // This allows running `ntnt path/to/app.tnt` from any directory
         let base_dir = if std::path::Path::new(dir_path).is_relative() {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(dir_path))
-                .unwrap_or_else(|_| std::path::PathBuf::from(dir_path))
+            // Use the directory of the current .tnt file as base, not cwd
+            if let Some(current_file) = &self.current_file {
+                let script_dir = std::path::Path::new(current_file)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."));
+                script_dir.join(dir_path)
+            } else {
+                // Fallback to cwd if no current file (shouldn't happen in practice)
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(dir_path))
+                    .unwrap_or_else(|_| std::path::PathBuf::from(dir_path))
+            }
         } else {
             std::path::PathBuf::from(dir_path)
         };
@@ -2153,11 +2191,20 @@ impl Interpreter {
 
                         match (&prefix, &directory) {
                             (Value::String(prefix_str), Value::String(dir_str)) => {
-                                // Resolve relative paths
+                                // Resolve relative paths based on the .tnt file's location
                                 let resolved_dir = if std::path::Path::new(dir_str).is_relative() {
-                                    std::env::current_dir()
-                                        .map(|cwd| cwd.join(dir_str).to_string_lossy().to_string())
-                                        .unwrap_or_else(|_| dir_str.clone())
+                                    if let Some(current_file) = &self.current_file {
+                                        let script_dir = std::path::Path::new(current_file)
+                                            .parent()
+                                            .unwrap_or(std::path::Path::new("."));
+                                        script_dir.join(dir_str).to_string_lossy().to_string()
+                                    } else {
+                                        std::env::current_dir()
+                                            .map(|cwd| {
+                                                cwd.join(dir_str).to_string_lossy().to_string()
+                                            })
+                                            .unwrap_or_else(|_| dir_str.clone())
+                                    }
                                 } else {
                                     dir_str.clone()
                                 };
@@ -2190,6 +2237,185 @@ impl Interpreter {
                         let handler = self.eval_expression(&arguments[0])?;
                         self.server_state.add_middleware(handler);
                         return Ok(Value::Unit);
+                    }
+
+                    // Special handling for on_shutdown(handler_fn)
+                    if name == "on_shutdown" && arguments.len() == 1 {
+                        let handler = self.eval_expression(&arguments[0])?;
+                        self.server_state.add_shutdown_handler(handler);
+                        return Ok(Value::Unit);
+                    }
+
+                    // Special handling for template(path, data) - load and render template
+                    if name == "template" && arguments.len() == 2 {
+                        let path = self.eval_expression(&arguments[0])?;
+                        let data = self.eval_expression(&arguments[1])?;
+
+                        let path_str = match &path {
+                            Value::String(s) => s.clone(),
+                            _ => {
+                                return Err(IntentError::TypeError(
+                                    "template() first argument must be a string path".to_string(),
+                                ))
+                            }
+                        };
+
+                        let data_map = match &data {
+                            Value::Map(m) => m.clone(),
+                            _ => {
+                                return Err(IntentError::TypeError(
+                                    "template() second argument must be a map".to_string(),
+                                ))
+                            }
+                        };
+
+                        // Load template file
+                        let base_path = self.current_file.as_deref();
+                        let content =
+                            crate::stdlib::template::load_template_file(&path_str, base_path)?;
+
+                        // Render with data
+                        return self.render_template_with_data(&content, &data_map);
+                    }
+
+                    // Special handling for compile(path) - pre-compile template
+                    if name == "compile" && arguments.len() == 1 {
+                        let path = self.eval_expression(&arguments[0])?;
+
+                        let path_str = match &path {
+                            Value::String(s) => s.clone(),
+                            _ => {
+                                return Err(IntentError::TypeError(
+                                    "compile() argument must be a string path".to_string(),
+                                ))
+                            }
+                        };
+
+                        // Load template file
+                        let base_path = self.current_file.as_deref();
+                        let content =
+                            crate::stdlib::template::load_template_file(&path_str, base_path)?;
+
+                        // Create compiled template
+                        let id = crate::stdlib::template::get_next_template_id();
+                        let compiled = crate::stdlib::template::CompiledTemplate {
+                            id,
+                            path: path_str.clone(),
+                            content,
+                        };
+
+                        // Store in cache
+                        crate::stdlib::template::store_compiled_template(id, compiled);
+
+                        // Return a map representing the compiled template
+                        let mut result = HashMap::new();
+                        result.insert("_template_id".to_string(), Value::Int(id as i64));
+                        result.insert("path".to_string(), Value::String(path_str));
+
+                        return Ok(Value::Map(result));
+                    }
+
+                    // Special handling for render(compiled, data) - render pre-compiled template
+                    if name == "render" && arguments.len() == 2 {
+                        let compiled = self.eval_expression(&arguments[0])?;
+                        let data = self.eval_expression(&arguments[1])?;
+
+                        // Get template ID from compiled template
+                        let template_id = match &compiled {
+                            Value::Map(m) => match m.get("_template_id") {
+                                Some(Value::Int(id)) => *id as u64,
+                                _ => {
+                                    return Err(IntentError::TypeError(
+                                        "render() first argument must be a compiled template"
+                                            .to_string(),
+                                    ))
+                                }
+                            },
+                            _ => {
+                                return Err(IntentError::TypeError(
+                                    "render() first argument must be a compiled template"
+                                        .to_string(),
+                                ))
+                            }
+                        };
+
+                        let data_map = match &data {
+                            Value::Map(m) => m.clone(),
+                            _ => {
+                                return Err(IntentError::TypeError(
+                                    "render() second argument must be a map".to_string(),
+                                ))
+                            }
+                        };
+
+                        // Get template content from cache
+                        let content =
+                            match crate::stdlib::template::get_compiled_template(template_id) {
+                                Some(t) => t.content,
+                                None => {
+                                    return Err(IntentError::RuntimeError(
+                                        "Template not found in cache".to_string(),
+                                    ))
+                                }
+                            };
+
+                        // Render with data
+                        return self.render_template_with_data(&content, &data_map);
+                    }
+
+                    // Special handling for std/fs functions - resolve paths relative to script
+                    // This makes apps portable: `ntnt run path/to/app.tnt` works from any directory
+                    let fs_single_path_fns = [
+                        "read_file",
+                        "read_bytes",
+                        "exists",
+                        "is_file",
+                        "is_dir",
+                        "mkdir",
+                        "mkdir_all",
+                        "readdir",
+                        "remove",
+                        "remove_dir",
+                        "remove_dir_all",
+                        "file_size",
+                    ];
+                    let fs_two_path_fns = ["rename", "copy"];
+                    let fs_path_content_fns = ["write_file", "append_file"];
+
+                    if fs_single_path_fns.contains(&name.as_str()) && arguments.len() == 1 {
+                        let path = self.eval_expression(&arguments[0])?;
+                        if let Value::String(path_str) = &path {
+                            let resolved = self.resolve_path_relative_to_script(path_str);
+                            let resolved_value = Value::String(resolved);
+                            let callee = self.eval_expression(function)?;
+                            return self.call_function(callee, vec![resolved_value]);
+                        }
+                    }
+
+                    if fs_two_path_fns.contains(&name.as_str()) && arguments.len() == 2 {
+                        let from_path = self.eval_expression(&arguments[0])?;
+                        let to_path = self.eval_expression(&arguments[1])?;
+                        if let (Value::String(from_str), Value::String(to_str)) =
+                            (&from_path, &to_path)
+                        {
+                            let resolved_from =
+                                Value::String(self.resolve_path_relative_to_script(from_str));
+                            let resolved_to =
+                                Value::String(self.resolve_path_relative_to_script(to_str));
+                            let callee = self.eval_expression(function)?;
+                            return self.call_function(callee, vec![resolved_from, resolved_to]);
+                        }
+                    }
+
+                    if fs_path_content_fns.contains(&name.as_str()) && arguments.len() == 2 {
+                        let path = self.eval_expression(&arguments[0])?;
+                        let content = self.eval_expression(&arguments[1])?;
+                        if let Value::String(path_str) = &path {
+                            let resolved =
+                                Value::String(self.resolve_path_relative_to_script(path_str));
+                            let callee = self.eval_expression(function)?;
+                            return self.call_function(callee, vec![resolved, content]);
+                        }
                     }
 
                     // Special handling for HTTP route registration
@@ -2620,6 +2846,47 @@ impl Interpreter {
         }
     }
 
+    /// Render a template string with the given data
+    fn render_template_with_data(
+        &mut self,
+        content: &str,
+        data: &HashMap<String, Value>,
+    ) -> Result<Value> {
+        // Wrap content in triple quotes to make it a template string
+        let template_source = format!("\"\"\"{}\"\"\"", content);
+
+        // Parse the template string
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+
+        let lexer = Lexer::new(&template_source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+
+        let template_expr = parser
+            .expression()
+            .map_err(|e| IntentError::RuntimeError(format!("Failed to compile template: {}", e)))?;
+
+        // Create a new scope for template data
+        let previous = Rc::clone(&self.environment);
+        self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
+
+        // Define all data variables in the new scope
+        for (key, value) in data {
+            self.environment
+                .borrow_mut()
+                .define(key.clone(), value.clone());
+        }
+
+        // Evaluate the template expression
+        let result = self.eval_expression(&template_expr);
+
+        // Restore environment
+        self.environment = previous;
+
+        result
+    }
+
     /// Evaluate template string parts
     fn eval_template_parts(&mut self, parts: &[TemplatePart]) -> Result<Value> {
         let mut result = String::new();
@@ -2631,16 +2898,48 @@ impl Interpreter {
                     let value = self.eval_expression(expr)?;
                     result.push_str(&value.to_string());
                 }
+                TemplatePart::FilteredExpr { expr, filters } => {
+                    // Check if there's a default filter in the chain
+                    let has_default = filters.iter().any(|f| f.name == "default");
+
+                    let mut value = match self.eval_expression(expr) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // If there's a default filter and we got an undefined variable error,
+                            // use Unit as the value so the default filter can provide a fallback
+                            if has_default && matches!(&e, IntentError::UndefinedVariable(_)) {
+                                Value::Unit
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    };
+                    for filter in filters {
+                        value = self.apply_template_filter(&value, filter)?;
+                    }
+                    result.push_str(&value.to_string());
+                }
                 TemplatePart::ForLoop {
                     var,
                     iterable,
                     body,
+                    empty_body,
                 } => {
                     let iterable_value = self.eval_expression(iterable)?;
 
                     match iterable_value {
+                        Value::Array(ref items) if items.is_empty() => {
+                            // Empty array - render empty_body if present
+                            if !empty_body.is_empty() {
+                                let empty_result = self.eval_template_parts(empty_body)?;
+                                if let Value::String(s) = empty_result {
+                                    result.push_str(&s);
+                                }
+                            }
+                        }
                         Value::Array(items) => {
-                            for item in items {
+                            let length = items.len();
+                            for (index, item) in items.into_iter().enumerate() {
                                 // Create new scope for each iteration
                                 let previous = Rc::clone(&self.environment);
                                 self.environment = Rc::new(RefCell::new(Environment::with_parent(
@@ -2649,6 +2948,29 @@ impl Interpreter {
 
                                 // Bind the loop variable
                                 self.environment.borrow_mut().define(var.clone(), item);
+
+                                // Bind loop metadata variables
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@index".to_string(), Value::Int(index as i64));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@index1".to_string(), Value::Int((index + 1) as i64));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@first".to_string(), Value::Bool(index == 0));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@last".to_string(), Value::Bool(index == length - 1));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@length".to_string(), Value::Int(length as i64));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@even".to_string(), Value::Bool(index % 2 == 0));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@odd".to_string(), Value::Bool(index % 2 == 1));
 
                                 // Evaluate the body and append to result
                                 let body_result = self.eval_template_parts(body)?;
@@ -2660,9 +2982,19 @@ impl Interpreter {
                                 self.environment = previous;
                             }
                         }
+                        Value::Map(ref map) if map.is_empty() => {
+                            // Empty map - render empty_body if present
+                            if !empty_body.is_empty() {
+                                let empty_result = self.eval_template_parts(empty_body)?;
+                                if let Value::String(s) = empty_result {
+                                    result.push_str(&s);
+                                }
+                            }
+                        }
                         Value::Map(map) => {
                             // When iterating over a map, yield (key, value) pairs
-                            for (k, v) in map.iter() {
+                            let length = map.len();
+                            for (index, (k, v)) in map.iter().enumerate() {
                                 // Create new scope for each iteration
                                 let previous = Rc::clone(&self.environment);
                                 self.environment = Rc::new(RefCell::new(Environment::with_parent(
@@ -2672,6 +3004,29 @@ impl Interpreter {
                                 // Create a tuple-like array for the pair
                                 let pair = Value::Array(vec![Value::String(k.clone()), v.clone()]);
                                 self.environment.borrow_mut().define(var.clone(), pair);
+
+                                // Bind loop metadata variables
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@index".to_string(), Value::Int(index as i64));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@index1".to_string(), Value::Int((index + 1) as i64));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@first".to_string(), Value::Bool(index == 0));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@last".to_string(), Value::Bool(index == length - 1));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@length".to_string(), Value::Int(length as i64));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@even".to_string(), Value::Bool(index % 2 == 0));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("@odd".to_string(), Value::Bool(index % 2 == 1));
 
                                 let body_result = self.eval_template_parts(body)?;
                                 if let Value::String(s) = body_result {
@@ -2693,6 +3048,7 @@ impl Interpreter {
                 TemplatePart::IfBlock {
                     condition,
                     then_parts,
+                    elif_chains,
                     else_parts,
                 } => {
                     let condition_value = self.eval_expression(condition)?;
@@ -2702,10 +3058,27 @@ impl Interpreter {
                         if let Value::String(s) = then_result {
                             result.push_str(&s);
                         }
-                    } else if !else_parts.is_empty() {
-                        let else_result = self.eval_template_parts(else_parts)?;
-                        if let Value::String(s) = else_result {
-                            result.push_str(&s);
+                    } else {
+                        // Check elif chains
+                        let mut handled = false;
+                        for (elif_condition, elif_body) in elif_chains {
+                            let elif_value = self.eval_expression(elif_condition)?;
+                            if elif_value.is_truthy() {
+                                let elif_result = self.eval_template_parts(elif_body)?;
+                                if let Value::String(s) = elif_result {
+                                    result.push_str(&s);
+                                }
+                                handled = true;
+                                break;
+                            }
+                        }
+
+                        // Fall through to else if no elif matched
+                        if !handled && !else_parts.is_empty() {
+                            let else_result = self.eval_template_parts(else_parts)?;
+                            if let Value::String(s) = else_result {
+                                result.push_str(&s);
+                            }
                         }
                     }
                 }
@@ -2713,6 +3086,220 @@ impl Interpreter {
         }
 
         Ok(Value::String(result))
+    }
+
+    /// Apply a template filter to a value
+    fn apply_template_filter(
+        &mut self,
+        value: &Value,
+        filter: &crate::ast::TemplateFilter,
+    ) -> Result<Value> {
+        // Evaluate filter arguments
+        let mut args = Vec::new();
+        for arg_expr in &filter.args {
+            args.push(self.eval_expression(arg_expr)?);
+        }
+
+        match filter.name.as_str() {
+            // String filters
+            "uppercase" => {
+                let s = value.to_string();
+                Ok(Value::String(s.to_uppercase()))
+            }
+            "lowercase" => {
+                let s = value.to_string();
+                Ok(Value::String(s.to_lowercase()))
+            }
+            "capitalize" => {
+                let s = value.to_string();
+                let mut chars = s.chars();
+                match chars.next() {
+                    None => Ok(Value::String(String::new())),
+                    Some(first) => Ok(Value::String(first.to_uppercase().chain(chars).collect())),
+                }
+            }
+            "trim" => {
+                let s = value.to_string();
+                Ok(Value::String(s.trim().to_string()))
+            }
+            "truncate" => {
+                let s = value.to_string();
+                let max_len = match args.first() {
+                    Some(Value::Int(n)) => *n as usize,
+                    _ => {
+                        return Err(IntentError::RuntimeError(
+                            "truncate filter requires an integer argument".to_string(),
+                        ))
+                    }
+                };
+                if s.len() <= max_len {
+                    Ok(Value::String(s))
+                } else {
+                    Ok(Value::String(format!("{}...", &s[..max_len])))
+                }
+            }
+            "replace" => {
+                let s = value.to_string();
+                let (from, to) = match (args.first(), args.get(1)) {
+                    (Some(Value::String(f)), Some(Value::String(t))) => (f.as_str(), t.as_str()),
+                    _ => {
+                        return Err(IntentError::RuntimeError(
+                            "replace filter requires two string arguments".to_string(),
+                        ))
+                    }
+                };
+                Ok(Value::String(s.replace(from, to)))
+            }
+
+            // Safety filters
+            "escape" => {
+                let s = value.to_string();
+                let escaped = s
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('"', "&quot;")
+                    .replace('\'', "&#x27;");
+                Ok(Value::String(escaped))
+            }
+            "raw" => {
+                // raw just returns the value as-is (no auto-escaping)
+                Ok(value.clone())
+            }
+            "default" => match value {
+                Value::Unit => Ok(args
+                    .first()
+                    .cloned()
+                    .unwrap_or(Value::String(String::new()))),
+                Value::EnumValue {
+                    enum_name, variant, ..
+                } if enum_name == "Option" && variant == "None" => Ok(args
+                    .first()
+                    .cloned()
+                    .unwrap_or(Value::String(String::new()))),
+                Value::String(s) if s.is_empty() => Ok(args
+                    .first()
+                    .cloned()
+                    .unwrap_or(Value::String(String::new()))),
+                _ => Ok(value.clone()),
+            },
+
+            // Collection filters
+            "length" => match value {
+                Value::String(s) => Ok(Value::Int(s.len() as i64)),
+                Value::Array(arr) => Ok(Value::Int(arr.len() as i64)),
+                Value::Map(m) => Ok(Value::Int(m.len() as i64)),
+                _ => Err(IntentError::RuntimeError(format!(
+                    "length filter not supported for {}",
+                    value.type_name()
+                ))),
+            },
+            "first" => match value {
+                Value::Array(arr) => Ok(arr.first().cloned().unwrap_or(Value::Unit)),
+                Value::String(s) => Ok(Value::String(
+                    s.chars().next().map(|c| c.to_string()).unwrap_or_default(),
+                )),
+                _ => Err(IntentError::RuntimeError(format!(
+                    "first filter not supported for {}",
+                    value.type_name()
+                ))),
+            },
+            "last" => match value {
+                Value::Array(arr) => Ok(arr.last().cloned().unwrap_or(Value::Unit)),
+                Value::String(s) => Ok(Value::String(
+                    s.chars().last().map(|c| c.to_string()).unwrap_or_default(),
+                )),
+                _ => Err(IntentError::RuntimeError(format!(
+                    "last filter not supported for {}",
+                    value.type_name()
+                ))),
+            },
+            "reverse" => match value {
+                Value::Array(arr) => {
+                    let mut reversed = arr.clone();
+                    reversed.reverse();
+                    Ok(Value::Array(reversed))
+                }
+                Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
+                _ => Err(IntentError::RuntimeError(format!(
+                    "reverse filter not supported for {}",
+                    value.type_name()
+                ))),
+            },
+            "join" => {
+                let separator = match args.first() {
+                    Some(Value::String(s)) => s.as_str(),
+                    _ => ", ",
+                };
+                match value {
+                    Value::Array(arr) => {
+                        let strings: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
+                        Ok(Value::String(strings.join(separator)))
+                    }
+                    _ => Err(IntentError::RuntimeError(format!(
+                        "join filter not supported for {}",
+                        value.type_name()
+                    ))),
+                }
+            }
+            "slice" => {
+                let start = match args.first() {
+                    Some(Value::Int(n)) => *n as usize,
+                    _ => 0,
+                };
+                let end = match args.get(1) {
+                    Some(Value::Int(n)) => Some(*n as usize),
+                    _ => None,
+                };
+                match value {
+                    Value::Array(arr) => {
+                        let end = end.unwrap_or(arr.len()).min(arr.len());
+                        let start = start.min(end);
+                        Ok(Value::Array(arr[start..end].to_vec()))
+                    }
+                    Value::String(s) => {
+                        let chars: Vec<char> = s.chars().collect();
+                        let end = end.unwrap_or(chars.len()).min(chars.len());
+                        let start = start.min(end);
+                        Ok(Value::String(chars[start..end].iter().collect()))
+                    }
+                    _ => Err(IntentError::RuntimeError(format!(
+                        "slice filter not supported for {}",
+                        value.type_name()
+                    ))),
+                }
+            }
+
+            // Formatting filters
+            "json" => {
+                let json_value = crate::stdlib::json::intent_value_to_json(value);
+                Ok(Value::String(json_value.to_string()))
+            }
+            "number" => {
+                let decimals = match args.first() {
+                    Some(Value::Int(n)) => *n as usize,
+                    _ => 2,
+                };
+                match value {
+                    Value::Int(n) => Ok(Value::String(format!(
+                        "{:.prec$}",
+                        *n as f64,
+                        prec = decimals
+                    ))),
+                    Value::Float(f) => Ok(Value::String(format!("{:.prec$}", f, prec = decimals))),
+                    _ => Ok(Value::String(value.to_string())),
+                }
+            }
+            "url_encode" => {
+                let s = value.to_string();
+                Ok(Value::String(urlencoding::encode(&s).to_string()))
+            }
+
+            _ => Err(IntentError::RuntimeError(format!(
+                "Unknown template filter: {}",
+                filter.name
+            ))),
+        }
     }
 
     /// Try to match a pattern against a value, returning variable bindings if successful
@@ -3331,6 +3918,17 @@ impl Interpreter {
                     let _ = http_server::send_response(http_request, &not_found);
                 }
                 Err(_) => {}
+            }
+        }
+
+        // Server is shutting down - call shutdown handlers
+        let shutdown_handlers: Vec<Value> = self.server_state.get_shutdown_handlers().to_vec();
+        if !shutdown_handlers.is_empty() {
+            println!("\nRunning shutdown handlers...");
+            for handler in shutdown_handlers {
+                if let Err(e) = self.call_function(handler, vec![]) {
+                    eprintln!("Shutdown handler error: {}", e);
+                }
             }
         }
 
@@ -6120,11 +6718,14 @@ c")
 
     #[test]
     fn test_std_http_module_exists() {
-        // Verify the HTTP module can be imported
-        let result = eval(r#"
-            import { fetch, post, put, delete, patch, head, request, get_json, post_json } from "std/http"
+        // Verify the HTTP module can be imported with new unified API
+        let result = eval(
+            r#"
+            import { fetch, download, Cache } from "std/http"
             "module loaded"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         if let Value::String(s) = result {
             assert_eq!(s, "module loaded");
         } else {
@@ -6153,12 +6754,12 @@ c")
     }
 
     #[test]
-    fn test_std_http_request_with_options() {
-        // Test that request() accepts options map
+    fn test_std_http_fetch_with_options() {
+        // Test that fetch() accepts options map
         let result = eval(
             r#"
-            import { request } from "std/http"
-            match request(map { "url": "invalid://test", "method": "GET" }) {
+            import { fetch } from "std/http"
+            match fetch(map { "url": "invalid://test", "method": "GET" }) {
                 Ok(resp) => "unexpected success",
                 Err(e) => "got error as expected",
             }
@@ -6173,13 +6774,13 @@ c")
     }
 
     #[test]
-    fn test_std_http_post_json_structure() {
-        // Test post_json with invalid URL (verifies JSON serialization)
+    fn test_std_http_post_json_via_fetch() {
+        // Test POST with JSON via fetch() options (verifies JSON serialization)
         let result = eval(
             r#"
-            import { post_json } from "std/http"
+            import { fetch } from "std/http"
             let data = map { "name": "test", "value": 42 }
-            match post_json("invalid://test", data) {
+            match fetch(map { "url": "invalid://test", "method": "POST", "json": data }) {
                 Ok(resp) => "unexpected success",
                 Err(e) => "got error as expected",
             }
@@ -6194,14 +6795,12 @@ c")
     }
 
     #[test]
-    fn test_std_http_post_returns_result_not_unit() {
-        // Test that post() with a URL returns a Result, not Unit
-        // This tests the fix for the bug where post() was being intercepted
-        // by the HTTP server route registration code
+    fn test_std_http_fetch_post_returns_result() {
+        // Test that fetch() with POST method returns a Result
         let result = eval(
             r#"
-            import { post } from "std/http"
-            let result = post("invalid://test", "body")
+            import { fetch } from "std/http"
+            let result = fetch(map { "url": "invalid://test", "method": "POST", "body": "test" })
             // Should return Err(...) for invalid URL, not Unit
             match result {
                 Ok(resp) => "got ok",
@@ -6218,14 +6817,17 @@ c")
     }
 
     #[test]
-    fn test_std_http_new_functions_exist() {
-        // Test that all new HTTP functions exist and are callable
+    fn test_std_http_fetch_with_auth() {
+        // Test that fetch() accepts auth option for basic auth
         let result = eval(
             r#"
-            import { fetch, basic_auth, post_form, download, upload } from "std/http"
-            
-            // Test that basic_auth returns a Result (will fail with invalid URL)
-            let auth_result = basic_auth("invalid://test", "user", "pass")
+            import { fetch } from "std/http"
+
+            // Test that auth option is accepted (will fail with invalid URL)
+            let auth_result = fetch(map {
+                "url": "invalid://test",
+                "auth": map { "user": "testuser", "pass": "testpass" }
+            })
             match auth_result {
                 Ok(r) => "ok",
                 Err(e) => "error"
@@ -6237,14 +6839,18 @@ c")
     }
 
     #[test]
-    fn test_std_http_post_form_structure() {
-        // Test that post_form accepts a map and returns a Result
+    fn test_std_http_fetch_with_form() {
+        // Test that fetch() accepts form option for URL-encoded form data
         let result = eval(
             r#"
-            import { post_form } from "std/http"
-            
+            import { fetch } from "std/http"
+
             let form = map { "username": "test", "password": "secret" }
-            let result = post_form("invalid://test", form)
+            let result = fetch(map {
+                "url": "invalid://test",
+                "method": "POST",
+                "form": form
+            })
             match result {
                 Ok(r) => "ok",
                 Err(e) => "error"

@@ -4,15 +4,68 @@
 
 ## Overview
 A clean, modern website introducing the NTNT programming language.
-Built with NTNT's HTTP server, router, middleware, and PostgreSQL for the blog.
+Built with NTNT's file-based routing, external templates, and middleware.
 
 ## Design
-- Colors from logo: #137EA2 (teal), #F1993F (orange), #2C2A74 (indigo), #192F52 (navy), #FCDD83 (yellow), #20DDE3 (cyan)
-- Logo in upper left header
-- Title: "The NTNT Programming Language"
-- Clean, modern aesthetic
+- Colors: #137EA2 (teal), #F1993F (orange), #2C2A74 (indigo), #192F52 (navy), #FCDD83 (yellow), #20DDE3 (cyan)
 - Hero: Full 100vw edge-to-edge, warm premium gradient (indigo → violet → orange glow)
 - Header: Dark glass effect with backdrop blur, floating over hero
+- Clean, modern aesthetic with responsive design
+
+---
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a visitor goes to $path | GET $path |
+| page loads successfully | status 200, returns HTML |
+| returns HTML | header "Content-Type" contains "text/html" |
+| has site branding | body contains "ntnt-logo", body contains "NTNT" |
+| has navigation | body contains "Learn", body contains "Blog" |
+| has proper layout | has site branding, has navigation, body contains "footer" |
+| they see {text} | body contains {text} |
+| they don't see {text} | body not contains {text} |
+| page not found | status 404 |
+| blog post exists | status 200, returns HTML |
+| blog post missing | body contains "Post Not Found" |
+
+---
+
+## Components
+
+Component: Branded Page
+  id: component.branded_page
+  description: "A page with consistent NTNT branding and layout"
+  inherent_behavior:
+    - Site logo and title visible
+    - Navigation links present
+    - Footer with copyright
+    - Consistent styling applied
+
+Component: Blog Post
+  id: component.blog_post
+  parameters:
+    - slug: the URL slug for the post
+    - title: the post title
+  inherent_behavior:
+    - Post title displayed
+    - Author and date shown
+    - Content rendered from template
+    - Back link to blog index
+
+---
+
+Feature: Code Quality
+  id: feature.code_quality
+  description: "Server code passes linting and validation checks"
+
+  Scenario: All code is valid
+    description: "All .tnt files pass linting and validation"
+    When checking code quality
+    → code is valid
+    → no syntax errors
+    → no lint warnings
 
 ---
 
@@ -20,20 +73,25 @@ Feature: Homepage
   id: feature.homepage
   description: "Landing page introducing NTNT with modern full-width hero and glass header"
   design:
-    - Hero: Full 100vw edge-to-edge, warm premium gradient (indigo → violet → orange glow)
-    - Header: Dark glass effect with backdrop blur, floating over hero
-    - Typography: Ensure hero headline has enough line-height/padding to avoid bottom clipping
-    - Separation: Add soft spacing/fade between hero and next section
-    - Color palette: Uses brand colors (indigo #2C2A74, orange #F1993F, teal #137EA2) with warmer accents
-  test:
-    - request: GET /
-      assert:
-        - status: 200
-        - body contains "NTNT"
-        - body contains "experimental"
-        - body contains "Get Started"
-        - body contains "Intent-Driven Development"
-        - body contains "Yessir!"
+    - Hero: Full 100vw edge-to-edge, warm premium gradient
+    - Header: Dark glass effect with backdrop blur
+    - Call-to-action buttons for Get Started and Learn More
+
+  Scenario: Visitor discovers NTNT
+    description: "A new visitor lands on the homepage and learns about NTNT"
+    When a visitor goes to /
+    → page loads successfully
+    → has proper layout
+    → they see "Experimental"
+    → they see "Intent-Driven Development"
+
+  Scenario: Visitor sees call-to-action
+    description: "The homepage prominently displays action buttons"
+    When a visitor goes to /
+    → they see "Get Started"
+    → they see "Learn More"
+
+---
 
 Feature: Learn Page
   id: feature.learn_page
@@ -41,38 +99,95 @@ Feature: Learn Page
   content:
     - Quick Start (installation, hello world, web API)
     - IDD Quick Start (intent files, annotations, verification)
-    - Links to LANGUAGE_SPEC.md, ARCHITECTURE.md, Whitepaper
+    - Links to docs and whitepaper
     - Code examples with syntax highlighting
-  test:
-    - request: GET /learn
-      assert:
-        - status: 200
-        - body contains "Quick Start"
-        - body contains "cargo build"
 
-Feature: Blog List
-  id: feature.blog_list
-  description: "Blog index showing all posts"
-  content:
-    - List of blog posts from PostgreSQL
-    - Title, date, excerpt for each post
-    - Link to full post
-  test:
-    - request: GET /blog
-      assert:
-        - status: 200
-        - body contains "Blog"
+  Scenario: Developer reads the quick start guide
+    description: "A developer visits the learn page to get started"
+    When a visitor goes to /learn
+    → page loads successfully
+    → has proper layout
+    → they see "Quick Start"
 
-Feature: Static Assets
-  id: feature.static_assets
-  description: "Serve static files (CSS, images, JS)"
+  Scenario: Developer sees code examples
+    description: "The learn page shows installation and code examples"
+    When a visitor goes to /learn
+    → they see "cargo build"
+    → they see "Hello, World"
 
 ---
 
-Constraint: Responsive
-  description: "Website should be mobile-friendly"
-  applies_to: [feature.homepage, feature.learn_page, feature.blog_list]
+Feature: Blog List
+  id: feature.blog_list
+  description: "Blog index showing all posts with excerpts"
+  content:
+    - List of blog posts with title, date, author, excerpt
+    - Links to individual posts
+    - Consistent styling with site
+
+  Scenario: Visitor browses the blog
+    description: "A visitor views the list of blog posts"
+    When a visitor goes to /blog
+    → page loads successfully
+    → has proper layout
+    → they see "Blog"
+
+  Scenario: Blog shows available posts
+    description: "The blog index lists all published posts"
+    When a visitor goes to /blog
+    → they see "Welcome to the NTNT Blog"
+    → they see "Intent-Driven Development Explained"
+
+---
+
+Feature: Blog Post View
+  id: feature.blog_post
+  description: "Individual blog post with full content"
+
+  Scenario: Reading the welcome post
+    description: "A visitor reads the introductory blog post"
+    When a visitor goes to /blog/welcome
+    → blog post exists
+    → has proper layout
+    → they see "Welcome to the NTNT Blog"
+    → they see "NTNT Team"
+
+  Scenario: Reading the IDD explained post
+    description: "A visitor learns about Intent-Driven Development"
+    When a visitor goes to /blog/idd-explained
+    → blog post exists
+    → has proper layout
+    → they see "Intent-Driven Development Explained"
+
+  Scenario: Visiting a non-existent post
+    description: "A visitor tries to access a post that doesn't exist"
+    When a visitor goes to /blog/does-not-exist
+    → page loads successfully
+    → blog post missing
+    → they don't see "Welcome to the NTNT Blog"
+
+---
+
+Feature: Static Assets
+  id: feature.static_assets
+  description: "Serve static files (CSS, images, JS) from /assets"
+  test:
+    - request: GET /assets/ntnt-logo.png
+      description: "Load the site logo"
+      assert:
+        - status: 200
+        - header "Content-Type" contains "image"
+
+---
+
+Constraint: Responsive Design
+  description: "Website should be mobile-friendly with proper viewport meta"
+  applies_to: [feature.homepage, feature.learn_page, feature.blog_list, feature.blog_post]
 
 Constraint: Accessible
-  description: "Use semantic HTML and proper contrast ratios"
+  description: "Use semantic HTML, proper heading hierarchy, and sufficient contrast"
+  applies_to: [feature.homepage, feature.learn_page, feature.blog_list, feature.blog_post]
+
+Constraint: Fast Loading
+  description: "Pages should load quickly with minimal blocking resources"
   applies_to: [feature.homepage, feature.learn_page, feature.blog_list]

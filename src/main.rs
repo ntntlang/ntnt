@@ -2,14 +2,6 @@
 //!
 //! Command-line interface for the NTNT (Intent) programming language.
 
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::type_complexity)]
-#![allow(clippy::single_match)]
-#![allow(clippy::manual_strip)]
-#![allow(clippy::collapsible_match)]
-#![allow(clippy::ptr_arg)]
-#![allow(clippy::redundant_closure)]
-
 use clap::{Parser, Subcommand};
 use colored::*;
 use ntnt::{intent, interpreter::Interpreter, lexer::Lexer, parser::Parser as IntentParser};
@@ -233,12 +225,9 @@ enum IntentCommands {
     /// Creates a new .tnt file with function stubs and route
     /// registrations based on the intent specification.
     ///
-    /// IMPORTANT: Always use -o flag to save to a file. Shell redirection
-    /// (>) may add incorrect encoding (BOM) on Windows, causing UTF-8 errors.
-    ///
     /// Examples:
+    ///   ntnt intent init requirements.intent
     ///   ntnt intent init requirements.intent -o server.tnt
-    ///   ntnt intent init requirements.intent (prints to stdout)
     Init {
         /// The intent file to generate code from
         #[arg(value_name = "INTENT_FILE")]
@@ -702,7 +691,7 @@ fn test_http_server(
                             if !response.is_empty() {
                                 let response_str = String::from_utf8_lossy(&response).to_string();
                                 let parts: Vec<&str> = response_str.splitn(2, "\r\n\r\n").collect();
-                                let headers = parts.first().unwrap_or(&"");
+                                let headers = parts.get(0).unwrap_or(&"");
                                 let body = parts.get(1).unwrap_or(&"").to_string();
 
                                 let status_code = headers
@@ -748,6 +737,13 @@ fn test_http_server(
     // Parse and run the server in main thread
     let source = fs::read_to_string(path)?;
     let mut interpreter = Interpreter::new();
+
+    // Set the current file path for routes() and serve_static() path resolution
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let path_str = canonical_path.to_string_lossy();
+    interpreter.set_current_file(&path_str);
+    interpreter.set_main_source_file(&path_str);
+
     interpreter.set_test_mode(port, requests_to_make, shutdown_flag.clone());
 
     let lexer = Lexer::new(&source);
@@ -940,8 +936,8 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
                         "name": name,
                         "file": relative_path,
                         "line": line,
-                        "params": params.iter().map(param_to_json).collect::<Vec<_>>(),
-                        "return_type": return_type.as_ref().map(type_to_string),
+                        "params": params.iter().map(|p| param_to_json(p)).collect::<Vec<_>>(),
+                        "return_type": return_type.as_ref().map(|t| type_to_string(t)),
                         "contracts": contract_to_json(contract),
                         "attributes": attributes.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
                     });
@@ -1630,33 +1626,41 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         if let Some(first_arg) = arguments.first() {
                             match first_arg {
                                 Expression::String(s) if s.contains('{') && s.contains('}') => {
-                                    // Regular string with {} - likely needs raw string
+                                    // Check if source already uses raw string
                                     let line = find_line_number(source_lines, s);
-                                    issues.push(json!({
-                                        "severity": "warning",
-                                        "rule": "route_pattern_needs_raw_string",
-                                        "message": format!("Route pattern '{}' contains {{}} but is not a raw string. Use r\"{}\" to prevent interpolation.", s, s),
-                                        "line": line,
-                                        "fix": {
-                                            "replacement": format!("r\"{}\"", s),
-                                            "description": "Wrap route pattern in raw string"
-                                        }
-                                    }));
-                                }
-                                Expression::InterpolatedString(parts) => {
-                                    // Interpolated string used as route - definitely wrong
-                                    let has_route_params = parts.iter().any(|p| {
-                                        if let StringPart::Literal(s) = p {
-                                            s.contains("/{") || s.contains("}/")
+                                    let is_already_raw = line.map_or(false, |ln| {
+                                        if let Some(source_line) = source_lines.get(ln - 1) {
+                                            // Check for r"..." or r#"..."# pattern before the string content
+                                            source_line.contains(&format!("r\"{}\"", s))
+                                                || source_line.contains(&format!("r#\"{}\"#", s))
                                         } else {
                                             false
                                         }
                                     });
-                                    if has_route_params {
+
+                                    if !is_already_raw {
+                                        issues.push(json!({
+                                            "severity": "warning",
+                                            "rule": "route_pattern_needs_raw_string",
+                                            "message": format!("Route pattern '{}' contains {{}} but is not a raw string. Use r\"{}\" to prevent interpolation.", s, s),
+                                            "line": line,
+                                            "fix": {
+                                                "replacement": format!("r\"{}\"", s),
+                                                "description": "Wrap route pattern in raw string"
+                                            }
+                                        }));
+                                    }
+                                }
+                                Expression::InterpolatedString(parts) => {
+                                    // Interpolated string used as route - check if it has expression parts
+                                    // which likely means they used {param} expecting route params but got interpolation
+                                    let has_expression_parts =
+                                        parts.iter().any(|p| matches!(p, StringPart::Expr(_)));
+                                    if has_expression_parts {
                                         issues.push(json!({
                                             "severity": "warning",
                                             "rule": "route_pattern_interpolation",
-                                            "message": "Route pattern appears to use string interpolation where route parameters were intended. Use raw string r\"/path/{param}\" for route parameters.",
+                                            "message": "Route pattern uses string interpolation. If you intended route parameters like {id}, use a raw string: r\"/path/{param}\"",
                                             "line": null,
                                             "fix": {
                                                 "description": "Convert to raw string with route parameters"
@@ -2022,25 +2026,183 @@ fn run_intent_check_command(
     println!("Intent: {}", intent_file_path.display().to_string().green());
     println!();
 
-    // Run intent check
-    match intent::run_intent_check(
-        ntnt_path.as_path(),
-        intent_file_path.as_path(),
-        port,
-        verbose,
-    ) {
-        Ok(result) => {
-            intent::print_intent_results(&result);
-
-            if result.features_failed > 0 {
-                std::process::exit(1);
-            }
-            Ok(())
-        }
+    // Parse intent file (new IAL format)
+    let intent_file = match intent::IntentFile::parse(&intent_file_path) {
+        Ok(intent) => intent,
         Err(e) => {
-            anyhow::bail!("Intent check failed: {}", e);
+            anyhow::bail!("Failed to parse intent file: {}", e);
         }
+    };
+
+    // Collect all source files for annotation checking
+    let project_dir = ntnt_path.parent().unwrap_or(std::path::Path::new("."));
+    let source_files: Vec<(String, String)> = collect_tnt_files(&project_dir.to_path_buf())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| {
+            let content = std::fs::read_to_string(&p).ok()?;
+            Some((p.to_string_lossy().to_string(), content))
+        })
+        .collect();
+
+    // Run tests against the app server (same as Intent Studio)
+    println!("Starting server on port {}...", port);
+
+    // Get the current executable path to run ntnt
+    let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ntnt"));
+
+    // Start the NTNT app server as a subprocess
+    use std::process::Command;
+    let mut app_process = Command::new(&current_exe)
+        .arg("run")
+        .arg(&ntnt_path)
+        .env("NTNT_LISTEN_PORT", port.to_string())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to start app server: {}", e))?;
+
+    // Give the server time to start
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    // Run tests using the new IAL engine
+    let results = intent::run_tests_against_server(&intent_file, port, &source_files);
+
+    // Print results
+    println!();
+    println!("{}", "=== Test Results ===".cyan().bold());
+    println!();
+
+    // Calculate stats
+    let mut scenarios_passed = 0;
+    let mut scenarios_failed = 0;
+    let mut scenarios_skipped = 0;
+    let mut features_failed = 0;
+
+    for feature in &results.features {
+        let status_icon = if feature.passed {
+            "✓".green()
+        } else {
+            "✗".red()
+        };
+        println!("{} Feature: {}", status_icon, feature.feature_name.bold());
+
+        if !feature.passed {
+            features_failed += 1;
+        }
+
+        for scenario in &feature.scenarios {
+            let icon = match scenario.status.as_str() {
+                "pass" => {
+                    scenarios_passed += 1;
+                    "  ✓".green()
+                }
+                "fail" => {
+                    scenarios_failed += 1;
+                    "  ✗".red()
+                }
+                "skip" => {
+                    scenarios_skipped += 1;
+                    "  ⏭️ ".yellow()
+                }
+                _ => "  ⧗".yellow(),
+            };
+            println!("{} {}", icon, scenario.name);
+
+            if verbose {
+                if let Some(ref given) = scenario.given_clause {
+                    println!("      Given {}", given.dimmed());
+                }
+                println!("      When {}", scenario.when_clause.dimmed());
+                for outcome in &scenario.outcomes {
+                    println!("      → {}", outcome.dimmed());
+                }
+                if let Some(ref test_result) = scenario.test_result {
+                    for assertion in &test_result.assertions {
+                        let a_icon = if assertion.passed { "✓" } else { "✗" };
+                        println!("        {} {}", a_icon, assertion.assertion_text.dimmed());
+                    }
+                }
+            }
+        }
+
+        for test in &feature.tests {
+            let icon = if test.passed {
+                "  ✓".green()
+            } else {
+                "  ✗".red()
+            };
+            println!("{} {} {}", icon, test.method, test.path);
+
+            if verbose {
+                for assertion in &test.assertions {
+                    let a_icon = if assertion.passed { "✓" } else { "✗" };
+                    println!("      {} {}", a_icon, assertion.assertion_text.dimmed());
+                }
+            }
+        }
+
+        println!();
     }
+
+    for component in &results.components {
+        let status_icon = if component.passed {
+            "✓".green()
+        } else {
+            "✗".red()
+        };
+        println!(
+            "{} Component: {}",
+            status_icon,
+            component.component_name.bold()
+        );
+
+        for scenario in &component.scenarios {
+            let icon = match scenario.status.as_str() {
+                "pass" => {
+                    scenarios_passed += 1;
+                    "  ✓".green()
+                }
+                "fail" => {
+                    scenarios_failed += 1;
+                    "  ✗".red()
+                }
+                "skip" => {
+                    scenarios_skipped += 1;
+                    "  ⏭️ ".yellow()
+                }
+                _ => "  ⧗".yellow(),
+            };
+            println!("{} {}", icon, scenario.name);
+        }
+        println!();
+    }
+
+    println!("{}", "=== Summary ===".cyan().bold());
+    println!(
+        "Features: {} total, {} passed, {} failed",
+        results.total_features,
+        results.total_features - features_failed,
+        features_failed
+    );
+    println!(
+        "Scenarios: {} passed, {} failed, {} skipped",
+        scenarios_passed, scenarios_failed, scenarios_skipped
+    );
+    println!(
+        "Assertions: {} passed, {} failed",
+        results.passed_assertions, results.failed_assertions
+    );
+    println!();
+
+    // Cleanup: kill the app server
+    let _ = app_process.kill();
+
+    if scenarios_failed > 0 || features_failed > 0 {
+        anyhow::bail!("Some tests failed");
+    }
+
+    Ok(())
 }
 
 /// Run the intent coverage command
@@ -2092,8 +2254,37 @@ fn run_intent_coverage_command(
         .map_err(|e| anyhow::anyhow!("Failed to parse intent file: {}", e))?;
 
     // Read source file(s)
+    let mut source_files = Vec::new();
+
+    // Add main .tnt file
     let source_content = fs::read_to_string(&ntnt_path)?;
-    let source_files = vec![(ntnt_path.to_string_lossy().to_string(), source_content)];
+    source_files.push((ntnt_path.to_string_lossy().to_string(), source_content));
+
+    // Also scan routes/ directory for file-based routing
+    let routes_dir = ntnt_path
+        .parent()
+        .map(|p| p.join("routes"))
+        .unwrap_or_else(|| PathBuf::from("routes"));
+
+    if routes_dir.exists() && routes_dir.is_dir() {
+        // Recursively collect all .tnt files from routes directory
+        fn collect_route_files(dir: &PathBuf, files: &mut Vec<(String, String)>) {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        collect_route_files(&path, files);
+                    } else if path.extension().map(|e| e == "tnt").unwrap_or(false) {
+                        if let Ok(content) = fs::read_to_string(&path) {
+                            files.push((path.to_string_lossy().to_string(), content));
+                        }
+                    }
+                }
+            }
+        }
+
+        collect_route_files(&routes_dir, &mut source_files);
+    }
 
     // Generate and print coverage report
     let report = intent::generate_coverage_report(&intent_file, &source_files);
@@ -2140,8 +2331,7 @@ fn run_intent_init_command(
 
     // Output
     if let Some(output) = output_path {
-        // Write directly to file with explicit UTF-8 encoding (no BOM)
-        fs::write(output, scaffolding.as_bytes())?;
+        fs::write(output, &scaffolding)?;
         println!(
             "{}",
             format!("Generated {} from intent file", output.display()).green()
@@ -2155,18 +2345,7 @@ fn run_intent_init_command(
         );
     } else {
         // Print to stdout
-        print!("{}", scaffolding);
-        eprintln!();
-        eprintln!(
-            "{}",
-            "⚠️  Note: When redirecting to a file, use -o flag instead:".yellow()
-        );
-        eprintln!(
-            "   {} {}",
-            "ntnt intent init".cyan(),
-            format!("{} -o output.tnt", intent_path.display()).cyan()
-        );
-        eprintln!("   Shell redirection (>) may add incorrect encoding (BOM) on Windows");
+        println!("{}", scaffolding);
     }
 
     Ok(())
@@ -2309,7 +2488,12 @@ fn run_intent_studio_command(
     })
     .expect("Error setting Ctrl-C handler");
 
-    // Try to open browser
+    // Start simple HTTP server with non-blocking accepts BEFORE opening browser
+    let listener = TcpListener::bind(&addr)
+        .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", addr, e))?;
+    listener.set_nonblocking(true)?;
+
+    // Now open browser (server is ready to accept connections)
     if !no_open {
         let url = format!("http://{}", addr);
         #[cfg(target_os = "macos")]
@@ -2327,11 +2511,6 @@ fn run_intent_studio_command(
                 .spawn();
         }
     }
-
-    // Start simple HTTP server with non-blocking accepts
-    let listener = TcpListener::bind(&addr)
-        .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", addr, e))?;
-    listener.set_nonblocking(true)?;
 
     // Track file modification time for change detection
     let mut last_modified = fs::metadata(&intent_path)
@@ -2418,13 +2597,24 @@ fn run_intent_studio_command(
                         // Run tests against the app server
                         match intent::IntentFile::parse(&intent_path) {
                             Ok(intent_file) => {
-                                // Read source content for annotation checking
-                                let source_content =
-                                    tnt_path.as_ref().and_then(|p| fs::read_to_string(p).ok());
+                                // Collect all source files for annotation checking
+                                let project_dir = tnt_path
+                                    .as_ref()
+                                    .and_then(|p| p.parent())
+                                    .unwrap_or(std::path::Path::new("."));
+                                let source_files: Vec<(String, String)> =
+                                    collect_tnt_files(&project_dir.to_path_buf())
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .filter_map(|p| {
+                                            let content = fs::read_to_string(&p).ok()?;
+                                            Some((p.to_string_lossy().to_string(), content))
+                                        })
+                                        .collect();
                                 let results = intent::run_tests_against_server(
                                     &intent_file,
                                     app_port,
-                                    source_content.as_deref(),
+                                    &source_files,
                                 );
                                 let json = serde_json::to_string(&results)
                                     .unwrap_or_else(|_| "{}".to_string());
@@ -2499,941 +2689,22 @@ fn run_intent_studio_command(
     Ok(())
 }
 
-/// Render the Intent Studio HTML page
+/// Intent Studio Lite HTML (embedded at compile time)
+const INTENT_STUDIO_LITE_HTML: &str = include_str!("intent_studio_lite.html");
+
+/// Render the Intent Studio HTML page (Lite version with IAL support)
 fn render_intent_studio_html(
-    intent_file: &intent::IntentFile,
+    _intent_file: &intent::IntentFile,
     file_path: &str,
     app_port: u16,
 ) -> String {
-    let mut features_html = String::new();
-
-    for feature in &intent_file.features {
-        let id = feature.id.as_deref().unwrap_or("no-id");
-        let description = feature.description.as_deref().unwrap_or("No description");
-
-        // Build test cases HTML
-        let mut tests_html = String::new();
-        for (test_idx, test) in feature.tests.iter().enumerate() {
-            let mut assertions_html = String::new();
-            for (assert_idx, assertion) in test.assertions.iter().enumerate() {
-                let assertion_str = match assertion {
-                    intent::Assertion::Status(code) => format!("status: {}", code),
-                    intent::Assertion::BodyContains(text) => format!("body contains \"{}\"", text),
-                    intent::Assertion::BodyNotContains(text) => {
-                        format!("body not contains \"{}\"", text)
-                    }
-                    intent::Assertion::BodyMatches(pattern) => {
-                        format!("body matches \"{}\"", pattern)
-                    }
-                    intent::Assertion::HeaderContains(name, value) => {
-                        format!("header \"{}\" contains \"{}\"", name, value)
-                    }
-                };
-                assertions_html.push_str(&format!(
-                    r#"<div class="assertion" data-feature="{}" data-test="{}" data-assert="{}"><span class="assertion-icon">○</span> {}</div>"#,
-                    html_escape(id),
-                    test_idx,
-                    assert_idx,
-                    html_escape(&assertion_str)
-                ));
-            }
-
-            let body_html = if let Some(body) = &test.body {
-                format!(
-                    r#"<div class="test-body">Body: <code>{}</code></div>"#,
-                    html_escape(body)
-                )
-            } else {
-                String::new()
-            };
-
-            tests_html.push_str(&format!(
-                r#"<div class="test-case" data-feature="{}" data-test="{}">
-                    <div class="test-request"><span class="method">{}</span> <span class="path">{}</span></div>
-                    {}
-                    <div class="assertions">{}</div>
-                </div>"#,
-                html_escape(id),
-                test_idx,
-                test.method,
-                html_escape(&test.path),
-                body_html,
-                assertions_html
-            ));
-        }
-
-        // Pick an icon based on the feature name
-        let icon = if feature.name.to_lowercase().contains("login")
-            || feature.name.to_lowercase().contains("auth")
-        {
-            "🔐"
-        } else if feature.name.to_lowercase().contains("register")
-            || feature.name.to_lowercase().contains("signup")
-        {
-            "📝"
-        } else if feature.name.to_lowercase().contains("home")
-            || feature.name.to_lowercase().contains("index")
-        {
-            "🏠"
-        } else if feature.name.to_lowercase().contains("api")
-            || feature.name.to_lowercase().contains("status")
-        {
-            "⚡"
-        } else if feature.name.to_lowercase().contains("about") {
-            "ℹ️"
-        } else if feature.name.to_lowercase().contains("user")
-            || feature.name.to_lowercase().contains("profile")
-        {
-            "👤"
-        } else if feature.name.to_lowercase().contains("search") {
-            "🔍"
-        } else if feature.name.to_lowercase().contains("setting")
-            || feature.name.to_lowercase().contains("config")
-        {
-            "⚙️"
-        } else if feature.name.to_lowercase().contains("chart")
-            || feature.name.to_lowercase().contains("graph")
-        {
-            "📊"
-        } else if feature.name.to_lowercase().contains("data")
-            || feature.name.to_lowercase().contains("database")
-        {
-            "💾"
-        } else {
-            "✨"
-        };
-
-        features_html.push_str(&format!(
-            r#"<div class="feature-card" data-feature="{}">
-                <div class="feature-header">
-                    <span class="feature-icon">{}</span>
-                    <span class="feature-name">{}</span>
-                    <span class="feature-badge feature-status" data-feature="{}">pending</span>
-                </div>
-                <div class="feature-id"><code>{}</code></div>
-                <div class="feature-description">{}</div>
-                <div class="feature-tests">
-                    <div class="tests-header">Acceptance Criteria</div>
-                    {}
-                </div>
-            </div>"#,
-            html_escape(id),
-            icon,
-            html_escape(&feature.name),
-            html_escape(id),
-            html_escape(id),
-            html_escape(description),
-            tests_html
-        ));
-    }
-
-    let feature_count = intent_file.features.len();
-    let test_count: usize = intent_file.features.iter().map(|f| f.tests.len()).sum();
-    let assertion_count: usize = intent_file
-        .features
-        .iter()
-        .flat_map(|f| f.tests.iter())
-        .map(|t| t.assertions.len())
-        .sum();
-
-    let run_button_html =
-        r#"<button class="run-tests-btn" onclick="runTests()">▶ Run Tests</button>"#;
-
-    format!(
-        r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Intent Studio - {file_path}</title>
-    <style>
-        :root {{
-            --bg-primary: #0d1117;
-            --bg-secondary: #161b22;
-            --bg-tertiary: #21262d;
-            --border-color: #30363d;
-            --text-primary: #e6edf3;
-            --text-secondary: #8b949e;
-            --text-muted: #6e7681;
-            --accent-blue: #58a6ff;
-            --accent-green: #3fb950;
-            --accent-purple: #a371f7;
-            --accent-orange: #d29922;
-            --accent-red: #f85149;
-        }}
-        
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-        
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
-            background: var(--bg-primary);
-            color: var(--text-primary);
-            line-height: 1.6;
-            min-height: 100vh;
-        }}
-        
-        .header {{
-            background: var(--bg-secondary);
-            border-bottom: 1px solid var(--border-color);
-            padding: 1rem 2rem;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }}
-        
-        .header-content {{
-            max-width: 1200px;
-            margin: 0 auto;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 1rem;
-            flex-wrap: wrap;
-        }}
-        
-        .logo {{
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-        }}
-        
-        .logo-icon {{
-            width: 28px;
-            height: 28px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }}
-        
-        .logo-icon img {{
-            width: 100%;
-            height: 100%;
-            display: block;
-        }}
-        
-        .logo-text {{
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: var(--text-primary);
-        }}
-        
-        .logo-text span {{
-            color: var(--accent-purple);
-        }}
-        
-        .header-file {{
-            color: var(--text-secondary);
-            font-size: 0.875rem;
-        }}
-        
-        .header-file code {{
-            background: var(--bg-tertiary);
-            padding: 0.25rem 0.5rem;
-            border-radius: 4px;
-            font-size: 0.8rem;
-        }}
-        
-        .header-controls {{
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-        }}
-        
-        .run-tests-btn {{
-            background: var(--accent-green);
-            color: var(--bg-primary);
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 6px;
-            font-weight: 600;
-            font-size: 0.875rem;
-            cursor: pointer;
-            transition: background 0.2s, transform 0.1s;
-        }}
-        
-        .run-tests-btn:hover:not(:disabled) {{
-            background: #2ea043;
-            transform: scale(1.02);
-        }}
-        
-        .run-tests-btn:active:not(:disabled) {{
-            transform: scale(0.98);
-        }}
-        
-        .run-tests-btn.disabled {{
-            background: var(--bg-tertiary);
-            color: var(--text-muted);
-            cursor: not-allowed;
-        }}
-        
-        .run-tests-btn.running {{
-            background: var(--accent-orange);
-            cursor: wait;
-        }}
-        
-        .open-app-btn {{
-            background: var(--bg-tertiary);
-            color: var(--text-primary);
-            border: 1px solid var(--border-color);
-            padding: 0.5rem 1rem;
-            border-radius: 6px;
-            font-weight: 500;
-            font-size: 0.875rem;
-            cursor: pointer;
-            text-decoration: none;
-            transition: background 0.2s, border-color 0.2s;
-            display: flex;
-            align-items: center;
-            gap: 0.375rem;
-        }}
-        
-        .open-app-btn:hover {{
-            background: var(--bg-secondary);
-            border-color: var(--accent-blue);
-            color: var(--accent-blue);
-        }}
-        
-        .status-badge {{
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            background: var(--bg-tertiary);
-            padding: 0.375rem 0.75rem;
-            border-radius: 20px;
-            font-size: 0.8rem;
-        }}
-        
-        .status-dot {{
-            width: 8px;
-            height: 8px;
-            background: var(--accent-green);
-            border-radius: 50%;
-            animation: pulse 2s infinite;
-        }}
-        
-        .app-status {{
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            background: var(--bg-tertiary);
-            padding: 0.375rem 0.75rem;
-            border-radius: 20px;
-            font-size: 0.8rem;
-        }}
-        
-        .app-status-dot {{
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: var(--text-muted);
-        }}
-        
-        .app-status.running .app-status-dot {{
-            background: var(--accent-green);
-            animation: pulse 2s infinite;
-        }}
-        
-        .app-status.error .app-status-dot {{
-            background: var(--accent-red);
-        }}
-        
-        .app-status.starting .app-status-dot {{
-            background: var(--accent-orange);
-            animation: pulse 1s infinite;
-        }}
-        
-        @keyframes pulse {{
-            0%, 100% {{ opacity: 1; }}
-            50% {{ opacity: 0.5; }}
-        }}
-        
-        .main {{
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 2rem;
-        }}
-        
-        .stats {{
-            display: flex;
-            gap: 1rem;
-            margin-bottom: 2rem;
-            flex-wrap: wrap;
-        }}
-        
-        .stat {{
-            background: var(--bg-secondary);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 1rem 1.5rem;
-            min-width: 120px;
-        }}
-        
-        .stat-value {{
-            font-size: 2rem;
-            font-weight: 600;
-            color: var(--accent-blue);
-        }}
-        
-        .stat-label {{
-            color: var(--text-secondary);
-            font-size: 0.875rem;
-        }}
-        
-        .stat.passing .stat-value {{
-            color: var(--accent-green);
-        }}
-        
-        .stat.failing .stat-value {{
-            color: var(--accent-red);
-        }}
-        
-        .features-grid {{
-            display: grid;
-            gap: 1.5rem;
-        }}
-        
-        .feature-card {{
-            background: var(--bg-secondary);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            padding: 1.5rem;
-            transition: border-color 0.2s, transform 0.2s;
-        }}
-        
-        .feature-card:hover {{
-            border-color: var(--accent-purple);
-            transform: translateY(-2px);
-        }}
-        
-        .feature-card.passed {{
-            border-color: var(--accent-green);
-        }}
-        
-        .feature-card.failed {{
-            border-color: var(--accent-red);
-        }}
-        
-        .feature-header {{
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            margin-bottom: 0.5rem;
-        }}
-        
-        .feature-icon {{
-            font-size: 1.5rem;
-        }}
-        
-        .feature-name {{
-            font-size: 1.25rem;
-            font-weight: 600;
-            flex-grow: 1;
-        }}
-        
-        .feature-badge {{
-            background: var(--accent-purple);
-            color: white;
-            font-size: 0.7rem;
-            padding: 0.2rem 0.5rem;
-            border-radius: 4px;
-            text-transform: uppercase;
-            font-weight: 600;
-        }}
-        
-        .feature-status.passed {{
-            background: var(--accent-green);
-        }}
-        
-        .feature-status.failed {{
-            background: var(--accent-red);
-        }}
-        
-        .unlinked-warning {{
-            background: rgba(251, 191, 36, 0.2);
-            color: #fbbf24;
-            font-size: 0.7rem;
-            padding: 0.2rem 0.5rem;
-            border-radius: 4px;
-            font-weight: 500;
-            margin-left: 0.5rem;
-        }}
-        
-        .feature-card.unlinked {{
-            border-left: 3px solid #fbbf24;
-        }}
-        
-        .feature-id {{
-            margin-bottom: 0.75rem;
-        }}
-        
-        .feature-id code {{
-            background: var(--bg-tertiary);
-            padding: 0.2rem 0.5rem;
-            border-radius: 4px;
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-        }}
-        
-        .feature-description {{
-            color: var(--text-secondary);
-            margin-bottom: 1rem;
-            font-size: 0.95rem;
-        }}
-        
-        .feature-tests {{
-            background: var(--bg-tertiary);
-            border-radius: 8px;
-            padding: 1rem;
-        }}
-        
-        .tests-header {{
-            font-size: 0.8rem;
-            text-transform: uppercase;
-            color: var(--text-muted);
-            margin-bottom: 0.75rem;
-            font-weight: 600;
-            letter-spacing: 0.05em;
-        }}
-        
-        .test-case {{
-            padding: 0.75rem 0;
-            border-bottom: 1px solid var(--border-color);
-        }}
-        
-        .test-case:last-child {{
-            border-bottom: none;
-            padding-bottom: 0;
-        }}
-        
-        .test-request {{
-            font-family: 'SF Mono', 'Consolas', monospace;
-            margin-bottom: 0.5rem;
-        }}
-        
-        .method {{
-            background: var(--accent-green);
-            color: var(--bg-primary);
-            padding: 0.15rem 0.4rem;
-            border-radius: 4px;
-            font-size: 0.75rem;
-            font-weight: 600;
-        }}
-        
-        .path {{
-            color: var(--accent-blue);
-            margin-left: 0.5rem;
-        }}
-        
-        .test-body {{
-            font-size: 0.85rem;
-            color: var(--text-secondary);
-            margin-bottom: 0.5rem;
-        }}
-        
-        .test-body code {{
-            background: var(--bg-secondary);
-            padding: 0.15rem 0.4rem;
-            border-radius: 4px;
-            font-size: 0.8rem;
-        }}
-        
-        .assertions {{
-            display: flex;
-            flex-direction: column;
-            gap: 0.25rem;
-        }}
-        
-        .assertion {{
-            color: var(--text-secondary);
-            font-size: 0.85rem;
-            font-family: 'SF Mono', 'Consolas', monospace;
-            display: flex;
-            align-items: flex-start;
-            gap: 0.5rem;
-        }}
-        
-        .assertion-icon {{
-            flex-shrink: 0;
-        }}
-        
-        .assertion.passed {{
-            color: var(--accent-green);
-        }}
-        
-        .assertion.passed .assertion-icon::before {{
-            content: '✓';
-        }}
-        
-        .assertion.failed {{
-            color: var(--accent-red);
-        }}
-        
-        .assertion.failed .assertion-icon::before {{
-            content: '✗';
-        }}
-        
-        .assertion-message {{
-            color: var(--accent-red);
-            font-size: 0.75rem;
-            margin-left: 1.25rem;
-            opacity: 0.8;
-        }}
-        
-        .footer {{
-            text-align: center;
-            padding: 2rem;
-            color: var(--text-muted);
-            font-size: 0.85rem;
-        }}
-        
-        .update-toast {{
-            position: fixed;
-            bottom: 2rem;
-            right: 2rem;
-            background: var(--accent-purple);
-            color: white;
-            padding: 0.75rem 1.25rem;
-            border-radius: 8px;
-            font-size: 0.9rem;
-            opacity: 0;
-            transform: translateY(20px);
-            transition: opacity 0.3s, transform 0.3s;
-            z-index: 1000;
-        }}
-        
-        .update-toast.show {{
-            opacity: 1;
-            transform: translateY(0);
-        }}
-        
-        .results-summary {{
-            background: var(--bg-secondary);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 1rem 1.5rem;
-            margin-bottom: 2rem;
-            display: none;
-        }}
-        
-        .results-summary.visible {{
-            display: block;
-        }}
-        
-        .results-summary.all-passed {{
-            border-color: var(--accent-green);
-        }}
-        
-        .results-summary.has-failures {{
-            border-color: var(--accent-red);
-        }}
-        
-        .results-summary.has-warnings {{
-            border-color: #fbbf24;
-        }}
-        
-        .results-summary h3 {{
-            margin-bottom: 0.5rem;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }}
-        
-        .results-summary.all-passed h3 {{
-            color: var(--accent-green);
-        }}
-        
-        .results-summary.has-failures h3 {{
-            color: var(--accent-red);
-        }}
-        
-        .results-summary.has-warnings h3 {{
-            color: #fbbf24;
-        }}
-    </style>
-</head>
-<body>
-    <header class="header">
-        <div class="header-content">
-            <div class="logo">
-                <span class="logo-icon"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAGxlWElmTU0AKgAAAAgABAEaAAUAAAABAAAAPgEbAAUAAAABAAAARgEoAAMAAAABAAIAAIdpAAQAAAABAAAATgAAAAAAAAEsAAAAAQAAASwAAAABAAKgAgAEAAAAAQAAAECgAwAEAAAAAQAAAEAAAAAA9Ed7egAAAAlwSFlzAAAuIwAALiMBeKU/dgAAEHlJREFUeAHtWAlsHOd1/ubck8eSXN4SSYmkjsi2bDm+a8RxfMROfCB1FAdJYAeo7LooUsNoUBQtwLZO01ZBGyOGgbRu66Ot4wZJmig2FNeHbEuxLdk6LImSqIOHeIlckrvcc3Z2Zvq9WVKSK/mQY7VAu780w93Z+Y/3/d/73ns/UGkVBCoIVBCoIFBBoIJABYEKAhUEKghUEKggUEHg/x0Cyv+sxZ6Cu6A2BZ8OxlPvRLuMqYbGqFo7lXGTo3ZobrhqbWa25/cL6EOJ6/IAhdf5becNgL4+T311z9cvKGZTretixbb6QKnX8OxOzSm014WU+oaQFgurTk1Q9cx8yS0WoaeztjI/ayFVdNTppOVOHEsHjo9ZxlCktm7Ppp/+6O3zAch5AeDyu7/VFBt/6+EvLXO/nsoVA7KZzVEFKxtMtIQVRFQHqqrChQLX86AqClTPheUAcxZweKaIiayDkqdjSczAsZRnPXVQ+0HnZ+98+Md//UepT5ITnzAAnvK79/z27YnBo39zR6fdc2tPiKarSBc9jKRszOaBaRoW0IDWKhXNVTpMQ8VMzsHxpI2pTAl1EQPNEQ3t1SpiQZ1AAXbJxZN7cjicD+9wm5Y/9PgTz2z9pNjwiQHQ+sWHGjbE9vx5xEnftzJqqVe1GSg64sYKNFWByQvc7XmCMTDn4O2xPHYlFMwqVVgZTGFdi4lLmwNojHh8F3AoF7YLMgRkB7tynF8N2sjBKByxon/1t9n1G7HpvtxvyoZPAABPvf0Ln7/51vjcxphmreba8dmOAG114VLDLMrZbN7h7noYTZPWtKjKBFpqA9g2YsFyNayIkQ1hD+PzNgqOguoQGUCG1AeBGtJFABQgMyUFLx7NYmmVht2p0LbnMm1/sOUXP6E2fPz2GwHwmbsfarjc2913S2v+PsUu6GMpC9d3BZGxFYyT6tN5F9PpIkxNRRvp3hzVEY+oCOjALwcK6KrVcUFcx88G8rg4rqGz1sA8+57IOJikO8jfgKGhPqyigf1aIgqKBPTVoTyu7QhjX8pIvZCo/q56z6Pf/8EtPVSPc28fG4Crr7/tukuCo4/ef5G5OpEt4fXjBaysVZCmkom4xbiLXTSoPkjRM8rT2KSyTv9/Z8JGiqy4vjNIqgMp9nnxWAG39oYQ5G4rvtvAZ0uGnaayHoaSRbLJgy5soDBMkvxf/lQYAzMO/vGA+vJo9ar7X/vJE4fPFYKPBcCdX/vmRTdo+1/uiRTqfnnM5U6Y+J1POWgLk9pRDdVBjcpOPybdxYcXmwja2LyDHWMWbl/Bl9nkZ0NTcGS2hAPTBKGbwump/nMZROEnTQDhZROtRK4EYoEXRj1sndBwe3sWaxpD2J6Mbn+qav31+x/7vYw/8Ee8icueU6v7fF/15e6Bx+9eodZxLZhL53FjWxFx+uuFTSYiVDAxnML9HuO5fuS5m9uOW7iOO69QH+SfPLf5fncdgaNvvD1ehEHV8yiY/kUIHI4lxsv3RkaIZXy3NeTi2ngeR+ZctNC97uoqXvaZiWe/I3J5LgaRkOfSPOX+i/7k+3d3WrdtO57H8ZyG6zqCuL3bwBujFmxoDGGM76ftuowuX2X3/5M0vyhuoo0hzqExQnW/cc3SZyld5p2JIkKmuBCf+QCphIAaKGPwJm606VAWFzfquHFZENMFleJZgura6K4qfbrY/It9+wcOHygP/OH3cwJgw1d2fvWmpux3Dp3IKEup0tmigyuXBrg4Bd31Afx6pABdcdEY1nzf9lfNNZic5Q1qhEmqr2sJoMSEx6M1Gl/QiAyx8JsYKLu5ZTCHZUyATJUdF34TrCRpev5IHqsbAuip06Gwb4nPwoqDJDVFIG2LeteUum74j8MHds19uPkE9aO8JO+sX7++t1OZ+btktqheszTix+hG0j6iCZFld1zc1B3EnsmSH+50oTgXR5sxyLifyHm4qp3Gu44vhC5pPZ4u4VCiCKbCvripfL824GFdawivDtuEpzxGeY0eNh8tR45VDQbHoWvQLXprVAwnS7hqSYjao0NzrNZVzsHH7ur7dwbbD28fiQFf7NsUzu/68bNra/Krb1gWQFVAxVtjRVxN+pdpzKUSBUlglpDGrw8XUceUtzqoYt6iWA2LwkfoBgoXaxOkIgaSLp7el8dTzPCqKJpC4wyjgYS9rpiOBMPoKLNHCY1SE700bKGBzFrXbPrgE1c/N5CQykQSiQJweasBzXMwMJXtPnJkf2lwaOg14M8+EIUPBaCPkjz+lxu+e1u79ZU7egyEdAU7p5iyMsx11NKXZR0LXBcm8DHizPtfHyEIBGAbgWolrYdpzL6Ew0rHQ0/M9IF5boROEG1AoJTCzcsM/gYcYFg7MmOjmmgOpplBkmH7E7bvRlf6DJJZaL74BIERnWiMGth9okT9AegdWBU3MDlfuKp+9a/eOnTw4LEPQuBDAbC27rjpzsbZR7+xxlQki8sUXe5+Ab/F3feXsiC6zHXo/1R/PpTYnimp2PhuALMMFT0xoInqfXGzgYuag5jKufjh2ylM2SHU1FTh6NgMmgjSjctD6OXux8iwtC2FkYtH9gdRtG0mWKbvrwH6vSZRgnPJAoQJQU6eoR6NE8H2agNBgvfpFk1/4+jsFdEbv/UvI2+/RH6cvX0gAK94nv7yI9/7h2XRYqcULpKR7aBKx6nQHTUS68sKLaAcm7PRz53aO21jkD4ZC+uYoTB9tVfBZaRmjDSXeH9sjknTKGuBKQ8MeAgGA5iZz/uMckolLK3WEKZqSubYwxQ5XSgRHA0l28GuccvPMBN5xl8yIMJCKiAiI9rBhGsPmdlZRzcgIFsZbmczxfrDx4YTE2Ojvz67+aAQf0Cb6x+43shO/TGzPWXHuI0QHe5oyqGSBzFCX945nsfBWfpq2vULn44aA2sY5tbST0UTGgIujTdBHPwwOJV1sWvSwQH22Z3gzpkCQBDpbI4ZpIvuWiBZ8Oj3uj+ewp3uJgizGRs3dJhU/gCBUpFjLBzmOoZSri+iUmtUiQByvDHOcYyiK9LRRjC3Thnd33jggX/d+tJLrEXPbJSQ92+1IfPLcQb25ioHV3Axf7FTQ50ZRAB5H/0W0k0oJ6KokZKSsAj9xfj+6SIXL2rNTI/ukcp72E49iLK4eZmCpqtcIZucC0jeN5ZVcIiBq5H5/nZWipe2BtlXBTFl2PQwR2Ci1PUY+zc0UTu48VIXSGY4QaP7Z10/Xd6ciOPO5iRuWGVgb8Kjy4XiY0eHvsCpnvQn/G83Lu3s7WsPPNDtZmd7G7UMF6v6MbzaSaHFKODm5QFcu9TE6niAiypnfnTBcuzncAUKgZwBtETLSZHFCu8VGn1hk4Ef9edQYAUoIW6xSbgUKm8edHyfnmERJTm+wagh4NTT5YboVj7b2UlApUf4IDSxwJJS+nNLdfRSlJvdaYRVm70Uuhz7OgnNyiQv27hxIyXyzPa+AATUANlbiNebjNvUekH43jUGLm0C3qWvSSbn7zbHPJnR8bMscoJVXE2APsods1kWb2bycgUV/E3WALumwWrwzGlF1GxqyuN78rhySQSHSWMxWsaWomqSwiku8d5WjgI2hXiGteBImiy92vQj0xzDr86Q2BbxwstjWvvBo8Nr39u3/O3MlfB5X19fOJecW9cVthrrqwy/wpukLHfVmaRUAP0n8khRnCRZFSkWyi82qd1HqAmdpH+RycrzAzlmbjqzOBdP7GNpzDgvHWTXpS3+FULIjvcnNfzsEOsL5hvvMF8YZn4gx2mczmcVmHDJnD6DRP/4Tdxv20jeZ1itX4Xq2E19krOEOA8fGopj9XOp+TWciz3e284KwMRMutMoJlsa9WysnkdUexMullP1JcwZqou19M/t4yW6xqIBpxCwSIu8w9qdE28+YmFFvYkVrPkf2ZHBbJFawflPvX2KPbLTAobBQZ/ut/y84ZaeIHYysxzjYUoHBXCCf4kRO3EM33hmmlzDEUYWi8dHvSzHc/wrwjlFzXCYSmtMOTuN/KpIOND+4IMPNr/X/PdJhTP5/AUrqp2uhoCnij9LlrWqKcAMTI6pFPTSKIV0lRSXeZHvjGKULG6MO1bkIt4cLaCX+foljAibePjx2piHoE7NpaFirFynNzFensmOzJc0PLYz7zPic51k3IxEGSmZy2ceYjyX4TdGYOwmU65lTSIFlfDDJIjLeZwkwHiOg65qJqb5qYbpufTqcq9T9zMY8ErfK3p6Pr2sU5tt0mndIap5K4+rghQU2TuZ1+VMl7eb2MHSVQBS/MWXd2eCx167JwqM1x5WNhoY5ve/35nz+9h2ETaTmsXL4eLEcPleYg5Q/suakr675biNnxO4BmZ5zbykApQwujif0EgOR3Ywsqxk+hcLCRtd//yQ5YZ/ODPO7NNW6AYU4y5jfrVhBpadMr386QwAnp18ro7itVIv5ZdM89RFwszqelZdpLYYLxfXDEoDljNrk53WRZz4X3z+BHP4L62K+Mdiu044+CeK2lBKdqJ0mpHlzz4ApGhpAQABYfEiYvjndwt4a8LBmwT6qiUGlpNRknPIoiU6SC4yQ1DWNGo+M4WV5aaAkZnnBgaOzlOpuGHFTKonm8u20A3qFl7y/yz2OPlsfn78wmw6c8XmVLv+zN4sMzJWXbS6yBpWJjWpAwFe8nkdU1s51JzkIihzfgEjGeCauIqOKg/PvJvGT/uzpD4zxgXaS9xf/Cy7T9wWMspTriG/63TuMbLn4S0zCPNIbS3H7IoFcJwnSirnl3d2Mf+/ZolON3T9MConz5LYuGRQhrGyPujh8Il5fO9dE3uwrCWXnFmXzWZ7ThrLD2dJhEKHTaP45GQ696eT+WjQy7ZgO48XIqqFKpWHFW4eIcVipuWglVlKPcXuhcNp3LU6goM80moi3cQom/R+dTjnx2tdKMMF+23hs8sdlssTBpAd5ZT09Pf4Nt89xPA7QBG6oyfiUzyZtXlwamDfTAmuEcAoy+w3Jy0abCDnmjw2DyLp6Eg7JiwlgDEjjcGpAhqb3IPhcOhZ0zSPlxdSvi+s6vRHEgY9deeLl2zOmzVrYy2seqBW6ZxMYr/QSUIaeUH0uOCShXQyhSolh5xVQH0kgGCAlZ3NEpenc6IPvjTJTMICKpg8ka/CBt3QYVnWyWd8g4bKG2zcaXE8yR6XRDkKXWRyLoswx8/RuGgs7rudo/BwhL6u6VIH+CPAoVs5NisIt5QqjPV7Szs77vnhv/38+fLAp+5nBUB+3rBhQ0u4oQFD/f2BaDTYOj0912kYRgeX3RqKhFs5Y4vreM2upzZpuhqeGx9khhNB89JugiTRgXT0Y5ZsJA3iTGKWj8PCXcyT3xR5T36Um288v/svyk0oTZxJafHxYiGPxNB+1LZ1ETyT4uImKZ6TPGuYLFrWCQ4w5rqlEV3Vj1NPBtvb2xOt3d1eRzyevPfee8+oCssz+NOc++3b3/5m1d69E42hUFVz4cTRPzRq6geCNfEhhh7FkcKAfixx+mSTGHXad4f096lPJpxs8s5iW3i8MBSfytuO5iSGb/VCsWeKnrqrIRQ60Tk9nejbsoWp0v9qOzPLOm/LOUtGd97mqgxcQaCCQAWBCgIVBCoIVBCoIFBBoIJABYEKAhUEKghUEPi/hsB/AU+zq0eenIl3AAAAAElFTkSuQmCC" alt="NTNT Logo" /></span>
-                <span class="logo-text">Intent <span>Studio</span></span>
-            </div>
-            <div class="header-file">
-                <code>{file_path}</code>
-            </div>
-            <div class="header-controls">
-                <a href="http://127.0.0.1:{app_port}/" target="_blank" class="open-app-btn" title="Open app in new window">🌐 Open App</a>
-                <div class="app-status" id="app-status">
-                    <span class="app-status-dot" id="app-status-dot"></span>
-                    <span id="app-status-text">Checking app...</span>
-                </div>
-                {run_button_html}
-                <div class="status-badge">
-                    <span class="status-dot"></span>
-                    <span>Live</span>
-                </div>
-            </div>
-        </div>
-    </header>
-    
-    <main class="main">
-        <div class="results-summary" id="results-summary">
-            <h3><span id="results-icon"></span> <span id="results-title"></span></h3>
-            <p id="results-text"></p>
-        </div>
-        
-        <div class="stats">
-            <div class="stat">
-                <div class="stat-value">{feature_count}</div>
-                <div class="stat-label">Features</div>
-            </div>
-            <div class="stat">
-                <div class="stat-value">{test_count}</div>
-                <div class="stat-label">Test Cases</div>
-            </div>
-            <div class="stat" id="assertions-stat">
-                <div class="stat-value">{assertion_count}</div>
-                <div class="stat-label">Assertions</div>
-            </div>
-            <div class="stat passing" id="passed-stat" style="display: none;">
-                <div class="stat-value" id="passed-count">0</div>
-                <div class="stat-label">Passed</div>
-            </div>
-            <div class="stat failing" id="failed-stat" style="display: none;">
-                <div class="stat-value" id="failed-count">0</div>
-                <div class="stat-label">Failed</div>
-            </div>
-        </div>
-        
-        <div class="features-grid">
-            {features_html}
-        </div>
-    </main>
-    
-    <footer class="footer">
-        Intent-Driven Development • NTNT Language
-    </footer>
-    
-    <div class="update-toast" id="toast">✨ Intent updated - refreshing...</div>
-    
-    <script>
-        async function runTests() {{
-            const btn = document.querySelector('.run-tests-btn');
-            btn.textContent = '⏳ Running...';
-            btn.classList.add('running');
-            
-            // Reset all states
-            document.querySelectorAll('.assertion').forEach(el => {{
-                el.classList.remove('passed', 'failed');
-                el.querySelector('.assertion-icon').textContent = '○';
-            }});
-            document.querySelectorAll('.feature-card').forEach(el => {{
-                el.classList.remove('passed', 'failed');
-            }});
-            document.querySelectorAll('.feature-status').forEach(el => {{
-                el.classList.remove('passed', 'failed');
-                el.textContent = 'testing...';
-            }});
-            
-            try {{
-                const response = await fetch('/run-tests');
-                const results = await response.json();
-                
-                if (results.error) {{
-                    // Show error in summary
-                    const summary = document.getElementById('results-summary');
-                    const icon = document.getElementById('results-icon');
-                    const title = document.getElementById('results-title');
-                    const text = document.getElementById('results-text');
-                    
-                    summary.classList.add('visible', 'has-failures');
-                    summary.classList.remove('all-passed');
-                    icon.textContent = '⚠️';
-                    title.textContent = 'Test Error';
-                    text.textContent = results.error;
-                    
-                    // Also check app status
-                    checkAppStatus();
-                    return;
-                }}
-                
-                // Update UI with results
-                let passedCount = results.passed_assertions || 0;
-                let failedCount = results.failed_assertions || 0;
-                
-                // Show stats
-                document.getElementById('passed-stat').style.display = 'block';
-                document.getElementById('failed-stat').style.display = 'block';
-                document.getElementById('passed-count').textContent = passedCount;
-                document.getElementById('failed-count').textContent = failedCount;
-                
-                // Update each feature
-                for (const feature of results.features) {{
-                    const featureCard = document.querySelector(`.feature-card[data-feature="${{feature.feature_id}}"]`);
-                    const featureStatus = document.querySelector(`.feature-status[data-feature="${{feature.feature_id}}"]`);
-                    
-                    if (featureCard) {{
-                        featureCard.classList.add(feature.passed ? 'passed' : 'failed');
-                        
-                        // Show warning if no implementation linked
-                        if (!feature.has_implementation) {{
-                            featureCard.classList.add('unlinked');
-                            // Add warning badge if not already present
-                            const header = featureCard.querySelector('.feature-header');
-                            if (header && !header.querySelector('.unlinked-warning')) {{
-                                const warningBadge = document.createElement('span');
-                                warningBadge.className = 'unlinked-warning';
-                                warningBadge.title = 'No @implements annotation found for this feature';
-                                warningBadge.textContent = '⚠️ No code linked';
-                                header.appendChild(warningBadge);
-                            }}
-                        }}
-                    }}
-                    if (featureStatus) {{
-                        featureStatus.classList.add(feature.passed ? 'passed' : 'failed');
-                        featureStatus.textContent = feature.passed ? 'passed' : 'failed';
-                    }}
-                    
-                    // Update each test's assertions
-                    for (let ti = 0; ti < feature.tests.length; ti++) {{
-                        const test = feature.tests[ti];
-                        for (let ai = 0; ai < test.assertions.length; ai++) {{
-                            const assertion = test.assertions[ai];
-                            const assertionEl = document.querySelector(
-                                `.assertion[data-feature="${{feature.feature_id}}"][data-test="${{ti}}"][data-assert="${{ai}}"]`
-                            );
-                            if (assertionEl) {{
-                                assertionEl.classList.add(assertion.passed ? 'passed' : 'failed');
-                                const iconEl = assertionEl.querySelector('.assertion-icon');
-                                iconEl.textContent = assertion.passed ? '✓' : '✗';
-                                
-                                // Remove any existing error message first
-                                const existing = assertionEl.querySelector('.assertion-message');
-                                if (existing) existing.remove();
-                                
-                                // Add error message if failed
-                                if (!assertion.passed && assertion.message) {{
-                                    const msgEl = document.createElement('div');
-                                    msgEl.className = 'assertion-message';
-                                    msgEl.textContent = assertion.message;
-                                    assertionEl.appendChild(msgEl);
-                                }}
-                            }}
-                        }}
-                    }}
-                }}
-                
-                // Show summary
-                const summary = document.getElementById('results-summary');
-                const icon = document.getElementById('results-icon');
-                const title = document.getElementById('results-title');
-                const text = document.getElementById('results-text');
-                
-                // Check for unlinked features
-                const unlinkedCount = results.total_features - results.linked_features;
-                const hasUnlinked = unlinkedCount > 0;
-                
-                summary.classList.add('visible');
-                if (failedCount === 0 && !hasUnlinked) {{
-                    summary.classList.remove('has-failures', 'has-warnings');
-                    summary.classList.add('all-passed');
-                    icon.textContent = '✓';
-                    title.textContent = 'All Tests Passed!';
-                    text.textContent = `${{passedCount}} assertions passed across ${{results.features.length}} features. Coverage: ${{results.linked_features}}/${{results.total_features}} features linked.`;
-                }} else if (failedCount === 0 && hasUnlinked) {{
-                    summary.classList.remove('all-passed', 'has-failures');
-                    summary.classList.add('has-warnings');
-                    icon.textContent = '⚠';
-                    title.textContent = 'Tests Passed, But Missing Coverage';
-                    text.textContent = `${{passedCount}} assertions passed. Coverage: ${{results.linked_features}}/${{results.total_features}} features linked. Add @implements annotations to link code.`;
-                }} else {{
-                    summary.classList.remove('all-passed', 'has-warnings');
-                    summary.classList.add('has-failures');
-                    icon.textContent = '✗';
-                    title.textContent = 'Some Tests Failed';
-                    text.textContent = `${{passedCount}} passed, ${{failedCount}} failed. Coverage: ${{results.linked_features}}/${{results.total_features}} features linked.`;
-                }}
-                
-            }} catch (e) {{
-                console.error('Test run failed:', e);
-                alert('Failed to run tests: ' + e.message);
-            }} finally {{
-                btn.textContent = '▶ Run Tests';
-                btn.classList.remove('running');
-            }}
-        }}
-        
-        // Poll for changes every 2 seconds
-        async function checkForUpdates() {{
-            try {{
-                const response = await fetch('/check-update');
-                const text = await response.text();
-                if (text === 'changed') {{
-                    const toast = document.getElementById('toast');
-                    toast.classList.add('show');
-                    setTimeout(() => {{
-                        window.location.reload();
-                    }}, 500);
-                }}
-            }} catch (e) {{
-                // Server might be restarting, ignore
-            }}
-        }}
-        
-        setInterval(checkForUpdates, 2000);
-        
-        // Check app status
-        async function checkAppStatus() {{
-            const statusEl = document.getElementById('app-status');
-            const textEl = document.getElementById('app-status-text');
-            
-            try {{
-                const response = await fetch('/app-status');
-                const data = await response.json();
-                
-                statusEl.classList.remove('running', 'error', 'starting');
-                
-                if (data.running && data.healthy) {{
-                    statusEl.classList.add('running');
-                    textEl.textContent = 'App running';
-                    textEl.title = 'Status: ' + data.status;
-                }} else if (data.running && !data.healthy) {{
-                    statusEl.classList.add('error');
-                    textEl.textContent = 'App error';
-                    textEl.title = data.error || 'Routes not registered';
-                }} else {{
-                    statusEl.classList.add('error');
-                    textEl.textContent = 'App not responding';
-                    textEl.title = data.error || 'Connection failed';
-                }}
-            }} catch (e) {{
-                statusEl.classList.remove('running', 'error', 'starting');
-                statusEl.classList.add('error');
-                textEl.textContent = 'Status check failed';
-            }}
-        }}
-        
-        // Check app status periodically
-        setInterval(checkAppStatus, 5000);
-        checkAppStatus();
-        
-        // Auto-run tests on load
-        setTimeout(runTests, 500);
-    </script>
-</body>
-</html>"##,
-        file_path = html_escape(file_path),
-        app_port = app_port,
-        feature_count = feature_count,
-        test_count = test_count,
-        assertion_count = assertion_count,
-        features_html = features_html,
-        run_button_html = run_button_html
-    )
+    // Return the Lite HTML with placeholders filled in
+    INTENT_STUDIO_LITE_HTML
+        .replace("server.intent", &html_escape(file_path))
+        .replace(
+            "http://localhost:8081",
+            &format!("http://127.0.0.1:{}", app_port),
+        )
 }
 
 /// Render error page for Intent Studio
@@ -3842,17 +3113,36 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                             TemplatePart::Expr(expr) => {
                                 collect_fn(expr, names);
                             }
-                            TemplatePart::ForLoop { iterable, body, .. } => {
+                            TemplatePart::FilteredExpr { expr, filters } => {
+                                collect_fn(expr, names);
+                                for filter in filters {
+                                    for arg in &filter.args {
+                                        collect_fn(arg, names);
+                                    }
+                                }
+                            }
+                            TemplatePart::ForLoop {
+                                iterable,
+                                body,
+                                empty_body,
+                                ..
+                            } => {
                                 collect_fn(iterable, names);
                                 collect_from_template_parts(body, names, collect_fn);
+                                collect_from_template_parts(empty_body, names, collect_fn);
                             }
                             TemplatePart::IfBlock {
                                 condition,
                                 then_parts,
+                                elif_chains,
                                 else_parts,
                             } => {
                                 collect_fn(condition, names);
                                 collect_from_template_parts(then_parts, names, collect_fn);
+                                for (elif_cond, elif_body) in elif_chains {
+                                    collect_fn(elif_cond, names);
+                                    collect_from_template_parts(elif_body, names, collect_fn);
+                                }
                                 collect_from_template_parts(else_parts, names, collect_fn);
                             }
                         }

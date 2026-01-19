@@ -1,0 +1,48 @@
+// Blog post route handler
+// @implements: feature.blog_post
+
+import { html } from "std/http/server"
+import { has_key } from "std/collections"
+
+// Helper function to render with layout
+fn render_page(content, title) {
+    let styles = template("views/styles.css", map {})
+    let header = template("views/partials/header.html", map {})
+    let footer = template("views/partials/footer.html", map {})
+
+    return template("views/layout.html", map {
+        "title": title,
+        "styles": styles,
+        "header": header,
+        "footer": footer,
+        "content": content
+    })
+}
+
+// GET /blog/{slug} - Individual blog post
+fn get(req) {
+    let slug = req.params.slug
+
+    // Map of valid blog posts to their template files and titles
+    let valid_posts = map {
+        "welcome": map {
+            "template": "views/blog/welcome.html",
+            "title": "Welcome to the NTNT Blog"
+        },
+        "idd-explained": map {
+            "template": "views/blog/idd-explained.html",
+            "title": "Intent-Driven Development Explained"
+        }
+    }
+
+    // Check if slug is valid
+    if has_key(valid_posts, slug) {
+        let post = valid_posts[slug]
+        let content = template(post["template"], map {})
+        return html(render_page(content, post["title"] + " - NTNT Blog"))
+    }
+
+    // 404 - post not found
+    let content = template("views/blog/404.html", map {})
+    return html(render_page(content, "Post Not Found - NTNT Blog"))
+}

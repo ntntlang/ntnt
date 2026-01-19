@@ -20,6 +20,13 @@ src/
 ├── types.rs         # Type definitions and type checking
 ├── error.rs         # Error types and formatting
 ├── intent.rs        # Intent-Driven Development module
+├── ial/             # Intent Assertion Language (IAL) engine
+│   ├── mod.rs       # Public API: run_assertions(), run_scenario()
+│   ├── vocabulary.rs # Pattern matching and term storage
+│   ├── resolve.rs   # Recursive term rewriting (Term → Primitives)
+│   ├── execute.rs   # Primitive execution against Context
+│   ├── primitives.rs # Primitive enum (Http, Check) + CheckOp enum
+│   └── standard.rs  # Standard vocabulary definitions
 └── stdlib/          # Standard library modules
     ├── mod.rs       # Module registry
     ├── string.rs    # std/string
@@ -54,6 +61,43 @@ src/
 - **Maps**: Key-value literals with `map { key: value }` syntax
 - **String Interpolation**: Embedded expressions with `"Hello, {name}!"`
 - **Raw Strings**: Escape-free strings with `r"..."` and `r#"..."#`
+- **Intent Assertion Language (IAL)**: Term rewriting engine for natural language → executable tests
+
+### Intent Assertion Language (IAL) Engine
+
+IAL is a **term rewriting system** that translates natural language assertions into executable tests. The engine uses three core functions:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         IAL ENGINE                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   ┌─────────────┐                                                │
+│   │ VOCABULARY  │  ← All knowledge lives here                    │
+│   │             │    (standard + glossary + components)          │
+│   │ term → def  │                                                │
+│   └──────┬──────┘                                                │
+│          │                                                       │
+│          ▼                                                       │
+│   ┌─────────────┐                                                │
+│   │  RESOLVE    │  ← Pure function: term → primitives            │
+│   │             │    (recursive substitution)                    │
+│   └──────┬──────┘                                                │
+│          │                                                       │
+│          ▼                                                       │
+│   ┌─────────────┐     ┌─────────────┐                           │
+│   │ PRIMITIVES  │ ──▶ │  EXECUTE    │ ──▶ Results               │
+│   │ (actions +  │     │             │                           │
+│   │  checks)    │     └─────────────┘                           │
+│   └─────────────┘                                                │
+│                                                                  │
+│   Actions: Http, Cli, Sql, ReadFile                              │
+│   Checks:  Equals, Contains, Matches, Exists, InRange, LessThan │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key design principle:** The engine is fixed; all new assertions are vocabulary entries.
 
 See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applications.
 
@@ -78,8 +122,8 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
   - `std/time`: Time operations (now, sleep, elapsed, format_timestamp, duration_secs)
   - `std/crypto`: Cryptographic functions (sha256, hmac_sha256, uuid, random_bytes, hex_encode)
   - `std/url`: URL parsing and encoding (parse, encode, decode, build_query, join)
-  - `std/http`: HTTP client (get, post, put, delete, patch, head, request, get_json, post_json)
-  - `std/http/server`: HTTP server with routing, middleware, static files, and contract-verified endpoints
+  - `std/http`: HTTP client (fetch, download, Cache) - unified fetch() API for all HTTP requests
+  - `std/http/server`: HTTP server with routing, middleware, static files, parse_json, parse_form, on_shutdown
   - `std/db/postgres`: PostgreSQL database (connect, query, query_one, execute, begin, commit, rollback, close)
   - `std/concurrent`: Go-style concurrency (channel, send, recv, try_recv, recv_timeout, close, sleep_ms, thread_count)
 
@@ -98,7 +142,8 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 ### Tooling
 
 - **CLI**: `ntnt run <file>`, `ntnt repl`, `ntnt check`, `ntnt parse`, `ntnt lex`, `ntnt test`, `ntnt inspect`, `ntnt validate`, `ntnt intent` commands
-- **Intent-Driven Development**: `ntnt intent check` (verify against intent), `ntnt intent coverage` (show feature implementations), `ntnt intent init` (generate scaffolding)
+- **Intent-Driven Development**: `ntnt intent check` (verify against intent), `ntnt intent coverage` (show feature implementations), `ntnt intent init` (generate scaffolding), `ntnt intent studio` (visual preview with live tests)
+- **Intent Assertion Language (IAL)**: Glossary-based natural language assertions with deterministic translation to executable tests via term rewriting
 - **Agent Introspection**: `ntnt inspect` outputs JSON describing project structure (functions, routes, middleware, static dirs, file-based routing)
 - **Pre-Run Validation**: `ntnt validate` checks syntax and detects unused imports with JSON output
 - **File-Based Routing**: `routes()` function auto-discovers routes from directory structure, lib/ modules, and middleware/
@@ -178,10 +223,17 @@ See [ROADMAP.md](ROADMAP.md) for the 10-phase plan toward production web applica
 - Go-style concurrency with channels ✅
 - File-based routing with hot reload ✅
 - Agent introspection (`ntnt inspect`) ✅
-- Intent-Driven Development (`ntnt intent check|coverage|init`) ✅
+- Intent-Driven Development (`ntnt intent check|coverage|init|studio`) ✅
+- **Intent Assertion Language (IAL)** - Term rewriting engine for natural language tests ✅
+  - Vocabulary-based assertion resolution
+  - Glossary support for domain-specific terms
+  - Standard vocabulary (HTTP, CLI, file, database assertions)
+  - Component system for reusable assertion templates
+  - Preconditions with verify + skip semantics
 
 **Planned:**
 
+- IAL domain extensions (temporal, state machines, streaming) (Phase 6+)
 - Testing framework with contract-based test generation (Phase 7)
 - LSP server for IDE integration (Phase 8)
 - Package manager with registry (Phase 7)

@@ -19,6 +19,7 @@ pub mod math;
 pub mod path;
 pub mod postgres;
 pub mod string;
+pub mod template;
 pub mod time;
 pub mod url;
 
@@ -47,6 +48,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/db/postgres".to_string(), postgres::init());
     modules.insert("std/concurrent".to_string(), concurrent::init());
     modules.insert("std/csv".to_string(), csv::init());
+    modules.insert("std/template".to_string(), template::init());
 
     modules
 }

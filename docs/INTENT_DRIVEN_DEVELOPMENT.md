@@ -4,10 +4,10 @@
 
 ## Design Document
 
-**Status:** Draft  
-**Author:** Josh Cramer + Claude Opus 4.5  
-**Created:** January 13, 2026  
-**Last Updated:** January 14, 2026
+**Status:** Implemented (Core Features)
+**Author:** Josh Cramer + Claude Opus 4.5
+**Created:** January 13, 2026
+**Last Updated:** January 18, 2026
 
 ---
 
@@ -109,17 +109,20 @@ def test_invalid_location_falls_back():
 
 ```yaml
 Feature: Location Selection
+  id: feature.location_selection
   description: "Users can select which location to view via URL parameter"
 
-  behavior:
-    - "?location=<key> selects the location"
-    - "Invalid keys fall back to default (Denver)"
+  Scenario: Select valid location
+    When: GET /?location=denver
+    Then:
+      - status 200
+      - body contains "Denver"
 
-  test:
-    - request: GET /?location=denver
-      assert: [status 200, body contains "Denver"]
-    - request: GET /?location=invalid
-      assert: [status 200, body contains "Denver"]
+  Scenario: Invalid location falls back to default
+    When: GET /?location=invalid
+    Then:
+      - status 200
+      - body contains "Denver"
 ```
 
 ### What IDD Solves That TDD Doesn't
@@ -825,12 +828,11 @@ IDD uses progressive layers, each catching what the previous cannot:
 Fast, reliable, catches functional bugs:
 
 ```yaml
-test:
-  - request: GET /
-    assert:
-      - status: 200
-      - body contains "Welcome"
-      - header "Content-Type" contains "text/html"
+Scenario: Welcome page loads
+  When: GET /
+  Then:
+    - status 200
+    - body contains "Welcome"
 ```
 
 ### Layer 2: DOM Assertions
@@ -1064,12 +1066,12 @@ Elements:
 Link code to intent with comments (no runtime impact):
 
 ```ntnt
-import { listen, get, html } from "std/http_server"
+import { html } from "std/http/server"
 
 // @implements: feature.site_selection
 // @implements: feature.snow_display
 fn home_handler(req) {
-    let site = get_query_param(req, "site") ?? "bear_lake"
+    let site = req.query_params["site"] ?? "bear_lake"
     let depth = fetch_snow_depth(site)
 
     return html(render_page(site, depth))
@@ -1327,12 +1329,12 @@ Instead of reading this:
 Feature: User Login
   id: feature.user_login
   description: "Allows users to authenticate with email/password"
-  test:
-    - request: POST /login
-      body: '{"email": "test@example.com", "password": "secret"}'
-      assert:
-        - status: 200
-        - body contains "token"
+
+  Scenario: Successful login
+    When: POST /login {"email": "test@example.com", "password": "secret"}
+    Then:
+      - status 200
+      - body contains "token"
 ```
 
 You see a beautifully rendered card:
@@ -1343,8 +1345,9 @@ You see a beautifully rendered card:
 │                                                                 │
 │  Allows users to authenticate with email/password               │
 │                                                                 │
-│  Acceptance Criteria:                                           │
-│  ✓ POST /login → 200 with authentication token                  │
+│  Scenario: Successful login                                     │
+│    ✓ POST /login returns status 200                             │
+│    ✓ body contains "token"                                      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

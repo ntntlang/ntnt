@@ -382,18 +382,32 @@ pub enum TemplatePart {
     Literal(String),
     /// Expression to interpolate: {{expr}}
     Expr(Expression),
-    /// For loop: {{#for var in iterable}}body{{/for}}
+    /// Expression with filters: {{expr | filter1 | filter2(arg)}}
+    FilteredExpr {
+        expr: Expression,
+        filters: Vec<TemplateFilter>,
+    },
+    /// For loop: {{#for var in iterable}}body{{#empty}}empty{{/for}}
     ForLoop {
         var: String,
         iterable: Expression,
         body: Vec<TemplatePart>,
+        empty_body: Vec<TemplatePart>,
     },
-    /// If conditional: {{#if condition}}then{{#else}}else{{/if}}
+    /// If conditional with elif: {{#if cond}}then{{#elif cond2}}elif{{#else}}else{{/if}}
     IfBlock {
         condition: Expression,
         then_parts: Vec<TemplatePart>,
+        elif_chains: Vec<(Expression, Vec<TemplatePart>)>,
         else_parts: Vec<TemplatePart>,
     },
+}
+
+/// A filter applied to a template expression
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateFilter {
+    pub name: String,
+    pub args: Vec<Expression>,
 }
 
 /// Struct field

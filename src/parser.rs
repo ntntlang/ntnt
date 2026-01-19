@@ -890,7 +890,8 @@ impl Parser {
 
     // Expression parsing with precedence climbing
 
-    fn expression(&mut self) -> Result<Expression> {
+    /// Parse a single expression - made public for template rendering
+    pub fn expression(&mut self) -> Result<Expression> {
         self.assignment()
     }
 
@@ -1331,8 +1332,9 @@ impl Parser {
         if let Some(token) = self.peek() {
             if let TokenKind::InterpolatedString(ref parts) = token.kind {
                 let parts = parts.clone();
+                let line = token.line;
                 self.advance();
-                return self.parse_interpolated_string(&parts);
+                return self.parse_interpolated_string(&parts, line);
             }
         }
 
@@ -1340,8 +1342,9 @@ impl Parser {
         if let Some(token) = self.peek() {
             if let TokenKind::TemplateString(ref parts) = token.kind {
                 let parts = parts.clone();
+                let line = token.line;
                 self.advance();
-                return self.parse_template_string(&parts);
+                return self.parse_template_string(&parts, line);
             }
         }
 
@@ -1465,14 +1468,28 @@ impl Parser {
             return self.match_expression();
         }
 
+        // Provide a helpful error message showing what token was found
+        let found_desc = if let Some(token) = self.peek() {
+            format!(
+                "Expected expression, but found '{}' at line {}",
+                token.lexeme, token.line
+            )
+        } else {
+            "Expected expression, but reached end of file".to_string()
+        };
+
         Err(IntentError::ParserError {
             line: self.current_line(),
-            message: "Expected expression".to_string(),
+            message: found_desc,
         })
     }
 
     /// Parse an interpolated string into StringParts
-    fn parse_interpolated_string(&mut self, parts: &[LexerStringPart]) -> Result<Expression> {
+    fn parse_interpolated_string(
+        &mut self,
+        parts: &[LexerStringPart],
+        line: usize,
+    ) -> Result<Expression> {
         let mut ast_parts = Vec::new();
 
         for part in parts {
@@ -1485,8 +1502,29 @@ impl Parser {
                     let lexer = crate::lexer::Lexer::new(expr_str);
                     let tokens: Vec<_> = lexer.collect();
                     let mut parser = Parser::new(tokens);
-                    let expr = parser.expression()?;
-                    ast_parts.push(StringPart::Expr(expr));
+                    match parser.expression() {
+                        Ok(expr) => ast_parts.push(StringPart::Expr(expr)),
+                        Err(e) => {
+                            // Extract the original error message
+                            let original_msg = match &e {
+                                IntentError::ParserError { message, .. } => message.clone(),
+                                _ => e.to_string(),
+                            };
+                            let preview = if expr_str.len() > 30 {
+                                format!("{}...", &expr_str[..30])
+                            } else {
+                                expr_str.clone()
+                            };
+                            return Err(IntentError::ParserError {
+                                line,
+                                message: format!(
+                                    "Error in string interpolation '{{{}}}': {}. \
+                                    (Hint: if you meant literal braces, escape them with \\{{ and \\}})",
+                                    preview, original_msg
+                                ),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -1495,14 +1533,21 @@ impl Parser {
     }
 
     /// Parse a template string (triple-quoted) into TemplateParts
-    fn parse_template_string(&mut self, parts: &[LexerTemplatePart]) -> Result<Expression> {
-        let ast_parts = self.parse_template_parts(parts)?;
+    fn parse_template_string(
+        &mut self,
+        parts: &[LexerTemplatePart],
+        line: usize,
+    ) -> Result<Expression> {
+        let ast_parts = self.parse_template_parts(parts, line)?;
         Ok(Expression::TemplateString(ast_parts))
     }
 
     /// Recursively parse template parts from lexer format to AST format
-    #[allow(clippy::only_used_in_recursion)]
-    fn parse_template_parts(&mut self, parts: &[LexerTemplatePart]) -> Result<Vec<TemplatePart>> {
+    fn parse_template_parts(
+        &mut self,
+        parts: &[LexerTemplatePart],
+        line: usize,
+    ) -> Result<Vec<TemplatePart>> {
         let mut ast_parts = Vec::new();
 
         for part in parts {
@@ -1515,47 +1560,186 @@ impl Parser {
                     let lexer = crate::lexer::Lexer::new(expr_str);
                     let tokens: Vec<_> = lexer.collect();
                     let mut parser = Parser::new(tokens);
-                    let expr = parser.expression()?;
-                    ast_parts.push(TemplatePart::Expr(expr));
+                    match parser.expression() {
+                        Ok(expr) => ast_parts.push(TemplatePart::Expr(expr)),
+                        Err(e) => {
+                            let original_msg = match &e {
+                                IntentError::ParserError { message, .. } => message.clone(),
+                                _ => e.to_string(),
+                            };
+                            let preview = if expr_str.len() > 30 {
+                                format!("{}...", &expr_str[..30])
+                            } else {
+                                expr_str.clone()
+                            };
+                            return Err(IntentError::ParserError {
+                                line,
+                                message: format!(
+                                    "Error in template interpolation '{{{{{}}}}}': {}. \
+                                    (Hint: if you meant literal braces, escape them with \\{{{{ and \\}}}})",
+                                    preview, original_msg
+                                ),
+                            });
+                        }
+                    }
+                }
+                LexerTemplatePart::FilteredExpr { expr, filters } => {
+                    // Parse the base expression
+                    let lexer = crate::lexer::Lexer::new(expr);
+                    let tokens: Vec<_> = lexer.collect();
+                    let mut parser = Parser::new(tokens);
+                    let base_expr = match parser.expression() {
+                        Ok(e) => e,
+                        Err(e) => {
+                            let original_msg = match &e {
+                                IntentError::ParserError { message, .. } => message.clone(),
+                                _ => e.to_string(),
+                            };
+                            return Err(IntentError::ParserError {
+                                line,
+                                message: format!(
+                                    "Error in template filtered expression '{}': {}",
+                                    expr, original_msg
+                                ),
+                            });
+                        }
+                    };
+
+                    // Parse filter arguments
+                    let mut ast_filters = Vec::new();
+                    for filter in filters {
+                        let mut parsed_args = Vec::new();
+                        for arg_str in &filter.args {
+                            let lexer = crate::lexer::Lexer::new(arg_str);
+                            let tokens: Vec<_> = lexer.collect();
+                            let mut parser = Parser::new(tokens);
+                            match parser.expression() {
+                                Ok(arg_expr) => parsed_args.push(arg_expr),
+                                Err(e) => {
+                                    let original_msg = match &e {
+                                        IntentError::ParserError { message, .. } => message.clone(),
+                                        _ => e.to_string(),
+                                    };
+                                    return Err(IntentError::ParserError {
+                                        line,
+                                        message: format!(
+                                            "Error in filter '{}' argument '{}': {}",
+                                            filter.name, arg_str, original_msg
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                        ast_filters.push(crate::ast::TemplateFilter {
+                            name: filter.name.clone(),
+                            args: parsed_args,
+                        });
+                    }
+
+                    ast_parts.push(TemplatePart::FilteredExpr {
+                        expr: base_expr,
+                        filters: ast_filters,
+                    });
                 }
                 LexerTemplatePart::ForLoop {
                     var,
                     iterable,
                     body,
+                    empty_body,
                 } => {
                     // Parse the iterable expression
                     let lexer = crate::lexer::Lexer::new(iterable);
                     let tokens: Vec<_> = lexer.collect();
                     let mut parser = Parser::new(tokens);
-                    let iterable_expr = parser.expression()?;
+                    let iterable_expr = match parser.expression() {
+                        Ok(expr) => expr,
+                        Err(e) => {
+                            let original_msg = match &e {
+                                IntentError::ParserError { message, .. } => message.clone(),
+                                _ => e.to_string(),
+                            };
+                            return Err(IntentError::ParserError {
+                                line,
+                                message: format!(
+                                    "Error in template for-loop iterable '{}': {}",
+                                    iterable, original_msg
+                                ),
+                            });
+                        }
+                    };
 
-                    // Recursively parse the body
-                    let body_parts = self.parse_template_parts(body)?;
+                    // Recursively parse the body and empty body
+                    let body_parts = self.parse_template_parts(body, line)?;
+                    let empty_parts = self.parse_template_parts(empty_body, line)?;
 
                     ast_parts.push(TemplatePart::ForLoop {
                         var: var.clone(),
                         iterable: iterable_expr,
                         body: body_parts,
+                        empty_body: empty_parts,
                     });
                 }
                 LexerTemplatePart::IfBlock {
                     condition,
                     then_parts,
+                    elif_chains,
                     else_parts,
                 } => {
                     // Parse the condition expression
                     let lexer = crate::lexer::Lexer::new(condition);
                     let tokens: Vec<_> = lexer.collect();
                     let mut parser = Parser::new(tokens);
-                    let condition_expr = parser.expression()?;
+                    let condition_expr = match parser.expression() {
+                        Ok(expr) => expr,
+                        Err(e) => {
+                            let original_msg = match &e {
+                                IntentError::ParserError { message, .. } => message.clone(),
+                                _ => e.to_string(),
+                            };
+                            return Err(IntentError::ParserError {
+                                line,
+                                message: format!(
+                                    "Error in template if-block condition '{}': {}",
+                                    condition, original_msg
+                                ),
+                            });
+                        }
+                    };
+
+                    // Parse elif chains
+                    let mut ast_elif_chains = Vec::new();
+                    for (elif_condition, elif_body) in elif_chains {
+                        let lexer = crate::lexer::Lexer::new(elif_condition);
+                        let tokens: Vec<_> = lexer.collect();
+                        let mut parser = Parser::new(tokens);
+                        let elif_cond_expr = match parser.expression() {
+                            Ok(expr) => expr,
+                            Err(e) => {
+                                let original_msg = match &e {
+                                    IntentError::ParserError { message, .. } => message.clone(),
+                                    _ => e.to_string(),
+                                };
+                                return Err(IntentError::ParserError {
+                                    line,
+                                    message: format!(
+                                        "Error in template elif condition '{}': {}",
+                                        elif_condition, original_msg
+                                    ),
+                                });
+                            }
+                        };
+                        let elif_body_ast = self.parse_template_parts(elif_body, line)?;
+                        ast_elif_chains.push((elif_cond_expr, elif_body_ast));
+                    }
 
                     // Recursively parse then and else parts
-                    let then_ast = self.parse_template_parts(then_parts)?;
-                    let else_ast = self.parse_template_parts(else_parts)?;
+                    let then_ast = self.parse_template_parts(then_parts, line)?;
+                    let else_ast = self.parse_template_parts(else_parts, line)?;
 
                     ast_parts.push(TemplatePart::IfBlock {
                         condition: condition_expr,
                         then_parts: then_ast,
+                        elif_chains: ast_elif_chains,
                         else_parts: else_ast,
                     });
                 }

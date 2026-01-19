@@ -1,0 +1,46 @@
+// Blog list route handler
+// @implements: feature.blog_list
+
+import { html } from "std/http/server"
+
+// Helper function to render with layout
+// Paths resolve relative to PROJECT ROOT (where server.tnt is)
+fn render_page(content, title) {
+    let styles = template("views/styles.css", map {})
+    let header = template("views/partials/header.html", map {})
+    let footer = template("views/partials/footer.html", map {})
+
+    return template("views/layout.html", map {
+        "title": title,
+        "styles": styles,
+        "header": header,
+        "footer": footer,
+        "content": content
+    })
+}
+
+// GET /blog - Blog list page
+fn get(req) {
+    // Blog post data - could come from database or files
+    let posts = [
+        map {
+            "slug": "welcome",
+            "title": "Welcome to the NTNT Blog",
+            "date": "January 15, 2026",
+            "author": "NTNT Team",
+            "excerpt": "Introducing the NTNT programming language and Intent-Driven Development."
+        },
+        map {
+            "slug": "idd-explained",
+            "title": "Intent-Driven Development Explained",
+            "date": "January 10, 2026",
+            "author": "NTNT Team",
+            "excerpt": "A deep dive into how IDD bridges human requirements and AI implementation."
+        }
+    ]
+
+    let content = template("views/blog.html", map {
+        "posts": posts
+    })
+    return html(render_page(content, "Blog - NTNT"))
+}

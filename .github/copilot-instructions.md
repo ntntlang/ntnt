@@ -227,6 +227,61 @@ ntnt intent coverage server.tnt # Show coverage
 
 ---
 
+## Intent Assertion Language (IAL)
+
+IAL is a term rewriting engine that translates natural language assertions into executable tests. It powers the IDD test assertions.
+
+### Glossary Definitions
+
+Define domain-specific terms in your `.intent` file:
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+| success response | status 2xx, body contains "ok" |
+| they see "$text" | body contains "$text" |
+| they don't see "$text" | body not contains "$text" |
+```
+
+Then use natural language in tests:
+
+```yaml
+Feature: User Profile
+  id: feature.user_profile
+  test:
+    - request: GET /profile
+      assert:
+        - they see success response
+        - they see "Welcome"
+```
+
+### Standard Terms (Built-in)
+
+| Pattern | Description |
+|---------|-------------|
+| `status 200` | Exact status code |
+| `status 2xx` | Any success status |
+| `body contains "$text"` | Body includes text |
+| `body not contains "$text"` | Body excludes text |
+| `header "$name" contains "$value"` | Header check |
+| `redirects to $path` | Redirect check |
+
+### Preconditions (Given Clauses)
+
+```yaml
+Scenario: View profile
+  Given: logged in user
+  When: GET /profile
+  Then:
+    - status 200
+```
+
+If the `Given` precondition fails, the test is **SKIPPED** (not failed).
+
+---
+
 ## Mandatory Syntax Rules
 
 ### Map Literals
@@ -417,19 +472,176 @@ let user = get_env("USER") ?? "guest"
 let first = first(items) ?? default_item
 ```
 
-## HTTP POST/Form Handling
+## External Templates
 
-Use `parse_query()` from `std/url` to parse form data:
+Use `template()` to load external HTML files with Mustache-style variable substitution.
+
+### Basic Usage
 
 ```ntnt
-import { parse_query } from "std/url"
+// template(path, variables) - path is relative to the .tnt file
+let page = template("views/home.html", map {
+    "title": "Welcome",
+    "username": "Alice"
+})
+return html(page)
+```
+
+**views/home.html:**
+```html
+<!DOCTYPE html>
+<html>
+<head><title>{{title}}</title></head>
+<body>
+    <h1>Hello, {{username}}!</h1>
+</body>
+</html>
+```
+
+### Template Syntax
+
+```html
+<!-- Variables -->
+{{title}}
+{{user.name}}
+
+<!-- Loops -->
+{{#for item in items}}
+    <li>{{item.name}} - {{item.price}}</li>
+{{/for}}
+
+<!-- Conditionals -->
+{{#if logged_in}}
+    <p>Welcome back!</p>
+{{#else}}
+    <p>Please log in</p>
+{{/if}}
+```
+
+### Recommended Structure
+
+```
+my-app/
+├── server.tnt
+├── views/
+│   ├── layout.html
+│   ├── home.html
+│   └── partials/
+│       ├── header.html
+│       └── footer.html
+└── public/
+    └── (static assets)
+```
+
+### Layout Pattern
+
+```ntnt
+fn render_page(content, title) {
+    let header = template("views/partials/header.html", map {})
+    let footer = template("views/partials/footer.html", map {})
+
+    return template("views/layout.html", map {
+        "title": title,
+        "header": header,
+        "footer": footer,
+        "content": content
+    })
+}
+
+fn home(req) {
+    let content = template("views/home.html", map { "items": get_items() })
+    return html(render_page(content, "Home"))
+}
+```
+
+**Note:** Template paths resolve relative to the `.tnt` file, not the current working directory.
+
+---
+
+## File-Based Routing
+
+Use `routes()` to auto-discover route handlers from a directory (like Next.js):
+
+```ntnt
+// Load all routes from routes/ directory
+routes("routes")
+listen(8080)
+```
+
+### Directory Structure
+
+```
+my-app/
+├── server.tnt
+├── routes/
+│   ├── index.tnt          # GET /
+│   ├── about.tnt          # GET /about
+│   ├── api/
+│   │   ├── users.tnt      # GET/POST /api/users
+│   │   └── [id].tnt       # GET /api/:id (dynamic)
+│   └── blog/
+│       └── [slug].tnt     # GET /blog/:slug
+└── middleware/
+    └── logging.tnt        # Auto-applied to all routes
+```
+
+### Route File Format
+
+Export functions named after HTTP methods:
+
+**routes/api/users.tnt:**
+```ntnt
+import { json } from "std/http/server"
+
+fn get(req) {
+    return json(map { "users": [] })
+}
 
 fn post(req) {
-    // parse_query converts "name=Alice&age=25" → map { "name": "Alice", "age": "25" }
-    let form = parse_query(req.body)
+    let form = parse_form(req)
+    return json(map { "created": true })
+}
+```
+
+**routes/api/[id].tnt (dynamic segment):**
+```ntnt
+fn get(req) {
+    let id = req.params["id"]  // Access dynamic segment
+    return json(map { "id": id })
+}
+```
+
+---
+
+## HTTP POST/Form Handling
+
+Use `parse_form()` from `std/http/server` to parse form data:
+
+```ntnt
+import { parse_form } from "std/http/server"
+
+fn handle_post(req) {
+    // parse_form converts "name=Alice&age=25" → map { "name": "Alice", "age": "25" }
+    let form = parse_form(req)
 
     let name = form["name"]
     let age = int(form["age"])  // Convert to int for database!
+}
+```
+
+For JSON bodies, use `parse_json()`:
+
+```ntnt
+import { parse_json, json } from "std/http/server"
+
+fn handle_api(req) {
+    match parse_json(req) {
+        Ok(data) => {
+            let name = data["name"]
+            return json(map { "received": name })
+        },
+        Err(e) => return json(map { "error": e }, 400)
+    }
 }
 ```
 
@@ -503,16 +715,16 @@ fetch(map {
 import { split, join, trim, replace } from "std/string"
 import { encode, decode, parse_query, build_query } from "std/url"
 import { push, pop, keys, values, entries, has_key, get_key } from "std/collections"
-import { fetch, post, get_json } from "std/http"
-import { json, html, text, redirect, status } from "std/http/server"  // ONLY response builders!
+import { fetch, download, Cache } from "std/http"  // HTTP client
+import { json, html, text, redirect, status, parse_form, parse_json } from "std/http/server"  // Response builders + helpers
 import { connect, query, execute, close } from "std/db/postgres"
 import { read_file, write_file, exists } from "std/fs"
 import { parse, stringify } from "std/json"
 import { parse, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
 import { sin, cos, tan, atan2, log, exp, random, random_int, PI, E } from "std/math"
 import { now, format } from "std/time"
-import { get_env } from "std/env"
-import { channel, send, recv } from "std/concurrent"
+import { get_env, load_env } from "std/env"
+import { channel, send, recv, sleep_ms } from "std/concurrent"
 ```
 
 ## HTTP Server - Global Builtins vs Module Exports
@@ -524,14 +736,21 @@ import { channel, send, recv } from "std/concurrent"
 | `get(pattern, handler)`     | Global builtin | **No**                      |
 | `post(pattern, handler)`    | Global builtin | **No**                      |
 | `put(pattern, handler)`     | Global builtin | **No**                      |
+| `patch(pattern, handler)`   | Global builtin | **No**                      |
 | `delete(pattern, handler)`  | Global builtin | **No**                      |
 | `listen(port)`              | Global builtin | **No**                      |
 | `serve_static(prefix, dir)` | Global builtin | **No**                      |
 | `use_middleware(fn)`        | Global builtin | **No**                      |
-| `json(data)`                | Module export  | **Yes** - `std/http/server` |
-| `html(content)`             | Module export  | **Yes** - `std/http/server` |
+| `on_shutdown(fn)`           | Global builtin | **No**                      |
+| `routes(dir)`               | Global builtin | **No** (file-based routing) |
+| `template(path, vars)`      | Global builtin | **No** (external templates) |
+| `json(data, status?)`       | Module export  | **Yes** - `std/http/server` |
+| `html(content, status?)`    | Module export  | **Yes** - `std/http/server` |
 | `text(content)`             | Module export  | **Yes** - `std/http/server` |
 | `redirect(url)`             | Module export  | **Yes** - `std/http/server` |
+| `status(code, body)`        | Module export  | **Yes** - `std/http/server` |
+| `parse_form(req)`           | Module export  | **Yes** - `std/http/server` |
+| `parse_json(req)`           | Module export  | **Yes** - `std/http/server` |
 
 ### HTTP Server Example
 

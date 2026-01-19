@@ -1,0 +1,2913 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Intent Studio - MyApp</title>
+    <style>
+      /* ============================================
+           INTENT STUDIO V2 - DESIGN-FIRST, DASHBOARD-SECOND
+           ============================================ */
+
+      :root {
+        /* Colors - Dark theme */
+        --bg-primary: #0d1117;
+        --bg-secondary: #161b22;
+        --bg-tertiary: #21262d;
+        --bg-elevated: #1c2128;
+        --border-color: #30363d;
+        --border-hover: #484f58;
+
+        /* Text */
+        --text-primary: #e6edf3;
+        --text-secondary: #8b949e;
+        --text-muted: #6e7681;
+        --text-inverse: #0d1117;
+
+        /* Status colors */
+        --color-success: #3fb950;
+        --color-success-subtle: rgba(63, 185, 80, 0.15);
+        --color-danger: #f85149;
+        --color-danger-subtle: rgba(248, 81, 73, 0.15);
+        --color-warning: #d29922;
+        --color-warning-subtle: rgba(210, 153, 34, 0.15);
+        --color-info: #58a6ff;
+        --color-info-subtle: rgba(88, 166, 255, 0.15);
+        --color-purple: #a371f7;
+        --color-purple-subtle: rgba(163, 113, 247, 0.15);
+        --color-neutral: #484f58;
+        --color-neutral-subtle: rgba(72, 79, 88, 0.15);
+
+        /* Sizing */
+        --sidebar-width: 280px;
+        --header-height: 48px;
+        --activity-height: 200px;
+
+        /* Transitions */
+        --transition-fast: 0.1s ease;
+        --transition-normal: 0.2s ease;
+      }
+
+      /* ============================================
+           RESET & BASE
+           ============================================ */
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      /* ============================================
+           LAYOUT
+           ============================================ */
+
+      .studio-container {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+
+      .studio-header {
+        height: var(--header-height);
+        background: var(--bg-secondary);
+        border-bottom: 1px solid var(--border-color);
+        display: flex;
+        align-items: center;
+        padding: 0 16px;
+        gap: 16px;
+        flex-shrink: 0;
+      }
+
+      .studio-body {
+        display: flex;
+        flex: 1;
+        overflow: hidden;
+      }
+
+      .studio-sidebar {
+        width: var(--sidebar-width);
+        background: var(--bg-secondary);
+        border-right: 1px solid var(--border-color);
+        display: flex;
+        flex-direction: column;
+        flex-shrink: 0;
+        overflow: hidden;
+      }
+
+      .studio-main {
+        flex: 1;
+        overflow: auto;
+        background: var(--bg-primary);
+      }
+
+      /* ============================================
+           HEADER
+           ============================================ */
+
+      .logo {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        color: var(--text-primary);
+      }
+
+      .logo-icon {
+        font-size: 18px;
+      }
+
+      .logo span {
+        color: var(--color-purple);
+      }
+
+      .header-search {
+        flex: 1;
+        max-width: 400px;
+        position: relative;
+      }
+
+      .header-search input {
+        width: 100%;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        padding: 6px 12px 6px 32px;
+        color: var(--text-primary);
+        font-size: 13px;
+        outline: none;
+        transition: border-color var(--transition-fast);
+      }
+
+      .header-search input::placeholder {
+        color: var(--text-muted);
+      }
+
+      .header-search input:focus {
+        border-color: var(--color-info);
+      }
+
+      .header-search-icon {
+        position: absolute;
+        left: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: var(--text-muted);
+        font-size: 14px;
+        pointer-events: none;
+      }
+
+      .header-controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-left: auto;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        border: 1px solid transparent;
+        transition: all var(--transition-fast);
+      }
+
+      .btn-primary {
+        background: var(--color-success);
+        color: var(--text-inverse);
+      }
+
+      .btn-primary:hover {
+        background: #2ea043;
+      }
+
+      .btn-secondary {
+        background: var(--bg-tertiary);
+        border-color: var(--border-color);
+        color: var(--text-primary);
+      }
+
+      .btn-secondary:hover {
+        background: var(--bg-elevated);
+        border-color: var(--border-hover);
+      }
+
+      .status-pill {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        background: var(--bg-tertiary);
+        border-radius: 20px;
+        font-size: 12px;
+        color: var(--text-secondary);
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--color-success);
+        animation: pulse 2s infinite;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.5;
+        }
+      }
+
+      /* ============================================
+           SIDEBAR - HEALTH OVERVIEW
+           ============================================ */
+
+      .sidebar-section {
+        padding: 12px;
+        border-bottom: 1px solid var(--border-color);
+      }
+
+      .health-overview {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .health-bar {
+        flex: 1;
+        height: 8px;
+        background: var(--bg-tertiary);
+        border-radius: 4px;
+        overflow: hidden;
+      }
+
+      .health-bar-fill {
+        height: 100%;
+        background: var(--color-success);
+        border-radius: 4px;
+        transition: width var(--transition-normal);
+      }
+
+      .health-percent {
+        font-weight: 600;
+        font-size: 14px;
+        min-width: 40px;
+        text-align: right;
+      }
+
+      .health-stats {
+        display: flex;
+        gap: 12px;
+        margin-top: 8px;
+      }
+
+      .health-stat {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+      }
+
+      .health-stat .icon {
+        font-size: 12px;
+      }
+
+      .health-stat.passing {
+        color: var(--color-success);
+      }
+      .health-stat.failing {
+        color: var(--color-danger);
+      }
+      .health-stat.pending {
+        color: var(--text-muted);
+      }
+
+      /* ============================================
+           SIDEBAR - TREE NAVIGATION
+           ============================================ */
+
+      .sidebar-tree {
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+
+      .tree-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 12px;
+        color: var(--text-muted);
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+
+      .tree-header-action {
+        color: var(--text-muted);
+        cursor: pointer;
+        font-size: 14px;
+        opacity: 0.6;
+        transition: opacity var(--transition-fast);
+      }
+
+      .tree-header-action:hover {
+        opacity: 1;
+      }
+
+      .tree-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        border-left: 2px solid transparent;
+        transition: all var(--transition-fast);
+        user-select: none;
+      }
+
+      .tree-item:hover {
+        background: var(--bg-tertiary);
+      }
+
+      .tree-item.active {
+        background: var(--color-info-subtle);
+        border-left-color: var(--color-info);
+      }
+
+      .tree-item.selected {
+        background: var(--bg-tertiary);
+      }
+
+      .tree-item-indent {
+        display: flex;
+        gap: 0;
+      }
+
+      .tree-indent {
+        width: 16px;
+        flex-shrink: 0;
+      }
+
+      .tree-toggle {
+        width: 16px;
+        height: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-muted);
+        font-size: 10px;
+        flex-shrink: 0;
+        transition: transform var(--transition-fast);
+      }
+
+      .tree-toggle.collapsed {
+        transform: rotate(-90deg);
+      }
+
+      .tree-icon {
+        font-size: 14px;
+        flex-shrink: 0;
+      }
+
+      .tree-label {
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 13px;
+      }
+
+      .tree-status {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+        color: var(--text-muted);
+        flex-shrink: 0;
+      }
+
+      .tree-status-icon {
+        font-size: 12px;
+      }
+
+      .tree-status-icon.passing {
+        color: var(--color-success);
+      }
+      .tree-status-icon.failing {
+        color: var(--color-danger);
+      }
+      .tree-status-icon.warning {
+        color: var(--color-warning);
+      }
+      .tree-status-icon.pending {
+        color: var(--text-muted);
+      }
+
+      .tree-children {
+        overflow: hidden;
+      }
+
+      .tree-children.collapsed {
+        display: none;
+      }
+
+      /* ============================================
+           SIDEBAR - ACTIVITY FEED
+           ============================================ */
+
+      .activity-section {
+        height: var(--activity-height);
+        border-top: 1px solid var(--border-color);
+        display: flex;
+        flex-direction: column;
+        flex-shrink: 0;
+      }
+
+      .activity-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 12px;
+        color: var(--text-muted);
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 1px solid var(--border-color);
+      }
+
+      .activity-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: 8px;
+      }
+
+      .activity-item {
+        display: flex;
+        gap: 8px;
+        padding: 8px;
+        background: var(--bg-tertiary);
+        border-radius: 6px;
+        margin-bottom: 6px;
+        cursor: pointer;
+        transition: background var(--transition-fast);
+      }
+
+      .activity-item:hover {
+        background: var(--bg-elevated);
+      }
+
+      .activity-icon {
+        font-size: 14px;
+        flex-shrink: 0;
+      }
+
+      .activity-content {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .activity-title {
+        font-size: 12px;
+        font-weight: 500;
+        margin-bottom: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .activity-subtitle {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      .activity-action {
+        font-size: 11px;
+        color: var(--color-info);
+        cursor: pointer;
+      }
+
+      .activity-action:hover {
+        text-decoration: underline;
+      }
+
+      /* Agent update highlight */
+      .activity-item.agent-update {
+        border-left: 3px solid var(--color-purple);
+        animation: slideIn 0.3s ease;
+      }
+
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateX(-10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+
+      /* ============================================
+           MAIN - DETAIL PANEL
+           ============================================ */
+
+      .detail-panel {
+        padding: 24px;
+        max-width: 800px;
+      }
+
+      .detail-breadcrumb {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-bottom: 16px;
+      }
+
+      .detail-breadcrumb a {
+        color: var(--color-info);
+        text-decoration: none;
+      }
+
+      .detail-breadcrumb a:hover {
+        text-decoration: underline;
+      }
+
+      .detail-breadcrumb-separator {
+        color: var(--text-muted);
+      }
+
+      .detail-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        margin-bottom: 8px;
+      }
+
+      .detail-title {
+        font-size: 20px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .detail-status-badge {
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-weight: 500;
+      }
+
+      .detail-status-badge.passing {
+        background: var(--color-success-subtle);
+        color: var(--color-success);
+      }
+
+      .detail-status-badge.failing {
+        background: var(--color-danger-subtle);
+        color: var(--color-danger);
+      }
+
+      .detail-status-badge.pending {
+        background: var(--color-neutral-subtle);
+        color: var(--text-muted);
+      }
+
+      .detail-description {
+        color: var(--text-secondary);
+        font-size: 14px;
+        margin-bottom: 24px;
+        line-height: 1.6;
+      }
+
+      .detail-section {
+        margin-bottom: 24px;
+      }
+
+      .detail-section-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+
+      .detail-section-title {
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        letter-spacing: 0.5px;
+      }
+
+      /* ============================================
+           GLOSSARY CHIPS
+           ============================================ */
+
+      .glossary-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .glossary-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 10px;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        border-radius: 16px;
+        font-size: 12px;
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .glossary-chip:hover {
+        background: var(--bg-elevated);
+        border-color: var(--color-purple);
+        color: var(--color-purple);
+      }
+
+      .glossary-chip-add {
+        border-style: dashed;
+        color: var(--text-muted);
+      }
+
+      .glossary-chip-add:hover {
+        color: var(--color-info);
+        border-color: var(--color-info);
+      }
+
+      /* ============================================
+           SCENARIO CARDS
+           ============================================ */
+
+      .scenario-list {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .scenario-card {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        overflow: hidden;
+        transition: all var(--transition-fast);
+      }
+
+      .scenario-card:hover {
+        border-color: var(--border-hover);
+      }
+
+      .scenario-card.passing {
+        border-left: 3px solid var(--color-success);
+      }
+
+      .scenario-card.failing {
+        border-left: 3px solid var(--color-danger);
+      }
+
+      .scenario-card.pending {
+        border-left: 3px solid var(--text-muted);
+      }
+
+      .scenario-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 16px;
+        cursor: pointer;
+      }
+
+      .scenario-status-icon {
+        font-size: 14px;
+        flex-shrink: 0;
+      }
+
+      .scenario-status-icon.passing {
+        color: var(--color-success);
+      }
+      .scenario-status-icon.failing {
+        color: var(--color-danger);
+      }
+      .scenario-status-icon.pending {
+        color: var(--text-muted);
+      }
+
+      .scenario-title {
+        flex: 1;
+        font-size: 14px;
+        font-weight: 500;
+      }
+
+      .scenario-actions {
+        display: flex;
+        gap: 8px;
+        opacity: 0;
+        transition: opacity var(--transition-fast);
+      }
+
+      .scenario-card:hover .scenario-actions {
+        opacity: 1;
+      }
+
+      .scenario-action-btn {
+        padding: 4px 8px;
+        font-size: 11px;
+        background: var(--bg-tertiary);
+        border: none;
+        border-radius: 4px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .scenario-action-btn:hover {
+        background: var(--bg-elevated);
+        color: var(--text-primary);
+      }
+
+      .scenario-body {
+        padding: 0 16px 16px 40px;
+      }
+
+      .scenario-step {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 4px 0;
+        font-size: 13px;
+        color: var(--text-secondary);
+      }
+
+      .scenario-step-arrow {
+        color: var(--text-muted);
+        flex-shrink: 0;
+      }
+
+      .scenario-step-text {
+        flex: 1;
+      }
+
+      .scenario-step-text .term {
+        color: var(--color-purple);
+        cursor: pointer;
+      }
+
+      .scenario-step-text .term:hover {
+        text-decoration: underline;
+      }
+
+      /* ============================================
+           FAILURE CALLOUT
+           ============================================ */
+
+      .failure-callout {
+        background: var(--color-danger-subtle);
+        border: 1px solid var(--color-danger);
+        border-radius: 6px;
+        padding: 12px 16px;
+        margin-top: 12px;
+      }
+
+      .failure-callout-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .failure-callout-icon {
+        color: var(--color-danger);
+      }
+
+      .failure-callout-title {
+        font-weight: 600;
+        font-size: 12px;
+        color: var(--color-danger);
+      }
+
+      .failure-callout-body {
+        font-size: 12px;
+        font-family: "SF Mono", "Consolas", monospace;
+        color: var(--text-primary);
+      }
+
+      .failure-callout-row {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+
+      .failure-callout-label {
+        color: var(--text-muted);
+        min-width: 70px;
+      }
+
+      .failure-callout-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .btn-ai-fix {
+        background: var(--color-purple);
+        color: white;
+        border: none;
+      }
+
+      .btn-ai-fix:hover {
+        background: #8957e5;
+      }
+
+      /* ============================================
+           ADD SCENARIO BUTTON
+           ============================================ */
+
+      .add-scenario-card {
+        border: 2px dashed var(--border-color);
+        border-radius: 8px;
+        padding: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .add-scenario-card:hover {
+        border-color: var(--color-info);
+        color: var(--color-info);
+        background: var(--color-info-subtle);
+      }
+
+      /* ============================================
+           FILTER BAR
+           ============================================ */
+
+      .filter-bar {
+        display: flex;
+        gap: 8px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border-color);
+        flex-wrap: wrap;
+      }
+
+      .filter-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 10px;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        border-radius: 16px;
+        font-size: 11px;
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .filter-chip:hover {
+        border-color: var(--border-hover);
+      }
+
+      .filter-chip.active {
+        background: var(--color-info-subtle);
+        border-color: var(--color-info);
+        color: var(--color-info);
+      }
+
+      .filter-chip.danger.active {
+        background: var(--color-danger-subtle);
+        border-color: var(--color-danger);
+        color: var(--color-danger);
+      }
+
+      .filter-chip.warning.active {
+        background: var(--color-warning-subtle);
+        border-color: var(--color-warning);
+        color: var(--color-warning);
+      }
+
+      /* ============================================
+           EMPTY STATE
+           ============================================ */
+
+      .empty-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 48px;
+        text-align: center;
+      }
+
+      .empty-state-icon {
+        font-size: 48px;
+        margin-bottom: 16px;
+        opacity: 0.5;
+      }
+
+      .empty-state-title {
+        font-size: 16px;
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+
+      .empty-state-description {
+        color: var(--text-muted);
+        font-size: 14px;
+        max-width: 300px;
+      }
+
+      /* ============================================
+           VS CODE SIDEBAR MODE
+           ============================================ */
+
+      @media (max-width: 600px) {
+        .studio-sidebar {
+          width: 100%;
+        }
+
+        .studio-main {
+          display: none;
+        }
+
+        .studio-sidebar.detail-open .sidebar-tree,
+        .studio-sidebar.detail-open .activity-section {
+          display: none;
+        }
+
+        .studio-sidebar.detail-open .detail-panel {
+          display: block;
+        }
+
+        .header-search {
+          display: none;
+        }
+      }
+
+      /* ============================================
+           SCROLLBAR STYLING
+           ============================================ */
+
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      ::-webkit-scrollbar-thumb {
+        background: var(--border-color);
+        border-radius: 4px;
+      }
+
+      ::-webkit-scrollbar-thumb:hover {
+        background: var(--border-hover);
+      }
+
+      /* ============================================
+           CHANGE HIGHLIGHT ANIMATION
+           ============================================ */
+
+      .tree-item.changed {
+        animation: changeHighlight 2s ease;
+      }
+
+      @keyframes changeHighlight {
+        0% {
+          background: var(--color-purple-subtle);
+        }
+        100% {
+          background: transparent;
+        }
+      }
+
+      .tree-item.changed .tree-label::after {
+        content: "●";
+        color: var(--color-purple);
+        margin-left: 6px;
+        font-size: 8px;
+      }
+
+      /* ============================================
+           VIEW TOGGLE (PM / Technical)
+           ============================================ */
+
+      .view-toggle {
+        display: flex;
+        background: var(--bg-tertiary);
+        border-radius: 4px;
+        overflow: hidden;
+        margin-left: auto;
+      }
+
+      .view-toggle-btn {
+        padding: 4px 10px;
+        font-size: 10px;
+        font-weight: 500;
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .view-toggle-btn.active {
+        background: var(--bg-elevated);
+        color: var(--text-primary);
+      }
+
+      .view-toggle-btn:hover:not(.active) {
+        color: var(--text-secondary);
+      }
+
+      /* Technical View Styling */
+      .technical-view {
+        display: none;
+      }
+
+      .technical-view.active {
+        display: block;
+      }
+
+      .pm-view.hidden {
+        display: none;
+      }
+
+      .technical-section {
+        margin-bottom: 16px;
+      }
+
+      .technical-section:last-child {
+        margin-bottom: 0;
+      }
+
+      .technical-label {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        margin-bottom: 6px;
+        letter-spacing: 0.5px;
+      }
+
+      .technical-code {
+        background: var(--bg-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        padding: 12px;
+        font-family: "SF Mono", "Consolas", monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        overflow-x: auto;
+        white-space: pre;
+        color: var(--text-secondary);
+      }
+
+      .technical-code .method {
+        color: var(--color-success);
+        font-weight: 600;
+      }
+
+      .technical-code .url {
+        color: var(--color-info);
+      }
+
+      .technical-code .header {
+        color: var(--color-purple);
+      }
+
+      .technical-code .status-ok {
+        color: var(--color-success);
+      }
+
+      .technical-code .status-error {
+        color: var(--color-danger);
+      }
+
+      .assertion-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .assertion-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-family: "SF Mono", "Consolas", monospace;
+        font-size: 12px;
+        padding: 4px 8px;
+        background: var(--bg-primary);
+        border-radius: 4px;
+      }
+
+      .assertion-item.passing {
+        color: var(--color-success);
+      }
+
+      .assertion-item.failing {
+        color: var(--color-danger);
+      }
+
+      .technical-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+        padding-top: 12px;
+        border-top: 1px solid var(--border-color);
+      }
+
+      .technical-actions button {
+        padding: 6px 12px;
+        font-size: 11px;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        border-radius: 4px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .technical-actions button:hover {
+        background: var(--bg-elevated);
+        border-color: var(--border-hover);
+        color: var(--text-primary);
+      }
+
+      /* ============================================
+           CONVERSATIONAL EDIT PANEL
+           ============================================ */
+
+      .chat-panel {
+        position: fixed;
+        right: 0;
+        top: var(--header-height);
+        width: 400px;
+        height: calc(100vh - var(--header-height));
+        background: var(--bg-secondary);
+        border-left: 1px solid var(--border-color);
+        display: flex;
+        flex-direction: column;
+        transform: translateX(100%);
+        transition: transform 0.3s ease;
+        z-index: 200;
+      }
+
+      .chat-panel.open {
+        transform: translateX(0);
+      }
+
+      .chat-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--border-color);
+        background: var(--bg-tertiary);
+      }
+
+      .chat-header-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        font-size: 14px;
+      }
+
+      .chat-close-btn {
+        background: none;
+        border: none;
+        color: var(--text-muted);
+        font-size: 18px;
+        cursor: pointer;
+        padding: 4px;
+        line-height: 1;
+      }
+
+      .chat-close-btn:hover {
+        color: var(--text-primary);
+      }
+
+      .chat-context {
+        padding: 12px 16px;
+        background: var(--bg-tertiary);
+        border-bottom: 1px solid var(--border-color);
+        font-size: 12px;
+      }
+
+      .chat-context-label {
+        color: var(--text-muted);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 6px;
+      }
+
+      .chat-context-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin-bottom: 4px;
+        color: var(--text-secondary);
+      }
+
+      .chat-context-item .label {
+        color: var(--text-muted);
+        min-width: 60px;
+      }
+
+      .chat-context-item .value {
+        color: var(--text-primary);
+      }
+
+      .chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .chat-message {
+        display: flex;
+        gap: 12px;
+        animation: messageSlideIn 0.2s ease;
+      }
+
+      @keyframes messageSlideIn {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .chat-message-avatar {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        background: var(--bg-tertiary);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 14px;
+        flex-shrink: 0;
+      }
+
+      .chat-message.agent .chat-message-avatar {
+        background: var(--color-purple-subtle);
+      }
+
+      .chat-message.user {
+        flex-direction: row-reverse;
+      }
+
+      .chat-message.user .chat-message-avatar {
+        background: var(--color-info);
+      }
+
+      .chat-message.user .chat-message-content {
+        text-align: right;
+      }
+
+      .chat-message.user .chat-message-name {
+        color: var(--color-info);
+      }
+
+      .chat-message.user .chat-message-text {
+        background: var(--bg-tertiary);
+        padding: 8px 12px;
+        border-radius: 12px 12px 4px 12px;
+        display: inline-block;
+        text-align: left;
+      }
+
+      .chat-message-content {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .chat-message-name {
+        font-size: 12px;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+
+      .chat-message.agent .chat-message-name {
+        color: var(--color-purple);
+      }
+
+      .chat-message-text {
+        font-size: 13px;
+        line-height: 1.5;
+        color: var(--text-secondary);
+      }
+
+      .chat-message-text p {
+        margin-bottom: 8px;
+      }
+
+      .chat-message-text p:last-child {
+        margin-bottom: 0;
+      }
+
+      .chat-suggestion {
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 12px;
+        margin-top: 12px;
+      }
+
+      .chat-suggestion-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 8px;
+      }
+
+      .chat-suggestion-title {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        color: var(--text-muted);
+      }
+
+      .chat-suggestion-content {
+        font-size: 13px;
+        background: var(--bg-primary);
+        border-radius: 6px;
+        padding: 12px;
+        font-family: "SF Mono", "Consolas", monospace;
+        white-space: pre-wrap;
+        line-height: 1.6;
+      }
+
+      .chat-suggestion-actions {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .chat-suggestion .btn-accept {
+        background: var(--color-success);
+        color: var(--text-inverse);
+      }
+
+      .chat-suggestion .btn-accept:hover {
+        background: #2ea043;
+      }
+
+      .chat-input-area {
+        padding: 16px;
+        border-top: 1px solid var(--border-color);
+        background: var(--bg-tertiary);
+      }
+
+      .chat-input-wrapper {
+        display: flex;
+        gap: 8px;
+      }
+
+      .chat-input {
+        flex: 1;
+        background: var(--bg-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 8px;
+        padding: 10px 14px;
+        color: var(--text-primary);
+        font-size: 13px;
+        resize: none;
+        outline: none;
+        font-family: inherit;
+        min-height: 44px;
+        max-height: 120px;
+      }
+
+      .chat-input::placeholder {
+        color: var(--text-muted);
+      }
+
+      .chat-input:focus {
+        border-color: var(--color-info);
+      }
+
+      .chat-send-btn {
+        background: var(--color-info);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        width: 44px;
+        height: 44px;
+        cursor: pointer;
+        font-size: 16px;
+        transition: background var(--transition-fast);
+      }
+
+      .chat-send-btn:hover {
+        background: #4493e6;
+      }
+
+      .chat-send-btn:disabled {
+        background: var(--bg-tertiary);
+        color: var(--text-muted);
+        cursor: not-allowed;
+      }
+
+      /* Quick action buttons */
+      .chat-quick-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 10px;
+      }
+
+      .chat-quick-action {
+        padding: 6px 12px;
+        background: var(--bg-primary);
+        border: 1px solid var(--border-color);
+        border-radius: 16px;
+        font-size: 11px;
+        color: var(--text-secondary);
+        cursor: pointer;
+        transition: all var(--transition-fast);
+      }
+
+      .chat-quick-action:hover {
+        background: var(--bg-tertiary);
+        border-color: var(--color-info);
+        color: var(--color-info);
+      }
+
+      /* ============================================
+           FIX PANEL (Specialized for failures)
+           ============================================ */
+
+      .chat-panel.fix-mode .chat-header {
+        background: var(--color-danger-subtle);
+      }
+
+      .chat-panel.fix-mode .chat-header-title {
+        color: var(--color-danger);
+      }
+
+      .fix-context {
+        background: var(--color-danger-subtle);
+        border: 1px solid var(--color-danger);
+        border-radius: 6px;
+        padding: 12px;
+        margin: 12px 16px;
+      }
+
+      .fix-context-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        color: var(--color-danger);
+        font-weight: 600;
+        font-size: 12px;
+      }
+
+      .fix-context-details {
+        font-family: "SF Mono", "Consolas", monospace;
+        font-size: 11px;
+        line-height: 1.6;
+      }
+
+      .fix-context-row {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+
+      .fix-context-row .label {
+        color: var(--text-muted);
+        min-width: 70px;
+      }
+
+      /* ============================================
+           INTENT SOURCE VIEW
+           ============================================ */
+
+      .source-view-modal {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.7);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 300;
+        opacity: 0;
+        visibility: hidden;
+        transition: all 0.2s ease;
+      }
+
+      .source-view-modal.open {
+        opacity: 1;
+        visibility: visible;
+      }
+
+      .source-view-content {
+        width: 90%;
+        max-width: 800px;
+        max-height: 80vh;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        display: flex;
+        flex-direction: column;
+        transform: scale(0.95);
+        transition: transform 0.2s ease;
+      }
+
+      .source-view-modal.open .source-view-content {
+        transform: scale(1);
+      }
+
+      .source-view-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border-color);
+      }
+
+      .source-view-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+      }
+
+      .source-view-path {
+        font-size: 12px;
+        color: var(--text-muted);
+        font-family: "SF Mono", "Consolas", monospace;
+      }
+
+      .source-view-actions {
+        display: flex;
+        gap: 8px;
+      }
+
+      .source-view-body {
+        flex: 1;
+        overflow: auto;
+        padding: 0;
+      }
+
+      .source-code {
+        font-family: "SF Mono", "Consolas", monospace;
+        font-size: 13px;
+        line-height: 1.6;
+        margin: 0;
+        padding: 16px 20px;
+      }
+
+      .source-line {
+        display: flex;
+      }
+
+      .source-line:hover {
+        background: var(--bg-tertiary);
+      }
+
+      .source-line.highlighted {
+        background: var(--color-info-subtle);
+      }
+
+      .source-line-number {
+        width: 50px;
+        color: var(--text-muted);
+        text-align: right;
+        padding-right: 16px;
+        user-select: none;
+        flex-shrink: 0;
+      }
+
+      .source-line-content {
+        flex: 1;
+        white-space: pre;
+      }
+
+      /* Syntax highlighting */
+      .source-keyword {
+        color: var(--color-purple);
+      }
+
+      .source-string {
+        color: var(--color-success);
+      }
+
+      .source-comment {
+        color: var(--text-muted);
+        font-style: italic;
+      }
+
+      .source-id {
+        color: var(--color-info);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="studio-container">
+      <!-- ============================================
+             HEADER
+             ============================================ -->
+      <header class="studio-header">
+        <div class="logo">
+          <span class="logo-icon">🎯</span>
+          <span>Intent <span>Studio</span></span>
+        </div>
+
+        <div class="header-search">
+          <span class="header-search-icon">🔍</span>
+          <input type="text" placeholder="Search features, scenarios, terms... (⌘K)" id="search-input" />
+        </div>
+
+        <div class="header-controls">
+          <button class="btn btn-secondary header-actions" title="View intent source file" onclick="openSourceView()">📄 View Source</button>
+          <button class="btn btn-secondary" title="Open app in browser">🌐 Open App</button>
+          <button class="btn btn-primary" id="run-tests-btn">▶ Run Tests</button>
+          <div class="status-pill">
+            <span class="status-dot"></span>
+            <span>Live</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- ============================================
+             BODY - SIDEBAR + MAIN
+             ============================================ -->
+      <div class="studio-body">
+        <!-- ============================================
+                 SIDEBAR
+                 ============================================ -->
+        <aside class="studio-sidebar">
+          <!-- Health Overview -->
+          <div class="sidebar-section">
+            <div class="health-overview">
+              <div class="health-bar">
+                <div class="health-bar-fill" style="width: 82%"></div>
+              </div>
+              <div class="health-percent">82%</div>
+            </div>
+            <div class="health-stats">
+              <div class="health-stat passing">
+                <span class="icon">✓</span>
+                <span>14 passing</span>
+              </div>
+              <div class="health-stat failing">
+                <span class="icon">✗</span>
+                <span>2 failing</span>
+              </div>
+              <div class="health-stat pending">
+                <span class="icon">○</span>
+                <span>3 pending</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Filter Bar -->
+          <div class="filter-bar">
+            <span class="filter-chip active">All</span>
+            <span class="filter-chip danger">❌ Failing</span>
+            <span class="filter-chip warning">○ Not Impl</span>
+            <span class="filter-chip">📦 Components</span>
+          </div>
+
+          <!-- Tree Navigation -->
+          <div class="sidebar-tree">
+            <!-- Glossary Section -->
+            <div class="tree-header">
+              <span>Glossary (12)</span>
+              <span class="tree-header-action" title="Add term">+</span>
+            </div>
+            <div class="tree-children">
+              <div class="tree-item" data-type="glossary" data-id="user">
+                <span class="tree-indent"></span>
+                <span class="tree-icon">📝</span>
+                <span class="tree-label">user</span>
+              </div>
+              <div class="tree-item" data-type="glossary" data-id="logs-in">
+                <span class="tree-indent"></span>
+                <span class="tree-icon">📝</span>
+                <span class="tree-label">logs in</span>
+              </div>
+              <div class="tree-item" data-type="glossary" data-id="valid-credentials">
+                <span class="tree-indent"></span>
+                <span class="tree-icon">📝</span>
+                <span class="tree-label">valid credentials</span>
+              </div>
+            </div>
+
+            <!-- Components Section -->
+            <div class="tree-header">
+              <span>Components (4)</span>
+              <span class="tree-header-action" title="Add component">+</span>
+            </div>
+            <div class="tree-children">
+              <div class="tree-item" data-type="component" data-id="error-popup">
+                <span class="tree-indent"></span>
+                <span class="tree-icon">📦</span>
+                <span class="tree-label">Error Popup</span>
+                <span class="tree-status">
+                  <span class="tree-status-icon passing">✓</span>
+                </span>
+              </div>
+              <div class="tree-item" data-type="component" data-id="toast">
+                <span class="tree-indent"></span>
+                <span class="tree-icon">📦</span>
+                <span class="tree-label">Toast</span>
+                <span class="tree-status">
+                  <span class="tree-status-icon passing">✓</span>
+                </span>
+              </div>
+              <div class="tree-item" data-type="component" data-id="modal">
+                <span class="tree-indent"></span>
+                <span class="tree-icon">📦</span>
+                <span class="tree-label">Modal</span>
+                <span class="tree-status">
+                  <span class="tree-status-icon pending">○</span>
+                </span>
+              </div>
+            </div>
+
+            <!-- Modules Section -->
+            <div class="tree-header">
+              <span>Modules</span>
+              <span class="tree-header-action" title="Add feature">+</span>
+            </div>
+            <div class="tree-children" id="modules-tree">
+              <!-- Auth Module -->
+              <div class="tree-item" data-type="module" data-id="auth">
+                <span class="tree-toggle" onclick="toggleTreeNode(this)">▼</span>
+                <span class="tree-icon">📁</span>
+                <span class="tree-label">Authentication</span>
+                <span class="tree-status">
+                  <span class="tree-status-icon warning">⚠️</span>
+                  <span>5/7</span>
+                </span>
+              </div>
+              <div class="tree-children" data-parent="auth">
+                <div class="tree-item active" data-type="feature" data-id="user-login">
+                  <span class="tree-indent"></span>
+                  <span class="tree-indent"></span>
+                  <span class="tree-icon">✨</span>
+                  <span class="tree-label">User Login</span>
+                  <span class="tree-status">
+                    <span class="tree-status-icon passing">✓</span>
+                  </span>
+                </div>
+                <div class="tree-item changed" data-type="feature" data-id="password-reset">
+                  <span class="tree-indent"></span>
+                  <span class="tree-indent"></span>
+                  <span class="tree-icon">✨</span>
+                  <span class="tree-label">Password Reset</span>
+                  <span class="tree-status">
+                    <span class="tree-status-icon failing">✗</span>
+                  </span>
+                </div>
+                <div class="tree-item" data-type="feature" data-id="oauth">
+                  <span class="tree-indent"></span>
+                  <span class="tree-indent"></span>
+                  <span class="tree-icon">✨</span>
+                  <span class="tree-label">OAuth</span>
+                  <span class="tree-status">
+                    <span class="tree-status-icon pending">○</span>
+                  </span>
+                </div>
+                <div class="tree-item" data-type="feature" data-id="logout">
+                  <span class="tree-indent"></span>
+                  <span class="tree-indent"></span>
+                  <span class="tree-icon">✨</span>
+                  <span class="tree-label">Logout</span>
+                  <span class="tree-status">
+                    <span class="tree-status-icon passing">✓</span>
+                  </span>
+                </div>
+              </div>
+
+              <!-- Users Module -->
+              <div class="tree-item" data-type="module" data-id="users">
+                <span class="tree-toggle collapsed" onclick="toggleTreeNode(this)">▼</span>
+                <span class="tree-icon">📁</span>
+                <span class="tree-label">Users</span>
+                <span class="tree-status">
+                  <span class="tree-status-icon passing">✓</span>
+                  <span>4/4</span>
+                </span>
+              </div>
+              <div class="tree-children collapsed" data-parent="users">
+                <div class="tree-item" data-type="feature" data-id="user-profile">
+                  <span class="tree-indent"></span>
+                  <span class="tree-indent"></span>
+                  <span class="tree-icon">✨</span>
+                  <span class="tree-label">User Profile</span>
+                  <span class="tree-status">
+                    <span class="tree-status-icon passing">✓</span>
+                  </span>
+                </div>
+              </div>
+
+              <!-- Products Module -->
+              <div class="tree-item" data-type="module" data-id="products">
+                <span class="tree-toggle collapsed" onclick="toggleTreeNode(this)">▼</span>
+                <span class="tree-icon">📁</span>
+                <span class="tree-label">Products</span>
+                <span class="tree-status">
+                  <span class="tree-status-icon passing">✓</span>
+                  <span>6/6</span>
+                </span>
+              </div>
+              <div class="tree-children collapsed" data-parent="products"></div>
+
+              <!-- Orders Module -->
+              <div class="tree-item" data-type="module" data-id="orders">
+                <span class="tree-toggle collapsed" onclick="toggleTreeNode(this)">▼</span>
+                <span class="tree-icon">📁</span>
+                <span class="tree-label">Orders</span>
+                <span class="tree-status">
+                  <span class="tree-status-icon warning">⚠️</span>
+                  <span>3/5</span>
+                </span>
+              </div>
+              <div class="tree-children collapsed" data-parent="orders"></div>
+
+              <!-- Payments Module (not implemented) -->
+              <div class="tree-item" data-type="module" data-id="payments">
+                <span class="tree-toggle collapsed" onclick="toggleTreeNode(this)">▼</span>
+                <span class="tree-icon">📁</span>
+                <span class="tree-label">Payments</span>
+                <span class="tree-status">
+                  <span class="tree-status-icon pending">○</span>
+                  <span>0/3</span>
+                </span>
+              </div>
+              <div class="tree-children collapsed" data-parent="payments"></div>
+            </div>
+          </div>
+
+          <!-- Activity Feed -->
+          <div class="activity-section">
+            <div class="activity-header">
+              <span>Activity</span>
+              <span class="tree-header-action" title="Clear">✕</span>
+            </div>
+            <div class="activity-list">
+              <div class="activity-item agent-update">
+                <span class="activity-icon">🤖</span>
+                <div class="activity-content">
+                  <div class="activity-title">Agent updated Password Reset</div>
+                  <div class="activity-subtitle">+2 scenarios added</div>
+                  <span class="activity-action">View Changes</span>
+                </div>
+              </div>
+              <div class="activity-item">
+                <span class="activity-icon">✅</span>
+                <div class="activity-content">
+                  <div class="activity-title">Tests passed: User Login</div>
+                  <div class="activity-subtitle">3/3 scenarios</div>
+                </div>
+              </div>
+              <div class="activity-item">
+                <span class="activity-icon">❌</span>
+                <div class="activity-content">
+                  <div class="activity-title">Test failed: Password Reset</div>
+                  <div class="activity-subtitle">Email not sent</div>
+                  <span class="activity-action">Jump to Error</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- ============================================
+                 MAIN CONTENT - DETAIL PANEL
+                 ============================================ -->
+        <main class="studio-main">
+          <div class="detail-panel">
+            <!-- Breadcrumb -->
+            <div class="detail-breadcrumb">
+              <a href="#">Modules</a>
+              <span class="detail-breadcrumb-separator">›</span>
+              <a href="#">Authentication</a>
+              <span class="detail-breadcrumb-separator">›</span>
+              <span>User Login</span>
+            </div>
+
+            <!-- Header -->
+            <div class="detail-header">
+              <h1 class="detail-title">
+                User Login
+                <span class="detail-status-badge passing">✓ 3/3</span>
+              </h1>
+              <button class="btn btn-secondary">Edit ✎</button>
+            </div>
+
+            <p class="detail-description">"Users can securely access their accounts using email and password"</p>
+
+            <!-- Glossary Terms Used -->
+            <div class="detail-section">
+              <div class="detail-section-header">
+                <span class="detail-section-title">Glossary Terms</span>
+              </div>
+              <div class="glossary-chips">
+                <span class="glossary-chip" title="User exists in database with verified email">user</span>
+                <span class="glossary-chip" title="Submits email and password to authentication">logs in</span>
+                <span class="glossary-chip" title="Email exists AND password matches">valid credentials</span>
+                <span class="glossary-chip" title="Receives session token, can access protected resources">authenticated</span>
+                <span class="glossary-chip glossary-chip-add">+ Add Term</span>
+              </div>
+            </div>
+
+            <!-- Scenarios -->
+            <div class="detail-section">
+              <div class="detail-section-header">
+                <span class="detail-section-title">Scenarios</span>
+                <button class="btn btn-secondary" onclick="openSourceView()" style="font-size: 11px; padding: 4px 10px">📄 View .intent Source</button>
+              </div>
+              <div class="scenario-list">
+                <!-- Passing Scenario with Technical View -->
+                <div class="scenario-card passing" data-scenario-id="login-success">
+                  <div class="scenario-header">
+                    <span class="scenario-status-icon passing">✓</span>
+                    <span class="scenario-title">Successful login</span>
+                    <div class="view-toggle">
+                      <button class="view-toggle-btn active" onclick="toggleView(this, 'pm')">PM</button>
+                      <button class="view-toggle-btn" onclick="toggleView(this, 'technical')">Technical</button>
+                    </div>
+                    <div class="scenario-actions">
+                      <button class="scenario-action-btn" onclick="openEditChat('login-success', 'Successful login')">Edit</button>
+                      <button class="scenario-action-btn">Run</button>
+                    </div>
+                  </div>
+
+                  <!-- PM View (Natural Language) -->
+                  <div class="scenario-body pm-view">
+                    <div class="scenario-step">
+                      <span class="scenario-step-arrow">When</span>
+                      <span class="scenario-step-text">a <span class="term">registered user</span> <span class="term">logs in</span> with <span class="term">valid credentials</span></span>
+                    </div>
+                    <div class="scenario-step">
+                      <span class="scenario-step-arrow">→</span>
+                      <span class="scenario-step-text">they are <span class="term">authenticated</span></span>
+                    </div>
+                    <div class="scenario-step">
+                      <span class="scenario-step-arrow">→</span>
+                      <span class="scenario-step-text">they see "Welcome back"</span>
+                    </div>
+                  </div>
+
+                  <!-- Technical View (Hidden by default) -->
+                  <div class="scenario-body technical-view">
+                    <div class="technical-section">
+                      <div class="technical-label">Request</div>
+                      <pre class="technical-code"><span class="method">POST</span> <span class="url">/api/login</span>
+<span class="header">Content-Type:</span> application/json
+
+{
+  "email": "test@test.com",
+  "password": "correct"
+}</pre>
+                    </div>
+                    <div class="technical-section">
+                      <div class="technical-label">Assertions</div>
+                      <div class="assertion-list">
+                        <div class="assertion-item passing">✓ status: 200</div>
+                        <div class="assertion-item passing">✓ json path "token" exists</div>
+                        <div class="assertion-item passing">✓ body contains "Welcome back"</div>
+                      </div>
+                    </div>
+                    <div class="technical-section">
+                      <div class="technical-label">Response (45ms)</div>
+                      <pre class="technical-code"><span class="status-ok">HTTP/1.1 200 OK</span>
+<span class="header">Content-Type:</span> application/json
+
+{
+  "token": "eyJhbGciOiJIUzI1NiIs...",
+  "user": {"id": 1, "email": "test@test.com"},
+  "message": "Welcome back"
+}</pre>
+                    </div>
+                    <div class="technical-actions">
+                      <button onclick="copyCurl('login-success')">📋 Copy cURL</button>
+                      <button onclick="openInVscode('server.tnt', 45)">📝 Open in VS Code</button>
+                      <button>🔍 View Headers</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Another Passing Scenario -->
+                <div class="scenario-card passing" data-scenario-id="login-invalid">
+                  <div class="scenario-header">
+                    <span class="scenario-status-icon passing">✓</span>
+                    <span class="scenario-title">Invalid credentials</span>
+                    <div class="view-toggle">
+                      <button class="view-toggle-btn active" onclick="toggleView(this, 'pm')">PM</button>
+                      <button class="view-toggle-btn" onclick="toggleView(this, 'technical')">Technical</button>
+                    </div>
+                    <div class="scenario-actions">
+                      <button class="scenario-action-btn" onclick="openEditChat('login-invalid', 'Invalid credentials')">Edit</button>
+                      <button class="scenario-action-btn">Run</button>
+                    </div>
+                  </div>
+                  <div class="scenario-body pm-view">
+                    <div class="scenario-step">
+                      <span class="scenario-step-arrow">When</span>
+                      <span class="scenario-step-text">a <span class="term">registered user</span> <span class="term">logs in</span> with <span class="term">invalid credentials</span></span>
+                    </div>
+                    <div class="scenario-step">
+                      <span class="scenario-step-arrow">→</span>
+                      <span class="scenario-step-text">they see <span class="term">error popup</span> with "Invalid credentials"</span>
+                    </div>
+                  </div>
+                  <div class="scenario-body technical-view">
+                    <div class="technical-section">
+                      <div class="technical-label">Request</div>
+                      <pre class="technical-code"><span class="method">POST</span> <span class="url">/api/login</span>
+<span class="header">Content-Type:</span> application/json
+
+{
+  "email": "test@test.com",
+  "password": "wrong"
+}</pre>
+                    </div>
+                    <div class="technical-section">
+                      <div class="technical-label">Assertions</div>
+                      <div class="assertion-list">
+                        <div class="assertion-item passing">✓ status: 401</div>
+                        <div class="assertion-item passing">✓ body contains "Invalid credentials"</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Failing Scenario -->
+                <div class="scenario-card failing" data-scenario-id="password-reset-email">
+                  <div class="scenario-header">
+                    <span class="scenario-status-icon failing">✗</span>
+                    <span class="scenario-title">Password reset email</span>
+                    <div class="view-toggle">
+                      <button class="view-toggle-btn active" onclick="toggleView(this, 'pm')">PM</button>
+                      <button class="view-toggle-btn" onclick="toggleView(this, 'technical')">Technical</button>
+                    </div>
+                    <div class="scenario-actions">
+                      <button class="scenario-action-btn" onclick="openEditChat('password-reset-email', 'Password reset email')">Edit</button>
+                      <button class="scenario-action-btn">Run</button>
+                    </div>
+                  </div>
+                  <div class="scenario-body pm-view">
+                    <div class="scenario-step">
+                      <span class="scenario-step-arrow">When</span>
+                      <span class="scenario-step-text">a <span class="term">user</span> requests password reset</span>
+                    </div>
+                    <div class="scenario-step">
+                      <span class="scenario-step-arrow">→</span>
+                      <span class="scenario-step-text">email is sent to their address</span>
+                    </div>
+
+                    <!-- Failure Callout -->
+                    <div class="failure-callout">
+                      <div class="failure-callout-header">
+                        <span class="failure-callout-icon">❌</span>
+                        <span class="failure-callout-title">FAILED: email not sent</span>
+                      </div>
+                      <div class="failure-callout-body">
+                        <div class="failure-callout-row">
+                          <span class="failure-callout-label">Expected:</span>
+                          <span>email delivery to user@test.com</span>
+                        </div>
+                        <div class="failure-callout-row">
+                          <span class="failure-callout-label">Actual:</span>
+                          <span>no email triggered</span>
+                        </div>
+                      </div>
+                      <div class="failure-callout-actions">
+                        <button class="btn btn-ai-fix" onclick="openFixChat('password-reset-email')">🤖 Fix</button>
+                        <button class="btn btn-secondary">View Logs</button>
+                        <button class="btn btn-secondary">Dismiss</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="scenario-body technical-view">
+                    <div class="technical-section">
+                      <div class="technical-label">Request</div>
+                      <pre class="technical-code"><span class="method">POST</span> <span class="url">/api/password-reset</span>
+<span class="header">Content-Type:</span> application/json
+
+{
+  "email": "user@test.com"
+}</pre>
+                    </div>
+                    <div class="technical-section">
+                      <div class="technical-label">Assertions</div>
+                      <div class="assertion-list">
+                        <div class="assertion-item passing">✓ status: 200</div>
+                        <div class="assertion-item failing">✗ email sent to "user@test.com"</div>
+                      </div>
+                    </div>
+                    <div class="technical-section">
+                      <div class="technical-label">Response (23ms)</div>
+                      <pre class="technical-code"><span class="status-ok">HTTP/1.1 200 OK</span>
+<span class="header">Content-Type:</span> application/json
+
+{
+  "message": "Reset link sent",
+  "email_sent": false  // ← Bug: email not actually sent
+}</pre>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Pending Scenario -->
+                <div class="scenario-card pending" data-scenario-id="oauth-login">
+                  <div class="scenario-header">
+                    <span class="scenario-status-icon pending">○</span>
+                    <span class="scenario-title">OAuth login</span>
+                    <div class="view-toggle">
+                      <button class="view-toggle-btn active" onclick="toggleView(this, 'pm')">PM</button>
+                      <button class="view-toggle-btn" onclick="toggleView(this, 'technical')">Technical</button>
+                    </div>
+                    <div class="scenario-actions">
+                      <button class="scenario-action-btn" onclick="openEditChat('oauth-login', 'OAuth login')">Edit</button>
+                    </div>
+                  </div>
+                  <div class="scenario-body pm-view">
+                    <div class="scenario-step">
+                      <span class="scenario-step-arrow">When</span>
+                      <span class="scenario-step-text">a <span class="term">user</span> clicks "Login with Google"</span>
+                    </div>
+                    <div class="scenario-step">
+                      <span class="scenario-step-arrow">→</span>
+                      <span class="scenario-step-text">they are redirected to Google OAuth</span>
+                    </div>
+                    <div class="scenario-step" style="color: var(--text-muted); font-style: italic">
+                      <span class="scenario-step-arrow"></span>
+                      <span class="scenario-step-text">⚠️ Not implemented - no @implements annotation found</span>
+                    </div>
+                  </div>
+                  <div class="scenario-body technical-view">
+                    <div class="technical-section">
+                      <div class="technical-label">Request</div>
+                      <pre class="technical-code"><span class="method">GET</span> <span class="url">/auth/google</span></pre>
+                    </div>
+                    <div class="technical-section">
+                      <div class="technical-label">Assertions</div>
+                      <div class="assertion-list">
+                        <div class="assertion-item" style="color: var(--text-muted)">○ status: 302</div>
+                        <div class="assertion-item" style="color: var(--text-muted)">○ header "Location" contains "google.com"</div>
+                      </div>
+                    </div>
+                    <div class="technical-section" style="color: var(--text-muted); font-style: italic">⚠️ Not yet implemented - test not run</div>
+                  </div>
+                </div>
+
+                <!-- Add Scenario Button -->
+                <div class="add-scenario-card" onclick="openEditChat(null, null)">
+                  <span>+</span>
+                  <span>Add Scenario</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Linked Code -->
+            <div class="detail-section">
+              <div class="detail-section-header">
+                <span class="detail-section-title">Linked Code</span>
+              </div>
+              <div style="background: var(--bg-tertiary); border-radius: 6px; padding: 12px; font-family: &quot;SF Mono&quot;, monospace; font-size: 12px">
+                <div style="color: var(--text-muted)">// @implements: feature.user_login</div>
+                <div style="color: var(--color-info)">fn login_handler(req) { ... }</div>
+                <div style="margin-top: 8px">
+                  <button class="btn btn-secondary" style="font-size: 11px; padding: 4px 8px">Open in Editor</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <!-- ============================================
+         CONVERSATIONAL EDIT CHAT PANEL
+         ============================================ -->
+    <div class="chat-panel" id="edit-chat-panel">
+      <div class="chat-header">
+        <div class="chat-header-title">
+          <span>💬</span>
+          <span>Edit Intent</span>
+        </div>
+        <button class="chat-close-btn" onclick="closeChatPanel()">&times;</button>
+      </div>
+
+      <div class="chat-context" id="chat-context">
+        <div class="chat-context-label">Editing Context</div>
+        <div class="chat-context-item">
+          <span class="label">Feature:</span>
+          <span class="value" id="context-feature">User Login</span>
+        </div>
+        <div class="chat-context-item">
+          <span class="label">Scenario:</span>
+          <span class="value" id="context-scenario">Successful login</span>
+        </div>
+      </div>
+
+      <div class="chat-messages" id="chat-messages">
+        <div class="chat-message agent">
+          <div class="chat-message-avatar">🤖</div>
+          <div class="chat-message-content">
+            <div class="chat-message-name">Intent Agent</div>
+            <div class="chat-message-text">
+              <p>I can help you modify this scenario. What would you like to change?</p>
+              <p>Some examples:</p>
+              <ul style="margin: 8px 0 0 16px; color: var(--text-muted); font-size: 12px">
+                <li>Add an assertion for response time</li>
+                <li>Change the expected message</li>
+                <li>Add edge case handling</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-input-area">
+        <div class="chat-input-wrapper">
+          <textarea class="chat-input" id="chat-input" placeholder="Describe what you'd like to change..." rows="2"></textarea>
+          <button class="chat-send-btn" onclick="sendChatMessage()">↑</button>
+        </div>
+        <div class="chat-quick-actions">
+          <button class="chat-quick-action" onclick="quickAction('Add error handling')">Add error handling</button>
+          <button class="chat-quick-action" onclick="quickAction('Add timeout assertion')">Add timeout</button>
+          <button class="chat-quick-action" onclick="quickAction('Add another scenario')">New scenario</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================
+         FIX CHAT PANEL (For Failures)
+         ============================================ -->
+    <div class="chat-panel fix-mode" id="fix-chat-panel">
+      <div class="chat-header">
+        <div class="chat-header-title">
+          <span>🔧</span>
+          <span>Fix Failure</span>
+        </div>
+        <button class="chat-close-btn" onclick="closeFixPanel()">&times;</button>
+      </div>
+
+      <div class="fix-context">
+        <div class="fix-context-header">
+          <span>❌</span>
+          <span>Test Failure</span>
+        </div>
+        <div class="fix-context-details">
+          <div class="fix-context-row">
+            <span class="label">Scenario:</span>
+            <span id="fix-scenario">Password reset email</span>
+          </div>
+          <div class="fix-context-row">
+            <span class="label">Expected:</span>
+            <span id="fix-expected">email sent to user@test.com</span>
+          </div>
+          <div class="fix-context-row">
+            <span class="label">Actual:</span>
+            <span id="fix-actual">no email triggered</span>
+          </div>
+          <div class="fix-context-row">
+            <span class="label">Code:</span>
+            <span id="fix-code">@implements: feature.password_reset</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-messages" id="fix-messages">
+        <div class="chat-message agent">
+          <div class="chat-message-avatar">🤖</div>
+          <div class="chat-message-content">
+            <div class="chat-message-name">Intent Agent</div>
+            <div class="chat-message-text">
+              <p>I've analyzed the failure. The <code>reset_handler</code> function returns a success message but doesn't actually send the email.</p>
+              <p>Here's the fix:</p>
+            </div>
+
+            <div class="chat-suggestion">
+              <div class="chat-suggestion-header">
+                <span class="chat-suggestion-title">Proposed Change</span>
+                <span style="font-size: 11px; color: var(--text-muted)">server.tnt:67-75</span>
+              </div>
+              <div class="chat-suggestion-content">
+                <span style="color: var(--text-muted)"> fn reset_handler(req) {</span>
+                <span style="color: var(--text-muted)"> let email = req.body["email"]</span>
+                <span style="color: var(--text-muted)"> let token = generate_reset_token(email)</span>
+                <span style="color: var(--color-success)">+ let _ = send_email(email, "Reset your password", </span>
+                <span style="color: var(--color-success)">+ "Click here: /reset?token=" + token)</span>
+                <span style="color: var(--text-muted)"> return json(map { "message": "Reset link sent", "email_sent": true })</span>
+                <span style="color: var(--text-muted)"> }</span>
+              </div>
+              <div class="chat-suggestion-actions">
+                <button class="btn btn-accept" onclick="acceptFix()">✓ Accept Fix</button>
+                <button class="btn btn-secondary" onclick="openInVscode('server.tnt', 67)">Open in VS Code</button>
+                <button class="btn btn-secondary" onclick="rejectFix()">Try Different Approach</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-input-area">
+        <div class="chat-input-wrapper">
+          <textarea class="chat-input" id="fix-input" placeholder="Ask for a different approach or clarify..." rows="2"></textarea>
+          <button class="chat-send-btn" onclick="sendFixMessage()">↑</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================
+         SOURCE VIEW MODAL
+         ============================================ -->
+    <div class="source-view-modal" id="source-modal">
+      <div class="source-view-content">
+        <div class="source-view-header">
+          <div>
+            <div class="source-view-title">
+              <span>📄</span>
+              <span>Intent Source</span>
+            </div>
+            <div class="source-view-path">server.intent</div>
+          </div>
+          <div class="source-view-actions">
+            <button class="btn btn-secondary" onclick="openInVscode('server.intent', 1)">Open in VS Code</button>
+            <button class="btn btn-secondary" onclick="closeSourceView()">&times; Close</button>
+          </div>
+        </div>
+        <div class="source-view-body">
+          <pre class="source-code" id="source-code">
+<div class="source-line"><span class="source-line-number">1</span><span class="source-line-content"><span class="source-comment"># MyApp Intent</span></span></div>
+<div class="source-line"><span class="source-line-number">2</span><span class="source-line-content"><span class="source-comment"># A task management app for teams</span></span></div>
+<div class="source-line"><span class="source-line-number">3</span><span class="source-line-content"></span></div>
+<div class="source-line"><span class="source-line-number">4</span><span class="source-line-content"><span class="source-comment">## Glossary</span></span></div>
+<div class="source-line"><span class="source-line-number">5</span><span class="source-line-content"></span></div>
+<div class="source-line"><span class="source-line-number">6</span><span class="source-line-content">| Term | Means |</span></div>
+<div class="source-line"><span class="source-line-number">7</span><span class="source-line-content">|------|-------|</span></div>
+<div class="source-line"><span class="source-line-number">8</span><span class="source-line-content">| user | A registered account in the system |</span></div>
+<div class="source-line"><span class="source-line-number">9</span><span class="source-line-content">| logs in | Submits email and password to authenticate |</span></div>
+<div class="source-line"><span class="source-line-number">10</span><span class="source-line-content">| valid credentials | Email exists AND password matches |</span></div>
+<div class="source-line"><span class="source-line-number">11</span><span class="source-line-content">| authenticated | Has session token, can access protected resources |</span></div>
+<div class="source-line"><span class="source-line-number">12</span><span class="source-line-content"></span></div>
+<div class="source-line"><span class="source-line-number">13</span><span class="source-line-content">---</span></div>
+<div class="source-line"><span class="source-line-number">14</span><span class="source-line-content"></span></div>
+<div class="source-line highlighted"><span class="source-line-number">15</span><span class="source-line-content"><span class="source-keyword">Feature:</span> User Login</span></div>
+<div class="source-line highlighted"><span class="source-line-number">16</span><span class="source-line-content">  <span class="source-id">id: feature.user_login</span></span></div>
+<div class="source-line highlighted"><span class="source-line-number">17</span><span class="source-line-content">  <span class="source-string">description: "Users can securely access their accounts"</span></span></div>
+<div class="source-line highlighted"><span class="source-line-number">18</span><span class="source-line-content">  test:</span></div>
+<div class="source-line highlighted"><span class="source-line-number">19</span><span class="source-line-content">    - request: POST /api/login</span></div>
+<div class="source-line highlighted"><span class="source-line-number">20</span><span class="source-line-content">      body: '{"email": "test@test.com", "password": "correct"}'</span></div>
+<div class="source-line highlighted"><span class="source-line-number">21</span><span class="source-line-content">      assert:</span></div>
+<div class="source-line highlighted"><span class="source-line-number">22</span><span class="source-line-content">        - status: 200</span></div>
+<div class="source-line highlighted"><span class="source-line-number">23</span><span class="source-line-content">        - body contains "Welcome back"</span></div>
+<div class="source-line"><span class="source-line-number">24</span><span class="source-line-content"></span></div>
+<div class="source-line"><span class="source-line-number">25</span><span class="source-line-content">    - request: POST /api/login</span></div>
+<div class="source-line"><span class="source-line-number">26</span><span class="source-line-content">      body: '{"email": "test@test.com", "password": "wrong"}'</span></div>
+<div class="source-line"><span class="source-line-number">27</span><span class="source-line-content">      assert:</span></div>
+<div class="source-line"><span class="source-line-number">28</span><span class="source-line-content">        - status: 401</span></div>
+<div class="source-line"><span class="source-line-number">29</span><span class="source-line-content">        - body contains "Invalid credentials"</span></div>
+<div class="source-line"><span class="source-line-number">30</span><span class="source-line-content"></span></div>
+<div class="source-line"><span class="source-line-number">31</span><span class="source-line-content">---</span></div>
+<div class="source-line"><span class="source-line-number">32</span><span class="source-line-content"></span></div>
+<div class="source-line"><span class="source-line-number">33</span><span class="source-line-content"><span class="source-keyword">Feature:</span> Password Reset</span></div>
+<div class="source-line"><span class="source-line-number">34</span><span class="source-line-content">  <span class="source-id">id: feature.password_reset</span></span></div>
+<div class="source-line"><span class="source-line-number">35</span><span class="source-line-content">  <span class="source-string">description: "Users can reset forgotten passwords"</span></span></div>
+<div class="source-line"><span class="source-line-number">36</span><span class="source-line-content">  test:</span></div>
+<div class="source-line"><span class="source-line-number">37</span><span class="source-line-content">    - request: POST /api/password-reset</span></div>
+<div class="source-line"><span class="source-line-number">38</span><span class="source-line-content">      body: '{"email": "user@test.com"}'</span></div>
+<div class="source-line"><span class="source-line-number">39</span><span class="source-line-content">      assert:</span></div>
+<div class="source-line"><span class="source-line-number">40</span><span class="source-line-content">        - status: 200</span></div>
+<div class="source-line"><span class="source-line-number">41</span><span class="source-line-content">        - email sent to "user@test.com"</span></div>
+                </pre>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // ============================================
+      // TREE NAVIGATION
+      // ============================================
+
+      function toggleTreeNode(toggleEl) {
+        const treeItem = toggleEl.closest(".tree-item");
+        const moduleId = treeItem.dataset.id;
+        const children = document.querySelector(`.tree-children[data-parent="${moduleId}"]`);
+
+        if (children) {
+          toggleEl.classList.toggle("collapsed");
+          children.classList.toggle("collapsed");
+        }
+      }
+
+      // Tree item click handling
+      document.querySelectorAll(".tree-item").forEach((item) => {
+        item.addEventListener("click", function (e) {
+          if (e.target.classList.contains("tree-toggle")) return;
+
+          // Remove active from all
+          document.querySelectorAll(".tree-item").forEach((i) => i.classList.remove("active"));
+
+          // Set active
+          this.classList.add("active");
+
+          // Load detail (placeholder)
+          const type = this.dataset.type;
+          const id = this.dataset.id;
+          console.log(`Selected ${type}: ${id}`);
+
+          // If it's a module, toggle expand
+          if (type === "module") {
+            const toggle = this.querySelector(".tree-toggle");
+            if (toggle) toggleTreeNode(toggle);
+          }
+        });
+      });
+
+      // ============================================
+      // FILTER CHIPS
+      // ============================================
+
+      document.querySelectorAll(".filter-chip").forEach((chip) => {
+        chip.addEventListener("click", function () {
+          // For "All" filter, deselect others
+          if (this.textContent === "All") {
+            document.querySelectorAll(".filter-chip").forEach((c) => c.classList.remove("active"));
+            this.classList.add("active");
+          } else {
+            // Toggle this chip, remove All active
+            document.querySelector(".filter-chip:first-child").classList.remove("active");
+            this.classList.toggle("active");
+
+            // If none selected, select All
+            const anyActive = document.querySelectorAll(".filter-chip.active:not(:first-child)").length > 0;
+            if (!anyActive) {
+              document.querySelector(".filter-chip:first-child").classList.add("active");
+            }
+          }
+        });
+      });
+
+      // ============================================
+      // SEARCH
+      // ============================================
+
+      document.getElementById("search-input").addEventListener("input", function (e) {
+        const query = e.target.value.toLowerCase();
+
+        document.querySelectorAll(".tree-item").forEach((item) => {
+          const label = item.querySelector(".tree-label").textContent.toLowerCase();
+          const matches = label.includes(query);
+
+          // Show/hide based on search
+          item.style.display = matches || query === "" ? "flex" : "none";
+
+          // Expand parent modules if child matches
+          if (matches && query !== "") {
+            const parent = item.closest(".tree-children[data-parent]");
+            if (parent) {
+              parent.classList.remove("collapsed");
+              const parentToggle = document.querySelector(`.tree-item[data-id="${parent.dataset.parent}"] .tree-toggle`);
+              if (parentToggle) parentToggle.classList.remove("collapsed");
+            }
+          }
+        });
+      });
+
+      // Keyboard shortcut for search
+      document.addEventListener("keydown", function (e) {
+        if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+          e.preventDefault();
+          document.getElementById("search-input").focus();
+        }
+      });
+
+      // ============================================
+      // GLOSSARY TERM HOVER
+      // ============================================
+
+      document.querySelectorAll(".term").forEach((term) => {
+        term.addEventListener("click", function () {
+          const termName = this.textContent;
+          console.log(`Show definition for: ${termName}`);
+          // Could show a tooltip or modal with the glossary definition
+        });
+      });
+
+      // ============================================
+      // RUN TESTS
+      // ============================================
+
+      document.getElementById("run-tests-btn").addEventListener("click", async function () {
+        this.textContent = "⏳ Running...";
+        this.disabled = true;
+
+        try {
+          // Simulate test run
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+
+          // Update UI with results
+          console.log("Tests completed");
+        } finally {
+          this.textContent = "▶ Run Tests";
+          this.disabled = false;
+        }
+      });
+
+      // ============================================
+      // VIEW TOGGLE (PM / Technical)
+      // ============================================
+
+      function toggleView(btn, mode) {
+        const scenarioCard = btn.closest(".scenario-card");
+        const scenarioId = scenarioCard.dataset.scenarioId;
+
+        // Update buttons
+        const buttons = btn.parentElement.querySelectorAll("button");
+        buttons.forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+
+        // Toggle view content
+        const pmView = scenarioCard.querySelector(".pm-view");
+        const techView = scenarioCard.querySelector(".technical-view");
+
+        if (mode === "pm") {
+          pmView.classList.add("active");
+          techView.classList.remove("active");
+        } else {
+          pmView.classList.remove("active");
+          techView.classList.add("active");
+        }
+      }
+
+      // ============================================
+      // CONVERSATIONAL EDIT CHAT
+      // ============================================
+
+      function openEditChat(scenarioId, scenarioTitle) {
+        const chatPanel = document.getElementById("edit-chat-panel");
+        const fixPanel = document.getElementById("fix-chat-panel");
+
+        // Close fix panel if open
+        fixPanel.classList.remove("open");
+
+        // Set context
+        document.getElementById("context-scenario").textContent = scenarioTitle;
+
+        // Clear messages and add fresh welcome
+        const messagesEl = document.getElementById("chat-messages");
+        messagesEl.innerHTML = `
+                <div class="chat-message agent">
+                    <div class="chat-message-avatar">🤖</div>
+                    <div class="chat-message-content">
+                        <div class="chat-message-name">Intent Agent</div>
+                        <div class="chat-message-text">
+                            <p>I can help you modify "<strong>${scenarioTitle}</strong>". What would you like to change?</p>
+                            <p style="margin-top: 8px; color: var(--text-muted); font-size: 12px;">Examples:</p>
+                            <ul style="margin: 4px 0 0 16px; color: var(--text-muted); font-size: 12px;">
+                                <li>Add an assertion for response time under 200ms</li>
+                                <li>Change the expected status code</li>
+                                <li>Add another test case for edge case</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+        // Open panel
+        chatPanel.classList.add("open");
+
+        // Focus input
+        setTimeout(() => document.getElementById("chat-input").focus(), 100);
+      }
+
+      function closeChatPanel() {
+        document.getElementById("edit-chat-panel").classList.remove("open");
+      }
+
+      function sendChatMessage() {
+        const input = document.getElementById("chat-input");
+        const message = input.value.trim();
+        if (!message) return;
+
+        const messagesEl = document.getElementById("chat-messages");
+
+        // Add user message
+        messagesEl.innerHTML += `
+                <div class="chat-message user">
+                    <div class="chat-message-content">
+                        <div class="chat-message-name">You</div>
+                        <div class="chat-message-text">${message}</div>
+                    </div>
+                    <div class="chat-message-avatar">👤</div>
+                </div>
+            `;
+
+        // Clear input
+        input.value = "";
+
+        // Scroll to bottom
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+
+        // Simulate agent response
+        setTimeout(() => {
+          messagesEl.innerHTML += `
+                    <div class="chat-message agent">
+                        <div class="chat-message-avatar">🤖</div>
+                        <div class="chat-message-content">
+                            <div class="chat-message-name">Intent Agent</div>
+                            <div class="chat-message-text">
+                                <p>I'll update the intent file with that change. Here's what I'm proposing:</p>
+                                <div class="chat-suggestion" style="margin-top: 12px;">
+                                    <div class="chat-suggestion-header">
+                                        <span class="chat-suggestion-title">Intent Update</span>
+                                    </div>
+                                    <div class="chat-suggestion-content" style="font-family: var(--font-mono); font-size: 12px; color: var(--color-success);">
++ - response time < 200ms</div>
+                                    <div class="chat-suggestion-actions">
+                                        <button class="btn btn-accept" onclick="acceptIntentChange()">✓ Accept</button>
+                                        <button class="btn btn-secondary" onclick="showInSource()">View in .intent</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }, 800);
+      }
+
+      function quickAction(text) {
+        document.getElementById("chat-input").value = text;
+        sendChatMessage();
+      }
+
+      function acceptIntentChange() {
+        const messagesEl = document.getElementById("chat-messages");
+        messagesEl.innerHTML += `
+                <div class="chat-message agent">
+                    <div class="chat-message-avatar">🤖</div>
+                    <div class="chat-message-content">
+                        <div class="chat-message-name">Intent Agent</div>
+                        <div class="chat-message-text">
+                            <p>✅ Intent updated! The test is now running against the new assertion...</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+
+        // Simulate test run
+        setTimeout(() => {
+          messagesEl.innerHTML += `
+                    <div class="chat-message agent">
+                        <div class="chat-message-avatar">🤖</div>
+                        <div class="chat-message-content">
+                            <div class="chat-message-name">Intent Agent</div>
+                            <div class="chat-message-text">
+                                <p>🎉 <strong>Test passed!</strong> The response time was 87ms (under 200ms limit).</p>
+                                <p style="margin-top: 8px; color: var(--text-muted); font-size: 12px;">The intent file has been saved. Would you like to add anything else?</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }, 1500);
+      }
+
+      function showInSource() {
+        closeChatPanel();
+        openSourceView();
+      }
+
+      // ============================================
+      // FIX WORKFLOW
+      // ============================================
+
+      function openFixChat(scenarioId) {
+        const fixPanel = document.getElementById("fix-chat-panel");
+        const editPanel = document.getElementById("edit-chat-panel");
+
+        // Close edit panel if open
+        editPanel.classList.remove("open");
+
+        // Open fix panel
+        fixPanel.classList.add("open");
+      }
+
+      function closeFixPanel() {
+        document.getElementById("fix-chat-panel").classList.remove("open");
+      }
+
+      function sendFixMessage() {
+        const input = document.getElementById("fix-input");
+        const message = input.value.trim();
+        if (!message) return;
+
+        const messagesEl = document.getElementById("fix-messages");
+
+        // Add user message
+        messagesEl.innerHTML += `
+                <div class="chat-message user">
+                    <div class="chat-message-content">
+                        <div class="chat-message-name">You</div>
+                        <div class="chat-message-text">${message}</div>
+                    </div>
+                    <div class="chat-message-avatar">👤</div>
+                </div>
+            `;
+
+        input.value = "";
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+
+        // Agent responds
+        setTimeout(() => {
+          messagesEl.innerHTML += `
+                    <div class="chat-message agent">
+                        <div class="chat-message-avatar">🤖</div>
+                        <div class="chat-message-content">
+                            <div class="chat-message-name">Intent Agent</div>
+                            <div class="chat-message-text">
+                                <p>Let me try a different approach...</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }, 500);
+      }
+
+      function acceptFix() {
+        const messagesEl = document.getElementById("fix-messages");
+        messagesEl.innerHTML += `
+                <div class="chat-message agent">
+                    <div class="chat-message-avatar">🤖</div>
+                    <div class="chat-message-content">
+                        <div class="chat-message-name">Intent Agent</div>
+                        <div class="chat-message-text">
+                            <p>✅ <strong>Fix applied!</strong> Opening VS Code to show you the change...</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+
+        // Simulate applying and re-running test
+        setTimeout(() => {
+          messagesEl.innerHTML += `
+                    <div class="chat-message agent">
+                        <div class="chat-message-avatar">🤖</div>
+                        <div class="chat-message-content">
+                            <div class="chat-message-name">Intent Agent</div>
+                            <div class="chat-message-text">
+                                <p>🎉 <strong>Test now passing!</strong> The email is being sent correctly.</p>
+                                <p style="margin-top: 8px; color: var(--text-muted); font-size: 12px;">I've updated the scenario status in the studio.</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+
+          // Update the UI to show the scenario as passing (demo)
+          const failingCard = document.querySelector('.scenario-card[data-scenario-id="password-reset-email"]');
+          if (failingCard) {
+            failingCard.querySelector(".scenario-badge").className = "scenario-badge passing";
+            failingCard.querySelector(".scenario-badge").textContent = "✓ Passing";
+          }
+        }, 2000);
+      }
+
+      function rejectFix() {
+        const input = document.getElementById("fix-input");
+        input.value = "Try a different approach - ";
+        input.focus();
+      }
+
+      // ============================================
+      // SOURCE VIEW MODAL
+      // ============================================
+
+      function openSourceView() {
+        document.getElementById("source-modal").classList.add("open");
+      }
+
+      function closeSourceView() {
+        document.getElementById("source-modal").classList.remove("open");
+      }
+
+      // Close modal on escape key
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") {
+          closeSourceView();
+          closeChatPanel();
+          closeFixPanel();
+        }
+      });
+
+      // Close modal when clicking outside
+      document.getElementById("source-modal").addEventListener("click", function (e) {
+        if (e.target === this) {
+          closeSourceView();
+        }
+      });
+
+      // ============================================
+      // UTILITIES
+      // ============================================
+
+      function openInVscode(file, line) {
+        // Use VS Code URL scheme
+        const uri = `vscode://file/${encodeURIComponent("/path/to/project/" + file)}:${line}`;
+        console.log(`Opening: ${uri}`);
+        window.open(uri, "_blank");
+      }
+
+      function copyCurl(scenarioId) {
+        // Build cURL command based on scenario
+        const curlCommands = {
+          "login-success": `curl -X POST http://localhost:8080/api/login \\
+  -H "Content-Type: application/json" \\
+  -d '{"email": "test@test.com", "password": "correct"}'`,
+          "login-invalid": `curl -X POST http://localhost:8080/api/login \\
+  -H "Content-Type: application/json" \\
+  -d '{"email": "test@test.com", "password": "wrong"}'`,
+          "password-reset-email": `curl -X POST http://localhost:8080/api/password-reset \\
+  -H "Content-Type: application/json" \\
+  -d '{"email": "user@test.com"}'`,
+          "oauth-google": `curl -X GET http://localhost:8080/api/auth/google`,
+        };
+
+        const cmd = curlCommands[scenarioId] || "curl http://localhost:8080";
+        navigator.clipboard.writeText(cmd).then(() => {
+          // Show brief toast notification
+          const toast = document.createElement("div");
+          toast.style.cssText = `
+                    position: fixed;
+                    bottom: 20px;
+                    right: 20px;
+                    background: var(--color-success);
+                    color: white;
+                    padding: 12px 20px;
+                    border-radius: 8px;
+                    font-size: 13px;
+                    z-index: 10000;
+                    animation: slideIn 0.2s ease;
+                `;
+          toast.textContent = "✓ cURL command copied!";
+          document.body.appendChild(toast);
+          setTimeout(() => toast.remove(), 2000);
+        });
+      }
+
+      // Hook up the View Source button in header
+      document.querySelector(".header-actions").addEventListener("click", function (e) {
+        if (e.target.closest("button")?.textContent?.includes("View Source")) {
+          openSourceView();
+        }
+      });
+    </script>
+  </body>
+</html>

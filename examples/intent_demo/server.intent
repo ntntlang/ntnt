@@ -1,9 +1,64 @@
 # Test Server Intent Specification
 # Run: ntnt intent check server.tnt
 
+## Glossary
+
+| Term | Means |
+|------|-------|
+| user | Someone accessing the application |
+| visits | Makes a GET request to |
+| homepage | The root path "/" |
+| about page | The /about page |
+| creates a task | POST request to /api/tasks |
+| success message with "$text" | Displays component.success_message with text parameter |
+| error message with "$text" | Displays component.error_message with text parameter |
+| authenticated | User has valid session token |
+
+---
+
+Component: Success Message
+  id: component.success_message
+  parameters: [text]
+  description: "Green success notification displayed to the user"
+  
+  Inherent Behavior:
+    → page contains "$text"
+    → page contains "success"
+
+  Scenario: Message visibility
+    When a user sees a success message
+    → text is prominently displayed
+    → green styling is applied
+
+---
+
+Component: Error Message
+  id: component.error_message
+  parameters: [text]
+  description: "Red error notification displayed to the user"
+  
+  Inherent Behavior:
+    → page contains "$text"
+    → page contains "error"
+
+  Scenario: Error display
+    When a user sees an error message
+    → text is prominently displayed
+    → red styling is applied
+
+---
+
 Feature: Home Page
   id: feature.home
   description: "The home page displays a welcome message and navigation"
+  
+  Scenario: First visit
+    description: "Ensures new users see the welcome content and navigation links"
+    When a user visits the homepage
+    → they see success message with "Welcome to the Test Server"
+    → they see "About"
+    → they see "API Status"
+  
   test:
     - request: GET /
       assert:
@@ -15,6 +70,13 @@ Feature: Home Page
 Feature: About Page
   id: feature.about
   description: "The about page describes the application"
+  
+  Scenario: View about information
+    Given a user is on the homepage
+    When they visit the about page
+    → they see "About Us"
+    → they see "Intent-Driven Development"
+  
   test:
     - request: GET /about
       assert:
@@ -25,9 +87,40 @@ Feature: About Page
 Feature: API Status Endpoint
   id: feature.api_status
   description: "The API status endpoint returns health information"
+  
+  Scenario: Check system status
+    When a user visits /api/status
+    → they see "ok"
+    → they see "version"
+  
   test:
     - request: GET /api/status
       assert:
         - status: 200
         - body contains "ok"
         - body contains "version"
+
+Feature: Task Creation
+  id: feature.create_task
+  description: "Users can create new tasks"
+  
+  Scenario: Create a task successfully
+    description: "Happy path for authenticated users creating valid tasks"
+    Given a user is authenticated
+    When a user creates a task with title "Buy groceries"
+    → task is created successfully
+    → they see success message with "Task created"
+  
+  Scenario: Create a task without authentication
+    description: "Error path when unauthenticated user attempts task creation"
+    Given a user is not authenticated
+    When a user creates a task with title "Buy groceries"
+    → they see error message with "Authentication required"
+  
+  test:
+    - request: POST /api/tasks
+      body: '{"title": "Buy groceries", "completed": false}'
+      assert:
+        - status: 200
+        - body contains "Task created"
+        - body contains "success"

@@ -1,0 +1,37 @@
+{{! IDD Explained blog post }}
+<a href="/blog" class="back-link">&larr; Back to Blog</a>
+
+<article class="blog-post">
+    <h2>Intent-Driven Development Explained</h2>
+    <div class="blog-meta" style="margin-bottom: 2rem;">January 10, 2026 - NTNT Team</div>
+
+    <div class="content">
+        <p>Intent-Driven Development (IDD) is a methodology where human requirements are written as structured intent files, code is annotated with implementation markers, and the system verifies that implementations match their intents.</p>
+
+        <h3>The IDD Workflow</h3>
+
+        <p>IDD follows a simple cycle:</p>
+
+        <ol>
+            <li><strong>Human writes intent</strong> - Describe what the software should do in a <code>.intent</code> file</li>
+            <li><strong>Agent implements</strong> - AI generates code with <code>@implements</code> annotations</li>
+            <li><strong>System verifies</strong> - <code>ntnt intent check</code> confirms the implementation matches</li>
+            <li><strong>Human reviews</strong> - Approve, refine intent, or request changes</li>
+        </ol>
+
+        <h3>Why Intent Files?</h3>
+
+        <p>Intent files serve multiple purposes:</p>
+
+        <ul>
+            <li>They are human-readable specifications that do not require reading code</li>
+            <li>They are machine-parseable, so agents know exactly what to build</li>
+            <li>They create a permanent record of requirements separate from implementation</li>
+            <li>They enable automatic verification that code does what it should</li>
+        </ul>
+
+        <h3>Traceability</h3>
+
+        <p>Every function can be traced back to its intent. Run <code>ntnt intent coverage</code> to see which intents have implementations and which are missing. This makes it easy to audit a codebase and understand its purpose.</p>
+    </div>
+</article>

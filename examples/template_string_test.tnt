@@ -78,4 +78,113 @@ Single { braces } pass through.
 """
 print(escaped)
 
+// ============================================
+// NEW FEATURES - Template Engine v0.3.0
+// ============================================
+
+// Elif chains
+let score = 75
+let grade = """
+{{#if score >= 90}}Grade: A
+{{#elif score >= 80}}Grade: B
+{{#elif score >= 70}}Grade: C
+{{#elif score >= 60}}Grade: D
+{{#else}}Grade: F{{/if}}
+"""
+print("Elif test:")
+print(grade)
+
+// Loop metadata (@index, @first, @last, @length, @even, @odd)
+let colors = ["Red", "Green", "Blue"]
+let indexed_list = """
+<ul>
+{{#for color in colors}}
+    <li class="{{#if @first}}first{{#elif @last}}last{{#else}}middle{{/if}}{{#if @even}} even{{/if}}">
+        {{@index}}/{{@length}}: {{color}}
+    </li>
+{{/for}}
+</ul>
+"""
+print("Loop metadata test:")
+print(indexed_list)
+
+// Empty loop with {{#empty}}
+let empty_items = []
+let empty_list = """
+<ul>
+{{#for item in empty_items}}
+    <li>{{item}}</li>
+{{#empty}}
+    <li class="empty">No items found</li>
+{{/for}}
+</ul>
+"""
+print("Empty loop test:")
+print(empty_list)
+
+// Template comments {{! comment }}
+let with_comments = """
+{{! This comment will not appear in output }}
+<div>
+    {{! TODO: add more content here }}
+    <p>Visible content</p>
+</div>
+"""
+print("Comment test:")
+print(with_comments)
+
+// Filters - text transformations
+let raw_name = "john doe"
+let filtered = """
+<p>Original: {{raw_name}}</p>
+<p>Uppercase: {{raw_name | uppercase}}</p>
+<p>Capitalize: {{raw_name | capitalize}}</p>
+<p>Trimmed and upper: {{"  hello  " | trim | uppercase}}</p>
+"""
+print("Filter test:")
+print(filtered)
+
+// Default filter for missing values
+let optional_value = ""
+let with_defaults = """
+<p>{{missing_var | default("N/A")}}</p>
+<p>{{optional_value | default("No value provided")}}</p>
+"""
+print("Default filter test:")
+print(with_defaults)
+
+// Truncate and escape filters
+let long_text = "This is a very long description that needs to be truncated."
+let user_input = "<script>alert('xss')</script>"
+let safe_output = """
+<p>{{long_text | truncate(30)}}</p>
+<p>{{user_input | escape}}</p>
+"""
+print("Truncate and escape test:")
+print(safe_output)
+
+// Collection filters
+let numbers = [3, 1, 4, 1, 5, 9]
+let words = ["hello", "world"]
+let collection_filters = """
+<p>First: {{numbers | first}}</p>
+<p>Last: {{numbers | last}}</p>
+<p>Length: {{numbers | length}}</p>
+<p>Reversed: {{numbers | reverse | join(", ")}}</p>
+<p>Sliced: {{numbers | slice(0, 3) | join(", ")}}</p>
+<p>Joined words: {{words | join(" ")}}</p>
+"""
+print("Collection filter test:")
+print(collection_filters)
+
+// JSON filter
+let data = map { "name": "Alice", "age": 30 }
+let json_output = """
+<script>
+    const user = {{data | json}};
+</script>
+"""
+print("JSON filter test:")
+print(json_output)
+
 print("All template string tests passed!")

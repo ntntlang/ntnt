@@ -1,0 +1,9 @@
+// Logger middleware - logs all requests
+// @utility
+// Middleware signature: fn middleware(req) -> () | Map
+// Returns () to continue to handler, or a Map with "status" to short-circuit
+
+export fn middleware(req) {
+    print("[" + req.method + "] " + req.path)
+    return ()
+}

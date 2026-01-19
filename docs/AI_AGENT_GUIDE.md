@@ -348,6 +348,119 @@ Feature: User Authentication
 
 ---
 
+## Intent Assertion Language (IAL)
+
+IAL is a **term rewriting engine** that translates natural language assertions into executable tests. It powers the IDD assertions.
+
+### How IAL Works
+
+```
+"they see success response"
+    ↓ vocabulary lookup (glossary)
+"status 2xx, body contains 'ok'"
+    ↓ standard term resolution
+[Check(InRange, "response.status", 200-299), Check(Contains, "response.body", "ok")]
+    ↓ execution
+[✓, ✓]
+```
+
+### Glossary Definitions
+
+Define domain-specific terms in your `.intent` file:
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+| success response | status 2xx, body contains "ok" |
+| they see "$text" | body contains "$text" |
+| they don't see "$text" | body not contains "$text" |
+| logged in user | component.authenticated_user |
+```
+
+Then use natural language in tests:
+
+```yaml
+Feature: User Profile
+  id: feature.user_profile
+  test:
+    - request: GET /profile
+      given: logged in user
+      assert:
+        - they see success response
+        - they see "Welcome back"
+```
+
+### Standard Terms (Built-in)
+
+**HTTP:**
+| Pattern | Description |
+|---------|-------------|
+| `status 200` | Exact status code |
+| `status 2xx` | Any 2xx status |
+| `body contains "$text"` | Body includes text |
+| `body not contains "$text"` | Body excludes text |
+| `body matches $pattern` | Regex match |
+| `header "$name" contains "$value"` | Header check |
+| `redirects to $path` | Redirect check |
+| `returns JSON` | Content-Type check |
+
+**CLI:**
+| Pattern | Description |
+|---------|-------------|
+| `exits successfully` | Exit code 0 |
+| `exits with code $n` | Specific exit code |
+| `output shows "$text"` | Stdout check |
+| `error shows "$text"` | Stderr check |
+
+**Files:**
+| Pattern | Description |
+|---------|-------------|
+| `file "$path" exists` | File existence |
+| `file "$path" contains "$text"` | File content |
+| `directory "$path" exists` | Directory existence |
+
+### Components
+
+Reusable assertion templates with parameters:
+
+```yaml
+Component: Authenticated User
+  id: component.authenticated_user
+  parameters:
+    - username: the user's login name
+  inherent_behavior:
+    - valid session token exists
+
+  preconditions:
+    verify: POST /login with valid credentials returns status 200
+    skip: "User authentication not available"
+```
+
+Reference in glossary:
+
+```yaml
+| logged in user | component.authenticated_user(username: "testuser") |
+```
+
+### Preconditions (Given Clauses)
+
+Scenarios can have preconditions that must pass before the main test:
+
+```yaml
+Scenario: View profile
+  Given: logged in user
+  When: GET /profile
+  Then:
+    - status 200
+    - they see their username
+```
+
+If the precondition fails, the test is **SKIPPED** (not failed).
+
+---
+
 ## Lint Commands
 
 The `ntnt lint` command catches common mistakes like:
@@ -515,14 +628,72 @@ Use \{{ and \}} to output literal double braces.
 
 **Template String Rules:**
 
-| Syntax                               | Result                 |
-| ------------------------------------ | ---------------------- |
-| `{{expr}}`                           | Interpolate expression |
-| `{ ... }`                            | Literal (CSS/JS safe)  |
-| `{{#for x in arr}}...{{/for}}`       | Loop over array        |
-| `{{#if cond}}...{{/if}}`             | Conditional            |
-| `{{#if cond}}...{{#else}}...{{/if}}` | If-else                |
-| `\{{` and `\}}`                      | Literal `{{` and `}}`  |
+| Syntax                                   | Result                          |
+| ---------------------------------------- | ------------------------------- |
+| `{{expr}}`                               | Interpolate expression          |
+| `{{expr \| filter}}`                     | Apply filter to expression      |
+| `{ ... }`                                | Literal (CSS/JS safe)           |
+| `{{#for x in arr}}...{{/for}}`           | Loop over array                 |
+| `{{#for x in arr}}...{{#empty}}{{/for}}` | Loop with empty fallback        |
+| `{{#if cond}}...{{/if}}`                 | Conditional                     |
+| `{{#if cond}}...{{#elif}}...{{/if}}`     | Elif chains                     |
+| `{{#if cond}}...{{#else}}...{{/if}}`     | If-else                         |
+| `{{! comment }}`                         | Template comment (not rendered) |
+| `\{{` and `\}}`                          | Literal `{{` and `}}`           |
+
+**Loop Metadata Variables:**
+
+Inside `{{#for}}` loops, use these special variables: `@index` (0-based), `@length` (total items), `@first`, `@last`, `@even`, `@odd`.
+
+```ntnt
+// ✅ Use loop metadata for styling
+let colors = ["Red", "Green", "Blue"]
+let list = """
+{{#for color in colors}}
+    <li class="{{#if @first}}first{{#elif @last}}last{{#else}}middle{{/if}}">
+        {{@index}}/{{@length}}: {{color}}
+    </li>
+{{/for}}
+"""
+
+// ✅ Handle empty lists
+let items = []
+let output = """
+{{#for item in items}}
+    <li>{{item}}</li>
+{{#empty}}
+    <li class="empty">No items found</li>
+{{/for}}
+"""
+```
+
+**Template Filters:**
+
+Use the pipe syntax to transform values: `{{expr | filter}}`. Filters can be chained.
+
+```ntnt
+// ✅ Transform text
+let name = "john doe"
+let html = """
+<p>{{name | capitalize}}</p>
+<p>{{name | uppercase}}</p>
+"""
+
+// ✅ Handle missing values
+let page = """
+<p>{{missing_var | default("N/A")}}</p>
+"""
+
+// ✅ Security: escape user input
+let user_input = "<script>alert('xss')</script>"
+let safe = """<p>{{user_input | escape}}</p>"""
+
+// ✅ Chain filters
+let items = [3, 1, 4, 1, 5]
+let output = """{{items | reverse | join(", ")}}"""  // "5, 1, 4, 1, 3"
+```
+
+**Available Filters:** `uppercase`, `lowercase`, `capitalize`, `trim`, `truncate(n)`, `replace(old, new)`, `escape`, `raw`, `default(val)`, `length`, `first`, `last`, `reverse`, `join(sep)`, `slice(start, end)`, `json`, `number`, `url_encode`
 
 ### 6. Truthy/Falsy Values
 
@@ -622,7 +793,7 @@ NTNT uses JavaScript-style imports with quoted paths and `/` separators:
 ```ntnt
 // ✅ CORRECT - NTNT import syntax
 import { split, join, trim } from "std/string"
-import { fetch, post } from "std/http"
+import { fetch, download } from "std/http"
 import "std/math" as math
 import { readFile as read } from "std/fs"
 
@@ -768,12 +939,12 @@ import { encode, decode, parse_query, build_query } from "std/url"
 import { push, pop, first, last, reverse, slice, concat, is_empty } from "std/collections"
 import { keys, values, entries, has_key } from "std/collections"  // Map iteration
 
-// HTTP client
-import { fetch, post, put, delete, get_json, post_json } from "std/http"
+// HTTP client - unified fetch() API
+import { fetch, download, Cache } from "std/http"
 
-// HTTP server - ONLY response builders need importing
-// NOTE: get(), post(), listen(), serve_static(), use_middleware() are GLOBAL BUILTINS (no import needed)
-import { json, html, text, redirect, status } from "std/http/server"
+// HTTP server - response builders and helpers
+// NOTE: get(), post(), listen(), serve_static(), use_middleware(), on_shutdown() are GLOBAL BUILTINS
+import { json, html, text, redirect, status, parse_json, parse_form } from "std/http/server"
 
 // PostgreSQL database
 import { connect, query, execute, close } from "std/db/postgres"
@@ -812,16 +983,21 @@ import { channel, send, recv, sleep_ms } from "std/concurrent"
 | `get(pattern, handler)`     | Global builtin | No                          |
 | `post(pattern, handler)`    | Global builtin | No                          |
 | `put(pattern, handler)`     | Global builtin | No                          |
-| `delete(pattern, handler)`  | Global builtin | No                          |
 | `patch(pattern, handler)`   | Global builtin | No                          |
+| `delete(pattern, handler)`  | Global builtin | No                          |
 | `listen(port)`              | Global builtin | No                          |
 | `serve_static(prefix, dir)` | Global builtin | No                          |
 | `use_middleware(fn)`        | Global builtin | No                          |
-| `json(data)`                | Module export  | **Yes** - `std/http/server` |
-| `html(content)`             | Module export  | **Yes** - `std/http/server` |
+| `on_shutdown(fn)`           | Global builtin | No                          |
+| `routes(dir)`               | Global builtin | No (file-based routing)     |
+| `template(path, vars)`      | Global builtin | No (external templates)     |
+| `json(data, status?)`       | Module export  | **Yes** - `std/http/server` |
+| `html(content, status?)`    | Module export  | **Yes** - `std/http/server` |
 | `text(content)`             | Module export  | **Yes** - `std/http/server` |
 | `redirect(url)`             | Module export  | **Yes** - `std/http/server` |
 | `status(code, body)`        | Module export  | **Yes** - `std/http/server` |
+| `parse_form(req)`           | Module export  | **Yes** - `std/http/server` |
+| `parse_json(req)`           | Module export  | **Yes** - `std/http/server` |
 
 ### Basic HTTP Server Example
 
@@ -836,8 +1012,8 @@ fn get_user(req) {
 }
 
 fn create_user(req) {
-    let body = parse_query(req.body)
-    return json(map { "created": true, "name": body["name"] })
+    let form = parse_form(req)
+    return json(map { "created": true, "name": form["name"] })
 }
 
 // Routes use global builtins - no import needed
@@ -889,28 +1065,31 @@ get(r"/users/{id}", get_user)
 req.method        // "GET", "POST", etc.
 req.path          // "/users/123"
 req.params        // Map of route parameters: params["id"] = "123"
-req.query         // Map of query string: ?name=alice → query["name"] = "alice"
+req.query_params  // Map of query string: ?name=alice → query_params["name"] = "alice"
 req.headers       // Map of headers: headers["content-type"]
 req.body          // Raw request body as STRING (for POST/PUT)
+req.ip            // Client IP (from X-Forwarded-For if behind proxy)
+req.id            // Request ID (from X-Request-ID or auto-generated UUID)
+req.protocol      // "http" or "https" (from X-Forwarded-Proto)
 
-// ❌ WRONG - These do NOT exist
-req.form          // DOES NOT EXIST - use req.body and parse it
-req.json          // DOES NOT EXIST as property - body is a string
+// ❌ WRONG - These do NOT exist as properties
+req.json          // Use parse_json(req) instead
+req.form          // Use parse_form(req) instead
 req.data          // DOES NOT EXIST
 req.params.id     // WRONG - use req.params["id"]
 ```
 
 ### Parsing Form Data (POST requests)
 
-Use `parse_query()` from `std/url` to parse form data:
+Use `parse_form()` from `std/http/server` to parse URL-encoded form data:
 
 ```ntnt
-import { parse_query } from "std/url"
+import { parse_form } from "std/http/server"
 
-fn post(req) {
-    // parse_query converts "name=Alice&email=alice%40example.com&age=30"
+fn handle_post(req) {
+    // parse_form converts "name=Alice&email=alice%40example.com&age=30"
     // into map { "name": "Alice", "email": "alice@example.com", "age": "30" }
-    let form = parse_query(req.body)
+    let form = parse_form(req)
 
     let name = form["name"]     // "Alice"
     let email = form["email"]   // "alice@example.com" (auto URL-decoded)
@@ -920,7 +1099,186 @@ fn post(req) {
 }
 ```
 
-**Note:** `parse_query()` automatically URL-decodes values (handles `%20`, `+`, etc.).
+### Parsing JSON Body
+
+Use `parse_json()` from `std/http/server`:
+
+```ntnt
+import { parse_json, json } from "std/http/server"
+
+fn handle_api(req) {
+    match parse_json(req) {
+        Ok(data) => {
+            let name = data["name"]
+            return json(map { "received": name })
+        },
+        Err(e) => return json(map { "error": e }, 400)
+    }
+}
+```
+
+### Server Lifecycle Hook
+
+Register cleanup code to run when server shuts down:
+
+```ntnt
+on_shutdown(fn() {
+    print("Server shutting down...")
+    // Close database connections, flush logs, etc.
+})
+```
+
+### External Templates
+
+Use `template()` to load external HTML files with Mustache-style variable substitution:
+
+```ntnt
+// template(path, variables) - path is relative to the .tnt file
+let page = template("views/home.html", map {
+    "title": "Welcome",
+    "username": "Alice",
+    "items": [
+        map { "name": "Item 1", "price": 10 },
+        map { "name": "Item 2", "price": 20 }
+    ]
+})
+return html(page)
+```
+
+**views/home.html:**
+```html
+<!DOCTYPE html>
+<html>
+<head><title>{{title}}</title></head>
+<body>
+    <h1>Hello, {{username}}!</h1>
+
+    <!-- Loops -->
+    <ul>
+    {{#for item in items}}
+        <li>{{item.name}} - ${{item.price}}</li>
+    {{/for}}
+    </ul>
+
+    <!-- Conditionals -->
+    {{#if logged_in}}
+        <p>Welcome back!</p>
+    {{#else}}
+        <p>Please log in</p>
+    {{/if}}
+</body>
+</html>
+```
+
+**Recommended project structure:**
+```
+my-app/
+├── server.tnt
+├── views/
+│   ├── layout.html
+│   ├── home.html
+│   ├── styles.css
+│   └── partials/
+│       ├── header.html
+│       └── footer.html
+└── public/
+    └── (static assets)
+```
+
+**Layout pattern with partials:**
+```ntnt
+fn render_page(content, title) {
+    let styles = template("views/styles.css", map {})
+    let header = template("views/partials/header.html", map {})
+    let footer = template("views/partials/footer.html", map {})
+
+    return template("views/layout.html", map {
+        "title": title,
+        "styles": styles,
+        "header": header,
+        "footer": footer,
+        "content": content
+    })
+}
+
+fn home(req) {
+    let content = template("views/home.html", map {
+        "featured_items": get_featured_items()
+    })
+    return html(render_page(content, "Home"))
+}
+
+get("/", home)
+```
+
+**Important:** Template paths resolve relative to the `.tnt` file location, not the current working directory. This means your app works identically whether you run `ntnt run server.tnt` from the project folder or from anywhere else.
+
+### File-Based Routing
+
+Use `routes()` to auto-discover route handlers from a directory structure (like Next.js/SvelteKit):
+
+```ntnt
+// Load all routes from routes/ directory
+routes("routes")
+
+// Middleware auto-loads from middleware/ directory
+listen(8080)
+```
+
+**Directory structure:**
+```
+my-app/
+├── server.tnt
+├── routes/
+│   ├── index.tnt          # GET /
+│   ├── about.tnt          # GET /about
+│   ├── api/
+│   │   ├── users.tnt      # GET/POST /api/users
+│   │   └── [id].tnt       # GET /api/:id (dynamic segment)
+│   └── blog/
+│       └── [slug].tnt     # GET /blog/:slug
+├── middleware/
+│   └── logging.tnt        # Auto-applied to all routes
+└── views/
+    └── ...
+```
+
+**Route file format** - export functions named after HTTP methods:
+
+```ntnt
+// routes/api/users.tnt
+import { json, parse_form } from "std/http/server"
+
+fn get(req) {
+    return json(map { "users": get_all_users() })
+}
+
+fn post(req) {
+    let form = parse_form(req)
+    create_user(form["name"], form["email"])
+    return json(map { "created": true })
+}
+```
+
+**Dynamic segments** use `[param]` in filename:
+
+```ntnt
+// routes/api/[id].tnt
+fn get(req) {
+    let id = req.params["id"]  // Access dynamic segment
+    return json(map { "user": get_user(id) })
+}
+```
+
+**Middleware** runs before route handlers:
+
+```ntnt
+// middleware/logging.tnt
+fn middleware(req) {
+    print("Request: {req.method} {req.path}")
+    // Return nothing to continue, or return response to short-circuit
+}
+```
 
 ### Type Conversion Functions
 
@@ -934,7 +1292,7 @@ str(42)           // Converts integer to string: "42"
 str(3.14)         // Converts float to string: "3.14"
 
 // Common pattern: form field to database integer
-let form = parse_query(req.body)
+let form = parse_form(req)
 let age = int(form["age"])      // Convert "25" to 25 for DB
 let user_id = int(form["id"])   // Convert "123" to 123 for DB
 
@@ -980,9 +1338,15 @@ let csv_from_maps = stringify_with_headers(maps, headers)
 
 // Fetch and parse remote CSV
 fn fetch_csv_data(url: String) {
-    let response = get(url)
-    let records = parse_with_headers(response.body)
-    return records
+    match fetch(url) {
+        Ok(response) => {
+            return parse_with_headers(response.body)
+        },
+        Err(e) => {
+            print("Fetch error: " + e)
+            return []
+        }
+    }
 }
 
 // Custom delimiter (e.g., tab-separated)
@@ -1195,14 +1559,13 @@ for user in users {
 
 ```ntnt
 import { connect, query, execute, close } from "std/db/postgres"
-import { html } from "std/http_server"
-import { parse_query } from "std/url"
+import { html, parse_form } from "std/http/server"
 
 // CREATE - POST handler
-fn post(req) {
+fn create_user(req) {
     let db = unwrap(connect("postgres://..."))
 
-    let form = parse_query(req.body)
+    let form = parse_form(req)
     let name = form["name"]
     let age = int(form["age"])  // Convert to int for database!
 
@@ -1213,7 +1576,7 @@ fn post(req) {
 }
 
 // READ - GET handler
-fn get(req) {
+fn list_users(req) {
     let db = unwrap(connect("postgres://..."))
     let users = unwrap(query(db, "SELECT * FROM users", []))
     close(db)
@@ -1225,7 +1588,7 @@ fn get(req) {
 fn delete_user(req) {
     let db = unwrap(connect("postgres://..."))
 
-    let form = parse_query(req.body)
+    let form = parse_form(req)
     let user_id = int(form["id"])  // Convert to int for database!
 
     execute(db, "DELETE FROM users WHERE id = $1", [user_id])

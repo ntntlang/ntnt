@@ -1,0 +1,140 @@
+# Task Manager MVP
+# A simple task management API demonstrating IAL format
+# Run: ntnt intent studio server.tnt
+
+## Overview
+A minimal task management API that demonstrates the Intent Assertion Language (IAL).
+Shows how glossary terms create readable scenarios that map to technical assertions.
+Demonstrates the two-layer glossary: human-readable meanings + technical bindings.
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| user | Anonymous API consumer |
+| visits | Makes a GET request to a location |
+| creates | Makes a POST request to a location |
+| homepage | The root path of the application |
+| API status | The health check endpoint for monitoring |
+| task list | The collection of all tasks |
+| sees | Verifies response body contains expected text |
+| task | A todo item with title and completion status |
+| authenticated | User has a valid session token |
+| no tasks exist in the system | Database has zero tasks |
+| success response with "$message" | Displays component.success_response |
+| error response with "$message" | Displays component.error_response |
+
+## Glossary [Technical Bindings]
+
+homepage:
+  path: /
+
+API status:
+  path: /api/status
+
+task list:
+  path: /api/tasks
+
+visits:
+  action: GET
+
+creates:
+  action: POST
+
+authenticated:
+  assert:
+    - status 200
+    - json path "token" exists
+
+no tasks exist in the system:
+  precondition: tasks table is empty
+  assert:
+    - body contains "\"tasks\":[]"
+
+---
+
+Component: Success Response
+  id: component.success_response
+  parameters: [message]
+  description: "Successful API response with status and message"
+  
+  Inherent Behavior:
+    → they see "$message"
+    → they see "ok"
+
+  Scenario: Response format
+    When API returns a success response
+    → status is in 2xx range
+    → content-type is JSON
+
+---
+
+Component: Error Response
+  id: component.error_response
+  parameters: [message]
+  description: "Error API response with status and message"
+  
+  Inherent Behavior:
+    → they see "$message"
+    → they see "error"
+
+  Scenario: Error format
+    When API returns an error response
+    → status is in 4xx or 5xx range
+    → content-type is JSON
+
+---
+
+Feature: Public Pages
+  id: feature.public_pages
+  description: "Anonymous users can view public information"
+
+  Scenario: View homepage
+    description: "Ensures the main landing page shows navigation and branding"
+    When a user visits the homepage
+    → they see "Task Manager"
+    → they see "API Status"
+
+  Scenario: Check API health
+    description: "Health check endpoint for monitoring systems"
+    When a user visits the API status
+    → they see "ok"
+    → they see "version"
+
+---
+
+Feature: Task API
+  id: feature.task_api
+  description: "Users can manage their tasks via JSON API"
+
+  Scenario: List tasks when none exist
+    description: "Edge case for new users with empty task list"
+    Given no tasks exist in the system
+    When a user visits the task list
+    → they see their tasks as JSON
+    → they see success response with "Tasks retrieved"
+
+  Scenario: Create a new task
+    description: "Happy path for adding a task to the list"
+    Given a user wants to add a task
+    When a user creates the task list with title "Buy groceries"
+    → they see "Buy groceries"
+    → the task has an ID
+    → they see success response with "Task created"
+  
+  Scenario: Create task with missing title
+    description: "Validation error when required title field is missing"
+    Given a user submits incomplete data
+    When a user creates the task list without a title
+    → they see error response with "Title required"
+
+---
+
+Feature: Task Details
+  id: feature.task_details
+  description: "Users can view individual task details"
+
+  Scenario: View a specific task
+    When a user visits /api/tasks/1
+    → they see "title"
+    → they see "completed"

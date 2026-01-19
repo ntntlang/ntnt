@@ -21,18 +21,32 @@ pub enum TemplatePart {
     Literal(String),
     /// Expression to interpolate: {{expr}}
     Expr(String),
-    /// For loop: {{#for x in items}}...{{/for}}
+    /// Expression with filters: {{expr | filter1 | filter2(arg)}}
+    FilteredExpr {
+        expr: String,
+        filters: Vec<TemplateFilter>,
+    },
+    /// For loop: {{#for x in items}}...{{#empty}}...{{/for}}
     ForLoop {
         var: String,
         iterable: String,
         body: Vec<TemplatePart>,
+        empty_body: Vec<TemplatePart>,
     },
-    /// If conditional: {{#if condition}}...{{#else}}...{{/if}}
+    /// If conditional with elif chains: {{#if cond}}...{{#elif cond2}}...{{#else}}...{{/if}}
     IfBlock {
         condition: String,
         then_parts: Vec<TemplatePart>,
+        elif_chains: Vec<(String, Vec<TemplatePart>)>,
         else_parts: Vec<TemplatePart>,
     },
+}
+
+/// A filter applied to a template expression
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateFilter {
+    pub name: String,
+    pub args: Vec<String>,
 }
 
 /// Token types for the Intent language
@@ -522,20 +536,46 @@ impl<'a> Lexer<'a> {
                 // Parse the directive
                 let expr = expr.trim();
 
+                // Handle comments: {{! comment }} or {{!-- multi-line --}}
+                if expr.starts_with('!') {
+                    // Comment - skip entirely (don't add to output)
+                    continue;
+                }
+
                 if let Some(stripped) = expr.strip_prefix("#for ") {
                     // Parse: #for x in items
                     if let Some((var_part, iter_part)) = stripped.split_once(" in ") {
                         let var = var_part.trim().to_string();
                         let iterable = iter_part.trim().to_string();
 
-                        // Find the body until {{/for}}
+                        // Find the body until {{/for}}, with optional {{#empty}}
                         let rest: String = chars.clone().collect();
-                        if let Some(end_pos) = rest.find("{{/for}}") {
-                            let body_content = &rest[..end_pos];
+                        let endfor_pos = self.find_matching_end(&rest, "for");
+
+                        if let Some(endfor) = endfor_pos {
+                            let block_content = &rest[..endfor];
+
+                            // Check for {{#empty}} within the block
+                            let empty_pos = self.find_directive_at_level(block_content, "#empty");
+
+                            let (body_content, empty_content) = if let Some(empty_p) = empty_pos {
+                                (
+                                    &block_content[..empty_p],
+                                    Some(&block_content[(empty_p + 10)..]),
+                                )
+                            } else {
+                                (block_content, None)
+                            };
+
                             let body_parts = self.parse_template_content(body_content);
+                            let empty_parts = if let Some(ec) = empty_content {
+                                self.parse_template_content(ec)
+                            } else {
+                                Vec::new()
+                            };
 
                             // Advance past the body and closing tag
-                            for _ in 0..(end_pos + 8) {
+                            for _ in 0..(endfor + 8) {
                                 chars.next();
                             }
 
@@ -543,6 +583,7 @@ impl<'a> Lexer<'a> {
                                 var,
                                 iterable,
                                 body: body_parts,
+                                empty_body: empty_parts,
                             });
                         } else {
                             // No closing tag found, treat as literal
@@ -556,30 +597,16 @@ impl<'a> Lexer<'a> {
                     // Parse: #if condition
                     let condition = stripped.trim().to_string();
 
-                    // Find the body parts until {{/if}} (with optional {{#else}})
+                    // Find the body parts until {{/if}} (with optional {{#elif}} and {{#else}})
                     let rest: String = chars.clone().collect();
-
-                    // Find {{#else}} and {{/if}} positions
-                    let else_pos = rest.find("{{#else}}");
-                    let endif_pos = rest.find("{{/if}}");
+                    let endif_pos = self.find_matching_end(&rest, "if");
 
                     if let Some(endif) = endif_pos {
-                        let (then_content, else_content) = if let Some(else_p) = else_pos {
-                            if else_p < endif {
-                                (&rest[..else_p], Some(&rest[(else_p + 9)..endif]))
-                            } else {
-                                (&rest[..endif], None)
-                            }
-                        } else {
-                            (&rest[..endif], None)
-                        };
+                        let block_content = &rest[..endif];
 
-                        let then_parts = self.parse_template_content(then_content);
-                        let else_parts = if let Some(ec) = else_content {
-                            self.parse_template_content(ec)
-                        } else {
-                            Vec::new()
-                        };
+                        // Parse elif chains and else
+                        let (then_parts, elif_chains, else_parts) =
+                            self.parse_if_block_content(block_content);
 
                         // Advance past everything including closing tag
                         for _ in 0..(endif + 7) {
@@ -589,6 +616,7 @@ impl<'a> Lexer<'a> {
                         parts.push(TemplatePart::IfBlock {
                             condition,
                             then_parts,
+                            elif_chains,
                             else_parts,
                         });
                     } else {
@@ -598,13 +626,26 @@ impl<'a> Lexer<'a> {
                 } else if expr.starts_with("/for")
                     || expr.starts_with("/if")
                     || expr.starts_with("#else")
+                    || expr.starts_with("#elif")
+                    || expr.starts_with("#empty")
                 {
                     // Closing tags handled above, should not reach here
                     // If we do, it's unmatched - treat as literal
                     parts.push(TemplatePart::Literal(format!("{{{{{}}}}}", expr)));
                 } else {
-                    // Regular expression interpolation
-                    parts.push(TemplatePart::Expr(expr.to_string()));
+                    // Check for filter syntax: expr | filter1 | filter2(arg)
+                    if let Some((base_expr, filters)) = self.parse_filter_chain(expr) {
+                        if filters.is_empty() {
+                            parts.push(TemplatePart::Expr(base_expr));
+                        } else {
+                            parts.push(TemplatePart::FilteredExpr {
+                                expr: base_expr,
+                                filters,
+                            });
+                        }
+                    } else {
+                        parts.push(TemplatePart::Expr(expr.to_string()));
+                    }
                 }
             } else {
                 literal.push(ch);
@@ -617,6 +658,259 @@ impl<'a> Lexer<'a> {
         }
 
         parts
+    }
+
+    /// Find matching closing tag, respecting nested blocks
+    fn find_matching_end(&self, content: &str, block_type: &str) -> Option<usize> {
+        let open_tag = format!("{{{{#{}}}", block_type);
+        let close_tag = format!("{{{{/{}}}}}", block_type);
+
+        let mut depth = 0;
+        let mut pos = 0;
+
+        while pos < content.len() {
+            if content[pos..].starts_with(&close_tag) {
+                if depth == 0 {
+                    return Some(pos);
+                }
+                depth -= 1;
+                pos += close_tag.len();
+            } else if content[pos..].starts_with(&open_tag) {
+                depth += 1;
+                pos += open_tag.len();
+            } else {
+                pos += 1;
+            }
+        }
+
+        None
+    }
+
+    /// Find a directive at the current nesting level (not inside nested blocks)
+    fn find_directive_at_level(&self, content: &str, directive: &str) -> Option<usize> {
+        let target = format!("{{{{{}}}}}", directive);
+        let mut pos = 0;
+        let mut depth = 0;
+
+        while pos < content.len() {
+            // Track nesting depth for for/if blocks
+            if content[pos..].starts_with("{{#for ") || content[pos..].starts_with("{{#if ") {
+                depth += 1;
+            } else if content[pos..].starts_with("{{/for}}")
+                || content[pos..].starts_with("{{/if}}")
+            {
+                depth -= 1;
+            } else if depth == 0 && content[pos..].starts_with(&target) {
+                return Some(pos);
+            }
+            pos += 1;
+        }
+
+        None
+    }
+
+    /// Parse if block content to extract then_parts, elif_chains, and else_parts
+    fn parse_if_block_content(
+        &self,
+        content: &str,
+    ) -> (
+        Vec<TemplatePart>,
+        Vec<(String, Vec<TemplatePart>)>,
+        Vec<TemplatePart>,
+    ) {
+        let then_parts;
+        let mut elif_chains: Vec<(String, Vec<TemplatePart>)> = Vec::new();
+        let mut else_parts = Vec::new();
+
+        // Find all elif and else positions at the current level
+        let mut sections: Vec<(&str, usize)> = Vec::new(); // (type, position)
+        let mut pos = 0;
+        let mut depth = 0;
+
+        while pos < content.len() {
+            if content[pos..].starts_with("{{#for ") || content[pos..].starts_with("{{#if ") {
+                depth += 1;
+                pos += 1;
+            } else if content[pos..].starts_with("{{/for}}")
+                || content[pos..].starts_with("{{/if}}")
+            {
+                depth -= 1;
+                pos += 1;
+            } else if depth == 0 {
+                if content[pos..].starts_with("{{#elif ") {
+                    sections.push(("elif", pos));
+                    pos += 8;
+                } else if content[pos..].starts_with("{{#else}}") {
+                    sections.push(("else", pos));
+                    pos += 9;
+                } else {
+                    pos += 1;
+                }
+            } else {
+                pos += 1;
+            }
+        }
+
+        // Parse sections
+        if sections.is_empty() {
+            // No elif or else, entire content is then_parts
+            then_parts = self.parse_template_content(content);
+        } else {
+            // Parse then_parts (from start to first section)
+            let first_section_pos = sections[0].1;
+            then_parts = self.parse_template_content(&content[..first_section_pos]);
+
+            // Parse each section
+            for i in 0..sections.len() {
+                let (section_type, section_pos) = sections[i];
+                let section_end = if i + 1 < sections.len() {
+                    sections[i + 1].1
+                } else {
+                    content.len()
+                };
+
+                if section_type == "elif" {
+                    // Extract condition from {{#elif condition}}
+                    let after_elif = &content[section_pos + 8..];
+                    if let Some(close_pos) = after_elif.find("}}") {
+                        let condition = after_elif[..close_pos].trim().to_string();
+                        let body_start = section_pos + 8 + close_pos + 2;
+                        let body_content = &content[body_start..section_end];
+                        let body_parts = self.parse_template_content(body_content);
+                        elif_chains.push((condition, body_parts));
+                    }
+                } else if section_type == "else" {
+                    let body_content = &content[section_pos + 9..section_end];
+                    else_parts = self.parse_template_content(body_content);
+                }
+            }
+        }
+
+        (then_parts, elif_chains, else_parts)
+    }
+
+    /// Parse filter chain from expression: "expr | filter1 | filter2(arg)"
+    fn parse_filter_chain(&self, expr: &str) -> Option<(String, Vec<TemplateFilter>)> {
+        // Split by | but be careful about || operator and strings
+        let mut parts: Vec<&str> = Vec::new();
+        let mut current_start = 0;
+        let mut in_string = false;
+        let mut string_char = '"';
+        let mut paren_depth = 0;
+        let chars: Vec<char> = expr.chars().collect();
+
+        let mut i = 0;
+        while i < chars.len() {
+            let ch = chars[i];
+
+            if in_string {
+                if ch == string_char && (i == 0 || chars[i - 1] != '\\') {
+                    in_string = false;
+                }
+            } else {
+                match ch {
+                    '"' | '\'' => {
+                        in_string = true;
+                        string_char = ch;
+                    }
+                    '(' => paren_depth += 1,
+                    ')' => paren_depth -= 1,
+                    '|' if paren_depth == 0 => {
+                        // Check it's not ||
+                        if i + 1 < chars.len() && chars[i + 1] == '|' {
+                            i += 2;
+                            continue;
+                        }
+                        parts.push(&expr[current_start..i]);
+                        current_start = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            i += 1;
+        }
+        parts.push(&expr[current_start..]);
+
+        if parts.len() < 2 {
+            // No filters
+            return Some((expr.to_string(), Vec::new()));
+        }
+
+        let base_expr = parts[0].trim().to_string();
+        let mut filters = Vec::new();
+
+        for filter_str in &parts[1..] {
+            let filter_str = filter_str.trim();
+            if filter_str.is_empty() {
+                continue;
+            }
+
+            // Parse filter: name or name(arg1, arg2)
+            if let Some(paren_pos) = filter_str.find('(') {
+                if filter_str.ends_with(')') {
+                    let name = filter_str[..paren_pos].trim().to_string();
+                    let args_str = &filter_str[paren_pos + 1..filter_str.len() - 1];
+                    let args: Vec<String> = if args_str.trim().is_empty() {
+                        Vec::new()
+                    } else {
+                        // Split by comma while respecting string boundaries
+                        self.split_filter_args(args_str)
+                    };
+                    filters.push(TemplateFilter { name, args });
+                } else {
+                    // Malformed, treat as name
+                    filters.push(TemplateFilter {
+                        name: filter_str.to_string(),
+                        args: Vec::new(),
+                    });
+                }
+            } else {
+                filters.push(TemplateFilter {
+                    name: filter_str.to_string(),
+                    args: Vec::new(),
+                });
+            }
+        }
+
+        Some((base_expr, filters))
+    }
+
+    /// Split filter arguments by comma while respecting string boundaries
+    fn split_filter_args(&self, args_str: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut current_arg = String::new();
+        let mut in_string = false;
+        let mut string_char = '"';
+        let mut chars = args_str.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if in_string {
+                current_arg.push(c);
+                if c == '\\' {
+                    // Handle escape sequences - include the next character
+                    if let Some(next) = chars.next() {
+                        current_arg.push(next);
+                    }
+                } else if c == string_char {
+                    in_string = false;
+                }
+            } else if c == '"' || c == '\'' {
+                in_string = true;
+                string_char = c;
+                current_arg.push(c);
+            } else if c == ',' {
+                args.push(current_arg.trim().to_string());
+                current_arg = String::new();
+            } else {
+                current_arg.push(c);
+            }
+        }
+
+        if !current_arg.trim().is_empty() {
+            args.push(current_arg.trim().to_string());
+        }
+
+        args
     }
 
     fn scan_number(&mut self, first: char) -> Token {
@@ -893,8 +1187,8 @@ impl<'a> Lexer<'a> {
             // Numbers
             '0'..='9' => self.scan_number(ch),
 
-            // Identifiers and keywords
-            'a'..='z' | 'A'..='Z' | '_' => self.scan_identifier(ch),
+            // Identifiers and keywords (@ prefix for loop metadata like @index, @first)
+            'a'..='z' | 'A'..='Z' | '_' | '@' => self.scan_identifier(ch),
 
             // Operators and punctuation
             '+' => {
@@ -1043,7 +1337,7 @@ impl<'a> Lexer<'a> {
                     Token::new(TokenKind::Question, start_line, start_column, "?".into())
                 }
             }
-            '@' => Token::new(TokenKind::At, start_line, start_column, "@".into()),
+            // Note: '@' is handled in the identifier branch above for loop metadata like @index
             '#' => Token::new(TokenKind::Hash, start_line, start_column, "#".into()),
 
             _ => Token::new(

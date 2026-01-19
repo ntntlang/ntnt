@@ -1,6 +1,6 @@
 [package]
 name = "ntnt"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 authors = ["NTNT Language Team"]
 description = "NTNT (Intent) - A programming language designed for AI-driven development"
@@ -35,6 +35,12 @@ base64 = "0.21"
 
 # Regex for pattern matching
 regex = "1.10"
+
+# Lazy statics for global state
+lazy_static = "1.4"
+
+# URL encoding/decoding
+urlencoding = "2.1"
 
 # HTTP Client
 reqwest = { version = "0.11", features = ["blocking", "json", "multipart", "cookies"] }

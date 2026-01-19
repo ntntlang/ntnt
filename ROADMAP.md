@@ -47,6 +47,11 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Map literals with field access (dot notation)
 - [x] String interpolation and raw strings
 - [x] Template strings (`"""..."""` with `{{}}` interpolation, for loops, conditionals)
+- [x] Template elif chains (`{{#elif cond}}`)
+- [x] Template loop metadata (`@index`, `@first`, `@last`, `@length`, `@even`, `@odd`)
+- [x] Template empty blocks (`{{#empty}}` fallback for empty loops)
+- [x] Template comments (`{{! comment }}`)
+- [x] Template filters (`{{expr | filter1 | filter2(arg)}}`)
 - [x] Map iteration functions (`keys()`, `values()`, `entries()`, `has_key()`)
 - [x] Nested map inference (nested maps don't require `map` keyword inside `map {}`)
 - [x] Truthy/falsy values (0 is truthy, empty strings/arrays/maps are falsy)
@@ -176,7 +181,11 @@ trait Comparable {
 - [x] Truthy/falsy values: 0 is truthy, empty strings/arrays/maps are falsy, None is falsy
 - [x] Template strings: `"""..."""` with `{{expr}}` interpolation (CSS-safe)
   - `{{#for x in items}}...{{/for}}` for loops
-  - `{{#if cond}}...{{#else}}...{{/if}}` for conditionals
+  - `{{#if cond}}...{{#elif cond2}}...{{#else}}...{{/if}}` for conditionals with elif
+  - `{{#empty}}` fallback for empty loops
+  - `@index`, `@first`, `@last`, `@length`, `@even`, `@odd` loop metadata
+  - `{{! comment }}` template comments
+  - `{{expr | filter1 | filter2(arg)}}` filter/pipe syntax
   - `\{{` and `\}}` for literal double braces
 
 ```ntnt
@@ -283,9 +292,10 @@ listen(8080)  // Start server
 
 ### 5.4 HTTP Client ✅ COMPLETE
 
-- [x] `std/http` for HTTP requests (get, post, put, delete, patch, head)
-- [x] Full request control with `request()` (method, headers, body, timeout)
-- [x] JSON request/response helpers (get_json, post_json)
+- [x] `std/http` with unified `fetch()` API for all HTTP requests
+- [x] Full request control via options: method, headers, body, json, form, auth, cookies, timeout
+- [x] Response caching with `Cache(ttl)` and `cache_fetch(cache, request)`
+- [x] File downloads with `download(url, path)`
 
 ### 5.5 File-Based Routing & Introspection
 
@@ -426,7 +436,7 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 - [x] `std/time`: now, now_millis, now_nanos, sleep, elapsed, format_timestamp, duration_secs, duration_millis
 - [x] `std/crypto`: sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode
 - [x] `std/url`: parse, encode, encode_component, decode, build_query, parse_query, join
-- [x] `std/http`: get, post, put, delete, patch, head, request, get_json, post_json
+- [x] `std/http`: fetch (unified API), download, Cache
 - [x] `std/csv`: parse, parse_with_headers, stringify, stringify_with_headers
 
 ### 5.9 Response Caching
@@ -499,7 +509,7 @@ fn fetch_data(key) {
 
 ## Phase 6: Intent-Driven Development (IDD)
 
-**Status:** Next Up 🚀
+**Status:** Complete ✅
 
 **Goal:** Make NTNT the first language with native Intent-Driven Development—where human intent becomes executable specification.
 
@@ -556,6 +566,40 @@ Feature: Site Selection
 - [x] `ntnt intent coverage <file.tnt>` - Show which features have implementations
 - [ ] `ntnt intent diff <file.tnt>` - Gap analysis between intent and code
 
+### 6.2.1 Intent Assertion Language (IAL) Engine ✅
+
+**IAL is a term rewriting system** where natural language assertions are recursively resolved to executable primitives.
+
+Architecture:
+```
+"they see success response"
+    ↓ vocabulary lookup
+"component.success_response"
+    ↓ component expansion
+["status 2xx", "body contains 'ok'"]
+    ↓ standard term resolution
+[Check(InRange, "response.status", 200-299), Check(Contains, "response.body", "ok")]
+    ↓ execution
+[✓, ✓]
+```
+
+**Core Implementation (src/ial/):**
+- [x] `vocabulary.rs` - Pattern matching and term storage
+- [x] `resolve.rs` - Recursive term → primitive resolution (~30 lines core logic)
+- [x] `execute.rs` - Primitive execution against Context
+- [x] `primitives.rs` - Primitive enum (Http, Check) + CheckOp enum
+- [x] `standard.rs` - Standard vocabulary definitions
+
+**Primitives (fixed set - new assertions are vocabulary, not code):**
+- Actions: `Http`, `Cli`, `Sql`, `ReadFile`
+- Checks: `Equals`, `NotEquals`, `Contains`, `NotContains`, `Matches`, `Exists`, `NotExists`, `LessThan`, `GreaterThan`, `InRange`
+
+**High-level API:**
+```rust
+pub fn run_assertions(assertions: &[String], vocab: &Vocabulary, port: u16) -> IalResult<Vec<ExecuteResult>>
+pub fn run_scenario(method: &str, path: &str, body: Option<&str>, assertions: &[String], vocab: &Vocabulary, port: u16) -> IalResult<(bool, Vec<ExecuteResult>)>
+```
+
 ### 6.3 Code Annotations ✅
 
 - [x] `// @implements: feature.X` comment parsing
@@ -571,21 +615,37 @@ fn home_handler(req) {
 }
 ```
 
-### 6.4 Expanded Assertions
+### 6.4 Expanded Assertions (IAL Standard Vocabulary)
 
-**Output Assertions (Current)**
+**HTTP Assertions (Implemented via IAL)**
 
-- [x] Status code: `status: 200`
-- [x] Body contains: `body contains "text"`
+- [x] Status code: `status: 200`, `status 2xx`, `status 4xx`
+- [x] Body contains: `body contains "text"`, `they see "text"`
+- [x] Body negation: `body not contains "error"`, `they don't see "text"`
 - [x] Regex matching: `body matches r"pattern"`
 - [x] Header assertions: `header "Content-Type" contains "text/html"`
-- [x] Negation: `body not contains "error"`
-- [ ] JSON path: `body.json.users[0].name == "Alice"`
-- [ ] Response timing: `response_time < 500ms`
+- [x] JSON path: `body json "$.users[0].name" equals "Alice"`
+- [x] Redirects: `redirects to /path`
+- [x] Content-type: `returns JSON`, `returns HTML`
+- [ ] Response timing: `responds in under $time`
 
-**State & Database Assertions**
+**CLI Assertions (IAL Vocabulary)**
 
-- [ ] Database verification: `verify_db:` with SQL queries
+- [x] Exit codes: `exits successfully`, `exits with code $n`
+- [x] Output: `output shows "$text"`, `output matches $pattern`
+- [x] Errors: `error shows "$text"`, `no error output`
+
+**File Assertions (IAL Vocabulary)**
+
+- [x] Existence: `file "$path" exists`, `file "$path" is created`
+- [x] Content: `file "$path" contains "$text"`
+- [x] Directories: `directory "$path" exists`
+
+**Database Assertions (IAL Vocabulary - Definitions ready)**
+
+- [x] Row operations: `record is created`, `record is updated`, `record is deleted`
+- [x] Queries: `row exists where $condition`, `row count is $n`
+- [ ] Database verification: `verify_db:` with SQL queries (execution pending)
 - [ ] State before/after comparison
 
 ### 6.5 Intent Studio
@@ -1465,4 +1525,4 @@ pub fn main() {
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: January 2026 (v0.1.10)_
+_Last updated: January 2026 (v0.3.0)_

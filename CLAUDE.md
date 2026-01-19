@@ -170,6 +170,80 @@ ntnt intent check server.tnt   # Verify against intent (auto-finds server.intent
 ntnt intent coverage server.tnt # Show coverage
 ```
 
+## Intent Assertion Language (IAL)
+
+IAL is a term rewriting engine that powers IDD assertions. It translates natural language into executable tests.
+
+### Glossary Definitions
+
+Define domain-specific terms in your `.intent` file:
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+| success response | status 2xx, body contains "ok" |
+| they see "$text" | body contains "$text" |
+| they don't see "$text" | body not contains "$text" |
+| logged in user | component.authenticated_user |
+```
+
+Then use natural language in tests:
+
+```yaml
+Feature: User Profile
+  id: feature.user_profile
+  test:
+    - request: GET /profile
+      given: logged in user
+      assert:
+        - they see success response
+        - they see "Welcome"
+```
+
+### Standard Terms (Built-in)
+
+| Pattern | Description |
+|---------|-------------|
+| `status 200` | Exact status code |
+| `status 2xx` | Any success status |
+| `body contains "$text"` | Body includes text |
+| `body not contains "$text"` | Body excludes text |
+| `body matches $pattern` | Regex match |
+| `header "$name" contains "$value"` | Header check |
+| `redirects to $path` | Redirect check |
+| `returns JSON` | Content-Type check |
+| `exits successfully` | CLI exit code 0 |
+| `file "$path" exists` | File existence |
+
+### Components (Reusable Templates)
+
+```yaml
+Component: Authenticated User
+  id: component.authenticated_user
+  parameters:
+    - username: the user's login name
+  inherent_behavior:
+    - valid session token exists
+
+  preconditions:
+    verify: POST /login with valid credentials returns status 200
+    skip: "User authentication not available"
+```
+
+### Preconditions (Given Clauses)
+
+```yaml
+Scenario: View profile
+  Given: logged in user
+  When: GET /profile
+  Then:
+    - status 200
+```
+
+If the `Given` precondition fails, the test is **SKIPPED** (not failed).
+
 ## Critical Syntax Rules
 
 ### 1. Map Literals REQUIRE `map` Keyword
@@ -267,14 +341,21 @@ push(arr, item)   // ✅ CORRECT
 | `get(pattern, handler)`     | Global builtin | **No**                      |
 | `post(pattern, handler)`    | Global builtin | **No**                      |
 | `put(pattern, handler)`     | Global builtin | **No**                      |
+| `patch(pattern, handler)`   | Global builtin | **No**                      |
 | `delete(pattern, handler)`  | Global builtin | **No**                      |
 | `listen(port)`              | Global builtin | **No**                      |
 | `serve_static(prefix, dir)` | Global builtin | **No**                      |
 | `use_middleware(fn)`        | Global builtin | **No**                      |
-| `json(data)`                | Module export  | **Yes** - `std/http/server` |
-| `html(content)`             | Module export  | **Yes** - `std/http/server` |
+| `on_shutdown(fn)`           | Global builtin | **No**                      |
+| `routes(dir)`               | Global builtin | **No** (file-based routing) |
+| `template(path, vars)`      | Global builtin | **No** (external templates) |
+| `json(data, status?)`       | Module export  | **Yes** - `std/http/server` |
+| `html(content, status?)`    | Module export  | **Yes** - `std/http/server` |
 | `text(content)`             | Module export  | **Yes** - `std/http/server` |
 | `redirect(url)`             | Module export  | **Yes** - `std/http/server` |
+| `status(code, body)`        | Module export  | **Yes** - `std/http/server` |
+| `parse_form(req)`           | Module export  | **Yes** - `std/http/server` |
+| `parse_json(req)`           | Module export  | **Yes** - `std/http/server` |
 
 ### HTTP Server Example
 
@@ -327,32 +408,240 @@ ntnt inspect file.tnt --pretty # Project structure (for agents)
 ntnt test server.tnt --get /   # Test HTTP endpoints
 ntnt intent check file.tnt     # Verify intent implementation
 ntnt intent coverage file.tnt  # Show intent coverage
+ntnt intent studio file.intent # Visual preview with live tests (opens :3001)
 ```
 
 ## Standard Library Modules
 
-- `std/string` - split, join, trim, replace, contains
+- `std/string` - split, join, trim, replace, contains, starts_with, ends_with
 - `std/url` - encode, decode, parse_query, build_query
-- `std/env` - get_env, load_env, args, cwd
-- `std/collections` - push, pop, keys, values, has_key, get_key
-- `std/http` - fetch, post, put, delete, get_json
-- `std/http/server` - json, html, text, redirect, status (response builders ONLY)
+- `std/env` - get_env, load_env, set_env, all_env
+- `std/collections` - push, pop, keys, values, entries, has_key, get_key, first, last
+- `std/http` - fetch, download, Cache (HTTP client)
+- `std/http/server` - json, html, text, redirect, status, parse_json, parse_form (response builders + helpers)
 - `std/db/postgres` - connect, query, execute, close
-- `std/fs` - read_file, write_file, exists, mkdir
-- `std/json` - parse, stringify
-- `std/time` - now, format, add_days
+- `std/fs` - read_file, write_file, exists, is_file, is_dir, mkdir, readdir
+- `std/json` - parse, stringify, stringify_pretty
+- `std/csv` - parse, parse_with_headers, stringify, stringify_with_headers
+- `std/math` - sin, cos, tan, log, exp, random, random_int, PI, E
+- `std/time` - now, format, add_days, add_months
 - `std/concurrent` - channel, send, recv, sleep_ms
+- `std/path` - join, dirname, basename, extname
+
+## External Templates
+
+Use `template()` to load external HTML files with variable substitution. Templates use Mustache-style syntax.
+
+### Basic Usage
+
+```ntnt
+// template(path, variables) - path is relative to the .tnt file
+let page = template("views/home.html", map {
+    "title": "Welcome",
+    "username": "Alice"
+})
+return html(page)
+```
+
+**views/home.html:**
+```html
+<!DOCTYPE html>
+<html>
+<head><title>{{title}}</title></head>
+<body>
+    <h1>Hello, {{username}}!</h1>
+</body>
+</html>
+```
+
+### Template Syntax
+
+```html
+<!-- Variables -->
+{{title}}
+{{user.name}}
+
+<!-- Loops -->
+{{#for item in items}}
+    <li>{{item.name}} - {{item.price}}</li>
+{{/for}}
+
+<!-- Conditionals -->
+{{#if logged_in}}
+    <p>Welcome back!</p>
+{{#else}}
+    <p>Please log in</p>
+{{/if}}
+
+<!-- Nested templates (partials) -->
+{{> partials/header.html}}
+```
+
+### Recommended Project Structure
+
+```
+my-app/
+├── server.tnt
+├── views/
+│   ├── layout.html
+│   ├── home.html
+│   ├── styles.css
+│   └── partials/
+│       ├── header.html
+│       └── footer.html
+└── public/
+    └── (static assets)
+```
+
+### Complete Example
+
+```ntnt
+import { html } from "std/http/server"
+
+fn render_page(content, title) {
+    let styles = template("views/styles.css", map {})
+    let header = template("views/partials/header.html", map {})
+    let footer = template("views/partials/footer.html", map {})
+
+    return template("views/layout.html", map {
+        "title": title,
+        "styles": styles,
+        "header": header,
+        "footer": footer,
+        "content": content
+    })
+}
+
+fn home(req) {
+    let content = template("views/home.html", map {
+        "featured_items": get_featured_items()
+    })
+    return html(render_page(content, "Home"))
+}
+
+get("/", home)
+listen(8080)
+```
+
+**Note:** Template paths resolve relative to the `.tnt` file location, not the current working directory. This means your app works the same whether you run `ntnt run app.tnt` from the project folder or from anywhere else.
+
+## File-Based Routing
+
+Use `routes()` to auto-discover route handlers from a directory structure (like Next.js/SvelteKit):
+
+```ntnt
+import { html } from "std/http/server"
+
+// Load all routes from routes/ directory
+routes("routes")
+
+// Middleware auto-loads from middleware/ directory
+listen(8080)
+```
+
+### Directory Structure
+
+```
+my-app/
+├── server.tnt
+├── routes/
+│   ├── index.tnt          # GET /
+│   ├── about.tnt          # GET /about
+│   ├── api/
+│   │   ├── users.tnt      # GET/POST /api/users
+│   │   └── [id].tnt       # GET /api/users/:id (dynamic segment)
+│   └── blog/
+│       ├── index.tnt      # GET /blog
+│       └── [slug].tnt     # GET /blog/:slug
+├── middleware/
+│   └── logging.tnt        # Auto-applied to all routes
+└── views/
+    └── ...
+```
+
+### Route File Format
+
+Each route file exports handler functions named after HTTP methods:
+
+**routes/api/users.tnt:**
+```ntnt
+import { json } from "std/http/server"
+
+// GET /api/users
+fn get(req) {
+    return json(map { "users": get_all_users() })
+}
+
+// POST /api/users
+fn post(req) {
+    let form = parse_form(req)
+    return json(map { "created": true })
+}
+```
+
+**routes/api/[id].tnt (dynamic segment):**
+```ntnt
+import { json } from "std/http/server"
+
+// GET /api/users/:id
+fn get(req) {
+    let id = req.params["id"]
+    return json(map { "id": id })
+}
+```
+
+### Middleware
+
+**middleware/logging.tnt:**
+```ntnt
+fn middleware(req) {
+    print("Request: {req.method} {req.path}")
+    // Return nothing to continue, or return a response to short-circuit
+}
+```
 
 ## HTTP Form Handling
 
 ```ntnt
-import { parse_query } from "std/url"
+import { parse_form, parse_json } from "std/http/server"
 
-fn post(req) {
-    let form = parse_query(req.body)
+fn handle_form(req) {
+    let form = parse_form(req)  // Parse URL-encoded form data
     let name = form["name"]
     let age = int(form["age"])  // Convert to int for database!
 }
+
+fn handle_json(req) {
+    match parse_json(req) {     // Parse JSON body
+        Ok(data) => {
+            let name = data["name"]
+            // ...
+        },
+        Err(e) => print("Parse error: " + e)
+    }
+}
+```
+
+### Request Properties
+
+The request object includes these helpful fields:
+
+- `req.method` - HTTP method (GET, POST, etc.)
+- `req.path` - URL path
+- `req.query_params` - Parsed query string as map
+- `req.params` - Route parameters (from `/users/{id}`)
+- `req.headers` - Request headers map
+- `req.body` - Raw request body
+- `req.ip` - Client IP (from X-Forwarded-For if behind proxy)
+- `req.id` - Request ID (from X-Request-ID or auto-generated)
+
+### Server Lifecycle
+
+```ntnt
+on_shutdown(fn() {
+    print("Server shutting down...")
+    // Close database connections, flush logs, etc.
+})
 ```
 
 ## Full Reference
