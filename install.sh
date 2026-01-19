@@ -13,6 +13,49 @@ echo ""
 echo "🚀 Installing NTNT Language..."
 echo ""
 
+# macOS: Check for Xcode Command Line Tools
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    if ! xcode-select -p &> /dev/null; then
+        echo -e "${RED}❌ Xcode Command Line Tools not found${NC}"
+        echo ""
+        echo "NTNT requires the Xcode Command Line Tools to compile on macOS."
+        echo ""
+        echo "Install them by running:"
+        echo ""
+        echo -e "  ${GREEN}xcode-select --install${NC}"
+        echo ""
+        echo "After installation completes, re-run this installer."
+        echo ""
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Xcode Command Line Tools found${NC}"
+fi
+
+# Check for git
+if ! command -v git &> /dev/null; then
+    echo -e "${RED}❌ Git not found${NC}"
+    echo ""
+    echo "NTNT requires git to download the source code."
+    echo ""
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "Install it by running:"
+        echo ""
+        echo -e "  ${GREEN}xcode-select --install${NC}"
+    elif command -v apt-get &> /dev/null; then
+        echo "Install it by running:"
+        echo ""
+        echo -e "  ${GREEN}sudo apt-get install git${NC}"
+    elif command -v dnf &> /dev/null; then
+        echo "Install it by running:"
+        echo ""
+        echo -e "  ${GREEN}sudo dnf install git${NC}"
+    else
+        echo "Please install git using your system's package manager."
+    fi
+    echo ""
+    exit 1
+fi
+
 # Check for Rust/Cargo
 if ! command -v cargo &> /dev/null; then
     echo -e "${YELLOW}Rust not found. Installing via rustup...${NC}"
