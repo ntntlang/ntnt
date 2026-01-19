@@ -109,7 +109,10 @@ NTNT_DIR="$HOME/.ntnt-src"
 if [ -d "$NTNT_DIR" ]; then
     echo "Updating existing installation..."
     cd "$NTNT_DIR"
-    git pull --quiet
+    # Always reset to match remote (handles force pushes, conflicts, etc.)
+    git fetch --quiet origin
+    git reset --quiet --hard origin/main
+    git clean --quiet -fd
 else
     echo "Downloading NTNT..."
     git clone --quiet https://github.com/ntntlang/ntnt.git "$NTNT_DIR"
