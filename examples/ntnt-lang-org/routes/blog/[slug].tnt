@@ -6,13 +6,11 @@ import { has_key } from "std/collections"
 
 // Helper function to render with layout
 fn render_page(content, title) {
-    let styles = template("views/styles.css", map {})
     let header = template("views/partials/header.html", map {})
     let footer = template("views/partials/footer.html", map {})
 
     return template("views/layout.html", map {
         "title": title,
-        "styles": styles,
         "header": header,
         "footer": footer,
         "content": content

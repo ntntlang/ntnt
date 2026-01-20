@@ -22,6 +22,7 @@ Built with NTNT's file-based routing, external templates, and middleware.
 | page loads successfully | status 200, returns HTML |
 | returns HTML | header "Content-Type" contains "text/html" |
 | has site branding | body contains "ntnt-logo", body contains "NTNT" |
+| has powered badge | body contains "Powered by NTNT", body contains "powered-badge" |
 | has navigation | body contains "Learn", body contains "Blog" |
 | has proper layout | has site branding, has navigation, body contains "footer" |
 | they see {text} | body contains {text} |
@@ -91,29 +92,62 @@ Feature: Homepage
     → they see "Get Started"
     → they see "Learn More"
 
+  Scenario: Visitor sees feature highlights
+    description: "The homepage highlights NTNT's key features"
+    When a visitor goes to /
+    → they see "Why NTNT?"
+    → they see "Full-Featured Language"
+    → they see "Design by Contract"
+    → they see "Intent Studio"
+
 ---
 
 Feature: Learn Page
   id: feature.learn_page
   description: "Getting started guide and documentation links"
   content:
-    - Quick Start (installation, hello world, web API)
-    - IDD Quick Start (intent files, annotations, verification)
+    - One-liner installation for macOS/Linux and Windows
+    - Hello world examples for both platforms
+    - IDD walkthrough with intent files and verification
+    - Standard Library overview
+    - CLI commands reference
     - Links to docs and whitepaper
-    - Code examples with syntax highlighting
 
   Scenario: Developer reads the quick start guide
     description: "A developer visits the learn page to get started"
     When a visitor goes to /learn
     → page loads successfully
     → has proper layout
-    → they see "Quick Start"
+    → they see "Installation"
 
-  Scenario: Developer sees code examples
-    description: "The learn page shows installation and code examples"
+  Scenario: Developer sees one-liner install scripts
+    description: "The learn page shows easy installation commands"
     When a visitor goes to /learn
-    → they see "cargo build"
+    → they see "curl -sSf"
+    → they see "install.sh"
+    → they see "install.ps1"
+
+  Scenario: Developer sees platform-specific examples
+    description: "Hello World examples for different platforms"
+    When a visitor goes to /learn
+    → they see "macOS / Linux"
+    → they see "Windows"
     → they see "Hello, World"
+
+  Scenario: Developer learns about IDD
+    description: "The learn page explains Intent-Driven Development"
+    When a visitor goes to /learn
+    → they see "Intent-Driven Development"
+    → they see "@implements"
+    → they see "ntnt intent check"
+    → they see "Intent Studio"
+
+  Scenario: Developer sees standard library overview
+    description: "The learn page shows available stdlib modules"
+    When a visitor goes to /learn
+    → they see "Standard Library"
+    → they see "std/http/server"
+    → they see "std/db/postgres"
 
 ---
 
@@ -135,8 +169,8 @@ Feature: Blog List
   Scenario: Blog shows available posts
     description: "The blog index lists all published posts"
     When a visitor goes to /blog
-    → they see "Welcome to the NTNT Blog"
-    → they see "Intent-Driven Development Explained"
+    → they see "Introducing NTNT"
+    → they see "Intent-Driven Development"
 
 ---
 
@@ -144,12 +178,13 @@ Feature: Blog Post View
   id: feature.blog_post
   description: "Individual blog post with full content"
 
-  Scenario: Reading the welcome post
-    description: "A visitor reads the introductory blog post"
+  Scenario: Reading the introduction post
+    description: "A visitor reads the introductory blog post about NTNT"
     When a visitor goes to /blog/welcome
     → blog post exists
     → has proper layout
-    → they see "Welcome to the NTNT Blog"
+    → they see "Introducing NTNT"
+    → they see "A Real Programming Language"
     → they see "NTNT Team"
 
   Scenario: Reading the IDD explained post
@@ -157,26 +192,60 @@ Feature: Blog Post View
     When a visitor goes to /blog/idd-explained
     → blog post exists
     → has proper layout
-    → they see "Intent-Driven Development Explained"
+    → they see "Intent-Driven Development"
+    → they see "A Concrete Example"
 
   Scenario: Visiting a non-existent post
     description: "A visitor tries to access a post that doesn't exist"
     When a visitor goes to /blog/does-not-exist
     → page loads successfully
     → blog post missing
-    → they don't see "Welcome to the NTNT Blog"
+    → they don't see "Introducing NTNT"
 
 ---
 
 Feature: Static Assets
   id: feature.static_assets
   description: "Serve static files (CSS, images, JS) from /assets"
-  test:
-    - request: GET /assets/ntnt-logo.png
-      description: "Load the site logo"
-      assert:
-        - status: 200
-        - header "Content-Type" contains "image"
+
+  Scenario: Load the site logo
+    description: "The NTNT logo is served correctly"
+    When a visitor goes to /assets/ntnt-logo.png
+    → status 200
+    → header "Content-Type" contains "image"
+
+  Scenario: Load the stylesheet
+    description: "CSS is served as an external asset"
+    When a visitor goes to /assets/styles.css
+    → status 200
+    → header "Content-Type" contains "text/css"
+    → body contains "--teal"
+    → body contains "--code-bg"
+
+  Scenario: Load syntax highlighting script
+    description: "JavaScript for syntax highlighting is served"
+    When a visitor goes to /assets/syntax-highlight.js
+    → status 200
+    → header "Content-Type" contains "javascript"
+    → body contains "Prism.languages.ntnt"
+
+---
+
+Feature: Site Branding
+  id: feature.site_branding
+  description: "Consistent branding elements across the site"
+
+  Scenario: Footer shows NTNT attribution
+    description: "The footer includes a 'Powered by NTNT' badge"
+    When a visitor goes to /
+    → has powered badge
+
+  Scenario: Meta tags indicate NTNT server
+    description: "HTML meta tags show the site is built with NTNT"
+    When a visitor goes to /
+    → status 200
+    → body contains "generator"
+    → body contains "NTNT HTTP Server"
 
 ---
 

@@ -731,3 +731,207 @@ fn test_default_app_port_is_8081() {
         "Should document default app port"
     );
 }
+
+// ============================================================================
+// Regression Tests - These MUST run on CI to catch regressions
+// ============================================================================
+
+/// Test that intent check actually passes on a known-good example.
+/// This test caught the NTNT_LISTEN_PORT regression where the async server
+/// ignored the environment variable, causing all intent checks to fail.
+///
+/// IMPORTANT: This test does NOT use skip_on_ci!() - it MUST run on CI.
+#[test]
+fn test_intent_check_actually_passes() {
+    // Use unique port to avoid conflicts with other tests
+    let (stdout, stderr, code) = run_ntnt(&[
+        "intent",
+        "check",
+        "tests/fixtures/simple_server/server.tnt",
+        "--port",
+        "18091",
+    ]);
+    let output = format!("{}{}", stdout, stderr);
+
+    // The test should PASS (exit code 0), not just run
+    assert_eq!(
+        code, 0,
+        "intent check should pass on simple_server fixture.\n\
+         Exit code: {}\n\
+         Output:\n{}",
+        code, output
+    );
+
+    // Verify we actually ran tests and they passed
+    assert!(
+        output.contains("passed") && output.contains("0 failed"),
+        "Should show passing tests with 0 failures.\nOutput:\n{}",
+        output
+    );
+}
+
+/// Test that the server respects NTNT_LISTEN_PORT environment variable.
+/// This is a regression test for the async server ignoring NTNT_LISTEN_PORT.
+///
+/// IMPORTANT: This test does NOT use skip_on_ci!() - it MUST run on CI.
+#[test]
+fn test_async_server_respects_listen_port_env_var() {
+    // Create a temp file that listens on port 8080 in code
+    let temp_dir = std::env::temp_dir();
+    let test_file = temp_dir
+        .join("test_port_env.tnt")
+        .to_string_lossy()
+        .to_string();
+
+    fs::write(
+        &test_file,
+        r#"
+import { json } from "std/http/server"
+
+fn handler(req) {
+    return json(map { "port_test": "ok" })
+}
+
+get("/", handler)
+listen(8080)
+"#,
+    )
+    .unwrap();
+
+    // Start server with NTNT_LISTEN_PORT override
+    let test_port = 19876;
+    let binary = if std::path::Path::new("./target/release/ntnt").exists() {
+        "./target/release/ntnt"
+    } else if std::path::Path::new("./target/dev-release/ntnt").exists() {
+        "./target/dev-release/ntnt"
+    } else {
+        "./target/debug/ntnt"
+    };
+
+    let child = Command::new(binary)
+        .args(&["run", &test_file])
+        .env("NTNT_LISTEN_PORT", test_port.to_string())
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    if let Ok(mut child) = child {
+        // Wait for server to start
+        thread::sleep(Duration::from_secs(2));
+
+        // Server MUST be on the env var port (19876), NOT the code port (8080)
+        let correct_url = format!("http://127.0.0.1:{}", test_port);
+        let wrong_url = "http://127.0.0.1:8080";
+
+        let on_correct_port = wait_for_server(&correct_url, 3);
+        let on_wrong_port = reqwest::blocking::get(wrong_url).is_ok();
+
+        child.kill().ok();
+        fs::remove_file(&test_file).ok();
+
+        assert!(
+            on_correct_port,
+            "Server should listen on NTNT_LISTEN_PORT ({}), not the port in code (8080).\n\
+             This is a regression - the async server must respect NTNT_LISTEN_PORT.",
+            test_port
+        );
+
+        // Also verify it's NOT on the wrong port (unless something else is using it)
+        if on_wrong_port && !on_correct_port {
+            panic!(
+                "Server is on port 8080 (from code) instead of {} (from NTNT_LISTEN_PORT).\n\
+                 This means NTNT_LISTEN_PORT is being ignored!",
+                test_port
+            );
+        }
+    } else {
+        fs::remove_file(&test_file).ok();
+        panic!("Failed to start ntnt process");
+    }
+}
+
+/// Test that intent check returns non-zero exit code when tests fail.
+/// Ensures we can actually detect failures.
+#[test]
+fn test_intent_check_fails_on_bad_assertions() {
+    // Create a server that doesn't match its intent
+    let temp_dir = std::env::temp_dir();
+    let test_tnt = temp_dir
+        .join("test_fail_check.tnt")
+        .to_string_lossy()
+        .to_string();
+    let test_intent = temp_dir
+        .join("test_fail_check.intent")
+        .to_string_lossy()
+        .to_string();
+
+    // Server returns "hello" but intent expects "goodbye"
+    fs::write(
+        &test_tnt,
+        r#"
+import { html } from "std/http/server"
+
+fn handler(req) {
+    return html("<html><body>hello</body></html>")
+}
+
+get("/", handler)
+listen(8080)
+"#,
+    )
+    .unwrap();
+
+    fs::write(
+        &test_intent,
+        r#"# Failing Test
+## Overview
+Test that should fail.
+
+---
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits $path | GET $path |
+| they see {text} | body contains {text} |
+
+---
+
+Feature: Bad Test
+  id: feature.bad_test
+  description: "This should fail"
+
+  Scenario: Wrong content
+    description: "Expects goodbye but gets hello"
+    When a user visits /
+    → status 200
+    → they see "goodbye"
+"#,
+    )
+    .unwrap();
+
+    // Use unique port to avoid conflicts with other tests
+    let (stdout, stderr, code) = run_ntnt(&["intent", "check", &test_tnt, "--port", "18092"]);
+
+    // Clean up
+    fs::remove_file(&test_tnt).ok();
+    fs::remove_file(&test_intent).ok();
+
+    let output = format!("{}{}", stdout, stderr);
+
+    // Should fail (non-zero exit code)
+    assert_ne!(
+        code, 0,
+        "intent check should fail when assertions don't match.\nOutput:\n{}",
+        output
+    );
+
+    // Should show failed assertions
+    assert!(
+        output.contains("failed") || output.contains("Failed"),
+        "Output should indicate test failure.\nOutput:\n{}",
+        output
+    );
+}

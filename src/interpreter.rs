@@ -1595,6 +1595,55 @@ impl Interpreter {
         Ok(routes)
     }
 
+    /// Reload a single route handler from a file (for hot-reload)
+    fn reload_route_handler(&mut self, file_path: &str, method: &str) -> Result<Value> {
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use std::fs;
+
+        let path = std::path::Path::new(file_path);
+
+        // Read and parse the file
+        let source_code = fs::read_to_string(path).map_err(|e| {
+            IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path, e))
+        })?;
+
+        let lexer = Lexer::new(&source_code);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse()?;
+
+        // Create a fresh environment
+        let previous_env = Rc::clone(&self.environment);
+        let previous_file = self.current_file.clone();
+
+        self.environment = Rc::new(RefCell::new(Environment::new()));
+        self.current_file = Some(file_path.to_string());
+
+        // Re-define builtins
+        self.define_builtins();
+
+        // Evaluate the module
+        self.eval(&ast)?;
+
+        // Find the handler for the specified method
+        let method_name = method.to_lowercase();
+        let env = self.environment.borrow();
+        let handler = env.values.get(&method_name).cloned();
+        drop(env);
+
+        // Restore environment
+        self.environment = previous_env;
+        self.current_file = previous_file;
+
+        handler.ok_or_else(|| {
+            IntentError::RuntimeError(format!(
+                "Handler '{}' not found in {}",
+                method_name, file_path
+            ))
+        })
+    }
+
     /// Convert a file path to a URL pattern
     ///
     /// Examples:
@@ -2127,7 +2176,12 @@ impl Interpreter {
                         }
                         let port = self.eval_expression(&arguments[0])?;
                         if let Value::Int(port_num) = port {
-                            return self.run_async_http_server(port_num as u16);
+                            // Use sync server for test mode (intent check), async for production
+                            if self.test_mode.is_some() {
+                                return self.run_http_server(port_num as u16);
+                            } else {
+                                return self.run_async_http_server(port_num as u16);
+                            }
                         } else {
                             return Err(IntentError::TypeError(
                                 "listen() requires an integer port".to_string(),
@@ -3640,6 +3694,260 @@ impl Interpreter {
         }
     }
 
+    /// Run the HTTP server on the specified port
+    fn run_http_server(&mut self, port: u16) -> Result<Value> {
+        use crate::stdlib::http_server;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        // Check for NTNT_LISTEN_PORT env var override (used by Intent Studio)
+        let env_port = std::env::var("NTNT_LISTEN_PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok());
+
+        // Check if we're in test mode
+        let (actual_port, is_test_mode, shutdown_flag) = match &self.test_mode {
+            Some((test_port, _max_req, flag)) => (*test_port, true, Some(flag.clone())),
+            None => (env_port.unwrap_or(port), false, None),
+        };
+
+        // Check if any routes or static dirs are registered
+        let has_routes = self.server_state.route_count() > 0;
+        let has_static = !self.server_state.static_dirs.is_empty();
+
+        if !has_routes && !has_static {
+            return Err(IntentError::RuntimeError(
+                "No routes or static directories registered. Use get(), post(), serve_static(), etc. before calling listen()".to_string()
+            ));
+        }
+
+        // Print startup message
+        if is_test_mode {
+            println!("Starting test server on http://127.0.0.1:{}", actual_port);
+        } else {
+            println!("Starting server on http://0.0.0.0:{}", actual_port);
+        }
+
+        if has_routes {
+            println!("Routes registered: {}", self.server_state.route_count());
+        }
+        if has_static {
+            println!(
+                "Static directories: {}",
+                self.server_state.static_dirs.len()
+            );
+            if !is_test_mode {
+                for (prefix, dir) in &self.server_state.static_dirs {
+                    println!("  {} -> {}", prefix, dir);
+                }
+            }
+        }
+        let middleware_count = self.server_state.middleware.len();
+        if middleware_count > 0 {
+            println!("Middleware: {}", middleware_count);
+        }
+
+        // Show hot-reload status
+        if self.server_state.hot_reload && self.main_source_file.is_some() {
+            println!(
+                "\n🔥 Hot-reload enabled: edit your .tnt file and changes apply on next request"
+            );
+        }
+
+        if !is_test_mode {
+            println!("Press Ctrl+C to stop");
+        }
+        println!();
+
+        // Start the server
+        let server = if is_test_mode {
+            http_server::start_server_with_timeout(actual_port, Duration::from_secs(60))?
+        } else {
+            http_server::start_server(actual_port)?
+        };
+
+        // Handle requests in a loop
+        // In test mode, use recv_timeout and check shutdown flag
+        loop {
+            // Check shutdown flag in test mode
+            if let Some(ref flag) = shutdown_flag {
+                if flag.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+
+            // Get next request (with timeout in test mode)
+            let request = if is_test_mode {
+                match server.recv_timeout(Duration::from_millis(50)) {
+                    Ok(Some(req)) => req,
+                    Ok(None) => continue, // Timeout, check shutdown flag
+                    Err(_) => break,      // Server error
+                }
+            } else {
+                match server.recv() {
+                    Ok(req) => req,
+                    Err(_) => break,
+                }
+            };
+
+            // Hot-reload check: if main source file changed, reload it
+            // This runs on each request to pick up changes without restart
+            self.check_and_reload_main_source();
+
+            let method = request.method().to_string();
+            let url = request.url().to_string();
+            let path = url.split('?').next().unwrap_or(&url).to_string();
+
+            // First, try to find a matching route
+            if let Some((mut handler, route_params, route_index)) =
+                self.server_state.find_route(&method, &path)
+            {
+                // Hot-reload check: if file changed, reload the handler
+                if self.server_state.needs_reload(route_index) {
+                    if let Some(source) = self.server_state.get_route_source(route_index).cloned() {
+                        if let Some(file_path) = &source.file_path {
+                            // Re-parse and reload the handler
+                            match self.reload_route_handler(file_path, &method) {
+                                Ok(new_handler) => {
+                                    self.server_state
+                                        .update_route_handler(route_index, new_handler.clone());
+                                    handler = new_handler;
+                                    println!("[hot-reload] Reloaded: {}", file_path);
+                                }
+                                Err(e) => {
+                                    eprintln!("[hot-reload] Error reloading {}: {}", file_path, e);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Process request to get request Value
+                match http_server::process_request(request, route_params) {
+                    Ok((mut req_value, http_request)) => {
+                        // Run middleware chain and determine final response
+                        let middleware_handlers: Vec<Value> =
+                            self.server_state.get_middleware().to_vec();
+                        let mut early_response: Option<Value> = None;
+
+                        for mw in middleware_handlers {
+                            match self.call_function(mw.clone(), vec![req_value.clone()]) {
+                                Ok(result) => {
+                                    // Check if middleware returned a response (early exit) or modified request
+                                    match &result {
+                                        Value::Map(map) if map.contains_key("status") => {
+                                            // Middleware returned a response - use it and stop
+                                            early_response = Some(result);
+                                            break;
+                                        }
+                                        Value::Map(_) => {
+                                            // Middleware returned modified request - continue with it
+                                            req_value = result;
+                                        }
+                                        Value::Unit => {
+                                            // Middleware returned unit - continue with original request
+                                        }
+                                        _ => {
+                                            // Other return - continue with original request
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Middleware error: {}", e);
+                                    early_response = Some(http_server::create_error_response(
+                                        500,
+                                        &e.to_string(),
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Determine final response
+                        let final_response = if let Some(resp) = early_response {
+                            resp
+                        } else {
+                            // Call the route handler
+                            match self.call_function(handler, vec![req_value]) {
+                                Ok(response) => response,
+                                Err(e) => {
+                                    eprintln!("Handler error: {}", e);
+                                    // Check for contract violations and return appropriate HTTP status
+                                    if let IntentError::ContractViolation(msg) = &e {
+                                        if msg.contains("Precondition failed") {
+                                            // Precondition = bad request from client
+                                            http_server::create_error_response(
+                                                400,
+                                                &format!("Bad Request: {}", msg),
+                                            )
+                                        } else if msg.contains("Postcondition failed") {
+                                            // Postcondition = server logic error
+                                            http_server::create_error_response(
+                                                500,
+                                                &format!("Internal Error: {}", msg),
+                                            )
+                                        } else {
+                                            http_server::create_error_response(500, &e.to_string())
+                                        }
+                                    } else {
+                                        http_server::create_error_response(500, &e.to_string())
+                                    }
+                                }
+                            }
+                        };
+
+                        // Send the response (only once)
+                        if let Err(e) = http_server::send_response(http_request, &final_response) {
+                            eprintln!("Error sending response: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error processing request: {}", e);
+                    }
+                }
+                continue;
+            }
+
+            // No matching route - check static files (only for GET requests)
+            if method == "GET" {
+                if let Some((file_path, _relative)) = self.server_state.find_static_file(&path) {
+                    // Serve static file
+                    if let Err(e) = http_server::send_static_response(request, &file_path) {
+                        eprintln!("Error serving static file: {}", e);
+                    }
+                    continue;
+                }
+            }
+
+            // No matching route or static file - send 404
+            let path_clone = path.clone();
+            #[allow(clippy::single_match)]
+            match http_server::process_request(request, HashMap::new()) {
+                Ok((_, http_request)) => {
+                    let not_found = http_server::create_error_response(
+                        404,
+                        &format!("Not Found: {} {}", method, path_clone),
+                    );
+                    let _ = http_server::send_response(http_request, &not_found);
+                }
+                Err(_) => {}
+            }
+        }
+
+        // Server is shutting down - call shutdown handlers
+        let shutdown_handlers: Vec<Value> = self.server_state.get_shutdown_handlers().to_vec();
+        if !shutdown_handlers.is_empty() {
+            println!("\nRunning shutdown handlers...");
+            for handler in shutdown_handlers {
+                if let Err(e) = self.call_function(handler, vec![]) {
+                    eprintln!("Shutdown handler error: {}", e);
+                }
+            }
+        }
+
+        Ok(Value::Unit)
+    }
+
     /// Run the HTTP server using Axum + Tokio
     /// This provides high-concurrency handling for production workloads
     fn run_async_http_server(&mut self, port: u16) -> Result<Value> {
@@ -3659,10 +3967,19 @@ impl Interpreter {
             ));
         }
 
+        // Check for NTNT_LISTEN_PORT env var override (used by Intent Studio and intent check)
+        let actual_port = std::env::var("NTNT_LISTEN_PORT")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(port);
+
         // Enable hot-reload by default for the async server
         self.server_state.hot_reload = true;
 
-        println!("🚀 Starting NTNT async server (Axum + Tokio)...");
+        println!(
+            "🚀 Starting NTNT async server (Axum + Tokio) on http://0.0.0.0:{}...",
+            actual_port
+        );
         println!("   Routes registered: {}", self.server_state.route_count());
         println!(
             "   Static directories: {}",
@@ -3714,7 +4031,7 @@ impl Interpreter {
 
         // Create server config
         let server_config = AsyncServerConfig {
-            port,
+            port: actual_port,
             host: "0.0.0.0".to_string(),
             enable_compression: true,
             request_timeout_secs: self.request_timeout_secs,

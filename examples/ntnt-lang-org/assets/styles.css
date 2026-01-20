@@ -376,6 +376,40 @@ pre code {
     color: #e2e8f0;
 }
 
+/* Prism.js syntax highlighting - matches VS Code dark theme */
+/* Override Prism defaults to use our dark theme */
+pre,
+pre[class*="language-"],
+code[class*="language-"] {
+    background: var(--code-bg) !important;
+    text-shadow: none !important;
+    color: #e2e8f0 !important;
+}
+
+pre code,
+pre code[class*="language-"] {
+    background: none !important;
+}
+
+.token.comment { color: #6A9955; font-style: italic; }
+.token.annotation { color: #6A9955; font-style: italic; }
+.token.string { color: #CE9178; }
+.token.number { color: #B5CEA8; }
+.token.boolean { color: #569CD6; }
+.token.keyword { color: #C586C0; }
+.token.declaration { color: #569CD6; }
+.token.contract { color: #C586C0; font-style: italic; }
+.token.type { color: #4EC9B0; }
+.token.builtin { color: #DCDCAA; }
+.token.function { color: #DCDCAA; }
+.token.operator { color: #D4D4D4; }
+.token.punctuation { color: #808080; }
+
+/* Intent file tokens */
+.token.label { color: #DCDCAA; }
+.token.method { color: #569CD6; }
+.token.assertion { color: #C586C0; }
+
 .footer {
     background: var(--navy);
     color: rgba(255,255,255,0.7);

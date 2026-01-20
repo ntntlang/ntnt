@@ -1,6 +1,6 @@
 [package]
 name = "ntnt"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["NTNT Language Team"]
 description = "NTNT (Intent) - A programming language designed for AI-driven development"
@@ -45,13 +45,16 @@ urlencoding = "2.1"
 # HTTP Client
 reqwest = { version = "0.11", features = ["blocking", "json", "multipart", "cookies"] }
 
-# HTTP Server (Axum + Tokio for high-concurrency)
+# HTTP Server (Axum + Tokio for high-concurrency in production)
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "compression-gzip", "trace", "fs", "timeout"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
+
+# HTTP Server (tiny_http for synchronous test mode)
+tiny_http = "0.12"
 
 # Ctrl+C handling
 ctrlc = "3.4"

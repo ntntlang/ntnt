@@ -5,49 +5,7 @@
     </div>
     <p>NTNT Programming Language &copy; 2026 &nbsp;|&nbsp; <a href="https://github.com/ntntlang/ntnt">GitHub</a> &nbsp;|&nbsp; MIT + Apache 2.0 License</p>
 </footer>
-<script>
-    document.addEventListener("DOMContentLoaded", () => {
-        document.querySelectorAll("pre").forEach((pre) => {
-            if (pre.querySelector(".copy-button")) {
-                return;
-            }
 
-            const button = document.createElement("button");
-            button.type = "button";
-            button.className = "copy-button";
-            button.textContent = "Copy";
-
-            button.addEventListener("click", async () => {
-                const codeEl = pre.querySelector("code");
-                const codeText = codeEl ? codeEl.innerText : pre.innerText;
-
-                try {
-                    await navigator.clipboard.writeText(codeText.trim());
-                    button.classList.add("copied");
-                    button.textContent = "Copied";
-                    setTimeout(() => {
-                        button.classList.remove("copied");
-                        button.textContent = "Copy";
-                    }, 1200);
-                } catch (err) {
-                    const textarea = document.createElement("textarea");
-                    textarea.value = codeText.trim();
-                    textarea.style.position = "fixed";
-                    textarea.style.opacity = "0";
-                    document.body.appendChild(textarea);
-                    textarea.select();
-                    document.execCommand("copy");
-                    document.body.removeChild(textarea);
-                    button.classList.add("copied");
-                    button.textContent = "Copied";
-                    setTimeout(() => {
-                        button.classList.remove("copied");
-                        button.textContent = "Copy";
-                    }, 1200);
-                }
-            });
-
-            pre.appendChild(button);
-        });
-    });
-</script>
+<!-- Syntax highlighting -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="/assets/syntax-highlight.js"></script>

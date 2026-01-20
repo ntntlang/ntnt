@@ -1,0 +1,47 @@
+# Simple Test Server
+# Minimal test fixture for integration tests
+# Run: ntnt intent check server.tnt
+
+## Overview
+A minimal server designed to reliably pass intent checks.
+Used for CI integration tests.
+
+---
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits $path | GET $path |
+| page loads | status 200 |
+| they see {text} | body contains {text} |
+| returns JSON | header "content-type" contains "application/json" |
+| returns HTML | header "content-type" contains "text/html" |
+
+---
+
+Feature: Homepage
+  id: feature.homepage
+  description: "Simple homepage that returns HTML"
+
+  Scenario: User visits homepage
+    description: "Basic homepage test"
+    When a user visits /
+    → page loads
+    → returns HTML
+    → they see "Test Server"
+    → they see "Welcome"
+
+---
+
+Feature: Health Check
+  id: feature.health_check
+  description: "Health check endpoint returns JSON status"
+
+  Scenario: Check server health
+    description: "Health endpoint returns ok status"
+    When a user visits /health
+    → page loads
+    → returns JSON
+    → they see "ok"
+    → they see "version"

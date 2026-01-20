@@ -1,0 +1,19 @@
+// Simple test server for integration tests
+// This server is designed to reliably pass intent checks
+
+import { json, html } from "std/http/server"
+
+// @implements: feature.health_check
+fn health_handler(req) {
+    return json(map { "status": "ok", "version": "1.0.0" })
+}
+
+// @implements: feature.homepage
+fn home_handler(req) {
+    return html("<html><body><h1>Test Server</h1><p>Welcome</p></body></html>")
+}
+
+get("/", home_handler)
+get("/health", health_handler)
+
+listen(8080)
