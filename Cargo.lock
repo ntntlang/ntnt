@@ -1364,6 +1364,7 @@ dependencies = [
  "hyper 1.8.1",
  "hyper-util",
  "lazy_static",
+ "libc",
  "postgres",
  "pretty_assertions",
  "rand 0.8.5",

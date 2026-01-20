@@ -29,6 +29,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 /// Helper to run ntnt command and capture output
 ///
 /// ⚠️ WARNING: Prefers release binary! See module-level docs for caching issues.
@@ -58,6 +61,8 @@ fn run_ntnt(args: &[&str]) -> (String, String, i32) {
 /// Helper to start Intent Studio as a background process
 ///
 /// ⚠️ WARNING: Prefers release binary! See module-level docs for caching issues.
+///
+/// On Unix, spawns in a new process group so we can kill all descendants.
 fn start_intent_studio(intent_file: &str, studio_port: u16, app_port: u16) -> Child {
     // Try release binary first, fall back to debug
     let binary = if std::path::Path::new("./target/release/ntnt").exists() {
@@ -68,21 +73,47 @@ fn start_intent_studio(intent_file: &str, studio_port: u16, app_port: u16) -> Ch
         "./target/debug/ntnt"
     };
 
-    Command::new(binary)
-        .args(&[
-            "intent",
-            "studio",
-            intent_file,
-            "--port",
-            &studio_port.to_string(),
-            "--app-port",
-            &app_port.to_string(),
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("Failed to start Intent Studio")
+    let mut cmd = Command::new(binary);
+    cmd.args(&[
+        "intent",
+        "studio",
+        intent_file,
+        "--port",
+        &studio_port.to_string(),
+        "--app-port",
+        &app_port.to_string(),
+    ])
+    .current_dir(env!("CARGO_MANIFEST_DIR"))
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+    // On Unix, create a new process group so we can kill all descendants
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    cmd.spawn().expect("Failed to start Intent Studio")
+}
+
+/// Kill a child process and all its descendants.
+/// On Unix, sends SIGKILL to the process group.
+/// On other platforms, just kills the child.
+fn kill_process_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // Kill the entire process group (negative PID = process group)
+        let pid = child.id() as i32;
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+
+    // Always wait to reap the zombie
+    let _ = child.wait();
 }
 
 /// Check if running in CI environment
@@ -255,7 +286,7 @@ fn test_intent_studio_starts_on_default_port() {
     let studio_ready = wait_for_server(&studio_url, 5);
 
     // Kill the process
-    child.kill().ok();
+    kill_process_tree(&mut child);
 
     assert!(
         studio_ready,
@@ -282,7 +313,7 @@ fn test_intent_studio_serves_html() {
     let studio_url = format!("http://127.0.0.1:{}", studio_port);
     if wait_for_server(&studio_url, 5) {
         if let Ok((status, body)) = http_get(&studio_url) {
-            child.kill().ok();
+            kill_process_tree(&mut child);
 
             assert_eq!(status, 200, "Should return 200 OK");
             assert!(body.contains("<!doctype html>"), "Should serve HTML");
@@ -294,7 +325,7 @@ fn test_intent_studio_serves_html() {
         }
     }
 
-    child.kill().ok();
+    kill_process_tree(&mut child);
     panic!("Could not connect to Intent Studio");
 }
 
@@ -312,7 +343,7 @@ fn test_intent_studio_has_logo() {
     let studio_url = format!("http://127.0.0.1:{}", studio_port);
     if wait_for_server(&studio_url, 5) {
         if let Ok((_, body)) = http_get(&studio_url) {
-            child.kill().ok();
+            kill_process_tree(&mut child);
 
             // Should have text logo in the header
             assert!(body.contains("class=\"logo\""), "Should have logo class");
@@ -324,7 +355,7 @@ fn test_intent_studio_has_logo() {
         }
     }
 
-    child.kill().ok();
+    kill_process_tree(&mut child);
     panic!("Could not connect to Intent Studio");
 }
 
@@ -342,7 +373,7 @@ fn test_intent_studio_has_open_app_button() {
     let studio_url = format!("http://127.0.0.1:{}", studio_port);
     if wait_for_server(&studio_url, 5) {
         if let Ok((_, body)) = http_get(&studio_url) {
-            child.kill().ok();
+            kill_process_tree(&mut child);
 
             // Should have Open App button and handler
             assert!(body.contains("Open App"), "Should have Open App button");
@@ -351,7 +382,7 @@ fn test_intent_studio_has_open_app_button() {
         }
     }
 
-    child.kill().ok();
+    kill_process_tree(&mut child);
     panic!("Could not connect to Intent Studio");
 }
 
@@ -369,7 +400,7 @@ fn test_intent_studio_app_status_endpoint() {
     let status_url = format!("http://127.0.0.1:{}/app-status", studio_port);
     if wait_for_server(&format!("http://127.0.0.1:{}", studio_port), 5) {
         if let Ok((status, body)) = http_get(&status_url) {
-            child.kill().ok();
+            kill_process_tree(&mut child);
 
             assert_eq!(status, 200, "app-status should return 200");
 
@@ -394,7 +425,7 @@ fn test_intent_studio_app_status_endpoint() {
         }
     }
 
-    child.kill().ok();
+    kill_process_tree(&mut child);
     panic!("Could not connect to Intent Studio app-status endpoint");
 }
 
@@ -419,7 +450,7 @@ fn test_intent_studio_run_tests_endpoint() {
         thread::sleep(Duration::from_secs(2));
 
         if let Ok((status, body)) = http_get(&tests_url) {
-            child.kill().ok();
+            kill_process_tree(&mut child);
 
             assert_eq!(status, 200, "run-tests should return 200");
 
@@ -446,7 +477,7 @@ fn test_intent_studio_run_tests_endpoint() {
         }
     }
 
-    child.kill().ok();
+    kill_process_tree(&mut child);
     panic!("Could not connect to Intent Studio run-tests endpoint");
 }
 
@@ -468,7 +499,7 @@ fn test_intent_studio_ui_has_test_controls() {
     let studio_url = format!("http://127.0.0.1:{}", studio_port);
     if wait_for_server(&studio_url, 5) {
         if let Ok((_, body)) = http_get(&studio_url) {
-            child.kill().ok();
+            kill_process_tree(&mut child);
 
             // Should have test-related UI elements
             assert!(
@@ -487,7 +518,7 @@ fn test_intent_studio_ui_has_test_controls() {
         }
     }
 
-    child.kill().ok();
+    kill_process_tree(&mut child);
     panic!("Could not connect to Intent Studio");
 }
 
@@ -509,7 +540,7 @@ fn test_intent_studio_ui_has_app_status_indicator() {
     let studio_url = format!("http://127.0.0.1:{}", studio_port);
     if wait_for_server(&studio_url, 5) {
         if let Ok((_, body)) = http_get(&studio_url) {
-            child.kill().ok();
+            kill_process_tree(&mut child);
 
             // UI is in flux; just verify the page renders the Intent Studio title
             assert!(
@@ -520,7 +551,7 @@ fn test_intent_studio_ui_has_app_status_indicator() {
         }
     }
 
-    child.kill().ok();
+    kill_process_tree(&mut child);
     panic!("Could not connect to Intent Studio");
 }
 
@@ -539,7 +570,7 @@ fn test_intent_studio_custom_ports() {
     let studio_url = format!("http://127.0.0.1:{}", studio_port);
     let studio_ready = wait_for_server(&studio_url, 5);
 
-    child.kill().ok();
+    kill_process_tree(&mut child);
 
     assert!(
         studio_ready,
@@ -583,13 +614,17 @@ listen(8080)
         "./target/debug/ntnt"
     };
 
-    let child = Command::new(binary)
-        .args(&["run", &test_file])
+    let mut cmd = Command::new(binary);
+    cmd.args(&["run", &test_file])
         .env("NTNT_LISTEN_PORT", "19999")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let child = cmd.spawn();
 
     if let Ok(mut child) = child {
         thread::sleep(Duration::from_secs(2));
@@ -598,7 +633,7 @@ listen(8080)
         let url = "http://127.0.0.1:19999";
         let server_ready = wait_for_server(url, 3);
 
-        child.kill().ok();
+        kill_process_tree(&mut child);
         fs::remove_file(test_file).ok();
 
         assert!(server_ready, "Server should use NTNT_LISTEN_PORT env var");
@@ -808,13 +843,17 @@ listen(8080)
         "./target/debug/ntnt"
     };
 
-    let child = Command::new(binary)
-        .args(&["run", &test_file])
+    let mut cmd = Command::new(binary);
+    cmd.args(&["run", &test_file])
         .env("NTNT_LISTEN_PORT", test_port.to_string())
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let child = cmd.spawn();
 
     if let Ok(mut child) = child {
         // Wait for server to start
@@ -827,7 +866,7 @@ listen(8080)
         let on_correct_port = wait_for_server(&correct_url, 3);
         let on_wrong_port = reqwest::blocking::get(wrong_url).is_ok();
 
-        child.kill().ok();
+        kill_process_tree(&mut child);
         fs::remove_file(&test_file).ok();
 
         assert!(
