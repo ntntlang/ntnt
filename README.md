@@ -18,7 +18,9 @@ curl -sSf https://raw.githubusercontent.com/ntntlang/ntnt/main/install.sh | bash
 irm https://raw.githubusercontent.com/ntntlang/ntnt/main/install.ps1 | iex
 ```
 
-This automatically installs Rust if needed, clones the repo, and builds NTNT.
+This downloads a pre-built binary for your platform. If no binary is available, it falls back to building from source (installing Rust if needed).
+
+**To update:** Run the same command again to get the latest version.
 
 <details>
 <summary><b>Manual Installation</b></summary>
@@ -40,6 +42,14 @@ Windows: Download and run [rustup-init.exe](https://win.rustup.rs/x86_64)
 git clone https://github.com/ntntlang/ntnt.git
 cd ntnt
 cargo build --release
+cargo install --path . --locked
+```
+
+**To update (manual install):**
+
+```bash
+cd ntnt
+git pull
 cargo install --path . --locked
 ```
 
@@ -263,7 +273,7 @@ ntnt intent studio server.intent
 
 ## Current Status
 
-**Version 0.3.0** - Intent Assertion Language + IDD
+**Version 0.3.1** - Intent Assertion Language + IDD
 
 NTNT includes:
 

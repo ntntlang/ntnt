@@ -298,12 +298,51 @@ if ! check_command ntnt; then
     echo ""
 fi
 
+# Offer to download examples (only for binary installs)
+if [ "$INSTALLED_FROM" = "binary" ]; then
+    echo ""
+    echo -n "Would you like to download the examples? (y/n) "
+    read -r DOWNLOAD_EXAMPLES
+    if [ "$DOWNLOAD_EXAMPLES" = "y" ] || [ "$DOWNLOAD_EXAMPLES" = "Y" ]; then
+        EXAMPLES_DIR="$(pwd)/ntnt-examples"
+        echo ""
+        echo "Downloading examples to ./ntnt-examples..."
+        if git clone --depth 1 --filter=blob:none --sparse "https://github.com/$REPO.git" "$EXAMPLES_DIR" 2>/dev/null; then
+            cd "$EXAMPLES_DIR"
+            git sparse-checkout set examples 2>/dev/null
+            # Move examples to root and clean up
+            mv examples/* . 2>/dev/null
+            rm -rf examples .git
+            cd - > /dev/null
+            echo -e "${GREEN}[OK] Examples downloaded to ./ntnt-examples${NC}"
+        else
+            # Fallback: full shallow clone if sparse checkout not supported
+            rm -rf "$EXAMPLES_DIR"
+            if git clone --depth 1 "https://github.com/$REPO.git" "$EXAMPLES_DIR" 2>/dev/null; then
+                # Keep only examples
+                mv "$EXAMPLES_DIR/examples"/* "$EXAMPLES_DIR/" 2>/dev/null
+                rm -rf "$EXAMPLES_DIR/examples" "$EXAMPLES_DIR/src" "$EXAMPLES_DIR/tests" "$EXAMPLES_DIR/.git" "$EXAMPLES_DIR/.github"
+                rm -f "$EXAMPLES_DIR/Cargo.toml" "$EXAMPLES_DIR/Cargo.lock" "$EXAMPLES_DIR"/*.md "$EXAMPLES_DIR"/*.sh "$EXAMPLES_DIR"/*.ps1
+                echo -e "${GREEN}[OK] Examples downloaded to ./ntnt-examples${NC}"
+            else
+                echo -e "${YELLOW}Could not download examples. You can browse them at:${NC}"
+                echo "  https://github.com/$REPO/tree/main/examples"
+            fi
+        fi
+    fi
+fi
+
+echo ""
 echo "Get started:"
 echo -e "  ${CYAN}ntnt run hello.tnt${NC}     # Run a file"
 echo -e "  ${CYAN}ntnt --help${NC}            # See all commands"
 echo ""
 if [ "$INSTALLED_FROM" = "source" ]; then
     echo "Examples: ./ntnt-src/examples/"
+elif [ -d "$(pwd)/ntnt-examples" ]; then
+    echo "Examples: ./ntnt-examples/"
+else
+    echo "Examples: https://github.com/$REPO/tree/main/examples"
 fi
 echo "Docs: https://github.com/$REPO"
 echo ""

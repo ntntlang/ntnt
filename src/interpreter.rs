@@ -4039,8 +4039,9 @@ impl Interpreter {
         };
 
         // Spawn async server in a separate thread
+        // Note: We move interpreter_handle into the thread (not clone) so it's dropped
+        // when the server shuts down, which closes the channel and signals the main loop to exit
         let routes_clone = async_routes.clone();
-        let handle_clone = interpreter_handle.clone();
         let server_handle = thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -4049,7 +4050,7 @@ impl Interpreter {
 
             rt.block_on(async {
                 if let Err(e) =
-                    start_server_with_bridge(server_config, handle_clone, routes_clone).await
+                    start_server_with_bridge(server_config, interpreter_handle, routes_clone).await
                 {
                     eprintln!("Server error: {}", e);
                 }

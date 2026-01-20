@@ -82,12 +82,12 @@ fn test_validate_directory() {
 
 #[test]
 fn test_validate_shows_warnings() {
-    let (stdout, _, _) = run_ntnt(&["validate", "examples/website.tnt"]);
+    let (stdout, _, _) = run_ntnt(&["validate", "examples/http_server.tnt"]);
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("validate should output valid JSON");
 
-    // website.tnt has unused imports
+    // http_server.tnt has unused imports
     let warnings = json["summary"]["warnings"].as_i64().unwrap();
     assert!(warnings > 0, "Should detect unused import warnings");
 }

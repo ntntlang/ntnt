@@ -318,12 +318,75 @@ if (-not $inPath) {
     Write-Host ""
 }
 
+# Offer to download examples (only for binary installs)
+$script:ExamplesDir = $null
+if ($script:InstalledFrom -eq "binary") {
+    Write-Host ""
+    $response = Read-Host "Would you like to download the examples? (y/n)"
+    if ($response -eq "y" -or $response -eq "Y") {
+        $script:ExamplesDir = Join-Path (Get-Location) "ntnt-examples"
+        Write-Host ""
+        Write-Host "Downloading examples to .\ntnt-examples..."
+
+        try {
+            # Try sparse checkout first
+            $null = git clone --depth 1 --filter=blob:none --sparse "https://github.com/$script:Repo.git" $script:ExamplesDir 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Push-Location $script:ExamplesDir
+                $null = git sparse-checkout set examples 2>&1
+                # Move examples to root and clean up
+                if (Test-Path "examples") {
+                    Get-ChildItem -Path "examples" | Move-Item -Destination . -Force
+                    Remove-Item -Path "examples" -Recurse -Force -ErrorAction SilentlyContinue
+                }
+                Remove-Item -Path ".git" -Recurse -Force -ErrorAction SilentlyContinue
+                Pop-Location
+                Write-Host "[OK] Examples downloaded to .\ntnt-examples" -ForegroundColor Green
+            } else {
+                throw "Sparse checkout failed"
+            }
+        } catch {
+            # Fallback: full shallow clone
+            Remove-Item -Path $script:ExamplesDir -Recurse -Force -ErrorAction SilentlyContinue
+            try {
+                $null = git clone --depth 1 "https://github.com/$script:Repo.git" $script:ExamplesDir 2>&1
+                if ($LASTEXITCODE -eq 0 -and (Test-Path "$script:ExamplesDir\examples")) {
+                    # Keep only examples
+                    Get-ChildItem -Path "$script:ExamplesDir\examples" | Move-Item -Destination $script:ExamplesDir -Force
+                    Remove-Item -Path "$script:ExamplesDir\examples" -Recurse -Force -ErrorAction SilentlyContinue
+                    Remove-Item -Path "$script:ExamplesDir\src" -Recurse -Force -ErrorAction SilentlyContinue
+                    Remove-Item -Path "$script:ExamplesDir\tests" -Recurse -Force -ErrorAction SilentlyContinue
+                    Remove-Item -Path "$script:ExamplesDir\.git" -Recurse -Force -ErrorAction SilentlyContinue
+                    Remove-Item -Path "$script:ExamplesDir\.github" -Recurse -Force -ErrorAction SilentlyContinue
+                    Remove-Item -Path "$script:ExamplesDir\Cargo.toml" -Force -ErrorAction SilentlyContinue
+                    Remove-Item -Path "$script:ExamplesDir\Cargo.lock" -Force -ErrorAction SilentlyContinue
+                    Remove-Item -Path "$script:ExamplesDir\*.md" -Force -ErrorAction SilentlyContinue
+                    Remove-Item -Path "$script:ExamplesDir\*.sh" -Force -ErrorAction SilentlyContinue
+                    Remove-Item -Path "$script:ExamplesDir\*.ps1" -Force -ErrorAction SilentlyContinue
+                    Write-Host "[OK] Examples downloaded to .\ntnt-examples" -ForegroundColor Green
+                } else {
+                    throw "Clone failed"
+                }
+            } catch {
+                $script:ExamplesDir = $null
+                Write-Host "Could not download examples. You can browse them at:" -ForegroundColor Yellow
+                Write-Host "  https://github.com/$script:Repo/tree/main/examples"
+            }
+        }
+    }
+}
+
+Write-Host ""
 Write-Host "Get started:"
 Write-Host "  ntnt run hello.tnt     # Run a file" -ForegroundColor Cyan
 Write-Host "  ntnt --help            # See all commands" -ForegroundColor Cyan
 Write-Host ""
 if ($script:InstalledFrom -eq "source") {
     Write-Host "Examples: .\ntnt-src\examples\"
+} elseif ($script:ExamplesDir -and (Test-Path $script:ExamplesDir)) {
+    Write-Host "Examples: .\ntnt-examples\"
+} else {
+    Write-Host "Examples: https://github.com/$script:Repo/tree/main/examples"
 }
 Write-Host "Docs: https://github.com/$script:Repo"
 Write-Host ""

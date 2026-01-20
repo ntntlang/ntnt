@@ -1,16 +1,15 @@
 // NTNT Language Website
-// 
+//
 // A simple website with hot-reloadable HTML templates.
 // Edit HTML files and refresh to see changes - no restart needed!
 //
 // Configuration via environment variables:
 //   CAT_API_URL  - API endpoint for cat facts (default: https://meowfacts.herokuapp.com/)
 //
-// Run with: ntnt run examples/website.tnt
-// Or with custom config: CAT_API_URL="https://api.example.com" ntnt run examples/website.tnt
+// Run with: ntnt run website.tnt (from examples directory)
+// Or with custom config: CAT_API_URL="https://api.example.com" ntnt run website.tnt
 
-import { html, text, json, not_found } from "std/http/server"
-import { read_file, exists } from "std/fs"
+import { html, json } from "std/http/server"
 import { replace } from "std/string"
 import { fetch } from "std/http"
 import { parse } from "std/json"
@@ -20,10 +19,10 @@ import { get_env } from "std/env"
 // Configuration
 // ============================================================================
 
-// Paths relative to where ntnt is run from (project root)
-let PAGES_DIR = "examples/website/pages"
-let LAYOUT_FILE = "examples/website/layout.html"
-let ASSETS_DIR = "examples/website/assets"
+// Paths relative to this .tnt file (using template() for location-independent paths)
+let PAGES_DIR = "website/pages"
+let LAYOUT_FILE = "website/layout.html"
+let ASSETS_DIR = "website/assets"
 
 // Get configuration from environment variables with defaults
 fn get_config(name, default_value) {
@@ -36,37 +35,24 @@ fn get_config(name, default_value) {
 let CAT_API_URL = get_config("CAT_API_URL", "https://meowfacts.herokuapp.com/")
 
 // ============================================================================
-// Template Engine
+// Template Engine (using template() for cross-platform path resolution)
 // ============================================================================
 
 // Load the layout template and inject title + content
 fn render_page(title, content) {
-    match read_file(LAYOUT_FILE) {
-        Ok(layout) => {
-            let result = replace(layout, "<!--TITLE-->", title)
-            let result = replace(result, "<!--CONTENT-->", content)
-            return result
-        },
-        Err(e) => {
-            print("Error loading layout: " + e)
-            return "<html><body><h1>Error</h1><p>Could not load layout template.</p></body></html>"
-        }
-    }
+    // template() resolves paths relative to this .tnt file
+    let layout = template(LAYOUT_FILE, map {})
+    let result = replace(layout, "<!--TITLE-->", title)
+    let result = replace(result, "<!--CONTENT-->", content)
+    return result
 }
 
 // Load a page file and render it with the layout
 fn load_page(filename, title) {
     let filepath = PAGES_DIR + "/" + filename
-    
-    match read_file(filepath) {
-        Ok(content) => {
-            return html(render_page(title, content))
-        },
-        Err(e) => {
-            print("Error loading page " + filename + ": " + e)
-            return html(render_page("Error", "<h1>Page Not Found</h1><p>Could not load: " + filename + "</p>"))
-        }
-    }
+    // template() resolves paths relative to this .tnt file
+    let content = template(filepath, map {})
+    return html(render_page(title, content))
 }
 
 // ============================================================================
@@ -98,7 +84,7 @@ fn examples_page(req) {
 
 // Fetch page - demonstrates server-side API calls with environment config
 // Change the API URL by setting CAT_API_URL environment variable:
-//   CAT_API_URL="https://api.example.com" ntnt run examples/website.tnt
+//   CAT_API_URL="https://api.example.com" ntnt run website.tnt
 fn fetch_page(req) {
     // Fetch cat fact from external API (URL from env var)
     match fetch(CAT_API_URL) {
@@ -107,20 +93,13 @@ fn fetch_page(req) {
                 Ok(data) => {
                     // Extract the fact from the data array
                     let fact = data.data[0]
-                    
-                    // Load the page template
+
+                    // Load the page template using template() for cross-platform paths
                     let filepath = PAGES_DIR + "/fetch.html"
-                    match read_file(filepath) {
-                        Ok(content) => {
-                            // Replace placeholder with actual cat fact
-                            let content_with_fact = replace(content, "<!--CAT_FACT-->", fact)
-                            return html(render_page("Live API Demo", content_with_fact))
-                        },
-                        Err(e) => {
-                            print("Error loading fetch.html: " + e)
-                            return html(render_page("Error", "<h1>Error</h1><p>Could not load page.</p>"))
-                        }
-                    }
+                    let content = template(filepath, map {})
+                    // Replace placeholder with actual cat fact
+                    let content_with_fact = replace(content, "<!--CAT_FACT-->", fact)
+                    return html(render_page("Live API Demo", content_with_fact))
                 },
                 Err(e) => {
                     print("Error parsing JSON: " + e)
@@ -194,16 +173,14 @@ serve_static("/assets", ASSETS_DIR)
 
 print("=== NTNT Language Website ===")
 print("")
-print("Pages directory: " + PAGES_DIR)
-print("")
 print("Configuration:")
 print("  CAT_API_URL: " + CAT_API_URL)
 print("")
 print("Edit these files and refresh to see changes:")
-print("  website/pages/home.html")
-print("  website/pages/about.html")
-print("  website/pages/examples.html")
-print("  website/layout.html")
+print("  " + PAGES_DIR + "/home.html")
+print("  " + PAGES_DIR + "/about.html")
+print("  " + PAGES_DIR + "/examples.html")
+print("  " + LAYOUT_FILE)
 print("")
 print("Routes:")
 print("  GET /         -> home.html")
