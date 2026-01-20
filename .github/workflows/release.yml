@@ -85,15 +85,19 @@ jobs:
           Compress-Archive -Path target/${{ matrix.target }}/release/${{ matrix.binary }} -DestinationPath ntnt-${{ matrix.name }}.zip
           Get-ChildItem ntnt-${{ matrix.name }}.zip
 
-      - name: Generate SHA256 checksum
-        shell: bash
+      - name: Generate SHA256 checksum (Unix)
+        if: matrix.archive == 'tar.gz'
         run: |
-          if [[ "${{ matrix.archive }}" == "tar.gz" ]]; then
-            shasum -a 256 ntnt-${{ matrix.name }}.tar.gz > ntnt-${{ matrix.name }}.tar.gz.sha256
-          else
-            shasum -a 256 ntnt-${{ matrix.name }}.zip > ntnt-${{ matrix.name }}.zip.sha256
-          fi
-          cat ntnt-${{ matrix.name }}.${{ matrix.archive }}.sha256
+          shasum -a 256 ntnt-${{ matrix.name }}.tar.gz > ntnt-${{ matrix.name }}.tar.gz.sha256
+          cat ntnt-${{ matrix.name }}.tar.gz.sha256
+
+      - name: Generate SHA256 checksum (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 ntnt-${{ matrix.name }}.zip).Hash.ToLower()
+          "$hash  ntnt-${{ matrix.name }}.zip" | Out-File -Encoding ascii ntnt-${{ matrix.name }}.zip.sha256
+          Get-Content ntnt-${{ matrix.name }}.zip.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
