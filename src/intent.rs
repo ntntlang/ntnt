@@ -702,6 +702,17 @@ impl Glossary {
                     _ => {}
                 }
 
+                // Substitute params in path (for patterns like response.headers.{name})
+                let substituted_path = {
+                    let mut result = path.clone();
+                    for (name, value) in params {
+                        if let ial::Value::String(v) = value {
+                            result = result.replace(&format!("{{{}}}", name), v);
+                        }
+                    }
+                    result
+                };
+
                 // Substitute params in expected value for HTTP assertions
                 let expected_str = match expected {
                     ial::Value::String(s) => {
@@ -718,7 +729,7 @@ impl Glossary {
                     _ => return None,
                 };
 
-                match (op, path.as_str()) {
+                match (op, substituted_path.as_str()) {
                     (ial::CheckOp::Equals, "response.status") => {
                         if let Ok(code) = expected_str.parse::<u16>() {
                             return Some(Assertion::Status(code));
@@ -736,16 +747,14 @@ impl Glossary {
                     (ial::CheckOp::NotContains, "response.body") => {
                         return Some(Assertion::BodyNotContains(expected_str));
                     }
-                    (ial::CheckOp::Contains, path) if path.starts_with("response.headers.") => {
-                        let header_name = path.trim_start_matches("response.headers.");
+                    (ial::CheckOp::Contains, p) if p.starts_with("response.headers.") => {
+                        let header_name = p.trim_start_matches("response.headers.");
                         return Some(Assertion::HeaderContains(
                             header_name.to_string(),
                             expected_str,
                         ));
                     }
-                    (ial::CheckOp::Exists, path)
-                        if path.contains("json") || path.contains("id") =>
-                    {
+                    (ial::CheckOp::Exists, p) if p.contains("json") || p.contains("id") => {
                         return Some(Assertion::JsonPathExists(expected_str));
                     }
                     _ => {}
