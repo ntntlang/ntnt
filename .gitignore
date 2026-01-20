@@ -43,4 +43,4 @@ docs/_build/
 .claude/settings.local.json
 
 # Private examples
-examples/snowgauge/
+examples/snowgauge/ntnt-src/

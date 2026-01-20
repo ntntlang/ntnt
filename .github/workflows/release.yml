@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false  # Don't cancel other builds if one fails
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-arm64
+            archive: tar.gz
+            binary: ntnt
+          - os: macos-13
+            target: x86_64-apple-darwin
+            name: macos-x64
+            archive: tar.gz
+            binary: ntnt
+          - os: ubuntu-22.04  # Use 22.04 for better glibc compatibility
+            target: x86_64-unknown-linux-gnu
+            name: linux-x64
+            archive: tar.gz
+            binary: ntnt
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x64
+            archive: zip
+            binary: ntnt.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-release-
+
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Verify binary exists
+        shell: bash
+        run: |
+          ls -la target/${{ matrix.target }}/release/
+          test -f target/${{ matrix.target }}/release/${{ matrix.binary }}
+
+      - name: Run unit tests (skip integration tests that spawn servers)
+        run: cargo test --release --locked --target ${{ matrix.target }} --lib
+
+      - name: Package (Unix)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czvf ../../../ntnt-${{ matrix.name }}.tar.gz ${{ matrix.binary }}
+          cd ../../..
+          ls -la ntnt-${{ matrix.name }}.tar.gz
+
+      - name: Package (Windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/${{ matrix.target }}/release/${{ matrix.binary }} -DestinationPath ntnt-${{ matrix.name }}.zip
+          Get-ChildItem ntnt-${{ matrix.name }}.zip
+
+      - name: Generate SHA256 checksum
+        shell: bash
+        run: |
+          if [[ "${{ matrix.archive }}" == "tar.gz" ]]; then
+            shasum -a 256 ntnt-${{ matrix.name }}.tar.gz > ntnt-${{ matrix.name }}.tar.gz.sha256
+          else
+            shasum -a 256 ntnt-${{ matrix.name }}.zip > ntnt-${{ matrix.name }}.zip.sha256
+          fi
+          cat ntnt-${{ matrix.name }}.${{ matrix.archive }}.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ntnt-${{ matrix.name }}
+          path: |
+            ntnt-${{ matrix.name }}.${{ matrix.archive }}
+            ntnt-${{ matrix.name }}.${{ matrix.archive }}.sha256
+          if-no-files-found: error  # Fail if artifact is missing
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts (debug)
+        run: |
+          echo "=== Artifact structure ==="
+          find artifacts -type f
+          echo "=== Verifying all expected files exist ==="
+          test -f artifacts/ntnt-macos-arm64/ntnt-macos-arm64.tar.gz
+          test -f artifacts/ntnt-macos-x64/ntnt-macos-x64.tar.gz
+          test -f artifacts/ntnt-linux-x64/ntnt-linux-x64.tar.gz
+          test -f artifacts/ntnt-windows-x64/ntnt-windows-x64.zip
+          echo "All artifacts present!"
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: NTNT ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          generate_release_notes: true
+          files: |
+            artifacts/ntnt-macos-arm64/ntnt-macos-arm64.tar.gz
+            artifacts/ntnt-macos-arm64/ntnt-macos-arm64.tar.gz.sha256
+            artifacts/ntnt-macos-x64/ntnt-macos-x64.tar.gz
+            artifacts/ntnt-macos-x64/ntnt-macos-x64.tar.gz.sha256
+            artifacts/ntnt-linux-x64/ntnt-linux-x64.tar.gz
+            artifacts/ntnt-linux-x64/ntnt-linux-x64.tar.gz.sha256
+            artifacts/ntnt-windows-x64/ntnt-windows-x64.zip
+            artifacts/ntnt-windows-x64/ntnt-windows-x64.zip.sha256
+          fail_on_unmatched_files: true
