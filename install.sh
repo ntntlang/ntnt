@@ -34,10 +34,8 @@ detect_platform() {
 
     case "$os-$arch" in
         Darwin-arm64)  echo "macos-arm64" ;;
-        Darwin-x86_64) echo "macos-x64" ;;
         Linux-x86_64)  echo "linux-x64" ;;
-        Linux-aarch64) echo "linux-arm64" ;;  # Future support
-        *)             echo "" ;;
+        *)             echo "" ;;  # Other platforms build from source
     esac
 }
 
