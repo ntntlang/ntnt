@@ -14,21 +14,33 @@
 
         <pre><code># server.intent
 
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits the {path} | GET {path} |
+| a user visits {path} | GET {path} |
+| home page | / |
+| page loads successfully | status: 200 |
+| they see "{text}" | body contains "{text}" |
+
+---
+
 Feature: User Greeting
   id: feature.greeting
   description: "Display a personalized greeting"
 
   Scenario: Greet by name
-    When: GET /?name=Alice
-    Then:
-      - status 200
-      - body contains "Hello, Alice"
+    description: "User provides their name and gets a personal greeting"
+    When a user visits /?name=Alice
+    → page loads successfully
+    → they see "Hello, Alice"
 
   Scenario: Default greeting
-    When: GET /
-    Then:
-      - status 200
-      - body contains "Hello, World"</code></pre>
+    description: "User visits without a name and gets default greeting"
+    When a user visits the home page
+    → page loads successfully
+    → they see "Hello, World"</code></pre>
 
         <p>Now implement it in NTNT, linking your code to the intent:</p>
 

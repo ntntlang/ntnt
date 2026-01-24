@@ -2,7 +2,17 @@
 // @implements: feature.homepage
 // @implements: feature.code_quality
 
-import { html } from "std/http/server"
+import { response } from "std/http/server"
+
+// Cacheable HTML response for Cloudflare CDN
+// s-maxage: CDN cache time (doesn't affect browser)
+// stale-while-revalidate: serve stale while fetching fresh in background
+fn cached_html(body, max_age) {
+    return response(200, map {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "public, s-maxage={max_age}, stale-while-revalidate=3600"
+    }, body)
+}
 
 // Helper function to render with layout
 // Paths resolve relative to PROJECT ROOT (where server.tnt is)
@@ -21,5 +31,5 @@ fn render_page(content, title) {
 // GET / - Homepage
 fn get(req) {
     let content = template("views/home.html", map {})
-    return html(render_page(content, "The NTNT Programming Language"))
+    return cached_html(render_page(content, "The NTNT Programming Language"), 60)
 }

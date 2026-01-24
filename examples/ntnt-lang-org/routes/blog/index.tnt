@@ -1,7 +1,15 @@
 // Blog list route handler
 // @implements: feature.blog_list
 
-import { html } from "std/http/server"
+import { response } from "std/http/server"
+
+// Cacheable HTML response for Cloudflare CDN
+fn cached_html(body, max_age) {
+    return response(200, map {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "public, s-maxage={max_age}, stale-while-revalidate=3600"
+    }, body)
+}
 
 // Helper function to render with layout
 // Paths resolve relative to PROJECT ROOT (where server.tnt is)
@@ -40,5 +48,5 @@ fn get(req) {
     let content = template("views/blog.html", map {
         "posts": posts
     })
-    return html(render_page(content, "Blog - NTNT"))
+    return cached_html(render_page(content, "Blog - NTNT"), 60)
 }

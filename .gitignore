@@ -44,3 +44,7 @@ docs/_build/
 
 # Private examples
 examples/snowgauge/ntnt-src/
+examples/snowgauge
+
+# Private notes
+notes/

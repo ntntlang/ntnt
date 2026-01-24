@@ -81,21 +81,33 @@ listen(3000)</code></pre>
   </div>
   <pre><code># server.intent
 
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits the {path} | GET {path} |
+| a user visits {path} | GET {path} |
+| home page | / |
+| page loads successfully | status: 200 |
+| they see "{text}" | body contains "{text}" |
+
+---
+
 Feature: User Greeting
   id: feature.greeting
   description: "Display a personalized greeting"
 
   Scenario: Greet by name
-    When: GET /?name=Alice
-    Then:
-      - status 200
-      - body contains "Hello, Alice"
+    description: "User provides their name and gets a personal greeting"
+    When a user visits /?name=Alice
+    → page loads successfully
+    → they see "Hello, Alice"
 
   Scenario: Default greeting
-    When: GET /
-    Then:
-      - status 200
-      - body contains "Hello, World"</code></pre>
+    description: "User visits without a name and gets default greeting"
+    When a user visits the home page
+    → page loads successfully
+    → they see "Hello, World"</code></pre>
 
   <div class="step">
     <span class="step-number">2</span>
@@ -119,15 +131,25 @@ listen(8080)</code></pre>
   </div>
   <pre><code>$ ntnt intent check server.tnt
 
-Feature: User Greeting
-  Scenario: Greet by name
-    ✓ GET /?name=Alice returns status 200
-    ✓ body contains "Hello, Alice"
-  Scenario: Default greeting
-    ✓ GET / returns status 200
-    ✓ body contains "Hello, World"
+=== NTNT Intent Check ===
 
-1/1 features passing (4/4 assertions)</code></pre>
+Source: server.tnt
+Intent: server.intent
+
+Starting server on port 18081...
+
+=== Test Results ===
+
+✓ Feature: User Greeting
+  ✓ Greet by name
+  ✓ Default greeting
+  ✓ GET /?name=Alice
+  ✓ GET /
+
+=== Summary ===
+Features: 1 total, 1 passed, 0 failed
+Scenarios: 2 passed, 0 failed, 0 skipped
+Assertions: 4 passed, 0 failed</code></pre>
 
   <div class="step">
     <span class="step-number">4</span>

@@ -18,7 +18,11 @@ Built with NTNT's file-based routing, external templates, and middleware.
 
 | Term | Means |
 |------|-------|
-| a visitor goes to $path | GET $path |
+| a visitor goes to the {path} | GET {path} |
+| a visitor goes to {path} | GET {path} |
+| home page | / |
+| learn page | /learn |
+| blog | /blog |
 | page loads successfully | status 200, returns HTML |
 | returns HTML | header "Content-Type" contains "text/html" |
 | has site branding | body contains "ntnt-logo", body contains "NTNT" |
@@ -80,7 +84,7 @@ Feature: Homepage
 
   Scenario: Visitor discovers NTNT
     description: "A new visitor lands on the homepage and learns about NTNT"
-    When a visitor goes to /
+    When a visitor goes to the home page
     → page loads successfully
     → has proper layout
     → they see "Experimental"
@@ -88,13 +92,13 @@ Feature: Homepage
 
   Scenario: Visitor sees call-to-action
     description: "The homepage prominently displays action buttons"
-    When a visitor goes to /
+    When a visitor goes to the home page
     → they see "Get Started"
     → they see "Learn More"
 
   Scenario: Visitor sees feature highlights
     description: "The homepage highlights NTNT's key features"
-    When a visitor goes to /
+    When a visitor goes to the home page
     → they see "Why NTNT?"
     → they see "Full-Featured Language"
     → they see "Design by Contract"
@@ -115,28 +119,28 @@ Feature: Learn Page
 
   Scenario: Developer reads the quick start guide
     description: "A developer visits the learn page to get started"
-    When a visitor goes to /learn
+    When a visitor goes to the learn page
     → page loads successfully
     → has proper layout
     → they see "Installation"
 
   Scenario: Developer sees one-liner install scripts
     description: "The learn page shows easy installation commands"
-    When a visitor goes to /learn
+    When a visitor goes to the learn page
     → they see "curl -sSf"
     → they see "install.sh"
     → they see "install.ps1"
 
   Scenario: Developer sees platform-specific examples
     description: "Hello World examples for different platforms"
-    When a visitor goes to /learn
+    When a visitor goes to the learn page
     → they see "macOS / Linux"
     → they see "Windows"
     → they see "Hello, World"
 
   Scenario: Developer learns about IDD
     description: "The learn page explains Intent-Driven Development"
-    When a visitor goes to /learn
+    When a visitor goes to the learn page
     → they see "Intent-Driven Development"
     → they see "@implements"
     → they see "ntnt intent check"
@@ -144,7 +148,7 @@ Feature: Learn Page
 
   Scenario: Developer sees standard library overview
     description: "The learn page shows available stdlib modules"
-    When a visitor goes to /learn
+    When a visitor goes to the learn page
     → they see "Standard Library"
     → they see "std/http/server"
     → they see "std/db/postgres"
@@ -161,14 +165,14 @@ Feature: Blog List
 
   Scenario: Visitor browses the blog
     description: "A visitor views the list of blog posts"
-    When a visitor goes to /blog
+    When a visitor goes to the blog
     → page loads successfully
     → has proper layout
     → they see "Blog"
 
   Scenario: Blog shows available posts
     description: "The blog index lists all published posts"
-    When a visitor goes to /blog
+    When a visitor goes to the blog
     → they see "Introducing NTNT"
     → they see "Intent-Driven Development"
 
@@ -198,9 +202,7 @@ Feature: Blog Post View
   Scenario: Visiting a non-existent post
     description: "A visitor tries to access a post that doesn't exist"
     When a visitor goes to /blog/does-not-exist
-    → page loads successfully
-    → blog post missing
-    → they don't see "Introducing NTNT"
+    → page not found
 
 ---
 
@@ -237,12 +239,12 @@ Feature: Site Branding
 
   Scenario: Footer shows NTNT attribution
     description: "The footer includes a 'Powered by NTNT' badge"
-    When a visitor goes to /
+    When a visitor goes to the home page
     → has powered badge
 
   Scenario: Meta tags indicate NTNT server
     description: "HTML meta tags show the site is built with NTNT"
-    When a visitor goes to /
+    When a visitor goes to the home page
     → status 200
     → body contains "generator"
     → body contains "NTNT HTTP Server"

@@ -1,8 +1,24 @@
 // Blog post route handler
 // @implements: feature.blog_post
 
-import { html } from "std/http/server"
+import { response } from "std/http/server"
 import { has_key } from "std/collections"
+
+// Cacheable HTML response for Cloudflare CDN
+fn cached_html(body, max_age) {
+    return response(200, map {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "public, s-maxage={max_age}, stale-while-revalidate=3600"
+    }, body)
+}
+
+// 404 response with short cache (so new posts appear quickly)
+fn not_found_html(body) {
+    return response(404, map {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "public, s-maxage=10"
+    }, body)
+}
 
 // Helper function to render with layout
 fn render_page(content, title) {
@@ -37,10 +53,10 @@ fn get(req) {
     if has_key(valid_posts, slug) {
         let post = valid_posts[slug]
         let content = template(post["template"], map {})
-        return html(render_page(content, post["title"] + " - NTNT Blog"))
+        return cached_html(render_page(content, post["title"] + " - NTNT Blog"), 60)
     }
 
-    // 404 - post not found
+    // 404 - post not found (short cache so new posts appear quickly)
     let content = template("views/blog/404.html", map {})
-    return html(render_page(content, "Post Not Found - NTNT Blog"))
+    return not_found_html(render_page(content, "Post Not Found - NTNT Blog"))
 }

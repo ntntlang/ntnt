@@ -438,9 +438,13 @@ impl Glossary {
     }
 
     /// Match a parameterized glossary term against a when clause
-    /// Example: term "a visitor goes to $path" with meaning "GET $path"
+    /// Example: term "a visitor goes to {path}" with meaning "GET {path}"
     /// Input: "a visitor goes to /"
     /// Returns: Some(("GET", "/", None))
+    ///
+    /// Supports recursive glossary resolution:
+    /// If glossary has "the home page" -> "/" and "a user visits {path}" -> "GET {path}"
+    /// Then "a user visits the home page" resolves to "GET /"
     fn match_parameterized_when_term(
         &self,
         clause: &str,
@@ -449,13 +453,13 @@ impl Glossary {
         let term_text = &term.term;
         let meaning = &term.meaning;
 
-        // Check if term has a parameter placeholder ($param)
-        if !term_text.contains('$') {
+        // Check if term has a parameter placeholder ($param or {param})
+        if !term_text.contains('$') && !term_text.contains('{') {
             return None;
         }
 
         // Build a regex pattern from the term
-        // "a visitor goes to $path" -> "a visitor goes to (.+)"
+        // "a visitor goes to {path}" -> "a visitor goes to (.+)"
         let pattern = Self::term_to_regex_pattern(term_text);
         let re = regex::Regex::new(&format!("(?i)^{}$", pattern)).ok()?;
 
@@ -468,14 +472,18 @@ impl Glossary {
 
         for (i, name) in param_names.iter().enumerate() {
             if let Some(value) = caps.get(i + 1) {
-                params.insert(name.clone(), value.as_str().to_string());
+                let captured_value = value.as_str().to_string();
+                // Recursively resolve the captured value through the glossary
+                let resolved_value = self.resolve_glossary_term(&captured_value);
+                params.insert(name.clone(), resolved_value);
             }
         }
 
-        // Substitute parameters in the meaning
+        // Substitute parameters in the meaning (handle both $param and {param} syntax)
         let mut expanded = meaning.clone();
         for (name, value) in &params {
             expanded = expanded.replace(&format!("${}", name), value);
+            expanded = expanded.replace(&format!("{{{}}}", name), value);
         }
 
         // Parse the expanded meaning to extract method and path
@@ -492,23 +500,72 @@ impl Glossary {
         None
     }
 
+    /// Resolve a value through the glossary recursively
+    /// If the value matches a glossary term, return its meaning
+    /// Otherwise return the original value
+    fn resolve_glossary_term(&self, value: &str) -> String {
+        let trimmed = value.trim();
+
+        // If value already looks like a path (starts with /), use it directly
+        if trimmed.starts_with('/') {
+            return trimmed.to_string();
+        }
+
+        let value_lower = trimmed.to_lowercase();
+
+        // Look for an exact match in the glossary
+        for term in self.terms.values() {
+            if term.term.to_lowercase().trim() == value_lower {
+                // Found a match - return the meaning
+                // Don't recurse infinitely - just one level of resolution
+                return term.meaning.clone();
+            }
+        }
+
+        // No match found - return original value
+        trimmed.to_string()
+    }
+
     /// Convert a parameterized term to a regex pattern
-    /// "a visitor goes to $path" -> "a visitor goes to (.+)"
+    /// "a visitor goes to {path}" -> "a visitor goes to (.+)"
+    /// Supports both $param and {param} syntax
     fn term_to_regex_pattern(term: &str) -> String {
         let mut pattern = regex::escape(term);
         // Replace escaped $param with capture group
-        let re = regex::Regex::new(r"\\\$(\w+)").unwrap();
-        pattern = re.replace_all(&pattern, "(.+)").to_string();
+        let re_dollar = regex::Regex::new(r"\\\$(\w+)").unwrap();
+        pattern = re_dollar.replace_all(&pattern, "(.+)").to_string();
+        // Replace escaped {param} with capture group
+        let re_brace = regex::Regex::new(r"\\\{(\w+)\\\}").unwrap();
+        pattern = re_brace.replace_all(&pattern, "(.+)").to_string();
         pattern
     }
 
     /// Extract parameter names from a term
-    /// "a visitor goes to $path" -> ["path"]
+    /// "a visitor goes to {path}" -> ["path"]
+    /// Supports both $param and {param} syntax
     fn extract_param_names(term: &str) -> Vec<String> {
-        let re = regex::Regex::new(r"\$(\w+)").unwrap();
-        re.captures_iter(term)
-            .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-            .collect()
+        let mut names = Vec::new();
+
+        // Extract $param style
+        let re_dollar = regex::Regex::new(r"\$(\w+)").unwrap();
+        for cap in re_dollar.captures_iter(term) {
+            if let Some(m) = cap.get(1) {
+                names.push(m.as_str().to_string());
+            }
+        }
+
+        // Extract {param} style
+        let re_brace = regex::Regex::new(r"\{(\w+)\}").unwrap();
+        for cap in re_brace.captures_iter(term) {
+            if let Some(m) = cap.get(1) {
+                let name = m.as_str().to_string();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+
+        names
     }
 
     /// Extract a path from a glossary term's meaning
@@ -1000,13 +1057,9 @@ impl Glossary {
         let mut component_refs = Vec::new();
 
         // Determine method/path/body based on action type
-        let (method, path, body) = match &when_action {
+        let (method, path, body, is_http) = match &when_action {
             WhenAction::Http { method, path, body } => {
-                // Add appropriate default status based on HTTP method
-                // POST typically returns 201 (Created), others return 200
-                let default_status = if method == "POST" { 201 } else { 200 };
-                assertions.push(Assertion::Status(default_status));
-                (method.clone(), path.clone(), body.clone())
+                (method.clone(), path.clone(), body.clone(), true)
             }
             WhenAction::CodeQuality { file, .. } => {
                 // Code quality scenarios use a special method marker
@@ -1017,7 +1070,7 @@ impl Glossary {
                         .map(|d| d.to_string())
                         .unwrap_or_else(|| ".".to_string())
                 });
-                ("CODE_QUALITY".to_string(), quality_path, None)
+                ("CODE_QUALITY".to_string(), quality_path, None, false)
             }
         };
 
@@ -1049,6 +1102,18 @@ impl Glossary {
                     // Track unresolved outcome
                     unresolved.push(outcome.clone());
                 }
+            }
+        }
+
+        // For HTTP requests, add default status only if no explicit status assertion was provided
+        // This allows scenarios to explicitly test error responses (like 404) without conflict
+        if is_http {
+            let has_explicit_status = assertions.iter().any(|a| matches!(a, Assertion::Status(_)));
+            if !has_explicit_status {
+                // Add appropriate default status based on HTTP method
+                // POST typically returns 201 (Created), others return 200
+                let default_status = if method == "POST" { 201 } else { 200 };
+                assertions.insert(0, Assertion::Status(default_status));
             }
         }
 
