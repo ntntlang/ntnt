@@ -176,7 +176,7 @@ Feature: Blog List
   Scenario: Blog shows available posts
     description: "The blog index lists all published posts"
     When a visitor goes to the blog
-    → they see "Introducing NTNT"
+    → they see "Introducing the NTNT Programming Language"
     → they see "Intent-Driven Development"
 
 ---
@@ -188,20 +188,20 @@ Feature: Blog Post View
 
   Scenario: Reading the introduction post
     description: "A visitor reads the introductory blog post about NTNT"
-    When a visitor goes to /blog/introducing-ntnt-a-programming-language-for-the-ai-era
+    When a visitor goes to /blog/introducing-ntnt
     → blog post exists
     → has proper layout
-    → they see "Introducing NTNT"
-    → they see "A Real Programming Language"
+    → they see "Introducing the NTNT Programming Language"
+    → they see "What NTNT Includes"
     → they see "NTNT Team"
 
   Scenario: Reading the IDD explained post
     description: "A visitor learns about Intent-Driven Development"
-    When a visitor goes to /blog/intent-driven-development-from-requirements-to-verified-code
+    When a visitor goes to /blog/intent-driven-development
     → blog post exists
     → has proper layout
     → they see "Intent-Driven Development"
-    → they see "A Concrete Example"
+    → they see "The Core Idea"
 
   Scenario: Visiting a non-existent post
     description: "A visitor tries to access a post that doesn't exist"

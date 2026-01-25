@@ -1,43 +1,151 @@
-// NTNT Language - Struct Invariants Example
-// ============================================
-// This example demonstrates invariant checking on struct types.
+// Struct Invariants Example
+// Demonstrates invariant checking on struct types
+//
+// Run with: ntnt run examples/invariants.tnt
+//
 // Invariants are conditions that must always hold for a type.
+// They are checked:
+//   1. On struct construction
+//   2. After method calls that modify self
+//   3. After direct field assignments
 
-// Define a struct for a bank account
+// ============================================
+// Example 1: BankAccount - Balance must be non-negative
+// ============================================
+print("=== Example 1: BankAccount ===")
+
 struct BankAccount {
     balance: Int,
     owner: String
 }
 
-// Define invariants for BankAccount
-// The invariant ensures balance is never negative
 impl BankAccount {
-    invariant balance >= 0
+    invariant self.balance >= 0
 }
 
-print("=== Struct Invariants Example ===");
-print("");
+let account = BankAccount { owner: "Alice", balance: 100 }
+print("Account created: " + account.owner + " with balance " + str(account.balance))
 
-// Create a valid account - invariant passes
-print("Creating valid account with balance 100...");
-let account = BankAccount { balance: 100, owner: "Alice" };
-print("Account created successfully!");
-print("Balance: " + str(account.balance));
-print("Owner: " + account.owner);
+let empty_account = BankAccount { owner: "Bob", balance: 0 }
+print("Zero balance allowed: " + empty_account.owner)
 
-print("");
+// ============================================
+// Example 2: BoundedCounter - Value within min/max
+// ============================================
+print("")
+print("=== Example 2: BoundedCounter ===")
 
-// Create another valid account
-print("Creating account with zero balance...");
-let empty_account = BankAccount { balance: 0, owner: "Bob" };
-print("Empty account created successfully!");
-print("Balance: " + str(empty_account.balance));
+struct BoundedCounter {
+    value: Int,
+    min: Int,
+    max: Int
+}
 
-print("");
-print("=== Invariant Violation Demo ===");
-print("Attempting to create account with negative balance...");
-// Uncomment to see invariant violation:
-// let bad_account = BankAccount { balance: -50, owner: "Mallory" };
+impl BoundedCounter {
+    invariant self.value >= self.min
+    invariant self.value <= self.max
+}
 
-print("");
-print("=== All invariant examples passed! ===");
+let counter = BoundedCounter { value: 5, min: 0, max: 10 }
+print("Counter: " + str(counter.value) + " (range: " + str(counter.min) + "-" + str(counter.max) + ")")
+
+// ============================================
+// Example 3: NonEmptyList - Must have at least one item
+// ============================================
+print("")
+print("=== Example 3: NonEmptyList ===")
+
+struct NonEmptyList {
+    items: Array,
+    length: Int
+}
+
+impl NonEmptyList {
+    invariant self.length > 0
+}
+
+let list = NonEmptyList { items: [1, 2, 3], length: 3 }
+print("List with " + str(list.length) + " items")
+
+// ============================================
+// Example 4: Temperature - Kelvin cannot be negative
+// ============================================
+print("")
+print("=== Example 4: Temperature (Kelvin) ===")
+
+struct Temperature {
+    kelvin: Int
+}
+
+impl Temperature {
+    invariant self.kelvin >= 0
+}
+
+let temp = Temperature { kelvin: 293 }
+print("Temperature: " + str(temp.kelvin) + " K (about 20C)")
+
+// ============================================
+// Example 5: Percentage - Must be 0-100
+// ============================================
+print("")
+print("=== Example 5: Percentage ===")
+
+struct Percentage {
+    value: Int
+}
+
+impl Percentage {
+    invariant self.value >= 0
+    invariant self.value <= 100
+}
+
+let progress = Percentage { value: 75 }
+print("Progress: " + str(progress.value) + "%")
+
+// ============================================
+// Example 6: Rectangle - Positive dimensions
+// ============================================
+print("")
+print("=== Example 6: Rectangle ===")
+
+struct Rectangle {
+    width: Int,
+    height: Int
+}
+
+impl Rectangle {
+    invariant self.width > 0
+    invariant self.height > 0
+}
+
+let rect = Rectangle { width: 10, height: 5 }
+print("Rectangle: " + str(rect.width) + " x " + str(rect.height))
+
+// ============================================
+// Example 7: Ratio - Denominator cannot be zero
+// ============================================
+print("")
+print("=== Example 7: Ratio ===")
+
+struct Ratio {
+    numerator: Int,
+    denominator: Int
+}
+
+impl Ratio {
+    invariant self.denominator != 0
+}
+
+let half = Ratio { numerator: 1, denominator: 2 }
+print("Ratio: " + str(half.numerator) + "/" + str(half.denominator))
+
+// ============================================
+// Summary
+// ============================================
+print("")
+print("=== All Invariant Examples Passed! ===")
+print("")
+print("To see invariant violations, try creating:")
+print("  BankAccount { balance: -50, owner: \"Bad\" }")
+print("  Temperature { kelvin: -1 }")
+print("  Ratio { numerator: 1, denominator: 0 }")

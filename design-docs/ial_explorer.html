@@ -92,6 +92,30 @@
         cursor: pointer;
       }
 
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        border: 1px solid transparent;
+        transition: all 0.1s ease;
+      }
+
+      .btn-secondary {
+        background: var(--bg-tertiary);
+        border-color: var(--border);
+        color: var(--text-primary);
+      }
+
+      .btn-secondary:hover {
+        background: var(--bg-elevated);
+        border-color: var(--border-hover);
+      }
+
       /* Main container */
       .container {
         display: grid;
@@ -468,10 +492,15 @@
   <body>
     <header class="header">
       <div class="logo">
-        <span class="ial">IAL</span> Explorer
+        <img
+          src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABgWlDQ1BzUkdCIElFQzYxOTY2LTIuMQAAKJF1kctLQkEUh7+0MHpgUIsWLSyqRWSYgdQmSAkLJMOMem30+grULvcaIW2DtkJB1KbXov6C2gatg6AogmgdLYralNzOVUGJPMOZ+eY35xxmzoAllFLSer0L0pmsFvR7HQuLSw7bG3W0iw/QHVZ0dWJ2NkBN+3qQSLE7p1mrdty/1hyN6QrUNQqPK6qWFZ4SDmxkVZN3hTuUZDgqfC48qMkFhe9NPVLiV5MTJf4xWQsFfWBpE3YkqjhSxUpSSwvLy+lNp9aV8n3Ml7TEMvNzsvaId6ETxI8XB9NM4sPDMGMye3DiZkh21Mh3FfNnWJNcRWaVHBqrJEiSZVDUdakekzUuekxGipzZ/7591eMj7lL1Fi80vBjGRx/YdqCQN4zvY8MonID1Ga4ylfy1Ixj9FD1f0XoPwb4FF9cVLbIHl9vQ+aSGtXBRsopb4nF4P4PWRWi/hablUs/K55w+QmhTvuoG9g+gX+LtK79TxGfdK1twuAAAAAlwSFlzAAAuIwAALiMBeKU/dgAAD2hJREFUeJztmXuMXFd9xz/n3HvnzntmZ3e9Xu+ud+31M34kjhO7wTxCiGsINCBUEFRqBZUKCNFKpagPCQFKJdQ2NG1KBURQBAKioBBKICaJMThOHAfbcWITZ23v2ut9ex+zszM7z/s6p3/M7NqE4BoRgtTOV7oa7dy795zf93x/3/P7nYEmmmiiiSaaaKKJJppoookmmvh/B/F6Dzh8aTiRz+V6qsVCj18p9Gq3khZWOG9EEtN2LDmVSKWn0un07MqVnf7rMZ/fGQGlYqnliSd+fPPM1MSN/sLEeqM0vSXqFTa0WV5Hm61IhzT4DvguWpoIy8bFYt4RZKvayTrmZN5oGS7Y7cM337zz4F13v2d/MpGovNbzfM0JcGo1+/TpF+94+Ctf+Jt9idHbL807RtEN6E5K+lsjhIQiZihs00AaEiFAKY3vK0quxtOCyyWf81kX2zLY2RVlpqI5orfu/+gn//7ezu7eZ8Ph8GumjteUgKmpydSxJx/57PEnHv7Tva2Ftk3tFkIIFILpos9sWeErCBR4QUAyYmCYBsWaj+cpTENiSU1r1KQnaWDK+vT8QHNkzNHPl1sm973/Qw/ccue7/zmTafVeizm/JgR4vhc6e+b0ppMP3ff1meFzO2/vEvQkBELUR5BCoDVopfG14GI+4OfjFU7OScy2XlpKw9y0MsQbe8KkbIVEI6Ws/48GNGjgF/MwXAS9atvP3vfX//SJtrbW84Zhqt8rAbMz050vHH78L6aefOATwim1r8vYbGiRgMZDU6wFVHyouHAp75Or+qyKS/rbY/zsQpF4SLAyabM6KTk9VaGmBKtSNt0JgYUibhtELUmdTTg26RIWisFyZOjGP/m7f9ux520PJtPpwu+FgBNHn37LxFMP3tcxd3LL5YJjp0OajW0Wl8uaiVKAryAkNaaAqCnoToeIWeD4imOTLpvbQmTCghOXXbrjgp6kCcIgWwmYLvkEClwFnoKIBX1pk5CEFy67dMQNZCRZnVl521Nb7/rwpzZt3jzwuhHguq59//3//pfxM498Zl+vkTg8WqHqa2pVh5Kv2JAJsa0jTMRQWFJgStHwAg3AuVxAxQnYudJGCqj6iofOlPng9hghQAhBXfmaoJE2CzXNyYkqc1VFW9xkMbDY023RGpF8a9CY3PmBT33kXXff/bhpmvp3TsAT3/vWR5yD9//rVL4SPzgOOdfgr3ZItrSaxEP1YLUGIfQvDaGAiYLHC1Mud2+MIhuyRkDBURy+VGHvWpuoaYIQ6Cu3ERoEgkAr5mqa56YDvnteszVZ5S2rbVSmr7D1z+55z+ZtO576TWKRv2nwZ148/mbn2INf2L5CxGuB4OZ2wQc2QNSAeEgs56oQIMSV1yutmS37DMx5vH1dFCE1SE39EU0yJNjUFuJcNiDQGq0VoBHL7xNoNEJA2gaU5n39AQnbQAiDbdZM6tlv3/f5fH6h93dGgOM4fQe++vn7evVM4qvPF+hpjXB7r8U711gsOIqJkkbrX74AtNb4CgazPrd0hgkbqq6LJYunrpp1mRDzVcWC46NZuncFGvA17B+ssmeV5O51NqtTFq3xEMfGyuwKXt715X+55+Oe7xnXG9N1P7hYXLQe+tK9n+3NnXjXhWzN2Lc2wvC8yy1dNlIKMlGTly67JEKahCXRQiyvngZOT7tETMHatFn/Xkga4l4mSgjojJs8PlihO2kRNWTjifo7lFYcn3LpS1v0JAykELTGDF4cL9GXlIyXAtkt57dP0zr0zQe/e12meN0KOHrgsT8qnj7wUV9h7emNcGSsyrZ2o76nC0nSEuxYaXF8wme6rEBrVOM6O+dT8jRb2k00atncLuRcTkxWKXsNr1CasAl7+6OcvOxR8RRKqYaaFAeGq8StJRIlaGi3IRaSxG3JukyIQrGSOP3YN74+cuH81uuJ67oUMHju3C1fu/czj97WUorsWmVR9mF4wWd3t424aqXDpqC/1ea5CZf2mMA2BLMVxdk5l71rIxiGpOrBweEKh8c9vn++yiMDVSq+4NysQ9IWpCImsZBEoxnNe6xKmCDg8LhDR8Jia6uJbIwphEAg6EhIBuYV29otVsUFA6MzoQOnLq5/9vgLB+65557yb0VANptd8837PvelPaFL63d2WCgNz097vHVNFNOom9NSqgpACo1twZlZHw28NOvTEZNkq5qzOZ9LeY+NrSEUkh9f9OhZt4mYu8D7b4hwuehzLheQqwZIBMOFuhOMFjwsKbipI0Q9ZNBSNPSrMKUg70pMFAkT+jMWkxOTq4Zyjvvo/iefulZ810wBx3Xkf37xPz50s3PqTbu7bKSE2bJH2ADbUMjl6YDWdWkrFC0Rk4Ir+NpIhnN5SdQ2SFiwqzPE3rVRPAz2D1VxlMQwLH6RDThwyWFnV4Q7+8KsTRqELUkmavCVoThPThi0xEw0DXOlsUtoBRoMJB0RuJBz0FoTsQQf2BKOLPz84b89+NOD10wF81o3z5873/riocc+HG2rya0rYoQMwWRZsSIqQCs0Rj1PlabowfNTVYZyPsmQwS2rEzzz/BTv3WHT12IgpERpzUxZ85PhKvOuicKvb481g0CGePRciXdviNEet2jTmr6UIF/JkQ9CjOd9DgzWSIUFt3aF6WuxMAGjYaIro4LnxjR+l4EpYCgfUFwoRg7t/8EDpVLpzng8Xn21GK+ZAltu2PJpd/jYO9+7PsTL2QBfSkYKirUtFiM5l5myYqygGMr5ZCs+GzIWb10TZXuHxWzR48bOEBtbLXSjspspKV6Y9pgowalsvQ1ubW0lny9wcd7jD7osik7AyphZr3wkbG6zmCsHvLnb4rbuCP2ZEDNln8G5gKmSIl9TZCs+FV/T1xbhqTGXQAtmix5vWh1m/8B856abdp9+4IEHzr5ajL82BWZnZzOTF8/++fo2m86EiYniO5OdDMwpLi4ERKwQKVuwsdXkjjVh3tQbpjtp1vNTw4Wcy+aMuWxWFVczMOeBhp+OOKDr/lHv+jTlQPL0mEctkJyZc+pFj677S0dEMFsJAIibkps6wtyxJszuVTYrYwYJS+Jqg7NzDj+ZiXMya7OrM4RtSvoSBAef3H+n7/uJ34iA0dHR95cuD4u+uEZKsAxNbWaE9SnNrk6T/oxkdTpEOlIXkWCpCtQUXU3CrpuSBnwleGyoSlfa5OFzFTyu5PMyNLyck9R8xdmsx2hBL3+fsAUlt/G8oOE8gpCElXGT3rTJphbJbZ0WsjiLdBaxpEBKTRsFezE3a1y6dGnbdRPgeW7q8KGf3toepdYZA89XFF34h90W7TGT2YpCLc1PXylXlzBd8ulpqKHoBDwz5vCGnjAnJh2mKgaveLwxE0ElgB8MuezrjzG+GDCxGACCVEhScHS9txBXSKuPq8CQuFpweMzl02+Mc0O7ZMHVSK3pTkrS0tl29OjR7ddNwNTU5Y045bhZmWtP2YJcxScWkkRsyfpWk6FsDbVcq/PLKynAUYJ4SOBqzclLLv1piZTwo4se/q8RXd3d4Vxe8t/na+xcaXE265FzFKmIoOhqhJCNsVT9EhotQCnFhXmX7rRBZ8KkN2UxMFPDEoKoJbEun741Fo30XDcBhw4d2hY3fXt1PIhIw2C4oOmIaCSatqjG15CtAa+QsdYapSHvQiJicXhU0Rk3WZkU3H+8yJzz63fdJRUpBN8YcBgteLylL8xjg1VyNWiJGEyUl4ripY6zTlrNh6miT18c0JrWCOQcn5qob9Q3p11jenJs49GjR2+9LgKUUr3uyKm1cUOz6CoWHEV3KgRIBJLd3VGeGXEou0tnViy3LoWaplANODXt0p8WrM+Y/GjQ4cSMRlyj7FgmUmukNPmvl2qUXMUHt8QZnPeJ2RYHBgsoDUpoAvRyu/zitEt3wiARkigAAW/rT3Bk1MH3A1rCgtqlFzpd13nP/0rAwMDLQgWB2W/ObRYCnhwqsafHbvT2CoEgYsId/RGeHqote8FSOfj0pQpD8x6eFqzJWFxc8HnknEOgwPd9fN/H8zw8zyMIArTWy387nofn+3i+z4szAU+NepiGoLclzPcHipQ9qPoglrtMuLTg4wT11BRC16tRBGkL2iKCyZLCMCSbIwuZwfPnb8nn8y3XJGB2dm730MBLnV0xac47BhkbkpZa3raW0GJq2uMGwwseWimE1gQaZsoB+/qjjBQ0Y8WAH15wGc3/auBLF9SJCYJg+TMIAqqe4qGzNbKu5Jlxh5s6w7xrY5SBOQd0Xf4VV/GLGY871lgYkkZvQP2+0qxLG2QdgZImEa/YOz48NOU4zp5rEjA/n/vDsxdG933zQoRj42Vu7IriI+vSUyCUrlegAtamTKZKGgUESjOSD9jRFaYrAb1JyVefX+TxoQpLOSulRMorQy7JXnJVc3NVczVRDPjHQzncQNGfgu6UScEFXyu0FgzlAra0mfWOEYnW9fXXgBYS05L4vs8PL3h8ZyQWWSjVMkeOHNkTBMHySv5KKbxp08aXu3u6Xjp1ZqFDqTb5xQsxbO2QEA5po0bScGi3NV1Jk86WCK1Jk6NjFd7QbTOUddi7LoqUgtmKw7PjLjUlGqdDYtkvBKJx4EG9EKKxu111giaEQCvFiWmXTNxk7xobhCBhSXI1TSpukPWhJ2MwOF9lpqzIVgQ5L0TON1nwQ/hmhHwtRWG+Rmur7bxj+/bx9evXH9RaSyDgynCvVMH87o/98Tu+rdrWpFLpTDoItBUoVW94lMYLfHzPIXBrBLUypcUCG5IBi47P6pQJhslwAUby9eaovnVrkAKhl9yi7uipVIrCYuGqjrJxQLK83wvSEYNt7QaW9lkoe2hhkHfBjbSgRAjTjhAKhQmHI42js/oZgiENHbKsytjgqcrbb3/D9z75uXs//spYX5WAWq0Wfe7okf6QHRGlUileqVQ7S6VSXz6f78svLvaVSuU15XKpN59fjJcrVQSChZkxEq0riKfbEI1DEoGu/7hB3Zy0oF7eLq3wkpkJzbKloxtV5RVBLPGnNTi1KpX5SQIrQiKZQkpJPB7XsVhsOhGLjaTSqdFMS8twIpkYidj2aDKZnI9EIl46lZzftPmGyesi4HqQzWaF7/sdruetnxif2Pnl+z7/sQ1bd5xtae+oKnVFz/Iq41xe06Vs0AquynkaZF2ZXD1VlogQCIIg4Pih/Zt33XHXyTvfduf+TCYzaBjG8IoVK16123td4Hme6Xled+D7133G+FuN5/utruvGXo+xmmiiiSaaaKKJJppoookmmmiiiSb+z+F/AL8Qt1ZCgQpGAAAAAElFTkSuQmCC"
+          alt="NTNT"
+          style="height: 24px; width: 24px; vertical-align: middle; margin-right: 8px"
+        />NTNT <span class="ial">IAL</span> Explorer
         <span class="header-subtitle">Intent Assertion Language Visualizer</span>
       </div>
       <div class="header-right">
+        <a href="studio-mockup-v2.html" class="btn btn-secondary" style="text-decoration: none;">← Back to Studio</a>
         <select class="file-select">
           <option>ntnt-lang-org/server.intent</option>
           <option>ial_demo/server.intent</option>
@@ -615,6 +644,30 @@ Built with NTNT's file-based routing, external templates, and middleware.
 
 <span class="separator">---</span>
 
+<span class="keyword">Feature:</span> <span class="feature-name">Text Utilities</span>
+  id: feature.text_utilities
+  description: <span class="string">"Utility functions for text processing used across the site"</span>
+  source: lib/text.tnt
+
+  <span class="keyword">Scenario:</span> Blog titles become clean URLs
+    description: <span class="string">"Post titles are converted to URL-safe slugs"</span>
+    <span class="keyword">When</span> <span class="glossary-term" data-term="generating a slug from a title">generating a slug from a title</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="slug is URL-safe">slug is URL-safe</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="slug matches expected format">slug matches expected format</span>
+
+  <span class="keyword">Scenario:</span> Slugs are predictable
+    description: <span class="string">"The same title always produces the same slug"</span>
+    <span class="keyword">When</span> <span class="glossary-term" data-term="generating a slug from a title">generating a slug from a title</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="slug is predictable">slug is predictable</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="slug is stable">slug is stable</span>
+
+  <span class="keyword">Scenario:</span> Slugs handle any input
+    description: <span class="string">"Edge cases and weird inputs don't break slug generation"</span>
+    <span class="keyword">When</span> <span class="glossary-term" data-term="generating a slug from user input">generating a slug from user input</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="slug is URL-safe">slug is URL-safe</span>
+
+<span class="separator">---</span>
+
 <span class="keyword">Constraint:</span> Responsive Design
   description: <span class="string">"Website should be mobile-friendly with proper viewport meta"</span>
   applies_to: [feature.homepage, feature.learn_page, feature.blog_list, feature.blog_post]
@@ -622,6 +675,60 @@ Built with NTNT's file-based routing, external templates, and middleware.
 <span class="keyword">Constraint:</span> Accessible
   description: <span class="string">"Use semantic HTML, proper heading hierarchy, and sufficient contrast"</span>
   applies_to: [feature.homepage, feature.learn_page, feature.blog_list, feature.blog_post]
+
+<span class="separator">---</span>
+<span class="separator">---</span>
+
+<span class="section-header">## System-Managed Sections</span>
+
+<span class="comment">The sections below are managed by the system/agent. Humans confirm the scenarios above;
+the system uses these sections to execute verification.</span>
+
+<span class="separator">---</span>
+
+<span class="section-header">## Glossary Extensions (Unit Testing)</span>
+
+| Term | Means |
+|------|-------|
+| <span class="glossary-term" data-term="generating a slug from a title">generating a slug from a title</span> | call: slugify({title}), source: lib/text.tnt, input: test_data.slugify_examples |
+| <span class="glossary-term" data-term="generating a slug from user input">generating a slug from user input</span> | call: slugify({input}), source: lib/text.tnt, input: corpus.strings |
+| <span class="glossary-term" data-term="slug is URL-safe">slug is URL-safe</span> | check: invariant.url_slug |
+| <span class="glossary-term" data-term="slug matches expected format">slug matches expected format</span> | result is {expected} |
+| <span class="glossary-term" data-term="slug is predictable">slug is predictable</span> | property: deterministic |
+| <span class="glossary-term" data-term="slug is stable">slug is stable</span> | property: idempotent |
+
+<span class="separator">---</span>
+
+<span class="section-header">## Invariants</span>
+
+<span class="keyword">Invariant:</span> <span class="feature-name">URL Slug</span>
+  id: invariant.url_slug
+  description: <span class="string">"A URL-safe slug string"</span>
+
+  Assertions:
+    <span class="arrow">→</span> <span class="glossary-term primitive" data-term="uses only">uses only [a-z0-9-]</span>
+    <span class="arrow">→</span> <span class="glossary-term primitive" data-term="is lowercase">is lowercase</span>
+    <span class="arrow">→</span> <span class="glossary-term primitive" data-term="does not start with">does not start with "-"</span>
+    <span class="arrow">→</span> <span class="glossary-term primitive" data-term="does not end with">does not end with "-"</span>
+    <span class="arrow">→</span> <span class="glossary-term primitive" data-term="does not contain">does not contain "--"</span>
+    <span class="arrow">→</span> <span class="glossary-term primitive" data-term="is non-empty">is non-empty</span>
+
+<span class="separator">---</span>
+
+<span class="section-header">## Test Data</span>
+
+<span class="keyword">Test Cases:</span> <span class="feature-name">Slugify Examples</span>
+  id: test_data.slugify_examples
+  for: feature.text_utilities
+  scenario: Blog titles become clean URLs
+
+  | title | expected |
+  | <span class="string">"Hello World"</span> | <span class="string">"hello-world"</span> |
+  | <span class="string">"My First Post!"</span> | <span class="string">"my-first-post"</span> |
+  | <span class="string">"What's the Deal?"</span> | <span class="string">"whats-the-deal"</span> |
+  | <span class="string">"UPPERCASE TITLE"</span> | <span class="string">"uppercase-title"</span> |
+  | <span class="string">"  Extra   Spaces  "</span> | <span class="string">"extra-spaces"</span> |
+  | <span class="string">"Introducing NTNT: A Programming Language for the AI Era"</span> | <span class="string">"introducing-ntnt-a-programming-language-for-the-ai-era"</span> |
         </div>
       </div>
 
@@ -646,7 +753,7 @@ Built with NTNT's file-based routing, external templates, and middleware.
           </div>
         </div>
 
-        <div class="sidebar-title">Glossary Terms (13)</div>
+        <div class="sidebar-title">Glossary Terms (19)</div>
         <ul class="glossary-list">
           <li class="glossary-item" data-term="a visitor goes to the home page">
             <div class="term">a visitor goes to the home page</div>
@@ -699,6 +806,34 @@ Built with NTNT's file-based routing, external templates, and middleware.
           <li class="glossary-item" data-term="page not found">
             <div class="term">page not found</div>
             <div class="means">→ status 404</div>
+          </li>
+        </ul>
+
+        <div class="sidebar-title" style="margin-top: 20px;">Unit Testing Terms (6)</div>
+        <ul class="glossary-list">
+          <li class="glossary-item" data-term="generating a slug from a title">
+            <div class="term">generating a slug from a title</div>
+            <div class="means">→ call: slugify({title}), source: lib/text.tnt</div>
+          </li>
+          <li class="glossary-item" data-term="generating a slug from user input">
+            <div class="term">generating a slug from user input</div>
+            <div class="means">→ call: slugify({input}), input: corpus.strings</div>
+          </li>
+          <li class="glossary-item" data-term="slug is URL-safe">
+            <div class="term">slug is URL-safe</div>
+            <div class="means">→ check: invariant.url_slug (6 assertions)</div>
+          </li>
+          <li class="glossary-item" data-term="slug matches expected format">
+            <div class="term">slug matches expected format</div>
+            <div class="means">→ result is {expected}</div>
+          </li>
+          <li class="glossary-item" data-term="slug is predictable">
+            <div class="term">slug is predictable</div>
+            <div class="means">→ property: deterministic</div>
+          </li>
+          <li class="glossary-item" data-term="slug is stable">
+            <div class="term">slug is stable</div>
+            <div class="means">→ property: idempotent</div>
           </li>
         </ul>
       </div>
@@ -811,6 +946,83 @@ Built with NTNT's file-based routing, external templates, and middleware.
           means: 'status 404',
           primitive: true,
           check: 'Check(response.status == 404)'
+        },
+        // Unit testing glossary terms
+        'generating a slug from a title': {
+          means: 'call: slugify({title}), source: lib/text.tnt, input: test_data.slugify_examples',
+          children: [
+            { term: 'call: slugify({title})', primitive: true, check: 'slugify(title)' },
+            { term: 'source: lib/text.tnt', primitive: true, check: 'Load("lib/text.tnt")' },
+            { term: 'input: test_data.slugify_examples', primitive: true, check: 'ForEach(test_data.slugify_examples)' }
+          ]
+        },
+        'generating a slug from user input': {
+          means: 'call: slugify({input}), source: lib/text.tnt, input: corpus.strings',
+          children: [
+            { term: 'call: slugify({input})', primitive: true, check: 'slugify(input)' },
+            { term: 'source: lib/text.tnt', primitive: true, check: 'Load("lib/text.tnt")' },
+            { term: 'input: corpus.strings', primitive: true, check: 'ForEach(corpus.strings) // 30 edge cases' }
+          ]
+        },
+        'slug is URL-safe': {
+          means: 'check: invariant.url_slug',
+          children: [
+            { term: 'uses only [a-z0-9-]', primitive: true, check: 'Check(result.matches(/^[a-z0-9-]+$/))' },
+            { term: 'is lowercase', primitive: true, check: 'Check(result == result.toLowerCase())' },
+            { term: 'does not start with "-"', primitive: true, check: 'Check(!result.startsWith("-"))' },
+            { term: 'does not end with "-"', primitive: true, check: 'Check(!result.endsWith("-"))' },
+            { term: 'does not contain "--"', primitive: true, check: 'Check(!result.includes("--"))' },
+            { term: 'is non-empty', primitive: true, check: 'Check(result.length > 0)' }
+          ]
+        },
+        'slug matches expected format': {
+          means: 'result is {expected}',
+          primitive: true,
+          check: 'Check(result == expected)'
+        },
+        'slug is predictable': {
+          means: 'property: deterministic',
+          children: [
+            { term: 'Call f(x) twice', primitive: true, check: 'r1 = slugify(x); r2 = slugify(x)' },
+            { term: 'Results are equal', primitive: true, check: 'Check(r1 == r2)' }
+          ]
+        },
+        'slug is stable': {
+          means: 'property: idempotent',
+          children: [
+            { term: 'Call f(f(x))', primitive: true, check: 'r1 = slugify(x); r2 = slugify(r1)' },
+            { term: 'Results are equal', primitive: true, check: 'Check(r1 == r2)' }
+          ]
+        },
+        'uses only': {
+          means: 'uses only {pattern}',
+          primitive: true,
+          check: 'Check(result.matches(/^{pattern}+$/))'
+        },
+        'is lowercase': {
+          means: 'result is lowercase',
+          primitive: true,
+          check: 'Check(result == result.toLowerCase())'
+        },
+        'does not start with': {
+          means: 'does not start with {prefix}',
+          primitive: true,
+          check: 'Check(!result.startsWith("{prefix}"))'
+        },
+        'does not end with': {
+          means: 'does not end with {suffix}',
+          primitive: true,
+          check: 'Check(!result.endsWith("{suffix}"))'
+        },
+        'does not contain': {
+          means: 'does not contain {text}',
+          primitive: true,
+          check: 'Check(!result.includes("{text}"))'
+        },
+        'is non-empty': {
+          means: 'result is non-empty',
+          primitive: true,
+          check: 'Check(result.length > 0)'
         }
       };
 

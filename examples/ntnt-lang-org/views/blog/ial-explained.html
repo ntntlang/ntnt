@@ -1,0 +1,405 @@
+{{! IAL Explained blog post }}
+<a href="/blog" class="back-link">&larr; Back to Blog</a>
+
+<article class="blog-post">
+    <h2>The Intent Assertion Language (IAL)</h2>
+    <div class="blog-meta" style="margin-bottom: 2rem;">January 25, 2026 - NTNT Team</div>
+
+    <div class="content">
+        <p>The Intent Assertion Language (IAL) is a term rewriting engine that translates natural language assertions into executable tests. It's the core technology that powers Intent-Driven Development in NTNT.</p>
+
+        <p>This post explains how IAL works today, where it's headed, and why term rewriting is a powerful approach to bridging human intent and machine verification.</p>
+
+        <h3>More Than HTTP Testing</h3>
+
+        <p>IAL isn't just for testing web endpoints. It spans the full spectrum from unit tests to integration tests to acceptance tests, all in one unified language.</p>
+
+        <p><strong>Unit Testing:</strong> Test pure functions with keyword syntax in glossary terms:</p>
+
+        <pre><code>Feature: Text Utilities
+  id: feature.text_utilities
+
+  Scenario: Blog titles become clean URLs
+    When generating a slug from a title
+    &rarr; slug is URL-safe
+    &rarr; result matches expected
+
+  Scenario: Slugs are predictable
+    When generating a slug from a title
+    &rarr; slug is predictable
+
+---
+
+## Glossary Extensions (Unit Testing)
+
+| Term | Means |
+|------|-------|
+| generating a slug from a title | call: slugify({title}), source: lib/text.tnt, input: test_data.slugify_examples |
+| slug is URL-safe | check: invariant.url_slug |
+| slug is predictable | property: deterministic |
+| result matches expected | result is {expected} |
+
+---
+
+## Test Data
+
+Test Cases: Slugify Examples
+  id: test_data.slugify_examples
+
+  | title | expected |
+  | "Hello World" | "hello-world" |
+  | "My First Post!" | "my-first-post" |</code></pre>
+
+        <p>The keywords (<code>call:</code>, <code>source:</code>, <code>input:</code>, <code>property:</code>, <code>check:</code>) connect natural language scenarios to function calls, test data, and property checks.</p>
+
+        <p><strong>Integration Testing:</strong> Test how components work together:</p>
+
+        <pre><code>Feature: User Service
+
+  Scenario: Create user writes to database
+    When calling create_user("alice@test.com")
+    &rarr; result is Ok
+    &rarr; row exists where email = "alice@test.com"</code></pre>
+
+        <p><strong>Acceptance Testing:</strong> Test full HTTP flows:</p>
+
+        <pre><code>Feature: User Registration
+
+  Scenario: New user signs up
+    When POST /api/users with {"email": "test@example.com"}
+    &rarr; status 201
+    &rarr; they see "Welcome"</code></pre>
+
+        <p>One language, all levels of testing. The same glossary-based approach works everywhere.</p>
+
+        <h3>The Problem IAL Solves</h3>
+
+        <p>When you write a requirement like "the homepage should load successfully," what does that actually mean in code? It might mean:</p>
+
+        <ul>
+            <li>HTTP status code is 200</li>
+            <li>Response has a Content-Type header containing "text/html"</li>
+            <li>Response time is under 500ms</li>
+            <li>Body is not empty</li>
+        </ul>
+
+        <p>Traditional testing frameworks force you to write these checks explicitly in code. The natural language requirement lives in a document somewhere, disconnected from the tests that verify it.</p>
+
+        <p>IAL takes a different approach: you write the natural language, and the system expands it into executable checks automatically.</p>
+
+        <h3>Term Rewriting: The Core Mechanism</h3>
+
+        <p>IAL is a term rewriting system. You define terms, and IAL recursively expands them until it reaches primitives that can be executed directly.</p>
+
+        <p>Here's a simple example. You define these terms in your glossary:</p>
+
+        <pre><code>| Term | Means |
+|------|-------|
+| page loads successfully | status 200, returns HTML |
+| returns HTML | header "Content-Type" contains "text/html" |</code></pre>
+
+        <p>When IAL encounters "page loads successfully" in your intent file, it rewrites:</p>
+
+        <pre><code>page loads successfully
+  &rarr; status 200, returns HTML
+    &rarr; status 200
+      &rarr; Check(Equals, response.status, 200)
+    &rarr; returns HTML
+      &rarr; header "Content-Type" contains "text/html"
+        &rarr; Check(Contains, response.headers.content-type, "text/html")</code></pre>
+
+        <p>The rewriting continues until every term resolves to a primitive. Primitives are the leaf nodes that actually execute.</p>
+
+        <h3>What's Available Today</h3>
+
+        <p>The current IAL implementation supports HTTP-based testing with the following capabilities:</p>
+
+        <table style="width: 100%; margin: 1rem 0; border-collapse: collapse;">
+            <tr style="border-bottom: 1px solid var(--border);">
+                <th style="text-align: left; padding: 0.5rem;">Capability</th>
+                <th style="text-align: left; padding: 0.5rem;">Status</th>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;">Glossary definitions with parameterized terms</td>
+                <td style="padding: 0.5rem;">Available</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;">HTTP status assertions (<code>status 200</code>, <code>status 2xx</code>)</td>
+                <td style="padding: 0.5rem;">Available</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;">Body content assertions (<code>body contains</code>, <code>body not contains</code>)</td>
+                <td style="padding: 0.5rem;">Available</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;">Header assertions (<code>header "X" contains "Y"</code>)</td>
+                <td style="padding: 0.5rem;">Available</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>@implements</code> annotations linking code to intent</td>
+                <td style="padding: 0.5rem;">Available</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;">Intent Studio visualization</td>
+                <td style="padding: 0.5rem;">Available</td>
+            </tr>
+            <tr>
+                <td style="padding: 0.5rem;">Term composition (terms referencing other terms)</td>
+                <td style="padding: 0.5rem;">Available</td>
+            </tr>
+        </table>
+
+        <h3>The Three Layers</h3>
+
+        <p>IAL has three layers of vocabulary, checked in order:</p>
+
+        <p><strong>1. Your Glossary</strong></p>
+        <p>Project-specific terms you define in your <code>.intent</code> file. These capture your domain language.</p>
+
+        <pre><code>| Term | Means |
+|------|-------|
+| user is logged in | header "Authorization" exists |
+| cart is empty | body contains "Your cart is empty" |
+| checkout succeeds | status 200, body contains "Order confirmed" |</code></pre>
+
+        <p><strong>2. Standard Terms</strong></p>
+        <p>Built-in terms that work in any project. These handle common patterns:</p>
+
+        <pre><code>status 200           &rarr; Check(Equals, response.status, 200)
+status 2xx           &rarr; Check(InRange, response.status, 200-299)
+body contains "x"    &rarr; Check(Contains, response.body, "x")
+body not contains "x"&rarr; Check(NotContains, response.body, "x")
+content-type is json &rarr; Check(Contains, response.headers.content-type, "application/json")
+response time < 500ms&rarr; Check(LessThan, response.time_ms, 500)
+code is valid        &rarr; Check(Equals, code.quality.passed, true)
+exits successfully   &rarr; Check(Equals, cli.exit_code, 0)</code></pre>
+
+        <p><strong>3. Primitives</strong></p>
+        <p>The base operations that actually execute. You never write these directly; IAL resolves to them automatically.</p>
+
+        <h3>IAL Primitives</h3>
+
+        <p>Every assertion eventually resolves to a primitive operation. These are the base cases that actually execute:</p>
+
+        <p><strong>Http(method, path, body?, headers?)</strong></p>
+        <p>Executes an HTTP request and captures the response into context. After execution, you can check <code>response.status</code>, <code>response.body</code>, <code>response.headers.*</code>, and <code>response.time_ms</code>.</p>
+
+        <p><strong>Cli(command, args?)</strong></p>
+        <p>Executes a command-line operation. Captures <code>cli.exit_code</code>, <code>cli.stdout</code>, and <code>cli.stderr</code>.</p>
+
+        <p><strong>CodeQuality(path)</strong></p>
+        <p>Runs lint and validation checks on source files. Sets <code>code.quality.passed</code>, <code>code.quality.error_count</code>, and <code>code.quality.warning_count</code>.</p>
+
+        <p><strong>FunctionCall(name, args)</strong></p>
+        <p>Calls an NTNT function directly for unit testing. The return value is stored in <code>result</code>.</p>
+
+        <p><strong>PropertyCheck(function, property_type, inputs)</strong></p>
+        <p>Verifies function properties like determinism (same input always gives same output) or idempotence (f(f(x)) equals f(x)).</p>
+
+        <p><strong>Check(operation, path, expected)</strong></p>
+        <p>The universal assertion primitive. Compares a context value against an expected value using one of the check operations.</p>
+
+        <h3>Check Operations</h3>
+
+        <p>The Check primitive supports these comparison operations:</p>
+
+        <table style="width: 100%; margin: 1rem 0; border-collapse: collapse;">
+            <tr style="border-bottom: 1px solid var(--border);">
+                <th style="text-align: left; padding: 0.5rem;">Operation</th>
+                <th style="text-align: left; padding: 0.5rem;">Description</th>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>Equals</code></td>
+                <td style="padding: 0.5rem;">Exact equality</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>NotEquals</code></td>
+                <td style="padding: 0.5rem;">Not equal</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>Contains</code></td>
+                <td style="padding: 0.5rem;">String contains substring, or array contains element</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>NotContains</code></td>
+                <td style="padding: 0.5rem;">Does not contain</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>Matches</code></td>
+                <td style="padding: 0.5rem;">Regex pattern match</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>StartsWith</code></td>
+                <td style="padding: 0.5rem;">String starts with prefix</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>EndsWith</code></td>
+                <td style="padding: 0.5rem;">String ends with suffix</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>Exists</code></td>
+                <td style="padding: 0.5rem;">Value exists (not null)</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>NotExists</code></td>
+                <td style="padding: 0.5rem;">Value does not exist</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>LessThan</code></td>
+                <td style="padding: 0.5rem;">Numeric comparison</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>GreaterThan</code></td>
+                <td style="padding: 0.5rem;">Numeric comparison</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>InRange</code></td>
+                <td style="padding: 0.5rem;">Value within numeric range (e.g., 200-299)</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>IsType</code></td>
+                <td style="padding: 0.5rem;">Check value type</td>
+            </tr>
+            <tr>
+                <td style="padding: 0.5rem;"><code>HasLength</code></td>
+                <td style="padding: 0.5rem;">Check length equals value</td>
+            </tr>
+        </table>
+
+        <h3>The Context System</h3>
+
+        <p>IAL uses a context object to store values during test execution. Primitives write to context, and Check operations read from it.</p>
+
+        <p>Context paths use dot notation:</p>
+
+        <pre><code># HTTP response context
+response.status          # HTTP status code (number)
+response.body            # Response body (string)
+response.headers.content-type  # Specific header
+response.time_ms         # Response time in milliseconds
+
+# CLI context
+cli.exit_code            # Process exit code
+cli.stdout               # Standard output
+cli.stderr               # Standard error
+
+# Code quality context
+code.quality.passed      # Whether lint passed (bool)
+code.quality.error_count # Number of errors
+
+# Function call context
+result                   # Return value from function calls</code></pre>
+
+        <p>When you write <code>status 200</code>, IAL resolves it to <code>Check(Equals, response.status, 200)</code>. The Check primitive reads <code>response.status</code> from context and compares it to 200.</p>
+
+        <h3>Parameterized Terms</h3>
+
+        <p>Glossary terms can include parameters using <code>{param}</code> syntax:</p>
+
+        <pre><code>| Term | Means |
+|------|-------|
+| they see "{text}" | body contains "{text}" |
+| user {name} exists | body contains "User: {name}" |
+| response time under {ms}ms | response time < {ms}ms |</code></pre>
+
+        <p>When you write <code>they see "Welcome"</code>, IAL substitutes the parameter and rewrites to <code>body contains "Welcome"</code>, which then resolves to <code>Check(Contains, response.body, "Welcome")</code>.</p>
+
+        <h3>Composing Terms</h3>
+
+        <p>Terms can reference other terms, allowing you to build complex assertions from simple pieces:</p>
+
+        <pre><code>| Term | Means |
+|------|-------|
+| valid API response | status 2xx, content-type is json |
+| user created successfully | valid API response, body has field "id" |
+| error response | status 4xx, body contains "error" |</code></pre>
+
+        <p>The term "user created successfully" expands through multiple levels:</p>
+
+        <pre><code>user created successfully
+  &rarr; valid API response, body has field "id"
+    &rarr; status 2xx, content-type is json, body has field "id"
+      &rarr; Check(InRange, response.status, 200-299)
+      &rarr; Check(Contains, response.headers.content-type, "application/json")
+      &rarr; Check(Exists, response.body.id)</code></pre>
+
+        <h3>Why Term Rewriting?</h3>
+
+        <p>Term rewriting has several advantages over traditional test frameworks:</p>
+
+        <p><strong>Natural language stays connected to execution.</strong> You write "page loads successfully" and that exact phrase appears in test output. There's no translation layer where meaning gets lost.</p>
+
+        <p><strong>Domain terms are reusable.</strong> Define "user is authenticated" once in your glossary, use it in dozens of scenarios. Change the definition, and all scenarios update automatically.</p>
+
+        <p><strong>The system is extensible without code changes.</strong> New assertions are vocabulary entries, not new primitive implementations. The engine is fixed; all customization happens in the glossary.</p>
+
+        <p><strong>Resolution chains are inspectable.</strong> Intent Studio shows exactly how each assertion expands, making it easy to debug when tests fail.</p>
+
+        <p><strong>AI agents can work at the right level.</strong> Agents write natural language terms that match human requirements, not low-level test code. The system handles the translation.</p>
+
+        <h3>A Complete Example</h3>
+
+        <p>Here's how a scenario flows through IAL:</p>
+
+        <pre><code># Intent file
+Feature: User Registration
+  Scenario: New user signs up
+    When POST /api/users with {"email": "test@example.com"}
+    &rarr; user created successfully
+    &rarr; they see "test@example.com"</code></pre>
+
+        <pre><code># Glossary
+| Term | Means |
+|------|-------|
+| user created successfully | status 201, content-type is json, body has field "id" |
+| they see "{text}" | body contains "{text}" |</code></pre>
+
+        <p>IAL execution:</p>
+
+        <ol>
+            <li>Execute <code>Http(POST, /api/users, {"email": "test@example.com"})</code></li>
+            <li>Response stored in context: <code>response.status = 201</code>, <code>response.body = {"id": 42, "email": "test@example.com"}</code></li>
+            <li>Resolve "user created successfully":
+                <ul>
+                    <li><code>Check(Equals, response.status, 201)</code> &rarr; PASS</li>
+                    <li><code>Check(Contains, response.headers.content-type, "application/json")</code> &rarr; PASS</li>
+                    <li><code>Check(Exists, response.body.id)</code> &rarr; PASS</li>
+                </ul>
+            </li>
+            <li>Resolve "they see test@example.com":
+                <ul>
+                    <li><code>Check(Contains, response.body, "test@example.com")</code> &rarr; PASS</li>
+                </ul>
+            </li>
+        </ol>
+
+        <h3>Using IAL in Your Projects</h3>
+
+        <p>IAL is built into NTNT. To use it:</p>
+
+        <ol>
+            <li>Create a <code>.intent</code> file with a Glossary section</li>
+            <li>Define your domain terms</li>
+            <li>Write scenarios using your terms and standard terms</li>
+            <li>Run <code>ntnt intent check</code> to execute</li>
+            <li>Use <code>ntnt intent studio</code> to visualize resolution chains</li>
+        </ol>
+
+        <h3>What's Next for IAL</h3>
+
+        <p>IAL's vocabulary will continue to expand. Here's what we're exploring:</p>
+
+        <ul>
+            <li><strong>Database assertions</strong> &mdash; <code>record is created</code>, <code>row exists where email = "..."</code>, <code>row count increases by 1</code></li>
+            <li><strong>Schema verification</strong> &mdash; <code>table has column</code>, <code>column is type</code>, <code>index exists</code> (essential for agents generating migrations)</li>
+            <li><strong>Event verification</strong> &mdash; <code>email is sent to</code>, <code>event is emitted</code>, <code>message is logged</code></li>
+            <li><strong>Behavioral properties</strong> &mdash; <code>when repeated N times, still succeeds</code>, <code>makes at most N queries</code>, <code>data is unchanged</code></li>
+            <li><strong>Components</strong> &mdash; Reusable intent blocks with inherent behaviors that cascade verification</li>
+            <li><strong>Domain extensions</strong> &mdash; Specialized vocabularies for temporal logic, streaming, spatial, probabilistic (ML), mobile, and hardware testing</li>
+        </ul>
+
+        <p>The goal: if you can describe what correct behavior looks like in natural language, IAL should be able to verify it.</p>
+
+        <p>Check the <a href="https://github.com/ntntlang/ntnt">NTNT repository</a> for the latest implementation status.</p>
+    </div>
+</article>

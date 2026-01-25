@@ -2,59 +2,101 @@
 <a href="/blog" class="back-link">&larr; Back to Blog</a>
 
 <article class="blog-post">
-    <h2>Introducing NTNT: A Programming Language for the AI Era</h2>
-    <div class="blog-meta" style="margin-bottom: 2rem;">January 15, 2026 - NTNT Team</div>
+    <h2>Introducing the NTNT Programming Language</h2>
+    <div class="blog-meta" style="margin-bottom: 2rem;">January 25, 2026 - NTNT Team</div>
 
     <div class="content">
-        <p>We're excited to introduce NTNT (pronounced "Intent"), a new programming language designed from the ground up for AI-assisted software development.</p>
+        <p>We're introducing NTNT (pronounced "Intent"), a programming language designed for AI-assisted software development.</p>
 
-        <h3>A Real Programming Language</h3>
+        <h3>Why Create a New Language?</h3>
 
-        <p>NTNT is not a toy or a DSL. It's a full-featured language with everything you need to build real applications:</p>
+        <p>A fair question. The world has plenty of programming languages.</p>
+
+        <p>We created NTNT to explore what a language designed for AI agents as the primary code authors might look like. Existing languages carry decades of assumptions. Syntax optimized for human typing speed. Idioms shaped by human memory limitations. Conventions that made sense before AI could generate thousands of lines of code in seconds.</p>
+
+        <p>By starting fresh, we can ask different questions:</p>
 
         <ul>
-            <li><strong>Modern type system</strong> - Generics, enums, pattern matching, structs, and traits</li>
-            <li><strong>Design by contract</strong> - <code>requires</code> and <code>ensures</code> clauses built into the syntax</li>
-            <li><strong>Comprehensive stdlib</strong> - HTTP server/client, PostgreSQL, JSON, CSV, file I/O, crypto, and concurrency</li>
-            <li><strong>No package manager needed</strong> - Batteries included, just import and use</li>
+            <li>What if contracts were first-class citizens, not afterthoughts?</li>
+            <li>What if requirements were executable, not just documentation?</li>
+            <li>What if the language included a verification system from day one?</li>
+            <li>What if tooling was designed for agents to introspect and understand code?</li>
         </ul>
 
-        <h3>What Makes NTNT Different?</h3>
+        <p>This exploration may prove beneficial or not. But having a language we can take in any direction gives us options that retrofitting existing languages cannot. NTNT is a research vehicle for understanding the future of human-AI collaborative development.</p>
 
-        <p>Traditional languages were designed for humans typing code character by character. NTNT is designed for a world where AI agents generate code and humans verify it works correctly.</p>
+        <h3>What Makes NTNT Agent-Friendly?</h3>
 
-        <p>The key innovation is <strong>Intent-Driven Development (IDD)</strong>:</p>
+        <p>Several design decisions reduce the errors AI agents commonly make:</p>
+
+        <p><strong>Hallucination-resistant syntax.</strong> In Python or JavaScript, agents often hallucinate methods like <code>list.push()</code> vs <code>list.append()</code> vs <code>Array.push()</code>. NTNT uses functions, not methods: <code>len(x)</code>, <code>push(arr, item)</code>. This reduces the search space for correct syntax. Routing functions like <code>get()</code>, <code>post()</code>, and <code>listen()</code> are global builtins, so there are no imports to guess.</p>
+
+        <p><strong>Reduced cognitive load.</strong> NTNT strips away complex features that trip up agents:</p>
+        <ul>
+            <li>No borrow checker or lifetime annotations (the #1 cause of AI errors in Rust)</li>
+            <li>No async/await function coloring to track</li>
+            <li>Map-oriented data: shape data on the fly with <code>map { "key": val }</code> without defining structs for every intermediate value</li>
+        </ul>
+
+        <p><strong>Deterministic output.</strong> Response helpers like <code>json()</code> and <code>html()</code> handle serialization and headers automatically. Agents don't need to remember content-type headers or status codes.</p>
+
+        <p><strong>Verifiable targets.</strong> In other languages, an agent writes code and hopes it matches the prompt. In NTNT, the intent file provides a machine-readable contract. The agent knows exactly what "success" looks like because requirements are executable tests, not fuzzy text.</p>
+
+        <p><strong>Self-correction.</strong> If an agent forgets to implement a feature defined in the intent file, <code>ntnt intent coverage</code> reports exactly what's missing. The <code>@implements</code> annotation makes code searchable, so you can find where <code>feature.user_login</code> is implemented without parsing entire control flows.</p>
+
+        <p>Think of it as "prompt-friendly Rust." It has the rigor of a systems language to prevent runtime errors, the flexible data modeling of JavaScript to match how LLMs work with JSON, wrapped in a framework that verifies the agent understood the prompt.</p>
+
+        <h3>What NTNT Includes</h3>
+
+        <p>NTNT is not a toy or a DSL. It's a full-featured language:</p>
+
+        <ul>
+            <li><strong>Language core:</strong> Functions, structs, traits, generics, union types, enums, pattern matching</li>
+            <li><strong>Design by contract:</strong> <code>requires</code> and <code>ensures</code> clauses built into the syntax</li>
+            <li><strong>Standard library:</strong> 15+ modules including HTTP server/client, PostgreSQL, JSON, CSV, file I/O, crypto, time with timezone support, and Go-style concurrency</li>
+            <li><strong>Web development:</strong> File-based routing, external templates with Mustache-style syntax, native hot-reload</li>
+            <li><strong>Single binary:</strong> No runtime dependencies, no package manager needed</li>
+        </ul>
+
+        <h3>Intent-Driven Development</h3>
+
+        <p>The key innovation is <strong>Intent-Driven Development (IDD)</strong> powered by the <strong>Intent Assertion Language (IAL)</strong>:</p>
 
         <ol>
-            <li>Write requirements in plain language <code>.intent</code> files</li>
+            <li>Write requirements in natural language <code>.intent</code> files</li>
+            <li>Define domain terms in a Glossary that IAL resolves to executable checks</li>
             <li>Link code to requirements with <code>@implements</code> annotations</li>
-            <li>Run <code>ntnt intent check</code> to verify they match</li>
+            <li>Run <code>ntnt intent check</code> to verify implementation matches intent</li>
         </ol>
 
-        <p>This creates full traceability from requirement to implementation. You can always answer: "What is this code supposed to do?" and "Does it actually do that?"</p>
+        <p>IAL bridges the gap between natural language and code. You write <code>they see "Welcome"</code> in your intent file, and IAL translates it to HTTP assertions. The agent writes code; the system verifies it actually does what the human asked for.</p>
 
-        <h3>Developer Experience</h3>
+        <h3>Can I Use IDD/IAL With Other Languages?</h3>
 
-        <p>We've focused on making NTNT a joy to use:</p>
+        <p>Yes. IDD and IAL are concepts, not NTNT-specific features.</p>
 
-        <ul>
-            <li><strong>Native hot-reload</strong> - HTTP servers automatically reload when you save. No restart needed.</li>
-            <li><strong>Intent Studio</strong> - Visual development environment with live test execution</li>
-            <li><strong>Single binary</strong> - No runtime dependencies, runs anywhere</li>
-            <li><strong>Agent-native tooling</strong> - <code>ntnt inspect</code> outputs structured JSON for AI agents</li>
-        </ul>
+        <p>The intent file format is language-agnostic. The glossary system, term rewriting, and primitive execution model can be implemented for any language. If you port IAL to Python, JavaScript, or Rust, you get the same benefits.</p>
+
+        <p>We built IAL into NTNT because we wanted to explore the concepts with full control over the language. But there's nothing stopping you from bringing these ideas to your language of choice.</p>
+
+        <h3>Current State</h3>
+
+        <p>NTNT is experimental. The language core, standard library, and IDD tooling work today. Still in progress: LSP server, package manager, and performance optimizations (currently a tree-walking interpreter).</p>
 
         <h3>Who Should Use NTNT?</h3>
 
-        <p>NTNT is experimental and not production-ready. It's a great fit for:</p>
+        <p>NTNT is not production-ready. It's a great fit for:</p>
 
         <ul>
             <li>Exploring AI-assisted development workflows</li>
+            <li>Experimenting with Intent-Driven Development</li>
             <li>Prototypes and proof-of-concepts</li>
             <li>Learning about contracts and formal specifications</li>
-            <li>Internal tools where you control the environment</li>
+            <li>Contributing to language research</li>
         </ul>
 
-        <p>Check out the <a href="/learn">Learn</a> page to get started, or visit our <a href="https://github.com/ntntlang/ntnt">GitHub repository</a> for the source code.</p>
+        <h3>Get Started</h3>
+
+        <p>Visit the <a href="/learn">Learn</a> page for installation instructions and a complete walkthrough, or check out our <a href="https://github.com/ntntlang/ntnt">GitHub repository</a> for the source code.</p>
     </div>
 </article>

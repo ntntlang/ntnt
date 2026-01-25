@@ -1,148 +1,16 @@
-// routes/api/users/[id].tnt → GET/PUT/DELETE /api/users/{id}
-//
-// Dynamic route segment! The [id] in the filename becomes {id} in the URL.
-// Access it via req.params.id
-
 import { json } from "std/http/server"
-import { connect, query, execute, close } from "std/db/postgres"
-import { get_env } from "std/env"
-import { parse_query } from "std/url"
-
-// Helper to get database connection
-fn get_db_connection() {
-    let db_url = match get_env("DATABASE_URL") {
-        Some(url) => url,
-        None => "postgres://ntnt:password@localhost/ntnt"
-    }
-    
-    return connect(db_url)
-}
 
 fn get(req) {
-    let user_id = req.params["id"]
-    
-    let db_result = get_db_connection()
-    
-    match db_result {
-        Ok(db) => {
-            // Query for specific user by ID
-            let result = query(db, 
-                "SELECT id, name, email, age, active FROM users WHERE id = $1",
-                [int(user_id)]
-            )
-            
-            match result {
-                Ok(users) => {
-                    close(db)
-                    
-                    // Check if user was found
-                    if len(users) > 0 {
-                        let user = users[0]
-                        return json(user)
-                    } else {
-                        return json(map {
-                            "error": "User not found",
-                            "id": user_id
-                        }, 404)
-                    }
-                }
-                Err(e) => {
-                    close(db)
-                    return json(map {
-                        "error": "Database query failed",
-                        "details": e
-                    }, 500)
-                }
-            }
-        }
-        Err(e) => {
-            return json(map {
-                "error": "Database connection failed",
-                "details": e,
-                "note": "Make sure DATABASE_URL is set and PostgreSQL is running"
-            }, 500)
-        }
-    }
+    let id = req.params["id"]
+    return json(map { "id": id })
 }
 
 fn put(req) {
-    let user_id = req.params["id"]
-    let form = parse_query(req.body)
-    
-    let db_result = get_db_connection()
-    
-    match db_result {
-        Ok(db) => {
-            let name = form["name"]
-            let email = form["email"]
-            let age = int(form["age"])
-            let active = form["active"] == "true"
-            
-            let result = execute(db,
-                "UPDATE users SET name = $1, email = $2, age = $3, active = $4 WHERE id = $5",
-                [name, email, age, active, int(user_id)]
-            )
-            
-            match result {
-                Ok(_) => {
-                    close(db)
-                    return json(map {
-                        "message": "User updated",
-                        "id": user_id
-                    })
-                }
-                Err(e) => {
-                    close(db)
-                    return json(map {
-                        "error": "Update failed",
-                        "details": e
-                    }, 500)
-                }
-            }
-        }
-        Err(e) => {
-            return json(map {
-                "error": "Database connection failed",
-                "details": e
-            }, 500)
-        }
-    }
+    let id = req.params["id"]
+    return json(map { "updated": id })
 }
 
 fn delete(req) {
-    let user_id = req.params["id"]
-    
-    let db_result = get_db_connection()
-    
-    match db_result {
-        Ok(db) => {
-            let result = execute(db,
-                "DELETE FROM users WHERE id = $1",
-                [int(user_id)]
-            )
-            
-            match result {
-                Ok(_) => {
-                    close(db)
-                    return json(map {
-                        "message": "User deleted",
-                        "id": user_id
-                    })
-                }
-                Err(e) => {
-                    close(db)
-                    return json(map {
-                        "error": "Delete failed",
-                        "details": e
-                    }, 500)
-                }
-            }
-        }
-        Err(e) => {
-            return json(map {
-                "error": "Database connection failed",
-                "details": e
-            }, 500)
-        }
-    }
+    let id = req.params["id"]
+    return json(map { "deleted": id })
 }

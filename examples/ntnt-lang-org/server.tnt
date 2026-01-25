@@ -33,9 +33,5 @@ routes("routes")
 // Static files
 serve_static("/assets", "assets")
 
-print("NTNT Language website running at http://localhost:8080")
-print("File-based routing enabled:")
-print("  Routes:     routes/")
-print("  Middleware: middleware/")
-print("  Templates:  views/")
+// Start server
 listen(8080)

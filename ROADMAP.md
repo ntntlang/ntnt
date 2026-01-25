@@ -57,6 +57,20 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Truthy/falsy values (0 is truthy, empty strings/arrays/maps are falsy)
 - [x] CSV parsing (`std/csv`)
 - [x] `ntnt test` command for HTTP endpoint testing
+- [x] `ntnt docs` command for stdlib documentation search
+- [x] `ntnt docs --generate` for auto-generating reference docs from TOML
+- [x] `ntnt completions <shell>` for shell completions (bash, zsh, fish)
+- [x] Auto-generated documentation (STDLIB_REFERENCE.md, SYNTAX_REFERENCE.md, IAL_REFERENCE.md)
+- [x] External templates with `template()` function (Mustache-style syntax)
+- [x] Async HTTP server (Axum + Tokio) with bridge to sync interpreter
+
+---
+
+## Up Next 🔜
+
+High-priority items actively being worked on:
+
+- [ ] **Hot reload for new files** - Currently hot reload only detects changes to existing files. New files in `lib/`, `routes/`, and `middleware/` directories should be automatically discovered without requiring a server restart.
 
 ---
 
@@ -127,7 +141,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 
 ### 3.2 Core Standard Library ✅
 
-- [x] `std/string`: split, join, trim, replace, contains, starts_with, ends_with, to_upper, to_lower, char_at, substring
+- [x] `std/string`: 35+ string functions including split, join, trim, replace, regex (replace_pattern, matches_pattern, find_pattern), regex functions (replace_pattern, matches_pattern, find_pattern, find_all_pattern, split_pattern)
 - [x] `std/math`: sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E
 - [x] `std/collections`: push, pop, first, last, reverse, slice, concat, is_empty
 - [x] `std/env`: get_env, args, cwd
@@ -260,7 +274,8 @@ close(ch)
 
 ### 5.3 HTTP Server ✅ COMPLETE
 
-- [x] Built-in HTTP server (using tiny_http)
+- [x] Built-in HTTP server (Axum + Tokio async runtime)
+- [x] Bridge pattern connecting async handlers to sync interpreter
 - [x] Request/Response types
 - [x] Router with path parameters
 - [x] Middleware support
@@ -487,6 +502,8 @@ fn fetch_data(key) {
   - `--body 'key=value'` for form data
   - `--verbose` for detailed output
   - Automatic server startup and shutdown
+- [x] `ntnt docs` - Stdlib documentation search and generation
+- [x] `ntnt completions <shell>` - Shell completions (bash, zsh, fish)
 
 **Phase 5 Deliverables:**
 
@@ -504,6 +521,8 @@ fn fetch_data(key) {
 - [x] Template strings with `{{}}` interpolation
 - [x] Map iteration functions (`keys`, `values`, `entries`, `has_key`)
 - [x] Truthy/falsy value semantics
+- [x] External templates via `template()` function (Mustache-style with partials)
+- [x] Async HTTP server (Axum + Tokio) with bridge to sync interpreter
 
 ---
 
@@ -513,7 +532,7 @@ fn fetch_data(key) {
 
 **Goal:** Make NTNT the first language with native Intent-Driven Development—where human intent becomes executable specification.
 
-> See [docs/INTENT_DRIVEN_DEVELOPMENT.md](docs/INTENT_DRIVEN_DEVELOPMENT.md) for the complete design document.
+> See [docs/IAL_REFERENCE.md](docs/IAL_REFERENCE.md) for the Intent Assertion Language reference.
 
 ### What is IDD?
 
@@ -671,11 +690,35 @@ The `.intent` format is optimized for machine parsing and testing, but humans de
 - [x] **Native hot-reload** - edit .tnt file, changes apply on next request (no restart!)
 - [x] **Auto-start app** - Studio automatically starts the matching .tnt file
 
-**Phase 2: Enhanced Studio (Later)**
+**Phase 2: Intent Studio V2** (In Progress)
 
+Design: [design-docs/studio-mockup-v2.html](design-docs/studio-mockup-v2.html)
+
+- [ ] Health bar visualization (pass/fail/warning/skip percentages)
+- [ ] Filter chips (All, Failing, Warnings, Skipped, Unlinked, Unit Tests)
+- [ ] Search across features, scenarios, and assertions
+- [ ] Expanded feature cards with scenarios and assertions
+- [ ] Resolution chain visualization (glossary → terms → primitives)
+- [ ] Unit test section with test data, corpus testing, property checks
+- [ ] Invariant bundles display
+- [ ] Warning states for not-implemented features
+- [ ] Skip states with precondition failure reasons
 - [ ] WebSocket-based instant live reload (no polling)
+
+**Phase 3: IAL Explorer** (In Progress)
+
+Design: [design-docs/ial_explorer.html](design-docs/ial_explorer.html)
+
+- [ ] Intent file viewer with syntax highlighting
+- [ ] Interactive glossary term highlighting
+- [ ] Hover popover showing full resolution chain
+- [ ] Resolution depth visualization (Level 0 → 1 → 2 → primitive)
+- [ ] Sidebar glossary reference panel
+- [ ] Link between Studio and Explorer views
+
+**Phase 4: Enhanced Studio (Later)**
+
 - [ ] Implementation status indicators (linked to `@implements` annotations)
-- [ ] Collapsible test case details
 - [ ] Diff highlighting when intent changes
 
 ```bash
@@ -940,10 +983,13 @@ ntnt build --release
 ### 8.3 Documentation Generator
 
 - [ ] Doc comments (`///`)
-- [ ] Automatic API documentation
+- [x] Automatic API documentation from TOML source files
 - [ ] Contract documentation
 - [ ] Example extraction and testing
-- [ ] NTNT documentation
+- [x] `ntnt docs --generate` command
+- [x] `ntnt docs [query]` for searching stdlib documentation
+- [x] Auto-generated references: STDLIB_REFERENCE.md, SYNTAX_REFERENCE.md, IAL_REFERENCE.md
+- [x] CI/CD validation for documentation drift
 
 ### 8.4 Human Approval Mechanisms (From Whitepaper)
 
@@ -1252,6 +1298,88 @@ fn get_user(id: String) -> User { }
 - [ ] Auto-generate changelog entries
 - [ ] AI-friendly commit format
 
+### 10.5 AI Agent Optimization
+
+Targeting the specific weaknesses of LLMs: context limits, hallucinations, and safety.
+
+#### 10.5.1 Machine-Readable Diagnostics (`--json` output)
+
+Enable reliable "Self-Correction Loops" for agents.
+
+- [ ] `ntnt check --format=json`
+- [ ] `ntnt lint --format=json`
+- [ ] Structured errors with remediation suggestions
+- [ ] Codes for common agent mistakes (e.g., E023 "Undefined variable")
+
+```json
+{
+  "file": "server.tnt",
+  "line": 45,
+  "column": 12,
+  "severity": "error",
+  "code": "E023",
+  "message": "Undefined variable 'usr'",
+  "suggestion": {
+    "text": "Did you mean 'user'?",
+    "replacement": "user",
+    "start": 12,
+    "end": 15
+  }
+}
+```
+
+#### 10.5.2 Token-Optimized Context (`ntnt describe`)
+
+Provide compressed summaries of the codebase to save tokens and reduce distraction.
+
+- [ ] `ntnt describe src/` command
+- [ ] Extracts: Structs, Signatures, Contracts, Imports
+- [ ] Strips: Function bodies, comments (unless doc comments)
+- [ ] "Searchable Index" for agents to find correct imports
+
+#### 10.5.3 Native "Simulation Mode" (Safety Nets)
+
+Allow agents to execute code safely without side effects on production data.
+
+- [ ] Global `--dry-run` flag
+- [ ] `std/env` simulation context check
+- [ ] Mocking of side-effecting built-ins (`execute`, `write_file`) in simulation mode
+
+```ntnt
+// In std/db
+pub fn execute(query, params) {
+    if (Global.is_simulation) {
+        log("WOULD EXECUTE: " + query);
+        return Ok(0);
+    }
+    // ... real execution
+}
+```
+
+#### 10.5.4 First-Class `todo` Keyword (Hole-Driven Development)
+
+Allow agents to partially implement features without blocking compilation.
+
+- [ ] `todo` keyword (or `???`)
+- [ ] Syntactically valid but panics at runtime
+- [ ] Compiler passes `todo` blocks
+
+```ntnt
+fn complex_logic(user) {
+    if (check_auth(user)) {
+        todo "Implement retry logic"
+    }
+}
+```
+
+#### 10.5.5 "Smart Import" Resolution
+
+reduce hallucinated imports by suggesting correct paths.
+
+- [ ] "Smart Linker" in compiler/linter
+- [ ] Scans standard library and local modules for missing exports
+- [ ] Error message suggests correct path: "Error: `json` not found in `std/http`. Did you mean `std/http/server`?"
+
 **Deliverables:**
 
 - Structured edit engine
@@ -1374,17 +1502,17 @@ let result = data
 - SQLite
 - Redis client
 
-### High-Performance HTTP Server
+### High-Performance HTTP Server ✅ PARTIAL
 
-The current HTTP server uses `tiny_http` which is simple and reliable but uses `Connection: close` for each request. For high-traffic production applications:
+The HTTP server now uses Axum + Tokio for async request handling:
 
-- Async runtime (tokio/hyper) for concurrent connections
-- HTTP/2 support with multiplexing
-- Connection pooling and keep-alive
-- Request pipelining
-- Configurable worker threads
-- Zero-copy response streaming
-- Performance target: 100k+ req/sec on commodity hardware
+- [x] Async runtime (Tokio) for concurrent connections
+- [x] Connection pooling and keep-alive
+- [x] Bridge pattern connecting async handlers to sync interpreter
+- [ ] HTTP/2 support with multiplexing
+- [ ] Request pipelining
+- [ ] Zero-copy response streaming
+- [ ] Performance target: 100k+ req/sec on commodity hardware
 
 ### WebSocket Support
 
@@ -1525,4 +1653,4 @@ pub fn main() {
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: January 2026 (v0.3.0)_
+_Last updated: January 2026 (v0.3.3)_

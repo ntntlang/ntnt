@@ -1,6 +1,8 @@
 # NTNT Programming Language
 
-NTNT (pronounced "Intent") is an experimental Agent-Native programming language designed for AI-assisted software development. It introduces Intent-Driven Development (IDD), where human requirements become executable specifications that AI agents implement and the system verifies. Design-by-contract syntax, machine-readable introspection, and `@implements` annotations create full traceability from intent to code.
+NTNT (/ɪnˈtɛnt/) is an open-source agent-native language with Intent-Driven Development built in. You define constraints and expected behavior. Agents implement. NTNT verifies continuously.
+
+> **Experimental**: NTNT is a research language exploring AI-assisted development. It is not ready for production use.
 
 ## Quick Start
 
@@ -18,126 +20,100 @@ curl -sSf https://raw.githubusercontent.com/ntntlang/ntnt/main/install.sh | bash
 irm https://raw.githubusercontent.com/ntntlang/ntnt/main/install.ps1 | iex
 ```
 
-This downloads a pre-built binary for your platform. If no binary is available, it falls back to building from source (installing Rust if needed).
-
-**To update:** Run the same command again to get the latest version.
-
 <details>
 <summary><b>Manual Installation</b></summary>
 
-**1. Install Rust via [rustup.rs](https://rustup.rs/) (if you don't have it):**
-
-macOS/Linux:
-
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-```
-
-Windows: Download and run [rustup-init.exe](https://win.rustup.rs/x86_64)
-
-**2. Clone and build:**
-
-```bash
+# Install Rust if needed: https://rustup.rs/
 git clone https://github.com/ntntlang/ntnt.git
 cd ntnt
 cargo build --release
 cargo install --path . --locked
 ```
 
-**To update (manual install):**
-
-```bash
-cd ntnt
-git pull
-cargo install --path . --locked
-```
-
-**3. Verify installation:**
-
-```bash
-ntnt --version
-```
-
-If `ntnt` isn't found, add cargo's bin directory to your PATH:
-
-macOS/Linux:
-
-```bash
-echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-Windows (PowerShell):
-
-```powershell
-[Environment]::SetEnvironmentVariable("PATH", "$env:USERPROFILE\.cargo\bin;$env:PATH", "User")
-```
-
 </details>
 
-<details>
-<summary><b>For Contributors (faster builds)</b></summary>
+### Hello World with Intent-Driven Development
 
-```bash
-cargo build --profile dev-release
-cargo install --path . --profile dev-release --locked
+**1. Define requirements** (`hello-world.intent`):
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the home page | / |
+| the page loads | status 200 |
+| they see {text} | body contains {text} |
+
+---
+
+Feature: Hello World
+  id: feature.hello
+
+  Scenario: Greeting
+    When a user visits the home page
+    → the page loads
+    → they see "Hello, World"
 ```
 
-This skips link-time optimization for ~2x faster builds.
-
-</details>
-
-### Hello World
-
-**macOS / Linux:**
-
-```bash
-echo 'print("Hello, World!")' > hello.tnt
-ntnt run hello.tnt
-```
-
-**Windows (PowerShell):**
-
-```powershell
-Set-Content -Path hello.tnt -Value 'print("Hello, World!")' -Encoding UTF8
-ntnt run hello.tnt
-```
-
-### A Complete Web API
+**2. Implement** (`hello-world.tnt`):
 
 ```ntnt
-// api.tnt
-import { json } from "std/http/server"
+import { text } from "std/http/server"
 
+// @implements: feature.hello
 fn home(req) {
-    return json(map { "message": "Hello!" })
-}
-
-fn get_user(req) {
-    return json(map { "id": req.params["id"] })
+    return text("Hello, World!")
 }
 
 get("/", home)
-get(r"/users/{id}", get_user)
-
-listen(3000)
+listen(8080)
 ```
 
+**3. Verify**:
+
 ```bash
-ntnt run api.tnt
-# Visit http://localhost:3000
+$ ntnt intent check hello-world.tnt -vv
+
+✓ Feature: Hello World
+  ✓ Greeting
+      When a user visits the home page
+      → the page loads
+      → they see "Hello, World"
+        ✓ status: 200
+        ✓ body contains "Hello, World"
+
+1/1 features passing
+```
+
+For visual development, use **Intent Studio**:
+
+```bash
+ntnt intent studio server.intent
+# Opens http://127.0.0.1:3001 with live ✓/✗ indicators
 ```
 
 ---
 
 ## Why NTNT?
 
-NTNT is a general-purpose language with modern features: contracts (`requires`/`ensures`), pattern matching, generics, enums, and a comprehensive standard library covering HTTP servers, databases, JSON, file I/O, and concurrency. No package manager needed - batteries included.
+AI agents generate code quickly. The hard part is knowing whether the result satisfies the original requirements. Specs live in docs or prompts. Tests assert implementation details. When requirements change, there's no reliable signal for what is now invalid.
 
-What makes NTNT different is **integrated Intent-Driven Development (IDD) tooling**. Write human-readable `.intent` files describing what your software should do, link code with `@implements` annotations, and verify everything matches with `ntnt intent check`.
+NTNT explores a different approach. Requirements are executable specifications written in Intent Assertion Language (IAL). IAL defines enforceable assertions that continuously check implementation compliance. The `@implements` annotation links code to requirements, and `ntnt intent check` verifies everything matches.
 
-### Language Features
+### Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **Intent-Driven Development** | Write requirements in `.intent` files. Link code with `@implements`. Run `ntnt intent check` to verify. Full traceability from requirement to implementation. |
+| **Design by Contract** | `requires` and `ensures` built into function syntax. In HTTP routes, contract violations return 400/500 automatically. |
+| **Agent-Native Tooling** | `ntnt inspect` outputs JSON describing every function, route, and contract. `ntnt validate` returns machine-readable errors. |
+| **Batteries Included** | HTTP servers, PostgreSQL, JSON, CSV, file I/O, crypto, concurrency - all in the standard library. No package manager needed. |
+| **Hot Reload** | HTTP servers reload automatically when you save. Edit code, refresh browser, see changes. |
+
+### Design by Contract
 
 ```ntnt
 fn withdraw(amount: Int) -> Int
@@ -148,181 +124,33 @@ fn withdraw(amount: Int) -> Int
     self.balance = self.balance - amount
     return self.balance
 }
-```
 
-Contracts are machine-readable specifications for agents and executable documentation for humans. In HTTP handlers, a failed precondition returns 400 Bad Request automatically.
+// In HTTP routes:
+// - Failed requires → 400 Bad Request
+// - Failed ensures → 500 Internal Server Error
+```
 
 ### Standard Library
 
-| Category        | Modules                                  | What's Included                                                                 |
-| --------------- | ---------------------------------------- | ------------------------------------------------------------------------------- |
-| **Web**         | `std/http/server`, `std/http`            | HTTP server with routing, middleware, static files; HTTP client with fetch/post |
-| **Data**        | `std/json`, `std/csv`, `std/db/postgres` | Parse and stringify; PostgreSQL with transactions                               |
-| **I/O**         | `std/fs`, `std/path`, `std/env`          | File operations, path manipulation, environment variables                       |
-| **Text**        | `std/string`, `std/url`                  | Split, join, trim, replace, replace_chars, regex (replace_pattern, matches_pattern); URL encode/decode/parse |
-| **Utilities**   | `std/time`, `std/math`, `std/crypto`     | Timestamps, formatting, sleep; trig, log, exp; SHA256, HMAC, UUID               |
-| **Collections** | `std/collections`                        | Array and map operations: push, pop, keys, values, get_key                      |
-| **Concurrency** | `std/concurrent`                         | Go-style channels: send, recv, try_recv                                         |
-
----
-
-## Intent-Driven Development
-
-Write `.intent` files describing features and scenarios in plain English. The system verifies your code fulfills those intentions.
-
-```yaml
-# server.intent
-
-Feature: User Greeting
-  id: feature.greeting
-  description: "Display a personalized greeting"
-
-  Scenario: Greet by name
-    When: GET /?name=Alice
-    Then:
-      - status 200
-      - body contains "Hello, Alice"
-
-  Scenario: Default greeting
-    When: GET /
-    Then:
-      - status 200
-      - body contains "Hello, World"
-```
-
-Link your implementation with `@implements`:
-
-```ntnt
-// server.tnt
-import { html } from "std/http/server"
-
-// @implements: feature.greeting
-fn home(req) {
-    let name = req.query_params["name"] ?? "World"
-    return html("<h1>Hello, {name}!</h1>")
-}
-
-get(r"/", home)
-listen(8080)
-```
-
-Verify with `ntnt intent check`:
-
-```bash
-$ ntnt intent check server.tnt
-
-Feature: User Greeting
-  Scenario: Greet by name
-    ✓ GET /?name=Alice returns status 200
-    ✓ body contains "Hello, Alice"
-  Scenario: Default greeting
-    ✓ GET / returns status 200
-    ✓ body contains "Hello, World"
-
-1/1 features passing (4/4 assertions)
-```
-
-For visual development, use **Intent Studio** to see live test results as you code:
-
-```bash
-ntnt intent studio server.intent
-# Opens http://127.0.0.1:3001 with live ✓/✗ indicators
-```
-
-| Command                       | Description                                   |
-| ----------------------------- | --------------------------------------------- |
-| `ntnt intent check <file>`    | Verify code matches intent, run tests         |
-| `ntnt intent studio <intent>` | Launch visual studio with live test execution |
-| `ntnt intent coverage <file>` | Show feature implementation coverage          |
-| `ntnt intent init <intent>`   | Generate code scaffolding from intent         |
-
-> 📖 See [docs/INTENT_DRIVEN_DEVELOPMENT.md](docs/INTENT_DRIVEN_DEVELOPMENT.md) for the complete design document.
+| Category | Modules | Includes |
+|----------|---------|----------|
+| **Web** | `std/http/server`, `std/http` | HTTP server with routing, middleware, static files; HTTP client |
+| **Data** | `std/json`, `std/csv`, `std/db/postgres` | Parse/stringify; PostgreSQL with transactions |
+| **I/O** | `std/fs`, `std/path`, `std/env` | File operations, path manipulation, environment variables |
+| **Text** | `std/string`, `std/url` | Split, join, trim, regex; URL encode/decode |
+| **Utilities** | `std/time`, `std/math`, `std/crypto` | Timestamps, trig/log/exp, SHA256/HMAC/UUID |
+| **Collections** | `std/collections` | push, pop, keys, values, get_key |
+| **Concurrency** | `std/concurrent` | Go-style channels: send, recv, try_recv |
 
 ---
 
 ## Who Should Use NTNT?
 
-> ⚠️ **NTNT is experimental and not production-ready.** Use it for learning, prototyping, and exploring Intent-Driven Development. Do not use it for systems that require stability, security audits, or long-term maintenance.
+**Good fit:** Prototypes, AI-assisted development experiments, internal tools, learning projects.
 
-**Good fit:**
+**Not a fit:** Production systems, performance-critical code, projects needing third-party libraries.
 
-- Prototypes and proof-of-concepts where learning matters more than longevity
-- Experiments with AI-assisted development and Intent-Driven Development
-- Internal tools and scripts where you control the environment
-- Learning projects where contracts make expected behavior explicit
-- Exploring what agent-native programming could look like
-
-**Not a good fit:**
-
-- Production applications of any kind
-- Performance-critical systems (use Rust, Go, or C++)
-- Projects requiring third-party libraries or a package ecosystem
-- Teams that need mature IDE support and debugging tools
-
-### Limitations
-
-**Experimental**: NTNT is a research language. The API will change. There is no stability guarantee.
-
-**Performance**: Interpreted, not compiled. Handles hundreds of requests per second, sufficient for demos and prototypes.
-
-**Ecosystem**: No package manager. No third-party libraries. The standard library covers common tasks; everything else requires writing code or calling external services.
-
-**Tooling**: No debugger. Debugging is done with print statements and contracts. IDE support is syntax highlighting only.
-
----
-
-## Current Status
-
-**Version 0.3.3** - String Functions + Regex Support
-
-NTNT includes:
-
-- ✅ Full contract system (`requires`, `ensures`, struct invariants)
-- ✅ Type system with generics, enums, pattern matching
-- ✅ Standard library (HTTP, PostgreSQL, JSON, CSV, time, crypto, etc.)
-- ✅ File-based routing with hot-reload
-- ✅ **Native hot-reload** for single-file apps
-- ✅ **Intent Studio** with live test execution
-- ✅ IDD commands (`intent check`, `intent coverage`, `intent init`, `intent studio`)
-- ✅ Agent tooling (`inspect`, `validate`, `test`)
-- ✅ **Intent Assertion Language (IAL)** - term rewriting engine for natural language tests
-- 🔄 Intent diff and watch (coming soon)
-
-See [ROADMAP.md](ROADMAP.md) for the complete 11-phase implementation plan.
-
----
-
-## Documentation
-
-For detailed information, see the following documents:
-
-| Document | Description |
-| -------- | ----------- |
-| [Language Spec](LANGUAGE_SPEC.md) | Complete language syntax, types, contracts, and features |
-| [AI Agent Guide](docs/AI_AGENT_GUIDE.md) | Syntax reference, HTTP server patterns, database patterns, and common idioms for AI agents |
-| [IDD Design](docs/INTENT_DRIVEN_DEVELOPMENT.md) | Intent-Driven Development design document and workflow |
-| [IAL Specification](docs/INTENT_ASSERTION_LANGUAGE.md) | Intent Assertion Language term rewriting engine |
-| [Architecture](ARCHITECTURE.md) | System design and components |
-| [Whitepaper](whitepaper.md) | Technical specification and motivation |
-| [Roadmap](ROADMAP.md) | 11-phase implementation plan |
-
----
-
-## Editor Support
-
-### VS Code
-
-Install the NTNT Language extension for syntax highlighting:
-
-```bash
-cp -r editors/vscode/intent-lang ~/.vscode/extensions/
-```
-
-Then restart VS Code. The extension provides:
-
-- Syntax highlighting for `.tnt` files
-- Code snippets for common patterns
-- Bracket matching and auto-closing
+**Limitations:** Interpreted (not compiled), no package ecosystem, no debugger (use print + contracts).
 
 ---
 
@@ -330,14 +158,39 @@ Then restart VS Code. The extension provides:
 
 ```bash
 ntnt run <file>              # Run a .tnt file
-ntnt repl                    # Interactive REPL
-ntnt lint <file|dir>         # Check for errors and warnings
-ntnt validate <file|dir>     # Validate with JSON output
-ntnt inspect <file>          # Project structure as JSON
-ntnt test <file> [options]   # Test HTTP endpoints
+ntnt lint <file>             # Check for errors
 ntnt intent check <file>     # Verify code matches intent
+ntnt intent studio <intent>  # Visual studio with live tests
 ntnt intent coverage <file>  # Show feature coverage
-ntnt intent init <intent>    # Generate scaffolding from intent
-ntnt intent studio <intent>  # Launch visual studio with live tests
-ntnt --help                  # See all commands
+ntnt inspect <file>          # Project structure as JSON
+ntnt docs [query]            # Search stdlib documentation
+ntnt completions <shell>     # Generate shell completions
 ```
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Language Guide](LANGUAGE_GUIDE.md) | Learning guide with examples |
+| [AI Agent Guide](docs/AI_AGENT_GUIDE.md) | Syntax rules for AI-assisted development |
+| [Stdlib Reference](docs/STDLIB_REFERENCE.md) | All standard library functions |
+| [IAL Reference](docs/IAL_REFERENCE.md) | Intent Assertion Language primitives |
+| [Architecture](ARCHITECTURE.md) | System design details |
+
+---
+
+## Editor Support
+
+**VS Code:** Copy the extension for syntax highlighting:
+
+```bash
+cp -r editors/vscode/intent-lang ~/.vscode/extensions/
+```
+
+---
+
+## License
+
+MIT + Apache 2.0

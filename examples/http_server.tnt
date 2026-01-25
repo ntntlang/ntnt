@@ -1,5 +1,5 @@
 // HTTP Server Example for NTNT
-// Demonstrates building a simple REST API with routing and JSON responses
+// Demonstrates REST API routing, middleware, static files, and contracts
 //
 // Run with: ntnt run examples/http_server.tnt
 // Then visit: http://localhost:8080/
@@ -10,41 +10,39 @@
 import { text, html, json, status, redirect, not_found, error } from "std/http/server"
 
 // ============================================
-// Simple Hello World endpoint
+// Middleware: Request Logger
+// ============================================
+fn logger_middleware(req) {
+    print("[" + req.method + "] " + req.path)
+    return ()  // Continue to next handler
+}
+
+use_middleware(logger_middleware)
+
+// ============================================
+// Basic Endpoints
 // ============================================
 fn home(req) {
-    print("Request: GET /")
     return text("Welcome to the NTNT HTTP Server!")
 }
 
-// ============================================
-// Return HTML content
-// ============================================
 fn about(req) {
-    print("Request: GET /about")
     return html("<h1>About NTNT</h1><p>A language with contracts and effects.</p>")
 }
 
-// ============================================
-// JSON API endpoint
-// ============================================
 fn api_status(req) {
-    print("Request: GET /api/status")
     return json(map {
         "status": "ok",
-        "version": "0.1.6",
-        "uptime": "running"
+        "version": "0.3.3",
+        "features": ["routes", "middleware", "contracts"]
     })
 }
 
 // ============================================
-// Route with path parameter
+// Route Parameters
 // ============================================
 fn get_user(req) {
     let id = req.params.id
-    print("Request: GET /users/" + id)
-    
-    // Simulate a user database lookup
     return json(map {
         "id": id,
         "name": "User " + id,
@@ -52,58 +50,41 @@ fn get_user(req) {
     })
 }
 
-// ============================================
-// Nested path parameters
-// ============================================
 fn get_user_post(req) {
     let user_id = req.params.user_id
     let post_id = req.params.post_id
-    print("Request: GET /users/" + user_id + "/posts/" + post_id)
-    
     return json(map {
         "user_id": user_id,
         "post_id": post_id,
-        "title": "Post " + post_id + " by User " + user_id,
-        "content": "This is sample post content."
+        "title": "Post " + post_id + " by User " + user_id
     })
 }
 
 // ============================================
-// Handle query parameters
+// Query Parameters
 // ============================================
 fn search(req) {
-    let query = req.query
-    print("Request: GET /search?" + query)
-    
-    // Return the full query_params map - accessing individual keys
-    // will error if they don't exist, so return the whole map
     return json(map {
-        "raw_query": query,
+        "raw_query": req.query,
         "params": req.query_params,
         "results": []
     })
 }
 
 // ============================================
-// POST endpoint - echo the body back
+// CRUD Operations
 // ============================================
-fn create_user(req) {
-    print("Request: POST /users")
-    print("Body: " + req.body)
-    
+fn create_user(req)
+requires req.body != ""
+{
     return json(map {
         "message": "User created",
         "received": req.body
     })
 }
 
-// ============================================
-// Different HTTP methods for same resource
-// ============================================
 fn update_user(req) {
     let id = req.params.id
-    print("Request: PUT /users/" + id)
-    
     return json(map {
         "message": "User " + id + " updated",
         "body": req.body
@@ -112,17 +93,11 @@ fn update_user(req) {
 
 fn delete_user(req) {
     let id = req.params.id
-    print("Request: DELETE /users/" + id)
-    
-    return json(map {
-        "message": "User " + id + " deleted"
-    })
+    return json(map { "message": "User " + id + " deleted" })
 }
 
 fn patch_user(req) {
     let id = req.params.id
-    print("Request: PATCH /users/" + id)
-    
     return json(map {
         "message": "User " + id + " partially updated",
         "body": req.body
@@ -130,56 +105,87 @@ fn patch_user(req) {
 }
 
 // ============================================
-// Custom status codes
+// Contract-Verified Division
 // ============================================
-fn not_implemented_handler(req) {
-    return status(501, "This feature is not implemented yet")
+fn safe_divide(a, b) -> Int
+requires b != 0
+ensures result * b <= a
+{
+    return a / b
 }
 
+fn calc_divide(req) {
+    let query = req.query
+    if query == "" {
+        return status(400, "Missing required parameters: a and b (use ?a=X&b=Y)")
+    }
+
+    let params = req.query_params
+    let a = int(params["a"])
+    let b = int(params["b"])
+    let result = safe_divide(a, b)
+
+    return json(map {
+        "a": a,
+        "b": b,
+        "result": result,
+        "verified": true
+    })
+}
+
+// ============================================
+// Redirects and Status Codes
+// ============================================
 fn custom_redirect(req) {
     return redirect("/about")
 }
 
+fn not_implemented_handler(req) {
+    return status(501, "This feature is not implemented yet")
+}
+
 // ============================================
-// Register routes
+// Register Routes
 // ============================================
 print("=== NTNT HTTP Server Example ===")
 print("")
 
-// Basic routes (no parameters - regular strings work fine)
+// Basic routes
 get("/", home)
 get("/about", about)
 get("/redirect", custom_redirect)
 get("/api/status", api_status)
 get("/not-implemented", not_implemented_handler)
 
-// Routes with path parameters - use raw strings r"..." to avoid interpolation
+// Routes with path parameters (use raw strings)
 get(r"/users/{id}", get_user)
 get(r"/users/{user_id}/posts/{post_id}", get_user_post)
 
 // Query parameter handling
 get("/search", search)
 
-// POST, PUT, DELETE, PATCH routes with parameters
+// CRUD routes
 post("/users", create_user)
 put(r"/users/{id}", update_user)
 delete(r"/users/{id}", delete_user)
 patch(r"/users/{id}", patch_user)
 
-print("")
-print("Routes registered:")
-print(r"  GET  /              - Welcome page")
-print(r"  GET  /about         - About page (HTML)")
-print(r"  GET  /redirect      - Redirects to /about")
-print(r"  GET  /api/status    - JSON status endpoint")
-print(r"  GET  /users/{id}    - Get user by ID")
-print(r"  GET  /users/{user_id}/posts/{post_id} - Get post")
-print(r"  GET  /search?q=...  - Search with query params")
-print(r"  POST /users         - Create user")
-print(r"  PUT  /users/{id}    - Update user")
-print(r"  DELETE /users/{id}  - Delete user")
-print(r"  PATCH /users/{id}   - Partial update")
+// Contract-verified endpoint
+get("/calc/divide", calc_divide)
+
+print("Routes:")
+print(r"  GET  /                - Welcome page")
+print(r"  GET  /about           - About page (HTML)")
+print(r"  GET  /redirect        - Redirects to /about")
+print(r"  GET  /api/status      - JSON status endpoint")
+print(r"  GET  /users/{id}      - Get user by ID")
+print(r"  GET  /users/{uid}/posts/{pid} - Get post")
+print(r"  GET  /search?q=...    - Search with query params")
+print(r"  POST /users           - Create user (requires body)")
+print(r"  PUT  /users/{id}      - Update user")
+print(r"  DELETE /users/{id}    - Delete user")
+print(r"  PATCH /users/{id}     - Partial update")
+print(r"  GET  /calc/divide?a=X&b=Y - Contract-verified division")
 print("")
 
-// Start the server
 listen(8080)

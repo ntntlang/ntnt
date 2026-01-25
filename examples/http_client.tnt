@@ -1,9 +1,11 @@
 // HTTP Client Example - Unified fetch() API
-// Demonstrates the streamlined std/http module
+// Demonstrates all HTTP operations using a single fetch() function
+//
+// Run with: ntnt run examples/http_client.tnt
 //
 // The fetch() function handles ALL HTTP operations:
-//   - fetch(url)           - Simple GET request
-//   - fetch(map { ... })   - Full options: method, json, form, headers, auth, timeout
+//   fetch(url)           - Simple GET request
+//   fetch(map { ... })   - Full options: method, json, form, headers, auth, cookies, timeout
 
 import { fetch } from "std/http"
 import { parse } from "std/json"
@@ -11,32 +13,23 @@ import { parse } from "std/json"
 print("=== HTTP Client Demo (Unified fetch API) ===")
 print("")
 
-// ========== Basic GET Request ==========
-print("--- Basic GET Request ---")
-print("Fetching from httpbin.org/get...")
-
+// ========== 1. Basic GET Request ==========
+print("--- 1. Basic GET Request ---")
 match fetch("https://httpbin.org/get") {
     Ok(response) => {
         print("Status: " + str(response.status))
-        print("Status Text: " + response.status_text)
         print("OK: " + str(response.ok))
-        print("Content-Type: " + response.headers["content-type"])
-        print("Body length: " + str(len(response.body)))
     },
     Err(e) => print("Error: " + e)
 }
-
 print("")
 
-// ========== GET JSON (using fetch + parse) ==========
-print("--- GET JSON ---")
-print("Fetching JSON data...")
-
+// ========== 2. GET JSON (fetch + parse) ==========
+print("--- 2. GET JSON ---")
 match fetch("https://httpbin.org/json") {
     Ok(response) => {
         match parse(response.body) {
             Ok(data) => {
-                print("Received JSON with slideshow:")
                 print("Title: " + data["slideshow"]["title"])
                 print("Author: " + data["slideshow"]["author"])
             },
@@ -45,36 +38,31 @@ match fetch("https://httpbin.org/json") {
     },
     Err(e) => print("Error: " + e)
 }
-
 print("")
 
-// ========== POST JSON (using json option) ==========
-print("--- POST JSON ---")
+// ========== 3. POST JSON (json option auto-serializes) ==========
+print("--- 3. POST JSON ---")
 let payload = map {
     "name": "NTNT Language",
-    "version": "0.1.6",
+    "version": "0.3.3",
     "features": ["contracts", "traits", "http"]
 }
 
-print("Posting JSON data...")
 match fetch(map { "url": "https://httpbin.org/post", "method": "POST", "json": payload }) {
     Ok(response) => {
         match parse(response.body) {
             Ok(data) => {
-                print("Server echoed our data:")
-                print("Name: " + data["json"]["name"])
-                print("Version: " + data["json"]["version"])
+                print("Server echoed: " + data["json"]["name"])
             },
             Err(e) => print("Parse error: " + e)
         }
     },
     Err(e) => print("Error: " + e)
 }
-
 print("")
 
-// ========== Custom Request with Headers ==========
-print("--- Custom Request with Headers ---")
+// ========== 4. Custom Headers ==========
+print("--- 4. Custom Headers ---")
 match fetch(map {
     "url": "https://httpbin.org/headers",
     "method": "GET",
@@ -83,40 +71,81 @@ match fetch(map {
         "Accept": "application/json"
     }
 }) {
-    Ok(response) => {
-        print("Status: " + str(response.status))
-        print("Custom headers were sent!")
-    },
+    Ok(response) => print("Status: " + str(response.status)),
     Err(e) => print("Error: " + e)
 }
-
 print("")
 
-// ========== POST with form data ==========
-print("--- POST Form Data ---")
+// ========== 5. POST Form Data ==========
+print("--- 5. POST Form Data ---")
 match fetch(map {
     "url": "https://httpbin.org/post",
     "method": "POST",
-    "form": map { "key": "value", "name": "ntnt" }
+    "form": map { "username": "bob", "remember": "true" }
 }) {
-    Ok(response) => print("POST successful, status: " + str(response.status)),
+    Ok(response) => print("Status: " + str(response.status)),
     Err(e) => print("Error: " + e)
 }
-
 print("")
 
-// ========== Basic Auth (using auth option) ==========
-print("--- Basic Auth ---")
+// ========== 6. Basic Authentication ==========
+print("--- 6. Basic Auth ---")
 match fetch(map {
     "url": "https://httpbin.org/basic-auth/user/passwd",
     "auth": map { "user": "user", "pass": "passwd" }
 }) {
     Ok(response) => {
-        print("Auth status: " + str(response.status))
+        print("Status: " + str(response.status))
         print("Authenticated: " + str(response.ok))
     },
+    Err(e) => print("Error: " + e)
+}
+print("")
+
+// ========== 7. Cookies ==========
+print("--- 7. Cookies ---")
+match fetch(map {
+    "url": "https://httpbin.org/cookies",
+    "cookies": map { "session_id": "abc123" }
+}) {
+    Ok(response) => print("Status: " + str(response.status)),
+    Err(e) => print("Error: " + e)
+}
+print("")
+
+// ========== 8. Other Methods ==========
+print("--- 8. PUT/DELETE/PATCH/HEAD ---")
+
+match fetch(map { "url": "https://httpbin.org/put", "method": "PUT", "body": "Updated" }) {
+    Ok(r) => print("PUT: " + str(r.status)),
+    Err(e) => print("Error: " + e)
+}
+
+match fetch(map { "url": "https://httpbin.org/delete", "method": "DELETE" }) {
+    Ok(r) => print("DELETE: " + str(r.status)),
+    Err(e) => print("Error: " + e)
+}
+
+match fetch(map { "url": "https://httpbin.org/patch", "method": "PATCH", "body": "Patched" }) {
+    Ok(r) => print("PATCH: " + str(r.status)),
+    Err(e) => print("Error: " + e)
+}
+
+match fetch(map { "url": "https://httpbin.org/get", "method": "HEAD" }) {
+    Ok(r) => print("HEAD: " + str(r.status)),
     Err(e) => print("Error: " + e)
 }
 
 print("")
 print("=== HTTP Client Demo Complete ===")
+print("")
+print(r"Options for fetch(map { ... }):")
+print("  url     - Request URL (required)")
+print("  method  - GET, POST, PUT, PATCH, DELETE, HEAD")
+print("  body    - Request body (text)")
+print("  json    - JSON body (auto-serialized)")
+print("  form    - Form data (map)")
+print("  headers - Custom headers (map)")
+print(r"  auth    - Basic auth: { user, pass }")
+print("  cookies - Request cookies (map)")
+print("  timeout - Timeout in seconds")

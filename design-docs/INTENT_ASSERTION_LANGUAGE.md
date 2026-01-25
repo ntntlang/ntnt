@@ -99,12 +99,13 @@ Behind the scenes, each glossary term has a precise technical binding that the t
 3. **Constrained Vocabulary**: Parser only accepts defined terms—no ambiguity
 4. **Progressive Disclosure**: PM sees English, developer expands to see technical details
 5. **Living Documentation**: Intent files serve as both specification and verified test suite
+6. **Full-Spectrum Testing**: One language for unit tests, integration tests, and acceptance tests
+7. **Agent Verification**: Enable AI agents to verify their generated code is correct
 
 ### 1.4 Non-Goals
 
 - IAL is not a general-purpose programming language
-- IAL does not replace unit tests for implementation details
-- IAL does not handle performance/load testing (use dedicated tools)
+- IAL does not handle performance/load testing at scale (use dedicated tools like k6, Locust)
 
 ---
 
@@ -260,6 +261,144 @@ Scenario: <name>
 - **→**: Outcomes—what should be true after (use `->` as ASCII alternative)
 - Subjects, actions, and outcomes must be glossary terms or standard terms
 
+### 4.4 Unit Testing Syntax
+
+IAL supports direct function testing through **keyword syntax** in glossary terms. This integrates unit testing into the same glossary-based approach used for all IAL assertions.
+
+#### Keyword Syntax
+
+Unit tests are defined using keywords in the "Means" column of glossary extensions:
+
+```intent
+## Glossary Extensions (Unit Testing)
+
+| Term | Means |
+|------|-------|
+| generating a slug from a title | call: slugify({title}), source: lib/text.tnt, input: test_data.slugify_examples |
+| slug is URL-safe | check: invariant.url_slug |
+| slug is predictable | property: deterministic |
+| result matches expected | result is {expected} |
+```
+
+#### Keywords
+
+| Keyword | Purpose | Example |
+|---------|---------|---------|
+| `call:` | Function to invoke | `call: slugify({title})` |
+| `source:` | Source file containing function | `source: lib/text.tnt` |
+| `input:` | Test data source | `input: test_data.examples` or `input: corpus.strings` |
+| `property:` | Property to verify | `property: deterministic` |
+| `check:` | Invariant to check | `check: invariant.url_slug` |
+
+#### Test Data Sections
+
+Test data is defined in table format, linked to features and scenarios:
+
+```intent
+## Test Data
+
+Test Cases: Slugify Examples
+  id: test_data.slugify_examples
+  for: feature.text_utilities
+  scenario: Blog titles become clean URLs
+
+  | title | expected |
+  | "Hello World" | "hello-world" |
+  | "My First Post!" | "my-first-post" |
+  | "UPPERCASE TITLE" | "uppercase-title" |
+  | "" | "post" |
+```
+
+Each row becomes a test case. Column names (like `{title}`) are substituted into the `call:` pattern.
+
+#### Invariants (Reusable Assertion Bundles)
+
+Invariants define reusable assertion patterns:
+
+```intent
+## Invariants
+
+Invariant: URL Slug
+  id: invariant.url_slug
+  description: "A URL-safe slug string"
+
+  Assertions:
+    → uses only [a-z0-9-]
+    → is lowercase
+    → does not start with "-"
+    → does not end with "-"
+    → does not contain "--"
+    → is non-empty
+```
+
+Reference invariants with `check: invariant.url_slug`.
+
+#### Property Types
+
+| Property | Meaning |
+|----------|---------|
+| `deterministic` | Same inputs always produce same output |
+| `idempotent` | f(f(x)) == f(x) |
+| `round-trips` | f(g(x)) == x for inverse function g |
+
+#### Complete Unit Testing Example
+
+```intent
+Feature: Text Utilities
+  id: feature.text_utilities
+  description: "Utility functions for text processing"
+  source: lib/text.tnt
+
+  Scenario: Blog titles become clean URLs
+    When generating a slug from a title
+    → slug is URL-safe
+    → result matches expected
+
+  Scenario: Slugs are predictable
+    When generating a slug from a title
+    → slug is predictable
+
+---
+
+## Glossary Extensions (Unit Testing)
+
+| Term | Means |
+|------|-------|
+| generating a slug from a title | call: slugify({title}), source: lib/text.tnt, input: test_data.slugify_examples |
+| slug is URL-safe | check: invariant.url_slug |
+| slug is predictable | property: deterministic |
+| result matches expected | result is {expected} |
+
+---
+
+## Invariants
+
+Invariant: URL Slug
+  id: invariant.url_slug
+  Assertions:
+    → uses only [a-z0-9-]
+    → is lowercase
+
+---
+
+## Test Data
+
+Test Cases: Slugify Examples
+  id: test_data.slugify_examples
+  for: feature.text_utilities
+
+  | title | expected |
+  | "Hello World" | "hello-world" |
+  | "My First Post!" | "my-first-post" |
+```
+
+When `ntnt intent check` runs, it:
+1. Parses the test data table
+2. For each row, calls `slugify({title})` with the row's `title` value
+3. Checks the invariant assertions against the result
+4. Verifies the result matches `{expected}`
+5. Confirms the function is deterministic
+
 ---
 
 ## 5. Standard Glossary
@@ -330,7 +469,56 @@ These terms are **built-in** and available without definition. They form the fou
 | `row count increases by {n}`    | {n} more rows than before action              |
 | `{column} is {value}`           | `result[0].{column} == {value}`               |
 
-### 5.6 Event & Side Effect Outcomes
+### 5.6 Schema Assertions
+
+Schema assertions allow agents and developers to verify database structure, not just data. This is essential for verifying migrations, ensuring code expects the correct schema, and validating that generated DDL is correct.
+
+| Term                                    | Technical Translation                           |
+| --------------------------------------- | ----------------------------------------------- |
+| `table {name} exists`                   | Table exists in database                        |
+| `table {name} does not exist`           | Table does not exist                            |
+| `table {name} has column {column}`      | Column exists in table                          |
+| `column {table}.{column} is type {type}` | Column has specified type                      |
+| `column {table}.{column} is nullable`   | Column allows NULL                              |
+| `column {table}.{column} is not nullable` | Column has NOT NULL constraint                |
+| `column {table}.{column} has default {value}` | Column has specified default value         |
+| `table {name} has primary key {columns}` | Primary key constraint exists                  |
+| `table {name} has foreign key to {other}` | Foreign key relationship exists               |
+| `index exists on {table}.{columns}`     | Index exists on specified columns               |
+| `unique constraint on {table}.{columns}` | Unique constraint exists                       |
+| `table {name} has {n} columns`          | Column count matches                            |
+
+#### Schema Assertion Examples
+
+```intent
+Feature: User Table Schema
+  id: feature.user_schema
+
+  Scenario: Users table structure
+    → table "users" exists
+    → table "users" has column "id"
+    → table "users" has column "email"
+    → table "users" has column "created_at"
+    → column "users"."id" is type "uuid"
+    → column "users"."email" is type "varchar(255)"
+    → column "users"."email" is not nullable
+    → unique constraint on "users".["email"]
+    → table "users" has primary key ["id"]
+
+Feature: Migration Verification
+  id: feature.migration_v2
+
+  Scenario: Add phone column
+    Given migration "002_add_phone" is applied
+    → table "users" has column "phone"
+    → column "users"."phone" is type "varchar(20)"
+    → column "users"."phone" is nullable
+    → index exists on "users".["phone"]
+```
+
+This enables agents to verify their database migrations are correct before and after applying them.
+
+### 5.7 Event & Side Effect Outcomes
 
 | Term                                   | Technical Translation               |
 | -------------------------------------- | ----------------------------------- |
@@ -341,7 +529,7 @@ These terms are **built-in** and available without definition. They form the fou
 | `{message} is logged`                  | Log output contains message         |
 | `no errors are logged`                 | No ERROR level log entries          |
 
-### 5.7 Behavioral Properties
+### 5.8 Behavioral Properties
 
 | Term                                    | Technical Translation                   |
 | --------------------------------------- | --------------------------------------- |
@@ -351,7 +539,7 @@ These terms are **built-in** and available without definition. They form the fou
 | `makes no external calls`               | No HTTP/network requests made           |
 | `data is unchanged`                     | No mutations to database/state          |
 
-### 5.8 Timing Assertions
+### 5.9 Timing Assertions
 
 | Term                      | Technical Translation   |
 | ------------------------- | ----------------------- |
@@ -2347,11 +2535,17 @@ Quick reference for all built-in standard terms:
 
 **Database:** `record is created/updated/deleted`, `row exists where {cond}`, `no row exists where {cond}`, `row count is/increases by {n}`, `{column} is {value}`
 
+**Schema:** `table {name} exists`, `table {name} has column {col}`, `column {tbl}.{col} is type {type}`, `column is nullable/not nullable`, `column has default {val}`, `table has primary key {cols}`, `table has foreign key to {other}`, `index exists on {tbl}.{cols}`, `unique constraint on {tbl}.{cols}`
+
 **Events:** `email is sent to {addr}`, `event {name} is emitted`, `no event {name}`, `{message} is logged`
 
 **Behavioral:** `when repeated {n} times, still {outcome}`, `when called simultaneously, {outcome}`, `makes at most {n} database queries`, `makes no external calls`, `data is unchanged`
 
 **Timing:** `responds in under {time}`, `completes within {time}`
+
+**Unit Test Keywords:** `call: func({args})`, `source: file.tnt`, `input: test_data.name`, `check: invariant.id`, `property: type`, `result is {expected}`
+
+**Properties:** `deterministic`, `idempotent`, `round-trips`
 
 ---
 

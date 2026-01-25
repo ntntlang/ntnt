@@ -1,194 +1,27 @@
-// NTNT Language Website
+// Website Example for NTNT
+// Demonstrates middleware and static file serving
 //
-// A simple website with hot-reloadable HTML templates.
-// Edit HTML files and refresh to see changes - no restart needed!
-//
-// Configuration via environment variables:
-//   CAT_API_URL  - API endpoint for cat facts (default: https://meowfacts.herokuapp.com/)
-//
-// Run with: ntnt run website.tnt (from examples directory)
-// Or with custom config: CAT_API_URL="https://api.example.com" ntnt run website.tnt
+// Run with: ntnt run examples/website.tnt
+// Then visit: http://localhost:8080/
 
-import { html, json } from "std/http/server"
-import { replace } from "std/string"
-import { fetch } from "std/http"
-import { parse } from "std/json"
-import { get_env } from "std/env"
+import { html } from "std/http/server"
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
-// Paths relative to this .tnt file (using template() for location-independent paths)
-let PAGES_DIR = "website/pages"
-let LAYOUT_FILE = "website/layout.html"
-let ASSETS_DIR = "website/assets"
-
-// Get configuration from environment variables with defaults
-fn get_config(name, default_value) {
-    match get_env(name) {
-        Some(value) => value,
-        None => default_value
-    }
-}
-
-let CAT_API_URL = get_config("CAT_API_URL", "https://meowfacts.herokuapp.com/")
-
-// ============================================================================
-// Template Engine (using template() for cross-platform path resolution)
-// ============================================================================
-
-// Load the layout template and inject title + content
-fn render_page(title, content) {
-    // template() resolves paths relative to this .tnt file
-    let layout = template(LAYOUT_FILE, map {})
-    let result = replace(layout, "<!--TITLE-->", title)
-    let result = replace(result, "<!--CONTENT-->", content)
-    return result
-}
-
-// Load a page file and render it with the layout
-fn load_page(filename, title) {
-    let filepath = PAGES_DIR + "/" + filename
-    // template() resolves paths relative to this .tnt file
-    let content = template(filepath, map {})
-    return html(render_page(title, content))
-}
-
-// ============================================================================
-// Request Logging Middleware
-// ============================================================================
-
+// Middleware
 fn logger(req) {
     print("[" + req.method + "] " + req.path)
-    return ()  // Continue to next handler
+    return ()
 }
 
 use_middleware(logger)
 
-// ============================================================================
-// Page Routes
-// ============================================================================
-
-fn home_page(req) {
-    return load_page("home.html", "Home")
-}
-
-fn about_page(req) {
-    return load_page("about.html", "About")
-}
-
-fn examples_page(req) {
-    return load_page("examples.html", "Examples")
-}
-
-// Fetch page - demonstrates server-side API calls with environment config
-// Change the API URL by setting CAT_API_URL environment variable:
-//   CAT_API_URL="https://api.example.com" ntnt run website.tnt
-fn fetch_page(req) {
-    // Fetch cat fact from external API (URL from env var)
-    match fetch(CAT_API_URL) {
-        Ok(response) => {
-            match parse(response.body) {
-                Ok(data) => {
-                    // Extract the fact from the data array
-                    let fact = data.data[0]
-
-                    // Load the page template using template() for cross-platform paths
-                    let filepath = PAGES_DIR + "/fetch.html"
-                    let content = template(filepath, map {})
-                    // Replace placeholder with actual cat fact
-                    let content_with_fact = replace(content, "<!--CAT_FACT-->", fact)
-                    return html(render_page("Live API Demo", content_with_fact))
-                },
-                Err(e) => {
-                    print("Error parsing JSON: " + e)
-                    let error_msg = "<h1>API Error</h1><p>Failed to parse response: " + e + "</p>"
-                    return html(render_page("Error", error_msg))
-                }
-            }
-        },
-        Err(e) => {
-            print("Error fetching cat fact: " + e)
-            let error_msg = "<h1>API Error</h1><p>Failed to fetch cat fact: " + e + "</p>"
-            return html(render_page("Error", error_msg))
-        }
-    }
-}
-
-// ============================================================================
-// API Routes (for demonstration)
-// ============================================================================
-
-fn api_status(req) {
-    return json(map {
-        "status": "ok",
-        "version": "0.1.6",
-        "pages_dir": PAGES_DIR
-    })
-}
-
-// API endpoint that returns raw cat fact JSON
-fn api_cat_fact(req) {
-    match fetch(CAT_API_URL) {
-        Ok(response) => {
-            match parse(response.body) {
-                Ok(data) => {
-                    return json(data)
-                },
-                Err(e) => {
-                    return json(map {
-                        "error": "Failed to parse JSON",
-                        "message": e
-                    })
-                }
-            }
-        },
-        Err(e) => {
-            return json(map {
-                "error": "Failed to fetch cat fact",
-                "message": e
-            })
-        }
-    }
-}
-
-// ============================================================================
 // Routes
-// ============================================================================
+fn home(req) {
+    return html("<h1>Welcome</h1>")
+}
 
-get("/", home_page)
-get("/about", about_page)
-get("/examples", examples_page)
-get("/fetch", fetch_page)
-get("/api/status", api_status)
-get("/api/cat-fact", api_cat_fact)
+get("/", home)
 
-// Serve static assets (images, CSS, JS, etc.)
-serve_static("/assets", ASSETS_DIR)
+// Static files
+serve_static("/assets", "./public")
 
-// ============================================================================
-// Start Server
-// ============================================================================
-
-print("=== NTNT Language Website ===")
-print("")
-print("Configuration:")
-print("  CAT_API_URL: " + CAT_API_URL)
-print("")
-print("Edit these files and refresh to see changes:")
-print("  " + PAGES_DIR + "/home.html")
-print("  " + PAGES_DIR + "/about.html")
-print("  " + PAGES_DIR + "/examples.html")
-print("  " + LAYOUT_FILE)
-print("")
-print("Routes:")
-print("  GET /         -> home.html")
-print("  GET /about    -> about.html")
-print("  GET /examples -> examples.html")
-print("  GET /fetch    -> Live API demo (uses CAT_API_URL)")
-print("  GET /api/status")
-print("  GET /api/cat-fact -> Raw JSON from cat facts API")
-print("")
-
-listen(3000)
+listen(8080)

@@ -1,0 +1,5 @@
+// File-based routing example
+import { html } from "std/http/server"
+
+routes("routes")
+listen(8080)

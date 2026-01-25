@@ -1,0 +1,368 @@
+# NTNT Syntax Reference
+# Source of truth for language syntax documentation
+# Auto-generates: docs/SYNTAX_REFERENCE.md
+
+[meta]
+version = "0.3.3"
+description = "NTNT language syntax specification"
+
+# =============================================================================
+# KEYWORDS
+# =============================================================================
+
+[keywords]
+description = "Reserved words in the NTNT language"
+
+[keywords.contracts]
+words = ["requires", "ensures", "invariant", "old", "result"]
+description = "Design-by-contract keywords for specifying function behavior"
+
+[keywords.functions]
+words = ["fn", "return"]
+description = "Function definition and control"
+
+[keywords.variables]
+words = ["let", "mut"]
+description = "Variable declaration (mut for mutable)"
+
+[keywords.control_flow]
+words = ["if", "else", "match", "for", "in", "while", "loop", "break", "continue", "defer"]
+description = "Control flow statements"
+
+[keywords.types]
+words = ["type", "struct", "enum", "impl", "trait", "pub", "self"]
+description = "Type system keywords"
+
+[keywords.modules]
+words = ["import", "from", "export"]
+description = "Module system keywords"
+
+[keywords.literals]
+words = ["true", "false", "map", "Ok", "Err", "Some", "None"]
+description = "Literal value keywords"
+
+# =============================================================================
+# OPERATORS
+# =============================================================================
+
+[operators]
+description = "NTNT operators by precedence (lowest to highest)"
+
+[operators.assignment]
+symbols = ["="]
+description = "Assignment (requires `mut` variable)"
+example = "let mut x = 5; x = 10"
+
+[operators.logical_or]
+symbols = ["||"]
+description = "Logical OR (short-circuit)"
+example = "a || b"
+
+[operators.logical_and]
+symbols = ["&&"]
+description = "Logical AND (short-circuit)"
+example = "a && b"
+
+[operators.comparison]
+symbols = ["==", "!=", "<", ">", "<=", ">="]
+description = "Comparison operators"
+example = "x == 5, y != 0, z < 10"
+
+[operators.arithmetic]
+symbols = ["+", "-", "*", "/", "%"]
+description = "Arithmetic operators"
+example = "a + b, x * y, n % 2"
+
+[operators.unary]
+symbols = ["-", "!"]
+description = "Unary negation and logical NOT"
+example = "-x, !condition"
+
+[operators.range]
+symbols = ["..", "..="]
+description = "Range operators (exclusive and inclusive)"
+example = "0..10 (0-9), 0..=10 (0-10)"
+
+[operators.member]
+symbols = [".", "[]"]
+description = "Member access and indexing"
+example = "user.name, arr[0], map[\"key\"]"
+
+[operators.pipe]
+symbols = ["|>"]
+description = "Pipeline operator (passes left as first arg to right)"
+example = "data |> transform |> validate"
+
+# =============================================================================
+# LITERALS
+# =============================================================================
+
+[literals]
+description = "Value literal syntax"
+
+[literals.integers]
+syntax = "42, -17, 0"
+description = "Integer literals (arbitrary precision)"
+examples = ["let x = 42", "let negative = -17"]
+
+[literals.floats]
+syntax = "3.14, 1.0e-10, -0.5"
+description = "Floating-point literals (IEEE 754)"
+examples = ["let pi = 3.14", "let tiny = 1.0e-10"]
+
+[literals.strings]
+syntax = "\"hello\", \"with {interpolation}\""
+description = "Double-quoted strings with escape sequences and interpolation"
+examples = ["let msg = \"Hello, {name}!\"", "let escaped = \"line1\\nline2\""]
+
+[literals.raw_strings]
+syntax = "r\"no escapes\", r#\"with \"quotes\"\"#"
+description = "Raw strings - no escape processing, useful for regex and routes"
+examples = ["let pattern = r\"\\d+\"", "get(r\"/users/{id}\", handler)"]
+
+[literals.template_strings]
+syntax = "\"\"\"...{{expr}}...\"\"\""
+description = "Triple-quoted template strings with {{}} interpolation, loops, conditionals"
+examples = ["let html = \"\"\"\n<h1>{{title}}</h1>\n\"\"\""]
+
+[literals.booleans]
+syntax = "true, false"
+description = "Boolean literals"
+examples = ["let active = true"]
+
+[literals.arrays]
+syntax = "[1, 2, 3], []"
+description = "Array literals"
+examples = ["let nums = [1, 2, 3]", "let empty = []"]
+
+[literals.maps]
+syntax = "map { \"key\": value }"
+description = "Map literals (MUST use `map` keyword at top level)"
+examples = ["let user = map { \"name\": \"Alice\" }", "let nested = map { \"a\": { \"b\": 1 } }"]
+
+[literals.ranges]
+syntax = "0..10, 0..=10"
+description = "Range literals (exclusive and inclusive)"
+examples = ["for i in 0..10 { }", "for i in 0..=10 { }"]
+
+# =============================================================================
+# ESCAPE SEQUENCES
+# =============================================================================
+
+[escapes]
+description = "Escape sequences in regular strings (not raw strings)"
+
+[escapes.sequences]
+"\\n" = "Newline"
+"\\t" = "Tab"
+"\\r" = "Carriage return"
+"\\\\" = "Backslash"
+"\\\"" = "Double quote"
+"\\'" = "Single quote"
+"\\{" = "Literal { (prevents interpolation)"
+"\\}" = "Literal }"
+
+# =============================================================================
+# STRING INTERPOLATION
+# =============================================================================
+
+[interpolation]
+description = "String interpolation syntax"
+
+[interpolation.regular]
+syntax = "{expr}"
+description = "In regular strings, {expr} interpolates the expression"
+examples = ["\"Hello, {name}!\"", "\"Result: {a + b}\""]
+note = "Use \\{ to escape literal braces"
+
+[interpolation.template]
+syntax = "{{expr}}"
+description = "In template strings, {{expr}} interpolates (single {} pass through for CSS)"
+examples = ["\"\"\"<style>h1 { color: {{color}}; }</style>\"\"\""]
+
+# =============================================================================
+# TEMPLATE STRING FEATURES
+# =============================================================================
+
+[templates]
+description = "Template string (triple-quoted) features"
+
+[templates.interpolation]
+syntax = "{{expr}}"
+description = "Interpolate any expression"
+example = "{{user.name}}"
+
+[templates.filters]
+syntax = "{{expr | filter}}"
+description = "Apply filter to expression"
+example = "{{name | uppercase}}"
+available_filters = ["uppercase", "lowercase", "capitalize", "trim", "truncate(n)", "replace(old, new)", "escape", "raw", "default(val)", "length", "first", "last", "reverse", "join(sep)", "slice(start, end)", "json", "number", "url_encode"]
+
+[templates.loops]
+syntax = "{{#for item in items}}...{{/for}}"
+description = "Loop over arrays"
+example = "{{#for user in users}}<li>{{user.name}}</li>{{/for}}"
+metadata_vars = ["@index (0-based)", "@length (total)", "@first (bool)", "@last (bool)", "@even (bool)", "@odd (bool)"]
+
+[templates.empty_fallback]
+syntax = "{{#for item in items}}...{{#empty}}...{{/for}}"
+description = "Fallback content when array is empty"
+example = "{{#for item in items}}<li>{{item}}</li>{{#empty}}<li>No items</li>{{/for}}"
+
+[templates.conditionals]
+syntax = "{{#if cond}}...{{/if}}"
+description = "Conditional rendering"
+example = "{{#if logged_in}}<a href=\"/profile\">Profile</a>{{/if}}"
+
+[templates.if_else]
+syntax = "{{#if cond}}...{{#else}}...{{/if}}"
+description = "If-else rendering"
+example = "{{#if logged_in}}Welcome{{#else}}Please login{{/if}}"
+
+[templates.elif]
+syntax = "{{#if cond}}...{{#elif cond2}}...{{#else}}...{{/if}}"
+description = "Elif chains"
+example = "{{#if score >= 90}}A{{#elif score >= 80}}B{{#else}}C{{/if}}"
+
+[templates.comments]
+syntax = "{{! comment }}"
+description = "Template comments (not rendered)"
+example = "{{! TODO: add more content }}"
+
+[templates.escape_braces]
+syntax = "\\{{ and \\}}"
+description = "Literal {{ and }} in output"
+example = "Use \\{{ for literal braces"
+
+# =============================================================================
+# TRUTHY/FALSY VALUES
+# =============================================================================
+
+[truthy_falsy]
+description = "Values that evaluate to true/false in conditionals"
+
+[truthy_falsy.truthy]
+values = ["true", "Some(x)", "non-empty string", "non-empty array", "non-empty map", "ALL numbers (including 0)"]
+note = "0 is truthy to avoid subtle bugs like `if count { }` failing when count is legitimately 0"
+
+[truthy_falsy.falsy]
+values = ["false", "None", "\"\" (empty string)", "[] (empty array)", "map {} (empty map)"]
+
+# =============================================================================
+# CONTRACTS
+# =============================================================================
+
+[contracts]
+description = "Design-by-contract syntax for functions and structs"
+
+[contracts.requires]
+syntax = "requires <condition>"
+description = "Precondition that must be true when function is called"
+example = "fn divide(a: Int, b: Int) -> Int\n    requires b != 0\n{ ... }"
+
+[contracts.ensures]
+syntax = "ensures <condition>"
+description = "Postcondition that must be true when function returns"
+example = "fn double(x: Int) -> Int\n    ensures result == x * 2\n{ ... }"
+
+[contracts.old]
+syntax = "old(expr)"
+description = "Captures value of expression at function entry (for use in ensures)"
+example = "ensures counter.value == old(counter.value) + 1"
+
+[contracts.result]
+syntax = "result"
+description = "Refers to the return value in ensures clauses"
+example = "ensures result > 0"
+
+[contracts.invariant]
+syntax = "invariant <condition>"
+description = "Struct invariant checked after construction and mutations"
+example = "impl Account {\n    invariant self.balance >= 0\n}"
+
+[contracts.placement]
+description = "Contracts go AFTER return type, BEFORE function body"
+example = "fn f(x: Int) -> Int\n    requires x > 0\n    ensures result > x\n{\n    return x + 1\n}"
+
+# =============================================================================
+# TYPE ANNOTATIONS
+# =============================================================================
+
+[types]
+description = "Type system syntax"
+
+[types.primitives]
+types = ["Int", "Float", "Bool", "String", "Unit"]
+description = "Built-in primitive types"
+
+[types.compound]
+types = ["[T] (Array)", "Map<K, V>", "fn(T1, T2) -> T3", "Range"]
+description = "Compound types"
+
+[types.option_result]
+types = ["Option<T> (Some/None)", "Result<T, E> (Ok/Err)"]
+description = "Built-in sum types for optional values and error handling"
+
+[types.union]
+syntax = "T1 | T2 | T3"
+description = "Union types for values that can be multiple types"
+example = "fn stringify(value: String | Int | Bool) -> String"
+
+[types.annotation]
+syntax = "let x: Type = value"
+description = "Optional type annotations on variables"
+example = "let count: Int = 42"
+
+# =============================================================================
+# IMPORT SYNTAX
+# =============================================================================
+
+[imports]
+description = "Module import syntax"
+
+[imports.named]
+syntax = "import { name1, name2 } from \"module/path\""
+description = "Import specific items from a module"
+example = "import { split, join } from \"std/string\""
+
+[imports.aliased]
+syntax = "import { name as alias } from \"module/path\""
+description = "Import with alias"
+example = "import { fetch as http_fetch } from \"std/http\""
+
+[imports.namespace]
+syntax = "import \"module/path\" as name"
+description = "Import entire module as namespace"
+example = "import \"std/math\" as math"
+
+[imports.local]
+syntax = "import { name } from \"./relative/path\""
+description = "Import from local files"
+example = "import { helper } from \"./lib/utils\""
+
+# =============================================================================
+# MATCH EXPRESSIONS
+# =============================================================================
+
+[match]
+description = "Pattern matching syntax"
+
+[match.basic]
+syntax = "match expr { pattern => result, ... }"
+description = "Match expression with patterns"
+example = "match value {\n    Ok(data) => process(data),\n    Err(e) => handle_error(e),\n}"
+
+[match.guards]
+syntax = "pattern if condition => result"
+description = "Pattern with guard condition"
+example = "match n {\n    x if x < 0 => \"negative\",\n    _ => \"non-negative\",\n}"
+
+[match.wildcard]
+syntax = "_"
+description = "Wildcard pattern matches anything"
+example = "_ => \"default\""
+
+[match.binding]
+syntax = "name"
+description = "Bind matched value to name"
+example = "Ok(data) => use(data)"

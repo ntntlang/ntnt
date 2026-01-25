@@ -2,7 +2,7 @@
   "name": "ntnt-lang",
   "displayName": "NTNT Language (Intent)",
   "description": "Syntax highlighting and language support for the NTNT (Intent) programming language",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "ntnt-lang",
   "repository": {
     "type": "git",
@@ -20,20 +20,25 @@
     "programming language",
     "contracts",
     "design by contract",
-    "AI"
+    "AI",
+    "intent-driven development"
   ],
   "contributes": {
     "languages": [
       {
         "id": "ntnt",
-        "aliases": [
-          "NTNT",
-          "Intent",
-          "ntnt"
-        ],
-        "extensions": [
-          ".tnt"
-        ],
+        "aliases": ["NTNT", "Intent", "ntnt"],
+        "extensions": [".tnt"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/intent-light.png",
+          "dark": "./icons/intent-dark.png"
+        }
+      },
+      {
+        "id": "intent-spec",
+        "aliases": ["Intent Specification", "intent"],
+        "extensions": [".intent"],
         "configuration": "./language-configuration.json",
         "icon": {
           "light": "./icons/intent-light.png",
@@ -46,6 +51,11 @@
         "language": "ntnt",
         "scopeName": "source.ntnt",
         "path": "./syntaxes/ntnt.tmLanguage.json"
+      },
+      {
+        "language": "intent-spec",
+        "scopeName": "source.intent",
+        "path": "./syntaxes/intent.tmLanguage.json"
       }
     ],
     "snippets": [

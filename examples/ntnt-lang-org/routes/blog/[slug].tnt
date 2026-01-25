@@ -2,19 +2,9 @@
 // @implements: feature.blog_post
 
 import { response } from "std/http/server"
-import { has_key } from "std/collections"
-import { replace, to_lower, trim } from "std/string"
+import { get_key } from "std/collections"
 
-// Simple slugify (inline to avoid module import bug with builtins)
-fn simple_slugify(title) {
-    let mut text = to_lower(trim(title))
-    text = replace(text, " ", "-")
-    text = replace(text, "'", "")
-    text = replace(text, "?", "")
-    text = replace(text, "!", "")
-    text = replace(text, ":", "")
-    return text
-}
+// Note: lib/blog.tnt is auto-injected as 'blog' module by file-based routing
 
 // Cacheable HTML response for Cloudflare CDN
 fn cached_html(body, max_age) {
@@ -45,30 +35,33 @@ fn render_page(content, title) {
     })
 }
 
-// Blog post definitions - static map for simplicity
-fn get_valid_posts() {
-    return map {
-        "introducing-ntnt-a-programming-language-for-the-ai-era": map {
-            "template": "views/blog/welcome.html",
-            "title": "Welcome to the NTNT Blog"
-        },
-        "intent-driven-development-from-requirements-to-verified-code": map {
-            "template": "views/blog/idd-explained.html",
-            "title": "Intent-Driven Development Explained"
-        }
-    }
+// 301 redirects for old blog post URLs
+// Add new redirects here: "old-slug": "/blog/new-slug"
+let redirects = map {
+    "introducing-ntnt-a-programming-language-for-the-ai-era": "/blog/introducing-ntnt",
+    "intent-driven-development-from-requirements-to-verified-code": "/blog/intent-driven-development",
+    "the-intent-assertion-language-how-natural-language-becomes-executable-tests": "/blog/intent-assertion-language"
 }
 
 // GET /blog/{slug} - Individual blog post
 fn get(req) {
     let slug = req.params.slug
-    let valid_posts = get_valid_posts()
 
-    // Check if slug is valid
-    if has_key(valid_posts, slug) {
-        let post = valid_posts[slug]
-        let content = template(post["template"], map {})
-        return cached_html(render_page(content, post["title"] + " - NTNT Blog"), 60)
+    // Handle redirects for old URLs (301 permanent)
+    let redirect_to = get_key(redirects, slug, "")
+    if redirect_to != "" {
+        return response(301, map { "location": redirect_to }, "")
+    }
+
+    let post = blog.get_post_by_slug(slug)
+
+    // Check if post exists (get_post_by_slug returns Some(post) or None)
+    match post {
+        Some(p) => {
+            let content = template(p["template"], map {})
+            return cached_html(render_page(content, p["title"] + " - NTNT Blog"), 60)
+        },
+        None => {}
     }
 
     // 404 - post not found (short cache so new posts appear quickly)

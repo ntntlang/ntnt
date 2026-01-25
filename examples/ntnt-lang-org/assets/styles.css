@@ -183,9 +183,18 @@ a:hover {
 }
 
 .hero .tagline {
-    font-size: 1.3rem;
-    color: rgba(255, 255, 255, 0.85);
+    font-size: 1.8rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.95);
     max-width: 700px;
+    margin: 0 auto 1rem auto;
+    line-height: 1.4;
+}
+
+.hero .tagline-sub {
+    font-size: 1.15rem;
+    color: rgba(255, 255, 255, 0.75);
+    max-width: 650px;
     margin: 0 auto 2.5rem auto;
     line-height: 1.7;
 }
@@ -238,7 +247,31 @@ a:hover {
 }
 
 .section {
-    margin: 5rem 0;
+    margin: 3.5rem 0;
+}
+
+.section:first-of-type {
+    margin-top: 2rem;
+}
+
+/* Intro Section */
+.intro-section {
+    max-width: 800px;
+}
+
+.intro-text {
+    font-size: 1.15rem;
+    line-height: 1.8;
+    color: var(--text);
+    margin-bottom: 1rem;
+}
+
+.intro-text:last-child {
+    margin-bottom: 0;
+}
+
+.intro-text strong {
+    color: var(--indigo);
 }
 
 .section h3 {
@@ -253,6 +286,119 @@ a:hover {
     color: var(--text-muted);
     font-size: 1.15rem;
     margin-bottom: 2.5rem;
+}
+
+/* IDD Flow Section */
+.idd-cycle {
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+    margin-top: 2rem;
+}
+
+.idd-step {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 2rem;
+    position: relative;
+}
+
+.idd-step-number {
+    position: absolute;
+    top: -1rem;
+    left: 2rem;
+    width: 2.5rem;
+    height: 2.5rem;
+    background: linear-gradient(135deg, var(--indigo) 0%, var(--teal) 100%);
+    color: white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 1.1rem;
+    box-shadow: 0 4px 12px rgba(44, 42, 116, 0.3);
+}
+
+.idd-step h4 {
+    color: var(--indigo);
+    font-size: 1.25rem;
+    margin-bottom: 0.5rem;
+    margin-top: 0.5rem;
+    font-weight: 700;
+}
+
+.idd-step > p {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    margin-bottom: 1rem;
+}
+
+.idd-step pre {
+    margin: 0;
+    font-size: 0.8rem;
+}
+
+.idd-step pre code {
+    padding: 1rem;
+}
+
+/* IAL Demo Section */
+.ial-demo {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 2rem;
+}
+
+.ial-explanation p {
+    color: var(--text-muted);
+    font-size: 1rem;
+    line-height: 1.6;
+}
+
+.ial-explanation pre {
+    margin: 1rem 0;
+}
+
+/* Intent Studio Section */
+.studio-feature {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 2rem;
+}
+
+.studio-description p {
+    color: var(--text-muted);
+    font-size: 1rem;
+    line-height: 1.6;
+    margin-bottom: 1rem;
+}
+
+.studio-features-list {
+    list-style: none;
+    padding: 0;
+    margin: 1.5rem 0 0 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.75rem;
+}
+
+.studio-features-list li {
+    color: var(--text);
+    font-size: 0.95rem;
+    padding-left: 1.5rem;
+    position: relative;
+}
+
+.studio-features-list li::before {
+    content: "✓";
+    position: absolute;
+    left: 0;
+    color: var(--teal);
+    font-weight: 700;
 }
 
 .features {
@@ -318,12 +464,21 @@ a:hover {
 .yellow { background: #ffbd2e; }
 .green { background: #27c93f; }
 
+/* Code block container - holds the button outside the scrolling pre */
+.code-container {
+    position: relative;
+    margin: 1.5rem 0;
+}
+
+.code-container pre {
+    margin: 0;
+}
+
 pre {
     background: var(--code-bg);
     border-radius: 12px;
     padding: 2.5rem 1.5rem 1.5rem 1.5rem;
     overflow-x: auto;
-    position: relative;
     font-family: 'JetBrains Mono', 'SF Mono', Consolas, 'Liberation Mono', Menlo, monospace;
     font-size: 0.9rem;
     line-height: 1.6;
@@ -347,6 +502,7 @@ pre {
     backdrop-filter: blur(6px);
     -webkit-backdrop-filter: blur(6px);
     transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+    z-index: 10;
 }
 
 .copy-button:hover {
@@ -564,6 +720,38 @@ pre code[class*="language-"] {
 .blog-excerpt {
     color: var(--text-muted);
     line-height: 1.6;
+}
+
+/* Page headers for Learn, Blog list, etc. */
+.page-header {
+    margin-bottom: 2.5rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.page-header h2 {
+    font-size: 2.5rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, var(--indigo) 0%, var(--teal) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 0.5rem;
+    letter-spacing: -0.02em;
+}
+
+.page-header .tagline {
+    color: var(--text-muted);
+    font-size: 1.1rem;
+    margin: 0;
+}
+
+/* Blog-specific header with playful style */
+.page-header.blog-header h2 {
+    background: linear-gradient(135deg, var(--orange) 0%, var(--indigo) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
 }
 
 .blog-post {

@@ -80,3 +80,45 @@ jobs:
 
       - name: Lint examples
         run: ./target/release/ntnt lint examples/
+
+  docs:
+    name: Validate Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Validate stdlib.toml
+        run: ./target/release/ntnt docs --validate
+
+      - name: Generate docs and check for drift
+        run: |
+          ./target/release/ntnt docs --generate
+          DRIFT=0
+          for file in docs/STDLIB_REFERENCE.md docs/SYNTAX_REFERENCE.md docs/IAL_REFERENCE.md; do
+            if ! git diff --quiet "$file" 2>/dev/null; then
+              echo "::error::$file is out of date. Run 'ntnt docs --generate' and commit."
+              git diff "$file"
+              DRIFT=1
+            fi
+          done
+          if [ "$DRIFT" = "1" ]; then
+            exit 1
+          fi

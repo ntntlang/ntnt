@@ -34,6 +34,7 @@ COPY --from=builder /ntnt-source/target/release/ntnt /usr/local/bin/ntnt
 COPY examples/ntnt-lang-org/server.tnt .
 COPY examples/ntnt-lang-org/routes ./routes
 COPY examples/ntnt-lang-org/middleware ./middleware
+COPY examples/ntnt-lang-org/lib ./lib
 COPY examples/ntnt-lang-org/views ./views
 COPY examples/ntnt-lang-org/assets ./assets
 

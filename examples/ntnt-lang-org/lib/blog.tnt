@@ -1,0 +1,44 @@
+// Blog post data - single source of truth
+// Both /blog (list) and /blog/[slug] (detail) routes import this
+
+// All blog posts with metadata
+// Order: newest first
+fn get_all_posts() {
+    return [
+        map {
+            "slug": "intent-assertion-language",
+            "title": "The Intent Assertion Language (IAL)",
+            "date": "January 25, 2026",
+            "author": "NTNT Team",
+            "excerpt": "IAL is a term rewriting engine that translates natural language assertions into executable tests. Learn how glossaries, standard terms, and primitives work together...",
+            "template": "views/blog/ial-explained.html"
+        },
+        map {
+            "slug": "intent-driven-development",
+            "title": "Intent-Driven Development (IDD)",
+            "date": "January 25, 2026",
+            "author": "NTNT Team",
+            "excerpt": "IDD is a methodology where human requirements become executable specifications. Write natural language, IAL resolves it to executable checks...",
+            "template": "views/blog/idd-explained.html"
+        },
+        map {
+            "slug": "introducing-ntnt",
+            "title": "Introducing the NTNT Programming Language",
+            "date": "January 25, 2026",
+            "author": "NTNT Team",
+            "excerpt": "NTNT explores what programming might look like when AI agents are the primary authors of code. A research language for human-AI collaborative development...",
+            "template": "views/blog/welcome.html"
+        }
+    ]
+}
+
+// Get a single post by slug - returns Some(post) or None
+fn get_post_by_slug(slug) {
+    let posts = get_all_posts()
+    for post in posts {
+        if post["slug"] == slug {
+            return Some(post)
+        }
+    }
+    return None
+}

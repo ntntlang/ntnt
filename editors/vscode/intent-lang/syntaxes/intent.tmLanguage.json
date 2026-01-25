@@ -1,0 +1,106 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Intent Specification",
+  "scopeName": "source.intent",
+  "patterns": [
+    {
+      "name": "comment.line.number-sign.intent",
+      "match": "^#.*$"
+    },
+    {
+      "name": "markup.heading.intent",
+      "match": "^##\\s+.*$"
+    },
+    {
+      "name": "punctuation.separator.intent",
+      "match": "^-{3,}$"
+    },
+    {
+      "match": "^(Feature|Constraint|Component|Invariant)(:)\\s*(.*)$",
+      "captures": {
+        "1": { "name": "keyword.control.intent" },
+        "2": { "name": "punctuation.separator.intent" },
+        "3": { "name": "entity.name.type.intent" }
+      }
+    },
+    {
+      "match": "^(\\s*)(Scenario|Test Cases|Assertions)(:)\\s*(.*)$",
+      "captures": {
+        "2": { "name": "keyword.control.intent" },
+        "3": { "name": "punctuation.separator.intent" },
+        "4": { "name": "entity.name.function.intent" }
+      }
+    },
+    {
+      "match": "^(\\s*)(id|description|design|content|note|notes|source|parameters|inherent_behavior|preconditions|applies_to|for|scenario|rationale|verify|skip)(:)",
+      "captures": {
+        "2": { "name": "support.type.property-name.intent" },
+        "3": { "name": "punctuation.separator.intent" }
+      }
+    },
+    {
+      "match": "^(\\s*)(test|request|assert|given|check|call|input|property)(:)",
+      "captures": {
+        "2": { "name": "keyword.other.intent" },
+        "3": { "name": "punctuation.separator.intent" }
+      }
+    },
+    {
+      "name": "keyword.operator.http.intent",
+      "match": "\\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\\b"
+    },
+    {
+      "name": "keyword.control.when.intent",
+      "match": "\\b(When|Given|Then)\\b"
+    },
+    {
+      "name": "keyword.operator.arrow.intent",
+      "match": "→"
+    },
+    {
+      "name": "support.function.assertion.intent",
+      "match": "\\b(body contains|body not contains|body matches|header contains|redirects to|exits successfully|result is|result equals|property:|check:|call:|source:|input:)\\b"
+    },
+    {
+      "match": "\\b(status)\\s+(\\d{3}|[245]xx)\\b",
+      "captures": {
+        "1": { "name": "support.function.assertion.intent" },
+        "2": { "name": "constant.numeric.intent" }
+      }
+    },
+    {
+      "match": "\\b(header)\\s+\"([^\"]+)\"\\s+(contains)\\s+\"([^\"]+)\"",
+      "captures": {
+        "1": { "name": "support.function.assertion.intent" },
+        "2": { "name": "string.quoted.double.intent" },
+        "3": { "name": "support.function.assertion.intent" },
+        "4": { "name": "string.quoted.double.intent" }
+      }
+    },
+    {
+      "name": "string.quoted.double.intent",
+      "begin": "\"",
+      "end": "\""
+    },
+    {
+      "name": "variable.parameter.intent",
+      "match": "\\{[^}]+\\}"
+    },
+    {
+      "name": "constant.other.reference.intent",
+      "match": "\\b(feature|component|constraint|invariant|test_data|corpus)\\.[a-z_]+"
+    },
+    {
+      "name": "constant.numeric.intent",
+      "match": "\\b\\d+\\b"
+    },
+    {
+      "name": "markup.list.intent",
+      "match": "^\\s*-\\s"
+    },
+    {
+      "name": "punctuation.separator.table.intent",
+      "match": "\\|"
+    }
+  ]
+}

@@ -1,0 +1,953 @@
+# NTNT Standard Library Documentation
+# ====================================
+# This is the single source of truth for stdlib documentation.
+# Generated docs and CI validation use this file.
+#
+# Run: ntnt docs --validate  (to check coverage)
+# Run: ntnt docs --generate  (to regenerate markdown)
+
+[meta]
+version = "0.3.3"
+generated_files = [
+    "docs/STDLIB_REFERENCE.md",
+    "docs/AI_AGENT_GUIDE.md"
+]
+
+# ============================================================================
+# GLOBAL BUILTINS
+# These functions are available everywhere without importing
+# ============================================================================
+
+[builtins.print]
+signature = "print(value: Any) -> Unit"
+description = "Prints a value to stdout with a newline"
+examples = ["print(\"Hello, world!\")"]
+
+[builtins.len]
+signature = "len(x: String | Array) -> Int"
+description = "Returns the length of a string or array"
+examples = ["len(\"hello\") // 5", "len([1, 2, 3]) // 3"]
+
+[builtins.type]
+signature = "type(x: Any) -> String"
+description = "Returns the type name of a value as a string"
+examples = ["type(42) // \"Int\"", "type([1, 2]) // \"Array\""]
+
+[builtins.str]
+signature = "str(x: Any) -> String"
+description = "Converts any value to its string representation"
+examples = ["str(42) // \"42\"", "str(true) // \"true\""]
+
+[builtins.int]
+signature = "int(x: Int | Float | String | Bool) -> Int"
+description = "Converts a value to an integer"
+examples = ["int(\"42\") // 42", "int(3.14) // 3", "int(true) // 1"]
+
+[builtins.float]
+signature = "float(x: Int | Float | String) -> Float"
+description = "Converts a value to a floating-point number"
+examples = ["float(\"3.14\") // 3.14", "float(42) // 42.0"]
+
+[builtins.push]
+signature = "push(arr: Array, item: Any) -> Array"
+description = "Returns a new array with the item appended"
+examples = ["push([1, 2], 3) // [1, 2, 3]"]
+
+[builtins.assert]
+signature = "assert(condition: Bool) -> Unit"
+description = "Throws an error if the condition is false"
+examples = ["assert(x > 0)"]
+
+[builtins.abs]
+signature = "abs(n: Int | Float) -> Int | Float"
+description = "Returns the absolute value of a number"
+examples = ["abs(-5) // 5", "abs(-3.14) // 3.14"]
+
+[builtins.min]
+signature = "min(a: Number, b: Number) -> Number"
+description = "Returns the smaller of two numbers"
+examples = ["min(3, 7) // 3"]
+
+[builtins.max]
+signature = "max(a: Number, b: Number) -> Number"
+description = "Returns the larger of two numbers"
+examples = ["max(3, 7) // 7"]
+
+[builtins.round]
+signature = "round(n: Float) -> Int"
+description = "Rounds a number to the nearest integer"
+examples = ["round(3.7) // 4", "round(3.2) // 3"]
+
+[builtins.floor]
+signature = "floor(n: Float) -> Int"
+description = "Rounds a number down to the nearest integer"
+examples = ["floor(3.7) // 3"]
+
+[builtins.ceil]
+signature = "ceil(n: Float) -> Int"
+description = "Rounds a number up to the nearest integer"
+examples = ["ceil(3.2) // 4"]
+
+[builtins.trunc]
+signature = "trunc(n: Float) -> Int"
+description = "Truncates a number toward zero"
+examples = ["trunc(3.7) // 3", "trunc(-3.7) // -3"]
+
+[builtins.sqrt]
+signature = "sqrt(n: Number) -> Float"
+description = "Returns the square root of a number"
+examples = ["sqrt(16) // 4.0"]
+errors = ["RuntimeError if n is negative"]
+
+[builtins.pow]
+signature = "pow(base: Number, exp: Number) -> Number"
+description = "Returns base raised to the power of exp"
+examples = ["pow(2, 3) // 8", "pow(2.0, 0.5) // 1.414..."]
+
+[builtins.sign]
+signature = "sign(n: Number) -> Int"
+description = "Returns -1, 0, or 1 based on the sign of the number"
+examples = ["sign(-5) // -1", "sign(0) // 0", "sign(5) // 1"]
+
+[builtins.clamp]
+signature = "clamp(value: Number, min: Number, max: Number) -> Number"
+description = "Constrains a value between min and max"
+examples = ["clamp(15, 0, 10) // 10", "clamp(-5, 0, 10) // 0"]
+
+# ============================================================================
+# HTTP SERVER BUILTINS
+# Global functions for HTTP routing (no import needed)
+# ============================================================================
+
+[builtins.get]
+signature = "get(pattern: String, handler: Fn) -> Unit"
+description = "Registers a GET route handler"
+examples = ["get(\"/\", home_handler)", "get(r\"/users/{id}\", get_user)"]
+notes = "Use raw strings r\"...\" for patterns with path parameters"
+
+[builtins.post]
+signature = "post(pattern: String, handler: Fn) -> Unit"
+description = "Registers a POST route handler"
+examples = ["post(\"/users\", create_user)"]
+
+[builtins.put]
+signature = "put(pattern: String, handler: Fn) -> Unit"
+description = "Registers a PUT route handler"
+examples = ["put(r\"/users/{id}\", update_user)"]
+
+[builtins.patch]
+signature = "patch(pattern: String, handler: Fn) -> Unit"
+description = "Registers a PATCH route handler"
+examples = ["patch(r\"/users/{id}\", patch_user)"]
+
+[builtins.delete]
+signature = "delete(pattern: String, handler: Fn) -> Unit"
+description = "Registers a DELETE route handler"
+examples = ["delete(r\"/users/{id}\", delete_user)"]
+
+[builtins.listen]
+signature = "listen(port: Int) -> Unit"
+description = "Starts the HTTP server on the specified port"
+examples = ["listen(8080)"]
+
+[builtins.serve_static]
+signature = "serve_static(prefix: String, dir: String) -> Unit"
+description = "Serves static files from a directory"
+examples = ["serve_static(\"/static\", \"./public\")"]
+
+[builtins.use_middleware]
+signature = "use_middleware(handler: Fn) -> Unit"
+description = "Registers middleware that runs before route handlers"
+examples = ["use_middleware(logger)"]
+
+[builtins.on_shutdown]
+signature = "on_shutdown(handler: Fn) -> Unit"
+description = "Registers a function to run when the server shuts down"
+examples = ["on_shutdown(cleanup)"]
+
+[builtins.routes]
+signature = "routes(dir: String) -> Unit"
+description = "Loads file-based routes from a directory"
+examples = ["routes(\"routes\")"]
+
+[builtins.template]
+signature = "template(path: String, vars: Map) -> String"
+description = "Renders an external template file with variable substitution"
+examples = ["template(\"views/home.html\", map { \"title\": \"Home\" })"]
+
+# ============================================================================
+# std/string - String Manipulation
+# ============================================================================
+
+[modules."std/string"]
+description = "Comprehensive string manipulation functions"
+
+[modules."std/string".functions.split]
+signature = "split(str: String, delim: String) -> [String]"
+description = "Splits a string into an array using a delimiter"
+examples = ["split(\"a,b,c\", \",\") // [\"a\", \"b\", \"c\"]"]
+
+[modules."std/string".functions.join]
+signature = "join(arr: Array, delim: String) -> String"
+description = "Joins array elements into a string with a delimiter"
+examples = ["join([\"a\", \"b\"], \",\") // \"a,b\""]
+
+[modules."std/string".functions.concat]
+signature = "concat(a: String, b: String) -> String"
+description = "Concatenates two strings"
+examples = ["concat(\"hello\", \" world\") // \"hello world\""]
+
+[modules."std/string".functions.repeat]
+signature = "repeat(str: String, n: Int) -> String"
+description = "Repeats a string n times"
+examples = ["repeat(\"ab\", 3) // \"ababab\""]
+
+[modules."std/string".functions.reverse]
+signature = "reverse(str: String) -> String"
+description = "Reverses a string"
+examples = ["reverse(\"abc\") // \"cba\""]
+
+[modules."std/string".functions.trim]
+signature = "trim(str: String) -> String"
+description = "Removes leading and trailing whitespace"
+examples = ["trim(\"  hello  \") // \"hello\""]
+
+[modules."std/string".functions.trim_left]
+signature = "trim_left(str: String) -> String"
+description = "Removes leading whitespace"
+examples = ["trim_left(\"  hello\") // \"hello\""]
+
+[modules."std/string".functions.trim_right]
+signature = "trim_right(str: String) -> String"
+description = "Removes trailing whitespace"
+examples = ["trim_right(\"hello  \") // \"hello\""]
+
+[modules."std/string".functions.trim_chars]
+signature = "trim_chars(str: String, chars: String) -> String"
+description = "Removes specified characters from both ends"
+examples = ["trim_chars(\"-hello-\", \"-\") // \"hello\""]
+
+[modules."std/string".functions.to_upper]
+signature = "to_upper(str: String) -> String"
+description = "Converts string to uppercase"
+examples = ["to_upper(\"hello\") // \"HELLO\""]
+
+[modules."std/string".functions.to_lower]
+signature = "to_lower(str: String) -> String"
+description = "Converts string to lowercase"
+examples = ["to_lower(\"HELLO\") // \"hello\""]
+
+[modules."std/string".functions.capitalize]
+signature = "capitalize(str: String) -> String"
+description = "Capitalizes the first character"
+examples = ["capitalize(\"hello\") // \"Hello\""]
+
+[modules."std/string".functions.title]
+signature = "title(str: String) -> String"
+description = "Capitalizes the first letter of each word"
+examples = ["title(\"hello world\") // \"Hello World\""]
+
+[modules."std/string".functions.to_snake_case]
+signature = "to_snake_case(str: String) -> String"
+description = "Converts to snake_case"
+examples = ["to_snake_case(\"helloWorld\") // \"hello_world\""]
+
+[modules."std/string".functions.to_camel_case]
+signature = "to_camel_case(str: String) -> String"
+description = "Converts to camelCase"
+examples = ["to_camel_case(\"hello_world\") // \"helloWorld\""]
+
+[modules."std/string".functions.to_pascal_case]
+signature = "to_pascal_case(str: String) -> String"
+description = "Converts to PascalCase"
+examples = ["to_pascal_case(\"hello_world\") // \"HelloWorld\""]
+
+[modules."std/string".functions.to_kebab_case]
+signature = "to_kebab_case(str: String) -> String"
+description = "Converts to kebab-case"
+examples = ["to_kebab_case(\"helloWorld\") // \"hello-world\""]
+
+[modules."std/string".functions.slugify]
+signature = "slugify(str: String) -> String"
+description = "Converts to URL-friendly slug"
+examples = ["slugify(\"Hello World!\") // \"hello-world\""]
+
+[modules."std/string".functions.contains]
+signature = "contains(str: String, substr: String) -> Bool"
+description = "Checks if string contains substring"
+examples = ["contains(\"hello\", \"ell\") // true"]
+
+[modules."std/string".functions.starts_with]
+signature = "starts_with(str: String, prefix: String) -> Bool"
+description = "Checks if string starts with prefix"
+examples = ["starts_with(\"hello\", \"he\") // true"]
+
+[modules."std/string".functions.ends_with]
+signature = "ends_with(str: String, suffix: String) -> Bool"
+description = "Checks if string ends with suffix"
+examples = ["ends_with(\"hello\", \"lo\") // true"]
+
+[modules."std/string".functions.index_of]
+signature = "index_of(str: String, substr: String) -> Int"
+description = "Returns index of first occurrence, or -1 if not found"
+examples = ["index_of(\"hello\", \"l\") // 2"]
+
+[modules."std/string".functions.last_index_of]
+signature = "last_index_of(str: String, substr: String) -> Int"
+description = "Returns index of last occurrence, or -1 if not found"
+examples = ["last_index_of(\"hello\", \"l\") // 3"]
+
+[modules."std/string".functions.count]
+signature = "count(str: String, substr: String) -> Int"
+description = "Counts occurrences of substring"
+examples = ["count(\"ababa\", \"a\") // 3"]
+
+[modules."std/string".functions.replace]
+signature = "replace(str: String, from: String, to: String) -> String"
+description = "Replaces all occurrences of from with to"
+examples = ["replace(\"hello\", \"l\", \"L\") // \"heLLo\""]
+
+[modules."std/string".functions.replace_first]
+signature = "replace_first(str: String, from: String, to: String) -> String"
+description = "Replaces first occurrence of from with to"
+examples = ["replace_first(\"abab\", \"a\", \"X\") // \"Xbab\""]
+
+[modules."std/string".functions.replace_chars]
+signature = "replace_chars(str: String, chars: String, repl: String) -> String"
+description = "Replaces any character in chars set with replacement"
+examples = ["replace_chars(\"a.b_c\", \"._\", \"-\") // \"a-b-c\""]
+
+[modules."std/string".functions.remove_chars]
+signature = "remove_chars(str: String, chars: String) -> String"
+description = "Removes all characters in the chars set"
+examples = ["remove_chars(\"a!b?\", \"!?\") // \"ab\""]
+
+[modules."std/string".functions.keep_chars]
+signature = "keep_chars(str: String, allowed: String) -> String"
+description = "Keeps only characters in the allowed set"
+examples = ["keep_chars(\"a1b2\", \"ab\") // \"ab\""]
+
+[modules."std/string".functions.replace_pattern]
+signature = "replace_pattern(str: String, pattern: String, repl: String) -> String"
+description = "Replaces all regex matches with replacement"
+examples = ["replace_pattern(\"a1b2\", r\"\\d\", \"X\") // \"aXbX\""]
+
+[modules."std/string".functions.matches_pattern]
+signature = "matches_pattern(str: String, pattern: String) -> Bool"
+description = "Checks if string matches regex pattern"
+examples = ["matches_pattern(\"test123\", r\"\\d+\") // true"]
+
+[modules."std/string".functions.find_pattern]
+signature = "find_pattern(str: String, pattern: String) -> Option<String>"
+description = "Returns first regex match or None"
+examples = ["find_pattern(\"ab12cd\", r\"\\d+\") // Some(\"12\")"]
+
+[modules."std/string".functions.find_all_pattern]
+signature = "find_all_pattern(str: String, pattern: String) -> [String]"
+description = "Returns all regex matches"
+examples = ["find_all_pattern(\"a1b2\", r\"\\d\") // [\"1\", \"2\"]"]
+
+[modules."std/string".functions.split_pattern]
+signature = "split_pattern(str: String, pattern: String) -> [String]"
+description = "Splits string by regex pattern"
+examples = ["split_pattern(\"a1b2c\", r\"\\d\") // [\"a\", \"b\", \"c\"]"]
+
+[modules."std/string".functions.char_at]
+signature = "char_at(str: String, index: Int) -> String"
+description = "Returns character at index"
+examples = ["char_at(\"hello\", 0) // \"h\""]
+
+[modules."std/string".functions.substring]
+signature = "substring(str: String, start: Int, end: Int) -> String"
+description = "Extracts substring from start to end (exclusive)"
+examples = ["substring(\"hello\", 1, 4) // \"ell\""]
+
+[modules."std/string".functions.chars]
+signature = "chars(str: String) -> [String]"
+description = "Splits string into array of characters"
+examples = ["chars(\"hi\") // [\"h\", \"i\"]"]
+
+[modules."std/string".functions.lines]
+signature = "lines(str: String) -> [String]"
+description = "Splits string by newlines"
+examples = ["lines(\"a\\nb\") // [\"a\", \"b\"]"]
+
+[modules."std/string".functions.words]
+signature = "words(str: String) -> [String]"
+description = "Splits string by whitespace"
+examples = ["words(\"hello world\") // [\"hello\", \"world\"]"]
+
+[modules."std/string".functions.truncate]
+signature = "truncate(str: String, max_len: Int, suffix: String) -> String"
+description = "Truncates string to max length with suffix"
+examples = ["truncate(\"hello world\", 8, \"...\") // \"hello...\""]
+
+[modules."std/string".functions.pad_left]
+signature = "pad_left(str: String, len: Int, char: String) -> String"
+description = "Pads string on the left to reach target length"
+examples = ["pad_left(\"5\", 3, \"0\") // \"005\""]
+
+[modules."std/string".functions.pad_right]
+signature = "pad_right(str: String, len: Int, char: String) -> String"
+description = "Pads string on the right to reach target length"
+examples = ["pad_right(\"5\", 3, \"0\") // \"500\""]
+
+[modules."std/string".functions.center]
+signature = "center(str: String, len: Int, char: String) -> String"
+description = "Centers string with padding on both sides"
+examples = ["center(\"hi\", 6, \"-\") // \"--hi--\""]
+
+[modules."std/string".functions.is_empty]
+signature = "is_empty(str: String) -> Bool"
+description = "Returns true if string is empty"
+examples = ["is_empty(\"\") // true"]
+
+[modules."std/string".functions.is_blank]
+signature = "is_blank(str: String) -> Bool"
+description = "Returns true if string is empty or only whitespace"
+examples = ["is_blank(\"  \") // true"]
+
+[modules."std/string".functions.is_numeric]
+signature = "is_numeric(str: String) -> Bool"
+description = "Returns true if string contains only digits"
+examples = ["is_numeric(\"123\") // true"]
+
+[modules."std/string".functions.is_alpha]
+signature = "is_alpha(str: String) -> Bool"
+description = "Returns true if string contains only letters"
+examples = ["is_alpha(\"abc\") // true"]
+
+[modules."std/string".functions.is_alphanumeric]
+signature = "is_alphanumeric(str: String) -> Bool"
+description = "Returns true if string contains only letters and digits"
+examples = ["is_alphanumeric(\"abc123\") // true"]
+
+[modules."std/string".functions.is_lowercase]
+signature = "is_lowercase(str: String) -> Bool"
+description = "Returns true if all letters are lowercase"
+examples = ["is_lowercase(\"hello\") // true"]
+
+[modules."std/string".functions.is_uppercase]
+signature = "is_uppercase(str: String) -> Bool"
+description = "Returns true if all letters are uppercase"
+examples = ["is_uppercase(\"HELLO\") // true"]
+
+[modules."std/string".functions.is_whitespace]
+signature = "is_whitespace(str: String) -> Bool"
+description = "Returns true if string contains only whitespace"
+examples = ["is_whitespace(\"  \\t\") // true"]
+
+[modules."std/string".functions.matches]
+signature = "matches(str: String, pattern: String) -> Bool"
+description = "Simple glob matching with * and ?"
+examples = ["matches(\"hello.txt\", \"*.txt\") // true"]
+
+# ============================================================================
+# std/math - Mathematical Functions
+# ============================================================================
+
+[modules."std/math"]
+description = "Mathematical functions and constants"
+
+[modules."std/math".constants.PI]
+value = "3.141592653589793"
+description = "The mathematical constant π"
+
+[modules."std/math".constants.E]
+value = "2.718281828459045"
+description = "Euler's number (e)"
+
+[modules."std/math".constants.TAU]
+value = "6.283185307179586"
+description = "The circle constant τ = 2π"
+
+[modules."std/math".constants.INFINITY]
+value = "Infinity"
+description = "Positive infinity"
+
+[modules."std/math".constants.NEG_INFINITY]
+value = "-Infinity"
+description = "Negative infinity"
+
+[modules."std/math".functions.sin]
+signature = "sin(x: Number) -> Float"
+description = "Returns the sine of x (in radians)"
+examples = ["sin(0) // 0.0"]
+
+[modules."std/math".functions.cos]
+signature = "cos(x: Number) -> Float"
+description = "Returns the cosine of x (in radians)"
+examples = ["cos(0) // 1.0"]
+
+[modules."std/math".functions.tan]
+signature = "tan(x: Number) -> Float"
+description = "Returns the tangent of x (in radians)"
+examples = ["tan(0) // 0.0"]
+
+[modules."std/math".functions.asin]
+signature = "asin(x: Number) -> Float"
+description = "Returns the arc sine of x"
+examples = ["asin(0) // 0.0"]
+
+[modules."std/math".functions.acos]
+signature = "acos(x: Number) -> Float"
+description = "Returns the arc cosine of x"
+examples = ["acos(1) // 0.0"]
+
+[modules."std/math".functions.atan]
+signature = "atan(x: Number) -> Float"
+description = "Returns the arc tangent of x"
+examples = ["atan(0) // 0.0"]
+
+[modules."std/math".functions.atan2]
+signature = "atan2(y: Number, x: Number) -> Float"
+description = "Returns the arc tangent of y/x using signs for quadrant"
+examples = ["atan2(1, 1) // 0.785... (π/4)"]
+
+[modules."std/math".functions.sinh]
+signature = "sinh(x: Number) -> Float"
+description = "Returns the hyperbolic sine of x"
+examples = ["sinh(0) // 0.0"]
+
+[modules."std/math".functions.cosh]
+signature = "cosh(x: Number) -> Float"
+description = "Returns the hyperbolic cosine of x"
+examples = ["cosh(0) // 1.0"]
+
+[modules."std/math".functions.tanh]
+signature = "tanh(x: Number) -> Float"
+description = "Returns the hyperbolic tangent of x"
+examples = ["tanh(0) // 0.0"]
+
+[modules."std/math".functions.log]
+signature = "log(x: Number) -> Float"
+description = "Returns the natural logarithm of x"
+examples = ["log(E) // 1.0"]
+errors = ["RuntimeError if x <= 0"]
+
+[modules."std/math".functions.log10]
+signature = "log10(x: Number) -> Float"
+description = "Returns the base-10 logarithm of x"
+examples = ["log10(100) // 2.0"]
+errors = ["RuntimeError if x <= 0"]
+
+[modules."std/math".functions.log2]
+signature = "log2(x: Number) -> Float"
+description = "Returns the base-2 logarithm of x"
+examples = ["log2(8) // 3.0"]
+errors = ["RuntimeError if x <= 0"]
+
+[modules."std/math".functions.exp]
+signature = "exp(x: Number) -> Float"
+description = "Returns e raised to the power x"
+examples = ["exp(1) // 2.718..."]
+
+[modules."std/math".functions.exp2]
+signature = "exp2(x: Number) -> Float"
+description = "Returns 2 raised to the power x"
+examples = ["exp2(3) // 8.0"]
+
+[modules."std/math".functions.cbrt]
+signature = "cbrt(x: Number) -> Float"
+description = "Returns the cube root of x"
+examples = ["cbrt(27) // 3.0"]
+
+[modules."std/math".functions.hypot]
+signature = "hypot(x: Number, y: Number) -> Float"
+description = "Returns sqrt(x² + y²)"
+examples = ["hypot(3, 4) // 5.0"]
+
+[modules."std/math".functions.degrees]
+signature = "degrees(x: Number) -> Float"
+description = "Converts radians to degrees"
+examples = ["degrees(PI) // 180.0"]
+
+[modules."std/math".functions.radians]
+signature = "radians(x: Number) -> Float"
+description = "Converts degrees to radians"
+examples = ["radians(180) // 3.14159..."]
+
+[modules."std/math".functions.random]
+signature = "random() -> Float"
+description = "Returns a random float between 0 and 1"
+examples = ["random() // 0.7234..."]
+
+[modules."std/math".functions.random_int]
+signature = "random_int(min: Int, max: Int) -> Int"
+description = "Returns a random integer between min and max (inclusive)"
+examples = ["random_int(1, 10) // 7"]
+
+[modules."std/math".functions.random_range]
+signature = "random_range(min: Number, max: Number) -> Float"
+description = "Returns a random float between min and max"
+examples = ["random_range(0.0, 100.0) // 42.5..."]
+
+[modules."std/math".functions.is_nan]
+signature = "is_nan(x: Number) -> Bool"
+description = "Returns true if x is NaN"
+examples = ["is_nan(0.0 / 0.0) // true"]
+
+[modules."std/math".functions.is_infinite]
+signature = "is_infinite(x: Number) -> Bool"
+description = "Returns true if x is infinite"
+examples = ["is_infinite(1.0 / 0.0) // true"]
+
+[modules."std/math".functions.is_finite]
+signature = "is_finite(x: Number) -> Bool"
+description = "Returns true if x is finite (not NaN or infinite)"
+examples = ["is_finite(42.0) // true"]
+
+# ============================================================================
+# std/http/server - HTTP Response Builders
+# ============================================================================
+
+[modules."std/http/server"]
+description = "HTTP response builders and request parsing utilities"
+
+[modules."std/http/server".functions.json]
+signature = "json(data: Any, status?: Int) -> Response"
+description = "Creates a JSON response"
+examples = ["json(map { \"ok\": true })", "json(data, 201)"]
+
+[modules."std/http/server".functions.html]
+signature = "html(content: String, status?: Int) -> Response"
+description = "Creates an HTML response"
+examples = ["html(\"<h1>Hello</h1>\")"]
+
+[modules."std/http/server".functions.text]
+signature = "text(content: String) -> Response"
+description = "Creates a plain text response"
+examples = ["text(\"Hello, world!\")"]
+
+[modules."std/http/server".functions.redirect]
+signature = "redirect(url: String) -> Response"
+description = "Creates a 302 redirect response"
+examples = ["redirect(\"/login\")"]
+
+[modules."std/http/server".functions.status]
+signature = "status(code: Int, body: String) -> Response"
+description = "Creates a response with custom status code"
+examples = ["status(404, \"Not found\")"]
+
+[modules."std/http/server".functions.parse_form]
+signature = "parse_form(req: Request) -> Map"
+description = "Parses URL-encoded form data from request body"
+examples = ["let form = parse_form(req)"]
+
+[modules."std/http/server".functions.parse_json]
+signature = "parse_json(req: Request) -> Result<Any, String>"
+description = "Parses JSON from request body"
+examples = ["match parse_json(req) { Ok(data) => ..., Err(e) => ... }"]
+
+# ============================================================================
+# std/http - HTTP Client
+# ============================================================================
+
+[modules."std/http"]
+description = "HTTP client for making requests"
+
+[modules."std/http".functions.fetch]
+signature = "fetch(url: String | Map) -> Result<Response, String>"
+description = "Makes an HTTP request. Simple form takes URL for GET. Map form supports method, body, json, form, headers, auth, cookies, timeout."
+examples = [
+    "fetch(\"https://api.example.com\")",
+    "fetch(map { \"url\": \"https://api.example.com\", \"method\": \"POST\", \"json\": data })"
+]
+
+[modules."std/http".functions.download]
+signature = "download(url: String, path: String) -> Result<Unit, String>"
+description = "Downloads a file from URL to local path"
+examples = ["download(\"https://example.com/file.zip\", \"./downloads/file.zip\")"]
+
+# ============================================================================
+# std/json - JSON Parsing
+# ============================================================================
+
+[modules."std/json"]
+description = "JSON parsing and serialization"
+
+[modules."std/json".functions.parse]
+signature = "parse(json: String) -> Result<Any, String>"
+description = "Parses a JSON string into a value"
+examples = ["parse(\"{\\\"key\\\": \\\"value\\\"}\")"]
+
+[modules."std/json".functions.stringify]
+signature = "stringify(value: Any) -> String"
+description = "Converts a value to a JSON string"
+examples = ["stringify(map { \"key\": \"value\" }) // \"{\\\"key\\\":\\\"value\\\"}\""]
+
+[modules."std/json".functions.stringify_pretty]
+signature = "stringify_pretty(value: Any) -> String"
+description = "Converts a value to a pretty-printed JSON string"
+examples = ["stringify_pretty(data)"]
+
+# ============================================================================
+# std/fs - File System
+# ============================================================================
+
+[modules."std/fs"]
+description = "File system operations"
+
+[modules."std/fs".functions.read_file]
+signature = "read_file(path: String) -> Result<String, String>"
+description = "Reads entire file contents as a string"
+examples = ["read_file(\"config.json\")"]
+
+[modules."std/fs".functions.write_file]
+signature = "write_file(path: String, content: String) -> Result<Unit, String>"
+description = "Writes content to a file, creating or overwriting"
+examples = ["write_file(\"output.txt\", \"Hello\")"]
+
+[modules."std/fs".functions.exists]
+signature = "exists(path: String) -> Bool"
+description = "Returns true if path exists"
+examples = ["exists(\"config.json\") // true"]
+
+[modules."std/fs".functions.is_file]
+signature = "is_file(path: String) -> Bool"
+description = "Returns true if path is a file"
+examples = ["is_file(\"config.json\") // true"]
+
+[modules."std/fs".functions.is_dir]
+signature = "is_dir(path: String) -> Bool"
+description = "Returns true if path is a directory"
+examples = ["is_dir(\"src\") // true"]
+
+[modules."std/fs".functions.mkdir]
+signature = "mkdir(path: String) -> Result<Unit, String>"
+description = "Creates a directory (including parents)"
+examples = ["mkdir(\"output/logs\")"]
+
+[modules."std/fs".functions.readdir]
+signature = "readdir(path: String) -> Result<[String], String>"
+description = "Lists directory contents"
+examples = ["readdir(\"src\")"]
+
+# ============================================================================
+# std/env - Environment
+# ============================================================================
+
+[modules."std/env"]
+description = "Environment variables and process info"
+
+[modules."std/env".functions.get_env]
+signature = "get_env(name: String) -> Option<String>"
+description = "Gets an environment variable"
+examples = ["get_env(\"HOME\") // Some(\"/Users/...\")"]
+
+[modules."std/env".functions.set_env]
+signature = "set_env(name: String, value: String) -> Unit"
+description = "Sets an environment variable for the current process"
+examples = ["set_env(\"MY_VAR\", \"value\")"]
+
+[modules."std/env".functions.all_env]
+signature = "all_env() -> Map"
+description = "Returns all environment variables as a map"
+examples = ["all_env()"]
+
+[modules."std/env".functions.load_env]
+signature = "load_env(path?: String) -> Result<Unit, String>"
+description = "Loads environment variables from a .env file"
+examples = ["load_env()", "load_env(\".env.local\")"]
+
+[modules."std/env".functions.args]
+signature = "args() -> [String]"
+description = "Returns command-line arguments"
+examples = ["args() // [\"script.tnt\", \"--flag\"]"]
+
+[modules."std/env".functions.cwd]
+signature = "cwd() -> String"
+description = "Returns the current working directory"
+examples = ["cwd() // \"/Users/...\""]
+
+# ============================================================================
+# std/collections - Collection Operations
+# ============================================================================
+
+[modules."std/collections"]
+description = "Collection manipulation utilities"
+
+[modules."std/collections".functions.push]
+signature = "push(arr: Array, item: Any) -> Array"
+description = "Returns new array with item appended"
+examples = ["push([1, 2], 3) // [1, 2, 3]"]
+
+[modules."std/collections".functions.pop]
+signature = "pop(arr: Array) -> Array"
+description = "Returns new array with last item removed"
+examples = ["pop([1, 2, 3]) // [1, 2]"]
+
+[modules."std/collections".functions.first]
+signature = "first(arr: Array) -> Option<Any>"
+description = "Returns the first element or None"
+examples = ["first([1, 2, 3]) // Some(1)"]
+
+[modules."std/collections".functions.last]
+signature = "last(arr: Array) -> Option<Any>"
+description = "Returns the last element or None"
+examples = ["last([1, 2, 3]) // Some(3)"]
+
+[modules."std/collections".functions.keys]
+signature = "keys(map: Map) -> [String]"
+description = "Returns array of map keys"
+examples = ["keys(map { \"a\": 1 }) // [\"a\"]"]
+
+[modules."std/collections".functions.values]
+signature = "values(map: Map) -> [Any]"
+description = "Returns array of map values"
+examples = ["values(map { \"a\": 1 }) // [1]"]
+
+[modules."std/collections".functions.entries]
+signature = "entries(map: Map) -> [[String, Any]]"
+description = "Returns array of [key, value] pairs"
+examples = ["entries(map { \"a\": 1 }) // [[\"a\", 1]]"]
+
+[modules."std/collections".functions.has_key]
+signature = "has_key(map: Map, key: String) -> Bool"
+description = "Returns true if map contains key"
+examples = ["has_key(map { \"a\": 1 }, \"a\") // true"]
+
+[modules."std/collections".functions.get_key]
+signature = "get_key(map: Map, key: String) -> Option<Any>"
+description = "Gets value by key or None"
+examples = ["get_key(map { \"a\": 1 }, \"a\") // Some(1)"]
+
+# ============================================================================
+# std/time - Date/Time
+# ============================================================================
+
+[modules."std/time"]
+description = "Date and time operations"
+
+[modules."std/time".functions.now]
+signature = "now() -> DateTime"
+description = "Returns the current date/time"
+examples = ["now()"]
+
+[modules."std/time".functions.format]
+signature = "format(dt: DateTime, fmt: String) -> String"
+description = "Formats a datetime using strftime-style format"
+examples = ["format(now(), \"%Y-%m-%d\") // \"2024-01-15\""]
+
+[modules."std/time".functions.parse]
+signature = "parse(str: String, fmt: String) -> Result<DateTime, String>"
+description = "Parses a string into a datetime"
+examples = ["parse(\"2024-01-15\", \"%Y-%m-%d\")"]
+
+[modules."std/time".functions.add_days]
+signature = "add_days(dt: DateTime, days: Int) -> DateTime"
+description = "Adds days to a datetime"
+examples = ["add_days(now(), 7)"]
+
+[modules."std/time".functions.add_months]
+signature = "add_months(dt: DateTime, months: Int) -> DateTime"
+description = "Adds months to a datetime"
+examples = ["add_months(now(), 1)"]
+
+# ============================================================================
+# std/url - URL Operations
+# ============================================================================
+
+[modules."std/url"]
+description = "URL encoding and query string operations"
+
+[modules."std/url".functions.encode]
+signature = "encode(str: String) -> String"
+description = "URL-encodes a string"
+examples = ["encode(\"hello world\") // \"hello%20world\""]
+
+[modules."std/url".functions.decode]
+signature = "decode(str: String) -> String"
+description = "URL-decodes a string"
+examples = ["decode(\"hello%20world\") // \"hello world\""]
+
+[modules."std/url".functions.parse_query]
+signature = "parse_query(query: String) -> Map"
+description = "Parses a query string into a map"
+examples = ["parse_query(\"a=1&b=2\") // map { \"a\": \"1\", \"b\": \"2\" }"]
+
+[modules."std/url".functions.build_query]
+signature = "build_query(params: Map) -> String"
+description = "Builds a query string from a map"
+examples = ["build_query(map { \"a\": \"1\" }) // \"a=1\""]
+
+# ============================================================================
+# std/path - Path Operations
+# ============================================================================
+
+[modules."std/path"]
+description = "File path manipulation"
+
+[modules."std/path".functions.join]
+signature = "join(parts: [String]) -> String"
+description = "Joins path segments"
+examples = ["join([\"src\", \"lib\", \"main.tnt\"]) // \"src/lib/main.tnt\""]
+
+[modules."std/path".functions.dirname]
+signature = "dirname(path: String) -> String"
+description = "Returns the directory portion of a path"
+examples = ["dirname(\"src/lib/main.tnt\") // \"src/lib\""]
+
+[modules."std/path".functions.basename]
+signature = "basename(path: String) -> String"
+description = "Returns the filename portion of a path"
+examples = ["basename(\"src/lib/main.tnt\") // \"main.tnt\""]
+
+[modules."std/path".functions.extname]
+signature = "extname(path: String) -> String"
+description = "Returns the file extension"
+examples = ["extname(\"main.tnt\") // \".tnt\""]
+
+# ============================================================================
+# std/csv - CSV Operations
+# ============================================================================
+
+[modules."std/csv"]
+description = "CSV parsing and generation"
+
+[modules."std/csv".functions.parse]
+signature = "parse(csv: String) -> [[String]]"
+description = "Parses CSV into array of rows (arrays of strings)"
+examples = ["parse(\"a,b\\n1,2\") // [[\"a\", \"b\"], [\"1\", \"2\"]]"]
+
+[modules."std/csv".functions.parse_with_headers]
+signature = "parse_with_headers(csv: String) -> [Map]"
+description = "Parses CSV into array of maps using first row as headers"
+examples = ["parse_with_headers(\"a,b\\n1,2\") // [map { \"a\": \"1\", \"b\": \"2\" }]"]
+
+[modules."std/csv".functions.stringify]
+signature = "stringify(rows: [[Any]]) -> String"
+description = "Converts array of rows to CSV string"
+examples = ["stringify([[\"a\", \"b\"], [1, 2]]) // \"a,b\\n1,2\""]
+
+[modules."std/csv".functions.stringify_with_headers]
+signature = "stringify_with_headers(rows: [Map], headers: [String]) -> String"
+description = "Converts array of maps to CSV with header row"
+examples = ["stringify_with_headers([map { \"a\": 1 }], [\"a\"])"]
+
+# ============================================================================
+# std/concurrent - Concurrency
+# ============================================================================
+
+[modules."std/concurrent"]
+description = "Concurrency primitives"
+
+[modules."std/concurrent".functions.channel]
+signature = "channel() -> [Sender, Receiver]"
+description = "Creates a channel for communication between tasks"
+examples = ["let [tx, rx] = channel()"]
+
+[modules."std/concurrent".functions.send]
+signature = "send(sender: Sender, value: Any) -> Unit"
+description = "Sends a value through a channel"
+examples = ["send(tx, \"hello\")"]
+
+[modules."std/concurrent".functions.recv]
+signature = "recv(receiver: Receiver) -> Any"
+description = "Receives a value from a channel (blocks until available)"
+examples = ["let msg = recv(rx)"]
+
+[modules."std/concurrent".functions.sleep_ms]
+signature = "sleep_ms(ms: Int) -> Unit"
+description = "Pauses execution for specified milliseconds"
+examples = ["sleep_ms(1000) // sleep 1 second"]

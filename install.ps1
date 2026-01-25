@@ -214,17 +214,17 @@ function Build-FromSource {
     }
 
     # Clone or update repo
-    $ntntDir = Join-Path (Get-Location) "ntnt-src"
+    $ntntDir = Join-Path (Get-Location) "ntnt"
 
     try {
         if (Test-Path $ntntDir) {
-            Write-Host "Updating NTNT source in .\ntnt-src..."
+            Write-Host "Updating NTNT source in .\ntnt..."
             Push-Location $ntntDir
             git fetch --quiet origin 2>$null
             git reset --quiet --hard origin/main 2>$null
             git clean --quiet -fd 2>$null
         } else {
-            Write-Host "Cloning NTNT source to .\ntnt-src..."
+            Write-Host "Cloning NTNT source to .\ntnt..."
             $cloneResult = git clone --quiet "https://github.com/$script:Repo.git" $ntntDir 2>&1
             if (-not (Test-Path $ntntDir)) {
                 throw "Git clone failed: $cloneResult"
@@ -318,77 +318,123 @@ if (-not $inPath) {
     Write-Host ""
 }
 
-# Offer to download examples (only for binary installs)
-$script:ExamplesDir = $null
-if ($script:InstalledFrom -eq "binary") {
+# Download docs, examples, and agent helper files
+function Download-StarterKit {
+    $script:NtntHome = Join-Path (Get-Location) "ntnt"
     Write-Host ""
-    $response = Read-Host "Would you like to download the examples? (y/n)"
-    if ($response -eq "y" -or $response -eq "Y") {
-        $script:ExamplesDir = Join-Path (Get-Location) "ntnt-examples"
-        Write-Host ""
-        Write-Host "Downloading examples to .\ntnt-examples..."
+    Write-Host "Downloading NTNT starter kit (docs, examples, agent guides)..."
+
+    New-Item -ItemType Directory -Force -Path $script:NtntHome | Out-Null
+
+    $tmpClone = Join-Path $env:TEMP "ntnt-clone-$(Get-Random)"
+
+    try {
+        # Try sparse checkout for efficiency
+        $null = git clone --depth 1 --filter=blob:none --sparse "https://github.com/$script:Repo.git" $tmpClone 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Push-Location $tmpClone
+            $null = git sparse-checkout set docs examples .github .claude/skills CLAUDE.md LANGUAGE_SPEC.md ARCHITECTURE.md 2>&1
+
+            # Copy the files we want
+            if (Test-Path "docs") { Copy-Item -Recurse "docs" $script:NtntHome -Force }
+            if (Test-Path "examples") { Copy-Item -Recurse "examples" $script:NtntHome -Force }
+            if (Test-Path ".github") { Copy-Item -Recurse ".github" $script:NtntHome -Force }
+            if (Test-Path ".claude\skills") {
+                New-Item -ItemType Directory -Force -Path "$script:NtntHome\.claude" | Out-Null
+                Copy-Item -Recurse ".claude\skills" "$script:NtntHome\.claude\" -Force
+            }
+            if (Test-Path "CLAUDE.md") { Copy-Item "CLAUDE.md" $script:NtntHome -Force }
+            if (Test-Path "LANGUAGE_SPEC.md") { Copy-Item "LANGUAGE_SPEC.md" $script:NtntHome -Force }
+            if (Test-Path "ARCHITECTURE.md") { Copy-Item "ARCHITECTURE.md" $script:NtntHome -Force }
+
+            Pop-Location
+            Remove-Item -Recurse -Force $tmpClone -ErrorAction SilentlyContinue
+        } else {
+            throw "Sparse checkout failed"
+        }
+    } catch {
+        # Fallback: full shallow clone
+        Remove-Item -Recurse -Force $tmpClone -ErrorAction SilentlyContinue
+        $tmpClone = Join-Path $env:TEMP "ntnt-clone-$(Get-Random)"
 
         try {
-            # Try sparse checkout first
-            $null = git clone --depth 1 --filter=blob:none --sparse "https://github.com/$script:Repo.git" $script:ExamplesDir 2>&1
+            $null = git clone --depth 1 "https://github.com/$script:Repo.git" $tmpClone 2>&1
             if ($LASTEXITCODE -eq 0) {
-                Push-Location $script:ExamplesDir
-                $null = git sparse-checkout set examples 2>&1
-                # Move examples to root and clean up
-                if (Test-Path "examples") {
-                    Get-ChildItem -Path "examples" | Move-Item -Destination . -Force
-                    Remove-Item -Path "examples" -Recurse -Force -ErrorAction SilentlyContinue
+                if (Test-Path "$tmpClone\docs") { Copy-Item -Recurse "$tmpClone\docs" $script:NtntHome -Force }
+                if (Test-Path "$tmpClone\examples") { Copy-Item -Recurse "$tmpClone\examples" $script:NtntHome -Force }
+                if (Test-Path "$tmpClone\.github") { Copy-Item -Recurse "$tmpClone\.github" $script:NtntHome -Force }
+                if (Test-Path "$tmpClone\.claude\skills") {
+                    New-Item -ItemType Directory -Force -Path "$script:NtntHome\.claude" | Out-Null
+                    Copy-Item -Recurse "$tmpClone\.claude\skills" "$script:NtntHome\.claude\" -Force
                 }
-                Remove-Item -Path ".git" -Recurse -Force -ErrorAction SilentlyContinue
-                Pop-Location
-                Write-Host "[OK] Examples downloaded to .\ntnt-examples" -ForegroundColor Green
+                if (Test-Path "$tmpClone\CLAUDE.md") { Copy-Item "$tmpClone\CLAUDE.md" $script:NtntHome -Force }
+                if (Test-Path "$tmpClone\LANGUAGE_SPEC.md") { Copy-Item "$tmpClone\LANGUAGE_SPEC.md" $script:NtntHome -Force }
+                if (Test-Path "$tmpClone\ARCHITECTURE.md") { Copy-Item "$tmpClone\ARCHITECTURE.md" $script:NtntHome -Force }
+                Remove-Item -Recurse -Force $tmpClone -ErrorAction SilentlyContinue
             } else {
-                throw "Sparse checkout failed"
+                throw "Clone failed"
             }
         } catch {
-            # Fallback: full shallow clone
-            Remove-Item -Path $script:ExamplesDir -Recurse -Force -ErrorAction SilentlyContinue
-            try {
-                $null = git clone --depth 1 "https://github.com/$script:Repo.git" $script:ExamplesDir 2>&1
-                if ($LASTEXITCODE -eq 0 -and (Test-Path "$script:ExamplesDir\examples")) {
-                    # Keep only examples
-                    Get-ChildItem -Path "$script:ExamplesDir\examples" | Move-Item -Destination $script:ExamplesDir -Force
-                    Remove-Item -Path "$script:ExamplesDir\examples" -Recurse -Force -ErrorAction SilentlyContinue
-                    Remove-Item -Path "$script:ExamplesDir\src" -Recurse -Force -ErrorAction SilentlyContinue
-                    Remove-Item -Path "$script:ExamplesDir\tests" -Recurse -Force -ErrorAction SilentlyContinue
-                    Remove-Item -Path "$script:ExamplesDir\.git" -Recurse -Force -ErrorAction SilentlyContinue
-                    Remove-Item -Path "$script:ExamplesDir\.github" -Recurse -Force -ErrorAction SilentlyContinue
-                    Remove-Item -Path "$script:ExamplesDir\Cargo.toml" -Force -ErrorAction SilentlyContinue
-                    Remove-Item -Path "$script:ExamplesDir\Cargo.lock" -Force -ErrorAction SilentlyContinue
-                    Remove-Item -Path "$script:ExamplesDir\*.md" -Force -ErrorAction SilentlyContinue
-                    Remove-Item -Path "$script:ExamplesDir\*.sh" -Force -ErrorAction SilentlyContinue
-                    Remove-Item -Path "$script:ExamplesDir\*.ps1" -Force -ErrorAction SilentlyContinue
-                    Write-Host "[OK] Examples downloaded to .\ntnt-examples" -ForegroundColor Green
-                } else {
-                    throw "Clone failed"
-                }
-            } catch {
-                $script:ExamplesDir = $null
-                Write-Host "Could not download examples. You can browse them at:" -ForegroundColor Yellow
-                Write-Host "  https://github.com/$script:Repo/tree/main/examples"
-            }
+            Remove-Item -Recurse -Force $tmpClone -ErrorAction SilentlyContinue
+            Write-Host "Could not download starter kit. You can browse docs at:" -ForegroundColor Yellow
+            Write-Host "  https://github.com/$script:Repo"
+            return $false
         }
     }
+
+    Write-Host "[OK] Starter kit downloaded to .\ntnt\" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "  .\ntnt\docs\              - Documentation"
+    Write-Host "  .\ntnt\examples\          - Example projects"
+    Write-Host "  .\ntnt\CLAUDE.md          - Claude Code instructions"
+    Write-Host "  .\ntnt\.claude\skills\    - Claude Code skills (IDD workflow)"
+    Write-Host "  .\ntnt\.github\copilot-instructions.md  - GitHub Copilot instructions"
+    Write-Host "  .\ntnt\.github\agents\    - AI agent definitions"
+    return $true
+}
+
+# For binary installs, always download the starter kit
+# For source installs, everything is already in ntnt\
+$script:NtntHome = $null
+if ($script:InstalledFrom -eq "binary") {
+    Download-StarterKit | Out-Null
 }
 
 Write-Host ""
-Write-Host "Get started:"
-Write-Host "  ntnt run hello.tnt     # Run a file" -ForegroundColor Cyan
-Write-Host "  ntnt --help            # See all commands" -ForegroundColor Cyan
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host "  Quick Start" -ForegroundColor Cyan
+Write-Host "============================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Try these commands:"
+Write-Host "  ntnt run hello.tnt     Run a file" -ForegroundColor Green
+Write-Host "  ntnt repl              Interactive REPL" -ForegroundColor Green
+Write-Host "  ntnt --help            See all commands" -ForegroundColor Green
 Write-Host ""
 if ($script:InstalledFrom -eq "source") {
-    Write-Host "Examples: .\ntnt-src\examples\"
-} elseif ($script:ExamplesDir -and (Test-Path $script:ExamplesDir)) {
-    Write-Host "Examples: .\ntnt-examples\"
+    Write-Host "Examples:    .\ntnt\examples\"
+    Write-Host "Docs:        .\ntnt\docs\"
+    Write-Host "Agent guide: .\ntnt\CLAUDE.md"
+} elseif ($script:NtntHome -and (Test-Path $script:NtntHome)) {
+    Write-Host "Examples:    .\ntnt\examples\"
+    Write-Host "Docs:        .\ntnt\docs\"
+    Write-Host "Agent guide: .\ntnt\CLAUDE.md"
 } else {
     Write-Host "Examples: https://github.com/$script:Repo/tree/main/examples"
+    Write-Host "Docs:     https://github.com/$script:Repo"
 }
-Write-Host "Docs: https://github.com/$script:Repo"
+Write-Host ""
+
+# Show tab completion instructions
+Write-Host "Tab Completion (optional):" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "  Add to your PowerShell profile (`$PROFILE):"
+Write-Host "    ntnt completions powershell | Out-String | Invoke-Expression" -ForegroundColor Green
+Write-Host ""
+Write-Host "  Or run once to add permanently:"
+Write-Host "    ntnt completions powershell >> `$PROFILE" -ForegroundColor Green
+Write-Host ""
+
+Write-Host "Happy coding!"
 Write-Host ""
 
 Wait-AndExit

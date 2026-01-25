@@ -53,11 +53,20 @@ document.addEventListener("DOMContentLoaded", () => {
     Prism.highlightAll();
 
     // Add copy buttons to code blocks
+    // Wrap pre elements in a container so the button stays fixed when code scrolls
     document.querySelectorAll("pre").forEach((pre) => {
-        if (pre.querySelector(".copy-button")) {
+        // Skip if already wrapped
+        if (pre.parentElement.classList.contains("code-container")) {
             return;
         }
 
+        // Create container wrapper
+        const container = document.createElement("div");
+        container.className = "code-container";
+        pre.parentNode.insertBefore(container, pre);
+        container.appendChild(pre);
+
+        // Create copy button (positioned in container, not pre)
         const button = document.createElement("button");
         button.type = "button";
         button.className = "copy-button";
@@ -93,6 +102,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         });
 
-        pre.appendChild(button);
+        // Add button to container (not pre), so it stays fixed when pre scrolls
+        container.appendChild(button);
     });
 });

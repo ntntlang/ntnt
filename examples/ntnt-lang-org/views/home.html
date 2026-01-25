@@ -3,7 +3,8 @@
   <div class="hero-pattern"></div>
   <div class="hero-content">
     <h2>The NTNT Programming Language</h2>
-    <p class="tagline">A programming language for building full-stack systems with AI. NTNT includes a comprehensive standard library and native Intent-Driven Development (IDD), enabling AI agents to validate code against explicit requirements.</p>
+    <p class="tagline">Explicit and verifiable intent.</p>
+    <p class="tagline-sub">NTNT (/ɪnˈtɛnt/) is an open-source agent-native language with Intent-Driven Development built in. You define constraints and expected behavior. Agents implement. NTNT verifies continuously.</p>
     <div style="display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap">
       <a href="https://github.com/ntntlang/ntnt" class="cta-button">Get Started</a>
       <a href="/learn" class="cta-button secondary">Learn More</a>
@@ -13,18 +14,128 @@
 
 <div class="warning">
   <span>&#9888;</span>
-  <span><strong>Experimental:</strong> NTNT is a research language exploring AI-assisted development. It is not ready for production use. APIs will change. Features are incomplete.</span>
+  <span><strong>Experimental:</strong> NTNT is a research language exploring AI-assisted development. It is not ready for production use.</span>
 </div>
 
-<section class="section">
+<section class="section intro-section">
   <h3>Why NTNT?</h3>
-  <p class="section-subtitle">A modern programming language designed for AI-assisted development with built-in verification.</p>
+  <p class="intro-text">AI agents can generate code quickly. The hard part is knowing whether the result satisfies the original requirements. Specs live in docs or context. Tests assert implementation details. When requirements change, there’s no reliable signal for what is now invalid.</p>
+  <p class="intro-text"><strong>NTNT explores a different approach.</strong> Requirements are executable specifications written in Intent Assertion Language (IAL). IAL defines enforceable assertions that continuously check implementation compliance. You monitor implementation and drift in real time.</p>
+</section>
+
+<section class="section">
+  <h3>IDD Flow</h3>
+  <p class="section-subtitle">Intent-Driven Development in three steps: write requirements, implement with annotations, verify automatically.</p>
+
+  <div class="idd-cycle">
+    <div class="idd-step">
+      <div class="idd-step-number">1</div>
+      <h4>Write Intent</h4>
+      <p>Describe what your software should do in a <code>.intent</code> file using natural language.</p>
+      <pre><code># server.intent
+
+Feature: User Greeting
+  id: feature.greeting
+
+  Scenario: Greet by name
+    When: GET /?name=Alice
+    Then:
+      - status 200
+      - body contains "Hello, Alice"
+
+  Scenario: Default greeting
+    When: GET /
+    Then:
+      - status 200
+      - body contains "Hello, World"</code></pre>
+    </div>
+
+    <div class="idd-step">
+      <div class="idd-step-number">2</div>
+      <h4>Implement with @implements</h4>
+      <p>Write code and link it to requirements with annotations.</p>
+      <pre><code>// server.tnt
+import \{ html \} from "std/http/server"
+
+// @implements: feature.greeting
+fn home(req) \{
+    let name = req.query_params["name"] ?? "World"
+    return html("&lt;h1&gt;Hello, \{name\}!&lt;/h1&gt;")
+\}
+
+get("/", home)
+listen(8080)</code></pre>
+    </div>
+
+    <div class="idd-step">
+      <div class="idd-step-number">3</div>
+      <h4>Verify</h4>
+      <p>Run <code>ntnt intent check</code> to verify code matches intent.</p>
+      <pre><code>$ ntnt intent check server.tnt
+
+Feature: User Greeting
+  ✓ Greet by name
+    ✓ GET /?name=Alice → status 200
+    ✓ body contains "Hello, Alice"
+  ✓ Default greeting
+    ✓ GET / → status 200
+    ✓ body contains "Hello, World"
+
+1/1 features passing (4/4 assertions)</code></pre>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <h3>Intent Assertion Language</h3>
+  <p class="section-subtitle">Natural language becomes executable tests through term rewriting.</p>
+
+  <div class="ial-demo">
+    <div class="ial-explanation">
+      <p>IAL lets you define domain-specific terms in a glossary. When tests run, natural language assertions are rewritten into executable checks.</p>
+      <pre><code>## Glossary
+
+| Term | Means |
+|------|-------|
+| page loads successfully | status 200 |
+| they see "$text" | body contains "$text" |
+| logged in as $user | header "Authorization" exists |</code></pre>
+      <p style="margin-top: 1rem">Then write tests in plain English:</p>
+      <pre><code>Scenario: Welcome message
+  When: GET /dashboard
+  Given: logged in as admin
+  Then:
+    - page loads successfully
+    - they see "Welcome back"</code></pre>
+      <p style="margin-top: 1rem">IAL rewrites this into executable HTTP assertions automatically.</p>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <h3>Intent Studio</h3>
+  <p class="section-subtitle">Visual development with live test execution.</p>
+
+  <div class="studio-feature">
+    <div class="studio-description">
+      <p>See pass/fail indicators update in real-time as you code. Intent Studio watches your files and re-runs tests automatically.</p>
+      <pre><code>$ ntnt intent studio server.intent
+# Opens http://127.0.0.1:3001</code></pre>
+      <ul class="studio-features-list">
+        <li>Live ✓/✗ indicators for each scenario</li>
+        <li>Automatic re-run on file save</li>
+        <li>Detailed assertion results</li>
+        <li>Coverage visualization</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <h3>Key Features</h3>
+  <p class="section-subtitle">Everything you need for verified AI-assisted development.</p>
 
   <div class="why-grid">
-    <div class="why-item">
-      <h4>Full-Featured Language</h4>
-      <p>Not a toy. NTNT has contracts, pattern matching, generics, enums, structs, traits, and a comprehensive standard library. Build real applications with HTTP servers, PostgreSQL, JSON, CSV, file I/O, crypto, and concurrency.</p>
-    </div>
     <div class="why-item">
       <h4>Intent-Driven Development</h4>
       <p>Write requirements in <code>.intent</code> files. Link code with <code>@implements</code>. Run <code>ntnt intent check</code> to verify they match. Full traceability from requirement to implementation.</p>
@@ -34,46 +145,45 @@
       <p><code>requires</code> and <code>ensures</code> are built into the syntax. Agents read them as specs. Humans read them as docs. In HTTP routes, contract violations automatically return proper error responses.</p>
     </div>
     <div class="why-item">
-      <h4>Intent Studio</h4>
-      <p>Visual development environment with live test execution. See pass/fail indicators update in real-time as you code. One command: <code>ntnt intent studio server.intent</code></p>
+      <h4>Agent-Native Tooling</h4>
+      <p><code>ntnt inspect</code> outputs structured JSON describing every function, route, and contract. <code>ntnt validate</code> returns machine-readable errors. AI agents understand your codebase in a single call.</p>
+    </div>
+    <div class="why-item">
+      <h4>Full-Featured Language</h4>
+      <p>Not a toy. NTNT has contracts, pattern matching, generics, enums, structs, traits, and a comprehensive standard library. Build real applications with HTTP servers, PostgreSQL, JSON, and more.</p>
+    </div>
+    <div class="why-item">
+      <h4>Batteries Included</h4>
+      <p>No package manager needed. The standard library covers HTTP, databases, JSON, CSV, file I/O, crypto, and concurrency out of the box.</p>
     </div>
     <div class="why-item">
       <h4>Native Hot-Reload</h4>
       <p>HTTP servers automatically reload when you save. No restart needed. Edit your code, refresh the browser, see changes instantly.</p>
     </div>
-    <div class="why-item">
-      <h4>Agent-Native Tooling</h4>
-      <p><code>ntnt inspect</code> outputs structured JSON describing every function, route, and contract. AI agents understand your codebase in a single call.</p>
-    </div>
   </div>
 </section>
 
 <section class="section">
-  <h3>What It Looks Like</h3>
-  <p class="section-subtitle">A complete web API in NTNT:</p>
+  <h3>Design by Contract</h3>
+  <p class="section-subtitle">Contracts are executable specifications for agents and documentation for humans.</p>
 
-  <pre><code>// api.tnt
-import \{ json \} from "std/http/server"
-import \{ connect, query \} from "std/db/postgres"
-
-let db = connect("postgres://localhost/myapp")
-
-fn get_user(id: Int) -&gt; Map
-    requires id &gt; 0
-    ensures result["id"] == id
+  <pre><code>fn withdraw(amount: Int) -&gt; Int
+    requires amount &gt; 0
+    requires amount &lt;= self.balance
+    ensures result &gt;= 0
 \{
-    return query(db, "SELECT * FROM users WHERE id = $1", [id])[0]
+    self.balance = self.balance - amount
+    return self.balance
 \}
 
-// @implements: feature.user_api
-get(r"/users/\{id\}", get_user_handler)
-
-listen(3000)</code></pre>
+// In HTTP routes, contract violations become proper errors:
+// - Failed precondition (requires): 400 Bad Request
+// - Failed postcondition (ensures): 500 Internal Server Error</code></pre>
 </section>
 
 <section class="section">
   <h3>Standard Library</h3>
-  <p class="section-subtitle">Batteries included. No package manager needed.</p>
+  <p class="section-subtitle">Everything you need to build web applications.</p>
 
   <div class="features">
     <div class="feature-card">

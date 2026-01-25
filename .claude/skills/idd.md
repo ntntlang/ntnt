@@ -1,6 +1,6 @@
 ---
-name: ntnt
-description: Build NTNT (.tnt) applications using Intent-Driven Development (IDD). Use when building new features, creating servers, or working with .intent files.
+name: idd
+description: Intent-Driven Development for NTNT. Use when building features with .intent files.
 allowed-tools:
   - Read
   - Write
@@ -195,3 +195,7 @@ Based on `$ARGUMENTS`:
 5. **No args**: Ask user what they want to build, then start with intent drafting
 
 Always lint before running. Always verify intent before saying "done".
+
+## Full Documentation
+
+For complete NTNT syntax and stdlib reference, see [docs/AI_AGENT_GUIDE.md](../../docs/AI_AGENT_GUIDE.md).

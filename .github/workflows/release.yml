@@ -9,6 +9,43 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  docs:
+    name: Generate Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-docs-
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Generate stdlib documentation
+        run: ./target/release/ntnt docs --generate
+
+      - name: Validate documentation
+        run: ./target/release/ntnt docs --validate
+
+      - name: Upload documentation artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: docs/STDLIB_REFERENCE.md
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -105,7 +142,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: build
+    needs: [build, docs]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -125,6 +162,7 @@ jobs:
           test -f artifacts/ntnt-macos-arm64/ntnt-macos-arm64.tar.gz
           test -f artifacts/ntnt-linux-x64/ntnt-linux-x64.tar.gz
           test -f artifacts/ntnt-windows-x64/ntnt-windows-x64.zip
+          test -f artifacts/documentation/STDLIB_REFERENCE.md
           echo "All artifacts present!"
 
       - name: Get version from tag
@@ -145,4 +183,5 @@ jobs:
             artifacts/ntnt-linux-x64/ntnt-linux-x64.tar.gz.sha256
             artifacts/ntnt-windows-x64/ntnt-windows-x64.zip
             artifacts/ntnt-windows-x64/ntnt-windows-x64.zip.sha256
+            artifacts/documentation/STDLIB_REFERENCE.md
           fail_on_unmatched_files: true

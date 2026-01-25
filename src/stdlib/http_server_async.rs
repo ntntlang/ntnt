@@ -502,17 +502,21 @@ pub async fn start_server_with_bridge(
     // 3. Tracing
     app = app.layer(TraceLayer::new_for_http());
 
-    println!("🚀 NTNT async server running on http://{}", addr);
-    println!("   Using Axum + Tokio for high-concurrency");
-    println!("   Routes registered: {}", route_count);
-    if static_count > 0 {
-        println!("   Static directories: {}", static_count);
-    }
-    println!("   Request timeout: {}s", config.request_timeout_secs);
-    println!("   Max connections: {}", config.max_connections);
+    // Show user-friendly URL (0.0.0.0 means all interfaces, so use localhost for display)
+    let display_url = if addr.ip().is_unspecified() {
+        format!("http://localhost:{}", addr.port())
+    } else {
+        format!("http://{}", addr)
+    };
+
+    println!();
+    println!("🚀 Server running — visit {}", display_url);
+    println!(
+        "   Routes: {}  |  Static: {}  |  Hot-reload: enabled",
+        route_count, static_count
+    );
     println!();
     println!("Press Ctrl+C to stop");
-    println!();
 
     // Create the listener
     let listener = tokio::net::TcpListener::bind(addr)

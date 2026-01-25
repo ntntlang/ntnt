@@ -1,15 +1,17 @@
 {{! Blog list page content }}
-<h2 style="margin-bottom: 0.5rem;">Blog</h2>
-<p style="color: var(--text-muted); margin-bottom: 2rem;">News, tutorials, and updates about NTNT.</p>
+<div class="page-header blog-header">
+  <h2>Good Intentions</h2>
+  <p class="tagline">The road to AGI and friday deploys is paved with good intentions.</p>
+</div>
 
 <div class="blog-list">
-{{#for post in posts}}
-    <div class="blog-card">
-        <h4><a href="/blog/{{post.slug}}">{{post.title}}</a></h4>
-        <div class="blog-meta">{{post.date}} - {{post.author}}</div>
-        <p class="blog-excerpt">{{post.excerpt}}</p>
-    </div>
-{{#empty}}
-    <p>No blog posts yet. Check back soon!</p>
-{{/for}}
+  {{#for post in posts}}
+  <div class="blog-card">
+    <h4><a href="/blog/{{post.slug}}">{{post.title}}</a></h4>
+    <div class="blog-meta">{{post.date}} - {{post.author}}</div>
+    <p class="blog-excerpt">{{post.excerpt}}</p>
+  </div>
+  {{#empty}}
+  <p>No blog posts yet. Check back soon!</p>
+  {{/for}}
 </div>

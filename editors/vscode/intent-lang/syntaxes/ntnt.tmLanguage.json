@@ -2,23 +2,36 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "NTNT",
   "scopeName": "source.ntnt",
-  "patterns": [{ "include": "#comments" }, { "include": "#strings" }, { "include": "#numbers" }, { "include": "#keywords" }, { "include": "#contracts" }, { "include": "#types" }, { "include": "#functions" }, { "include": "#operators" }, { "include": "#punctuation" }, { "include": "#variables" }],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#contracts" },
+    { "include": "#types" },
+    { "include": "#functions" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#variables" }
+  ],
   "repository": {
     "comments": {
       "patterns": [
         {
           "name": "comment.line.double-slash.ntnt",
-          "match": "//.*$"
+          "match": "//.*$",
+          "patterns": [
+            {
+              "name": "storage.type.annotation.ntnt",
+              "match": "@(implements|utility|test|deprecated|todo):\\s*[\\w.]+"
+            }
+          ]
         },
         {
           "name": "comment.block.ntnt",
           "begin": "/\\*",
           "end": "\\*/",
-          "patterns": [
-            {
-              "include": "#comments"
-            }
-          ]
+          "patterns": [{ "include": "#comments" }]
         },
         {
           "name": "comment.block.documentation.ntnt",
@@ -30,6 +43,28 @@
     "strings": {
       "patterns": [
         {
+          "name": "string.quoted.raw.hash.ntnt",
+          "begin": "r#\"",
+          "end": "\"#",
+          "patterns": [
+            {
+              "name": "string.regexp.ntnt",
+              "match": "."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.raw.ntnt",
+          "begin": "r\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "string.regexp.ntnt",
+              "match": "."
+            }
+          ]
+        },
+        {
           "name": "string.quoted.double.ntnt",
           "begin": "\"",
           "end": "\"",
@@ -40,7 +75,12 @@
             },
             {
               "name": "variable.interpolation.ntnt",
-              "match": "\\$\\{[^}]+\\}"
+              "begin": "\\{",
+              "end": "\\}",
+              "patterns": [
+                { "include": "#variables" },
+                { "include": "#functions" }
+              ]
             }
           ]
         },
@@ -52,21 +92,6 @@
             {
               "name": "constant.character.escape.ntnt",
               "match": "\\\\."
-            }
-          ]
-        },
-        {
-          "name": "string.quoted.template.ntnt",
-          "begin": "`",
-          "end": "`",
-          "patterns": [
-            {
-              "name": "constant.character.escape.ntnt",
-              "match": "\\\\."
-            },
-            {
-              "name": "variable.interpolation.ntnt",
-              "match": "\\$\\{[^}]+\\}"
             }
           ]
         }
@@ -104,7 +129,7 @@
         },
         {
           "name": "keyword.declaration.ntnt",
-          "match": "\\b(fn|let|const|mut|struct|enum|impl|trait|type|module|import|export|use|pub|priv|static)\\b"
+          "match": "\\b(fn|let|const|mut|struct|enum|impl|trait|type|module|import|export|from|use|pub|priv|static|map)\\b"
         },
         {
           "name": "keyword.other.ntnt",
@@ -116,7 +141,7 @@
         },
         {
           "name": "constant.language.null.ntnt",
-          "match": "\\b(null|nil|none|None)\\b"
+          "match": "\\b(null|nil|none|None|Ok|Err|Some)\\b"
         }
       ]
     },
@@ -155,16 +180,28 @@
     "functions": {
       "patterns": [
         {
-          "name": "entity.name.function.ntnt",
-          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(?=\\()"
+          "name": "support.function.builtin.ntnt",
+          "match": "\\b(print|println|debug|len|str|int|float|type|push|pop|abs|min|max|round|floor|assert|panic)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.stdlib.ntnt",
+          "match": "\\b(trim|to_lower|to_upper|split|join|replace|replace_pattern|contains|starts_with|ends_with|substring|index_of|last_index_of|trim_chars|char_at|chars|pad_left|pad_right|reverse|repeat|remove_chars|keep_chars|replace_chars|replace_first|matches_pattern|find_pattern|find_all_pattern|split_pattern)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.http.ntnt",
+          "match": "\\b(get|post|put|patch|delete|listen|serve_static|routes|template|json|html|text|redirect|status|response|parse_form|parse_json|fetch|download|use_middleware|on_shutdown)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.collections.ntnt",
+          "match": "\\b(keys|values|entries|has_key|get_key|first|last|map|filter|reduce|fold|zip|enumerate|range)\\b(?=\\s*\\()"
         },
         {
           "name": "entity.name.function.definition.ntnt",
           "match": "(?<=\\bfn\\s+)([a-z_][a-zA-Z0-9_]*)"
         },
         {
-          "name": "support.function.builtin.ntnt",
-          "match": "\\b(print|println|debug|len|push|pop|map|filter|reduce|fold|zip|enumerate|range|type_of|assert|panic)\\b"
+          "name": "entity.name.function.ntnt",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)\\s*(?=\\()"
         }
       ]
     },

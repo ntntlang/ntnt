@@ -2,12 +2,14 @@
 //!
 //! Command-line interface for the NTNT (Intent) programming language.
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use colored::*;
 use ntnt::{intent, interpreter::Interpreter, lexer::Lexer, parser::Parser as IntentParser};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -178,6 +180,58 @@ enum Commands {
     ///   ntnt intent check server.tnt --intent custom.intent
     #[command(subcommand)]
     Intent(IntentCommands),
+
+    /// Browse and validate stdlib documentation
+    ///
+    /// Documentation is auto-generated from docs/stdlib.toml.
+    /// Use --validate to check all functions are documented.
+    ///
+    /// Examples:
+    ///   ntnt docs                    # List all modules
+    ///   ntnt docs std/string         # Show string module docs
+    ///   ntnt docs split              # Search for a function
+    ///   ntnt docs --validate         # Check documentation coverage
+    ///   ntnt docs --generate         # Regenerate STDLIB_REFERENCE.md
+    Docs {
+        /// Module or function to look up (e.g., "std/string", "split")
+        #[arg(value_name = "QUERY")]
+        query: Option<String>,
+
+        /// Validate that all stdlib functions are documented
+        #[arg(long)]
+        validate: bool,
+
+        /// Regenerate docs/STDLIB_REFERENCE.md from stdlib.toml
+        #[arg(long)]
+        generate: bool,
+
+        /// Output as JSON (for tooling)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Generate shell completion scripts
+    ///
+    /// Output completion scripts for your shell. Add the output to your
+    /// shell configuration file.
+    ///
+    /// Examples:
+    ///   # Bash (add to ~/.bashrc)
+    ///   ntnt completions bash >> ~/.bashrc
+    ///
+    ///   # Zsh (add to ~/.zshrc)
+    ///   ntnt completions zsh >> ~/.zshrc
+    ///
+    ///   # Fish (save to completions dir)
+    ///   ntnt completions fish > ~/.config/fish/completions/ntnt.fish
+    ///
+    ///   # PowerShell
+    ///   ntnt completions powershell >> $PROFILE
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 /// Intent-Driven Development subcommands
@@ -308,6 +362,16 @@ fn main() {
         Some(Commands::Validate { path }) => validate_project(&path),
         Some(Commands::Lint { path, quiet, fix }) => lint_project(&path, quiet, fix),
         Some(Commands::Intent(intent_cmd)) => run_intent_command(intent_cmd),
+        Some(Commands::Docs {
+            query,
+            validate,
+            generate,
+            json,
+        }) => run_docs_command(query, validate, generate, json),
+        Some(Commands::Completions { shell }) => {
+            generate_completions(shell);
+            Ok(())
+        }
         None => {
             if let Some(file) = cli.file {
                 run_file(&file, 30)
@@ -3494,4 +3558,1368 @@ fn extract_line_from_error(error: &str) -> Option<usize> {
     } else {
         None
     }
+}
+
+// ============================================================================
+// Shell Completions
+// ============================================================================
+
+/// Generate shell completion scripts
+fn generate_completions(shell: Shell) {
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_string();
+    generate(shell, &mut cmd, name, &mut io::stdout());
+}
+
+// ============================================================================
+// Documentation Command
+// ============================================================================
+
+/// TOML structures for stdlib documentation
+mod docs {
+    use serde::Deserialize;
+    use std::collections::HashMap;
+
+    #[derive(Debug, Deserialize)]
+    pub struct StdlibDocs {
+        pub meta: Option<Meta>,
+        pub builtins: Option<HashMap<String, FunctionDoc>>,
+        pub modules: Option<HashMap<String, ModuleDoc>>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct Meta {
+        pub version: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct FunctionDoc {
+        pub signature: String,
+        pub description: String,
+        pub examples: Option<Vec<String>>,
+        pub errors: Option<Vec<String>>,
+        pub notes: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct ModuleDoc {
+        pub description: Option<String>,
+        pub functions: Option<HashMap<String, FunctionDoc>>,
+        pub constants: Option<HashMap<String, ConstantDoc>>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct ConstantDoc {
+        pub value: String,
+        pub description: String,
+    }
+}
+
+/// Run the docs command
+fn run_docs_command(
+    query: Option<String>,
+    validate: bool,
+    generate_md: bool,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    // Find the stdlib.toml file relative to the executable or in known locations
+    let docs_path = find_stdlib_toml()?;
+    let content = fs::read_to_string(&docs_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", docs_path.display(), e))?;
+
+    let stdlib: docs::StdlibDocs = toml::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse stdlib.toml: {}", e))?;
+
+    if validate {
+        return validate_docs(&stdlib);
+    }
+
+    if generate_md {
+        // Generate all reference docs
+        generate_stdlib_markdown(&stdlib, &docs_path)?;
+        generate_syntax_markdown(&docs_path)?;
+        generate_ial_markdown(&docs_path)?;
+        return Ok(());
+    }
+
+    match query {
+        None => list_modules(&stdlib, json_output),
+        Some(q) => search_docs(&stdlib, &q, json_output),
+    }
+}
+
+/// Find the stdlib.toml file
+fn find_stdlib_toml() -> anyhow::Result<PathBuf> {
+    // Try relative to current directory
+    let paths = [
+        PathBuf::from("docs/stdlib.toml"),
+        PathBuf::from("../docs/stdlib.toml"),
+    ];
+
+    for path in &paths {
+        if path.exists() {
+            return Ok(path.clone());
+        }
+    }
+
+    // Try relative to executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let path = parent.join("docs/stdlib.toml");
+            if path.exists() {
+                return Ok(path);
+            }
+            // Try one more level up (for installed binaries)
+            if let Some(grandparent) = parent.parent() {
+                let path = grandparent.join("share/ntnt/docs/stdlib.toml");
+                if path.exists() {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Could not find docs/stdlib.toml. Run from the NTNT project directory."
+    ))
+}
+
+/// List all available modules
+fn list_modules(stdlib: &docs::StdlibDocs, json_output: bool) -> anyhow::Result<()> {
+    if json_output {
+        let mut output = serde_json::Map::new();
+
+        // Add builtins count
+        let builtin_count = stdlib.builtins.as_ref().map(|b| b.len()).unwrap_or(0);
+        output.insert(
+            "builtins".to_string(),
+            serde_json::json!({ "count": builtin_count }),
+        );
+
+        // Add modules
+        if let Some(modules) = &stdlib.modules {
+            let mut mods = serde_json::Map::new();
+            for (name, module) in modules {
+                let func_count = module.functions.as_ref().map(|f| f.len()).unwrap_or(0);
+                let const_count = module.constants.as_ref().map(|c| c.len()).unwrap_or(0);
+                mods.insert(
+                    name.clone(),
+                    serde_json::json!({
+                        "functions": func_count,
+                        "constants": const_count,
+                        "description": module.description
+                    }),
+                );
+            }
+            output.insert("modules".to_string(), serde_json::Value::Object(mods));
+        }
+
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("{}", "NTNT Standard Library".green().bold());
+    if let Some(meta) = &stdlib.meta {
+        if let Some(version) = &meta.version {
+            println!("Version: {}", version);
+        }
+    }
+    println!();
+
+    // List builtins
+    if let Some(builtins) = &stdlib.builtins {
+        println!(
+            "{} ({} functions)",
+            "Global Builtins".cyan().bold(),
+            builtins.len()
+        );
+        println!("  Available everywhere without importing");
+        println!("  Run: ntnt docs <function_name>");
+        println!();
+    }
+
+    // List modules
+    if let Some(modules) = &stdlib.modules {
+        println!("{}", "Modules".cyan().bold());
+        let mut names: Vec<_> = modules.keys().collect();
+        names.sort();
+        for name in names {
+            let module = &modules[name];
+            let func_count = module.functions.as_ref().map(|f| f.len()).unwrap_or(0);
+            let desc = module
+                .description
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            println!("  {} ({} functions)", name.yellow(), func_count);
+            if !desc.is_empty() {
+                println!("    {}", desc.dimmed());
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "Run {} for details on a module or function.",
+        "ntnt docs <name>".cyan()
+    );
+
+    Ok(())
+}
+
+/// Search for a function or module
+fn search_docs(stdlib: &docs::StdlibDocs, query: &str, json_output: bool) -> anyhow::Result<()> {
+    let query_lower = query.to_lowercase();
+
+    // Check if it's a module name
+    if let Some(modules) = &stdlib.modules {
+        if let Some(module) = modules.get(query) {
+            return show_module(query, module, json_output);
+        }
+    }
+
+    // Check builtins
+    if let Some(builtins) = &stdlib.builtins {
+        if let Some(func) = builtins.get(query) {
+            return show_function(query, func, "builtin", json_output);
+        }
+    }
+
+    // Search in modules
+    if let Some(modules) = &stdlib.modules {
+        for (mod_name, module) in modules {
+            if let Some(functions) = &module.functions {
+                if let Some(func) = functions.get(query) {
+                    return show_function(query, func, mod_name, json_output);
+                }
+            }
+        }
+    }
+
+    // Fuzzy search - find functions containing the query
+    let mut matches: Vec<(String, String, &docs::FunctionDoc)> = Vec::new();
+
+    if let Some(builtins) = &stdlib.builtins {
+        for (name, func) in builtins {
+            if name.to_lowercase().contains(&query_lower) {
+                matches.push((name.clone(), "builtin".to_string(), func));
+            }
+        }
+    }
+
+    if let Some(modules) = &stdlib.modules {
+        for (mod_name, module) in modules {
+            if let Some(functions) = &module.functions {
+                for (name, func) in functions {
+                    if name.to_lowercase().contains(&query_lower) {
+                        matches.push((name.clone(), mod_name.clone(), func));
+                    }
+                }
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        println!(
+            "{}: No documentation found for '{}'",
+            "Not found".red(),
+            query
+        );
+        return Ok(());
+    }
+
+    if json_output {
+        let results: Vec<_> = matches
+            .iter()
+            .map(|(name, module, func)| {
+                serde_json::json!({
+                    "name": name,
+                    "module": module,
+                    "signature": func.signature,
+                    "description": func.description
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&results)?);
+        return Ok(());
+    }
+
+    println!(
+        "Found {} matches for '{}':",
+        matches.len().to_string().green(),
+        query
+    );
+    println!();
+    for (name, module, func) in matches {
+        println!("{} ({})", name.yellow().bold(), module.dimmed());
+        println!("  {}", func.signature.cyan());
+        println!("  {}", func.description);
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Show a module's documentation
+fn show_module(name: &str, module: &docs::ModuleDoc, json_output: bool) -> anyhow::Result<()> {
+    if json_output {
+        let output = serde_json::json!({
+            "name": name,
+            "description": module.description,
+            "functions": module.functions.as_ref().map(|f| f.keys().collect::<Vec<_>>()),
+            "constants": module.constants.as_ref().map(|c| c.keys().collect::<Vec<_>>())
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("{}", name.green().bold());
+    if let Some(desc) = &module.description {
+        println!("{}", desc);
+    }
+    println!();
+
+    // Show import example
+    println!("{}", "Import:".cyan().bold());
+    if let Some(functions) = &module.functions {
+        let func_names: Vec<_> = functions.keys().take(3).collect();
+        let import_list = func_names
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  import {{ {} }} from \"{}\"", import_list, name);
+    }
+    println!();
+
+    // Show constants
+    if let Some(constants) = &module.constants {
+        println!("{}", "Constants:".cyan().bold());
+        for (const_name, constant) in constants {
+            println!(
+                "  {} = {} - {}",
+                const_name.yellow(),
+                constant.value,
+                constant.description.dimmed()
+            );
+        }
+        println!();
+    }
+
+    // Show functions
+    if let Some(functions) = &module.functions {
+        println!("{}", "Functions:".cyan().bold());
+        let mut names: Vec<_> = functions.keys().collect();
+        names.sort();
+        for func_name in names {
+            let func = &functions[func_name];
+            println!("  {}", func.signature.yellow());
+            println!("    {}", func.description.dimmed());
+        }
+    }
+
+    Ok(())
+}
+
+/// Show a function's documentation
+fn show_function(
+    name: &str,
+    func: &docs::FunctionDoc,
+    module: &str,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    if json_output {
+        let output = serde_json::json!({
+            "name": name,
+            "module": module,
+            "signature": func.signature,
+            "description": func.description,
+            "examples": func.examples,
+            "errors": func.errors,
+            "notes": func.notes
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("{}", func.signature.green().bold());
+    if module != "builtin" {
+        println!("Module: {}", module.cyan());
+    } else {
+        println!("{}", "(global builtin - no import needed)".dimmed());
+    }
+    println!();
+    println!("{}", func.description);
+
+    if let Some(examples) = &func.examples {
+        println!();
+        println!("{}", "Examples:".cyan().bold());
+        for example in examples {
+            println!("  {}", example);
+        }
+    }
+
+    if let Some(errors) = &func.errors {
+        println!();
+        println!("{}", "Errors:".yellow().bold());
+        for error in errors {
+            println!("  - {}", error);
+        }
+    }
+
+    if let Some(notes) = &func.notes {
+        println!();
+        println!("{}", "Notes:".cyan().bold());
+        println!("  {}", notes);
+    }
+
+    Ok(())
+}
+
+/// Generate STDLIB_REFERENCE.md from stdlib.toml
+fn generate_stdlib_markdown(stdlib: &docs::StdlibDocs, toml_path: &PathBuf) -> anyhow::Result<()> {
+    let mut md = String::new();
+    let version = stdlib
+        .meta
+        .as_ref()
+        .and_then(|m| m.version.as_ref())
+        .map(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // Header
+    md.push_str("# NTNT Standard Library Reference\n\n");
+    md.push_str("> **Auto-generated from [stdlib.toml](stdlib.toml)** - Do not edit directly.\n");
+    md.push_str(">\n");
+    md.push_str(&format!("> Last updated: v{}\n\n", version));
+
+    // Table of Contents
+    md.push_str("## Table of Contents\n\n");
+    md.push_str("- [Global Builtins](#global-builtins)\n");
+
+    if let Some(modules) = &stdlib.modules {
+        let mut names: Vec<_> = modules.keys().collect();
+        names.sort();
+        for name in &names {
+            let anchor = name.replace("/", "").replace("std", "std");
+            md.push_str(&format!("- [{}](#{})\n", name, anchor));
+        }
+    }
+    md.push_str("\n---\n\n");
+
+    // Global Builtins
+    md.push_str("## Global Builtins\n\n");
+    md.push_str("These functions are available everywhere without importing.\n\n");
+
+    if let Some(builtins) = &stdlib.builtins {
+        md.push_str("| Function | Description |\n");
+        md.push_str("|----------|-------------|\n");
+
+        let mut names: Vec<_> = builtins.keys().collect();
+        names.sort();
+        for name in names {
+            if let Some(func) = builtins.get(name) {
+                // Extract just the function call part from signature
+                let call = func
+                    .signature
+                    .split("->")
+                    .next()
+                    .unwrap_or(&func.signature)
+                    .trim();
+                let desc = func.description.replace("|", "\\|");
+                md.push_str(&format!("| `{}` | {} |\n", call, desc));
+            }
+        }
+    }
+    md.push_str("\n---\n\n");
+
+    // Modules
+    if let Some(modules) = &stdlib.modules {
+        let mut names: Vec<_> = modules.keys().collect();
+        names.sort();
+
+        for name in names {
+            let module = &modules[name];
+
+            md.push_str(&format!("## {}\n\n", name));
+
+            if let Some(desc) = &module.description {
+                md.push_str(&format!("{}\n\n", desc));
+            }
+
+            md.push_str("```ntnt\n");
+            if let Some(functions) = &module.functions {
+                let func_names: Vec<_> = functions.keys().take(3).collect();
+                let import_list = func_names
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                md.push_str(&format!("import {{ {} }} from \"{}\"\n", import_list, name));
+            }
+            md.push_str("```\n\n");
+
+            // Constants
+            if let Some(constants) = &module.constants {
+                if !constants.is_empty() {
+                    md.push_str("### Constants\n\n");
+                    md.push_str("| Constant | Value | Description |\n");
+                    md.push_str("|----------|-------|-------------|\n");
+
+                    let mut const_names: Vec<_> = constants.keys().collect();
+                    const_names.sort();
+                    for const_name in const_names {
+                        let constant = &constants[const_name];
+                        md.push_str(&format!(
+                            "| `{}` | {} | {} |\n",
+                            const_name, constant.value, constant.description
+                        ));
+                    }
+                    md.push_str("\n");
+                }
+            }
+
+            // Functions
+            if let Some(functions) = &module.functions {
+                md.push_str("### Functions\n\n");
+                md.push_str("| Function | Description |\n");
+                md.push_str("|----------|-------------|\n");
+
+                let mut func_names: Vec<_> = functions.keys().collect();
+                func_names.sort();
+                for func_name in func_names {
+                    let func = &functions[func_name];
+                    let sig = func.signature.replace("|", "\\|");
+                    let desc = func.description.replace("|", "\\|");
+                    md.push_str(&format!("| `{}` | {} |\n", sig, desc));
+                }
+            }
+
+            md.push_str("\n---\n\n");
+        }
+    }
+
+    // Write to file
+    let output_path = toml_path.parent().unwrap().join("STDLIB_REFERENCE.md");
+    fs::write(&output_path, &md)?;
+
+    println!(
+        "{} Generated {}",
+        "✓".green(),
+        output_path.display().to_string().cyan()
+    );
+
+    // Count what we generated
+    let builtin_count = stdlib.builtins.as_ref().map(|b| b.len()).unwrap_or(0);
+    let mut func_count = 0;
+    let mut module_count = 0;
+    if let Some(modules) = &stdlib.modules {
+        module_count = modules.len();
+        for module in modules.values() {
+            if let Some(functions) = &module.functions {
+                func_count += functions.len();
+            }
+        }
+    }
+
+    println!(
+        "  {} builtins, {} modules, {} functions",
+        builtin_count.to_string().cyan(),
+        module_count.to_string().cyan(),
+        func_count.to_string().cyan()
+    );
+
+    Ok(())
+}
+
+/// Generate SYNTAX_REFERENCE.md from syntax.toml
+fn generate_syntax_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
+    let syntax_path = toml_path.parent().unwrap().join("syntax.toml");
+    if !syntax_path.exists() {
+        println!(
+            "  {} syntax.toml not found, skipping SYNTAX_REFERENCE.md",
+            "!".yellow()
+        );
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&syntax_path)?;
+    let syntax: toml::Value = toml::from_str(&content)?;
+
+    let mut md = String::new();
+    let version = syntax
+        .get("meta")
+        .and_then(|m| m.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // Header
+    md.push_str("# NTNT Syntax Reference\n\n");
+    md.push_str("> **Auto-generated from [syntax.toml](syntax.toml)** - Do not edit directly.\n");
+    md.push_str(">\n");
+    md.push_str(&format!("> Last updated: v{}\n\n", version));
+
+    // Table of Contents
+    md.push_str("## Table of Contents\n\n");
+    md.push_str("- [Keywords](#keywords)\n");
+    md.push_str("- [Operators](#operators)\n");
+    md.push_str("- [Literals](#literals)\n");
+    md.push_str("- [Escape Sequences](#escape-sequences)\n");
+    md.push_str("- [String Interpolation](#string-interpolation)\n");
+    md.push_str("- [Template Strings](#template-strings)\n");
+    md.push_str("- [Truthy/Falsy Values](#truthyfalsy-values)\n");
+    md.push_str("- [Contracts](#contracts)\n");
+    md.push_str("- [Types](#types)\n");
+    md.push_str("- [Imports](#imports)\n");
+    md.push_str("- [Match Expressions](#match-expressions)\n");
+    md.push_str("\n---\n\n");
+
+    // Keywords
+    if let Some(keywords) = syntax.get("keywords") {
+        md.push_str("## Keywords\n\n");
+        if let Some(desc) = keywords.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        let categories = [
+            ("contracts", "Contracts"),
+            ("functions", "Functions"),
+            ("variables", "Variables"),
+            ("control_flow", "Control Flow"),
+            ("types", "Types"),
+            ("modules", "Modules"),
+            ("literals", "Literals"),
+        ];
+
+        for (key, title) in &categories {
+            if let Some(cat) = keywords.get(*key) {
+                md.push_str(&format!("### {}\n\n", title));
+                if let Some(words) = cat.get("words").and_then(|v| v.as_array()) {
+                    let word_list: Vec<_> = words
+                        .iter()
+                        .filter_map(|w| w.as_str())
+                        .map(|w| format!("`{}`", w))
+                        .collect();
+                    md.push_str(&format!("{}\n\n", word_list.join(", ")));
+                }
+                if let Some(desc) = cat.get("description").and_then(|v| v.as_str()) {
+                    md.push_str(&format!("_{}_\n\n", desc));
+                }
+            }
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Operators
+    if let Some(operators) = syntax.get("operators") {
+        md.push_str("## Operators\n\n");
+        if let Some(desc) = operators.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Category | Operators | Description | Example |\n");
+        md.push_str("|----------|-----------|-------------|----------|\n");
+
+        let op_categories = [
+            "assignment",
+            "logical_or",
+            "logical_and",
+            "comparison",
+            "arithmetic",
+            "unary",
+            "range",
+            "member",
+            "pipe",
+        ];
+
+        for cat in &op_categories {
+            if let Some(op) = operators.get(*cat) {
+                let symbols = op
+                    .get("symbols")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| s.as_str())
+                            .map(|s| format!("`{}`", s))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let desc = op.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let example = op.get("example").and_then(|v| v.as_str()).unwrap_or("");
+                md.push_str(&format!(
+                    "| {} | {} | {} | `{}` |\n",
+                    cat.replace("_", " "),
+                    symbols,
+                    desc,
+                    example
+                ));
+            }
+        }
+        md.push_str("\n---\n\n");
+    }
+
+    // Literals
+    if let Some(literals) = syntax.get("literals") {
+        md.push_str("## Literals\n\n");
+        if let Some(desc) = literals.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Type | Syntax | Description |\n");
+        md.push_str("|------|--------|-------------|\n");
+
+        let lit_types = [
+            "integers",
+            "floats",
+            "strings",
+            "raw_strings",
+            "template_strings",
+            "booleans",
+            "arrays",
+            "maps",
+            "ranges",
+        ];
+
+        for lit in &lit_types {
+            if let Some(l) = literals.get(*lit) {
+                let syntax_str = l.get("syntax").and_then(|v| v.as_str()).unwrap_or("");
+                let desc = l.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                md.push_str(&format!("| {} | `{}` | {} |\n", lit, syntax_str, desc));
+            }
+        }
+        md.push_str("\n---\n\n");
+    }
+
+    // Escape Sequences
+    if let Some(escapes) = syntax.get("escapes") {
+        md.push_str("## Escape Sequences\n\n");
+        if let Some(desc) = escapes.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        if let Some(seqs) = escapes.get("sequences").and_then(|v| v.as_table()) {
+            md.push_str("| Escape | Result |\n");
+            md.push_str("|--------|--------|\n");
+            for (escape, result) in seqs {
+                if let Some(r) = result.as_str() {
+                    md.push_str(&format!("| `{}` | {} |\n", escape, r));
+                }
+            }
+        }
+        md.push_str("\n---\n\n");
+    }
+
+    // String Interpolation
+    if let Some(interp) = syntax.get("interpolation") {
+        md.push_str("## String Interpolation\n\n");
+        if let Some(desc) = interp.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        if let Some(regular) = interp.get("regular") {
+            md.push_str("### Regular Strings\n\n");
+            if let Some(syntax_str) = regular.get("syntax").and_then(|v| v.as_str()) {
+                md.push_str(&format!("Syntax: `{}`\n\n", syntax_str));
+            }
+            if let Some(desc) = regular.get("description").and_then(|v| v.as_str()) {
+                md.push_str(&format!("{}\n\n", desc));
+            }
+        }
+
+        if let Some(template) = interp.get("template") {
+            md.push_str("### Template Strings\n\n");
+            if let Some(syntax_str) = template.get("syntax").and_then(|v| v.as_str()) {
+                md.push_str(&format!("Syntax: `{}`\n\n", syntax_str));
+            }
+            if let Some(desc) = template.get("description").and_then(|v| v.as_str()) {
+                md.push_str(&format!("{}\n\n", desc));
+            }
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Template Strings section
+    if let Some(templates) = syntax.get("templates") {
+        md.push_str("## Template Strings\n\n");
+        if let Some(desc) = templates.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Feature | Syntax | Description |\n");
+        md.push_str("|---------|--------|-------------|\n");
+
+        let features = [
+            "interpolation",
+            "filters",
+            "loops",
+            "empty_fallback",
+            "conditionals",
+            "if_else",
+            "elif",
+            "comments",
+            "escape_braces",
+        ];
+
+        for feat in &features {
+            if let Some(f) = templates.get(*feat) {
+                let syntax_str = f.get("syntax").and_then(|v| v.as_str()).unwrap_or("");
+                let desc = f.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                // Escape pipes in table
+                let syntax_escaped = syntax_str.replace("|", "\\|");
+                md.push_str(&format!("| {} | `{}` | {} |\n", feat, syntax_escaped, desc));
+            }
+        }
+
+        // Filters list
+        if let Some(filters) = templates.get("filters") {
+            if let Some(available) = filters.get("available_filters").and_then(|v| v.as_array()) {
+                md.push_str("\n### Available Filters\n\n");
+                let filter_list: Vec<_> = available
+                    .iter()
+                    .filter_map(|f| f.as_str())
+                    .map(|f| format!("`{}`", f))
+                    .collect();
+                md.push_str(&format!("{}\n", filter_list.join(", ")));
+            }
+        }
+
+        // Loop metadata
+        if let Some(loops) = templates.get("loops") {
+            if let Some(metadata) = loops.get("metadata_vars").and_then(|v| v.as_array()) {
+                md.push_str("\n### Loop Metadata Variables\n\n");
+                for var in metadata {
+                    if let Some(v) = var.as_str() {
+                        md.push_str(&format!("- `{}`\n", v));
+                    }
+                }
+            }
+        }
+        md.push_str("\n---\n\n");
+    }
+
+    // Truthy/Falsy
+    if let Some(tf) = syntax.get("truthy_falsy") {
+        md.push_str("## Truthy/Falsy Values\n\n");
+        if let Some(desc) = tf.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        if let Some(truthy) = tf.get("truthy") {
+            md.push_str("### Truthy\n\n");
+            if let Some(values) = truthy.get("values").and_then(|v| v.as_array()) {
+                for val in values {
+                    if let Some(v) = val.as_str() {
+                        md.push_str(&format!("- `{}`\n", v));
+                    }
+                }
+            }
+            if let Some(note) = truthy.get("note").and_then(|v| v.as_str()) {
+                md.push_str(&format!("\n**Note:** {}\n", note));
+            }
+            md.push_str("\n");
+        }
+
+        if let Some(falsy) = tf.get("falsy") {
+            md.push_str("### Falsy\n\n");
+            if let Some(values) = falsy.get("values").and_then(|v| v.as_array()) {
+                for val in values {
+                    if let Some(v) = val.as_str() {
+                        md.push_str(&format!("- `{}`\n", v));
+                    }
+                }
+            }
+            md.push_str("\n");
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Contracts
+    if let Some(contracts) = syntax.get("contracts") {
+        md.push_str("## Contracts\n\n");
+        if let Some(desc) = contracts.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Keyword | Syntax | Description |\n");
+        md.push_str("|---------|--------|-------------|\n");
+
+        let keywords = ["requires", "ensures", "old", "result", "invariant"];
+        for kw in &keywords {
+            if let Some(c) = contracts.get(*kw) {
+                let syntax_str = c.get("syntax").and_then(|v| v.as_str()).unwrap_or("");
+                let desc = c.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                md.push_str(&format!("| `{}` | `{}` | {} |\n", kw, syntax_str, desc));
+            }
+        }
+
+        if let Some(placement) = contracts.get("placement") {
+            md.push_str("\n### Placement\n\n");
+            if let Some(desc) = placement.get("description").and_then(|v| v.as_str()) {
+                md.push_str(&format!("{}\n\n", desc));
+            }
+            if let Some(example) = placement.get("example").and_then(|v| v.as_str()) {
+                md.push_str("```ntnt\n");
+                md.push_str(example);
+                md.push_str("\n```\n");
+            }
+        }
+        md.push_str("\n---\n\n");
+    }
+
+    // Types
+    if let Some(types) = syntax.get("types") {
+        md.push_str("## Types\n\n");
+        if let Some(desc) = types.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        let type_categories = [
+            "primitives",
+            "compound",
+            "option_result",
+            "union",
+            "annotation",
+        ];
+        for cat in &type_categories {
+            if let Some(t) = types.get(*cat) {
+                md.push_str(&format!("### {}\n\n", cat.replace("_", " ").to_uppercase()));
+                if let Some(type_list) = t.get("types").and_then(|v| v.as_array()) {
+                    let types_str: Vec<_> = type_list
+                        .iter()
+                        .filter_map(|t| t.as_str())
+                        .map(|t| format!("`{}`", t))
+                        .collect();
+                    md.push_str(&format!("{}\n\n", types_str.join(", ")));
+                }
+                if let Some(syntax_str) = t.get("syntax").and_then(|v| v.as_str()) {
+                    md.push_str(&format!("Syntax: `{}`\n\n", syntax_str));
+                }
+                if let Some(desc) = t.get("description").and_then(|v| v.as_str()) {
+                    md.push_str(&format!("{}\n\n", desc));
+                }
+            }
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Imports
+    if let Some(imports) = syntax.get("imports") {
+        md.push_str("## Imports\n\n");
+        if let Some(desc) = imports.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Style | Syntax | Example |\n");
+        md.push_str("|-------|--------|----------|\n");
+
+        let styles = ["named", "aliased", "namespace", "local"];
+        for style in &styles {
+            if let Some(s) = imports.get(*style) {
+                let syntax_str = s.get("syntax").and_then(|v| v.as_str()).unwrap_or("");
+                let example = s.get("example").and_then(|v| v.as_str()).unwrap_or("");
+                md.push_str(&format!(
+                    "| {} | `{}` | `{}` |\n",
+                    style, syntax_str, example
+                ));
+            }
+        }
+        md.push_str("\n---\n\n");
+    }
+
+    // Match
+    if let Some(match_expr) = syntax.get("match") {
+        md.push_str("## Match Expressions\n\n");
+        if let Some(desc) = match_expr.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Feature | Syntax | Description |\n");
+        md.push_str("|---------|--------|-------------|\n");
+
+        let features = ["basic", "guards", "wildcard", "binding"];
+        for feat in &features {
+            if let Some(f) = match_expr.get(*feat) {
+                let syntax_str = f.get("syntax").and_then(|v| v.as_str()).unwrap_or("");
+                let desc = f.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                md.push_str(&format!("| {} | `{}` | {} |\n", feat, syntax_str, desc));
+            }
+        }
+        md.push_str("\n");
+    }
+
+    // Write to file
+    let output_path = toml_path.parent().unwrap().join("SYNTAX_REFERENCE.md");
+    fs::write(&output_path, &md)?;
+
+    println!(
+        "{} Generated {}",
+        "✓".green(),
+        output_path.display().to_string().cyan()
+    );
+
+    Ok(())
+}
+
+/// Generate IAL_REFERENCE.md from ial.toml
+fn generate_ial_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
+    let ial_path = toml_path.parent().unwrap().join("ial.toml");
+    if !ial_path.exists() {
+        println!(
+            "  {} ial.toml not found, skipping IAL_REFERENCE.md",
+            "!".yellow()
+        );
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&ial_path)?;
+    let ial: toml::Value = toml::from_str(&content)?;
+
+    let mut md = String::new();
+    let version = ial
+        .get("meta")
+        .and_then(|m| m.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // Header
+    md.push_str("# Intent Assertion Language (IAL) Reference\n\n");
+    md.push_str("> **Auto-generated from [ial.toml](ial.toml)** - Do not edit directly.\n");
+    md.push_str(">\n");
+    md.push_str(&format!("> Last updated: v{}\n\n", version));
+
+    if let Some(desc) = ial
+        .get("meta")
+        .and_then(|m| m.get("description"))
+        .and_then(|v| v.as_str())
+    {
+        md.push_str(&format!("{}\n\n", desc));
+    }
+
+    // Table of Contents
+    md.push_str("## Table of Contents\n\n");
+    md.push_str("- [Primitives](#primitives)\n");
+    md.push_str("- [Check Operations](#check-operations)\n");
+    md.push_str("- [Standard Terms](#standard-terms)\n");
+    md.push_str("- [Context Paths](#context-paths)\n");
+    md.push_str("- [Glossary System](#glossary-system)\n");
+    md.push_str("- [Intent File Format](#intent-file-format)\n");
+    md.push_str("- [Commands](#commands)\n");
+    md.push_str("\n---\n\n");
+
+    // Primitives
+    if let Some(primitives) = ial.get("primitives") {
+        md.push_str("## Primitives\n\n");
+        if let Some(desc) = primitives.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Primitive | Description | Context Sets |\n");
+        md.push_str("|-----------|-------------|---------------|\n");
+
+        let prim_names = [
+            "http",
+            "cli",
+            "code_quality",
+            "read_file",
+            "function_call",
+            "property_check",
+            "check",
+        ];
+        for prim in &prim_names {
+            if let Some(p) = primitives.get(*prim) {
+                let name = p.get("name").and_then(|v| v.as_str()).unwrap_or(*prim);
+                let desc = p.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let context = p
+                    .get("context_sets")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| s.as_str())
+                            .map(|s| format!("`{}`", s))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                md.push_str(&format!("| **{}** | {} | {} |\n", name, desc, context));
+            }
+        }
+        md.push_str("\n---\n\n");
+    }
+
+    // Check Operations
+    if let Some(check_ops) = ial.get("check_operations") {
+        md.push_str("## Check Operations\n\n");
+        if let Some(desc) = check_ops.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        let categories = [
+            ("equality", "Equality"),
+            ("containment", "Containment"),
+            ("pattern", "Pattern Matching"),
+            ("existence", "Existence"),
+            ("comparison", "Comparison"),
+            ("type", "Type Checks"),
+        ];
+
+        for (key, title) in &categories {
+            if let Some(cat) = check_ops.get(*key).and_then(|v| v.as_table()) {
+                md.push_str(&format!("### {}\n\n", title));
+                md.push_str("| Operation | Description |\n");
+                md.push_str("|-----------|-------------|\n");
+                for (op, desc) in cat {
+                    if let Some(d) = desc.as_str() {
+                        md.push_str(&format!("| `{}` | {} |\n", op, d));
+                    }
+                }
+                md.push_str("\n");
+            }
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Standard Terms
+    if let Some(terms) = ial.get("standard_terms") {
+        md.push_str("## Standard Terms\n\n");
+        if let Some(desc) = terms.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        let categories = [
+            ("http_status", "HTTP Status"),
+            ("http_body", "HTTP Body"),
+            ("http_headers", "HTTP Headers"),
+            ("content_type", "Content-Type Shortcuts"),
+            ("response_time", "Response Time"),
+            ("cli", "CLI"),
+            ("code_quality", "Code Quality"),
+            ("unit_test", "Unit Test Results"),
+            ("properties", "Function Properties"),
+            ("string_checks", "String/Value Checks"),
+            ("bounds", "Bounds"),
+        ];
+
+        for (key, title) in &categories {
+            if let Some(cat) = terms.get(*key).and_then(|v| v.as_table()) {
+                md.push_str(&format!("### {}\n\n", title));
+
+                // Get description if present
+                if let Some(desc) = cat.get("description").and_then(|v| v.as_str()) {
+                    md.push_str(&format!("_{}_\n\n", desc));
+                }
+
+                md.push_str("| Term | Resolves To |\n");
+                md.push_str("|------|-------------|\n");
+
+                for (term, value) in cat {
+                    if term == "description" {
+                        continue;
+                    }
+                    if let Some(t) = value.as_table() {
+                        let resolves = t.get("resolves_to").and_then(|v| v.as_str()).unwrap_or("");
+                        md.push_str(&format!("| `{}` | `{}` |\n", term, resolves));
+                    }
+                }
+                md.push_str("\n");
+            }
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Context Paths
+    if let Some(context) = ial.get("context") {
+        md.push_str("## Context Paths\n\n");
+        if let Some(desc) = context.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        let sections = ["response", "cli", "code_quality", "result", "file"];
+        for section in &sections {
+            if let Some(sec) = context.get(*section).and_then(|v| v.as_table()) {
+                md.push_str(&format!("### {}\n\n", section));
+                md.push_str("| Path | Description |\n");
+                md.push_str("|------|-------------|\n");
+                for (path, desc) in sec {
+                    if let Some(d) = desc.as_str() {
+                        md.push_str(&format!("| `{}` | {} |\n", path, d));
+                    }
+                }
+                md.push_str("\n");
+            }
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Glossary System
+    if let Some(glossary) = ial.get("glossary") {
+        md.push_str("## Glossary System\n\n");
+        if let Some(desc) = glossary.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        if let Some(format) = glossary.get("format") {
+            if let Some(syntax) = format.get("syntax").and_then(|v| v.as_str()) {
+                md.push_str("### Format\n\n");
+                md.push_str("```intent\n");
+                md.push_str(syntax);
+                md.push_str("\n```\n\n");
+            }
+        }
+
+        if let Some(params) = glossary.get("parameters") {
+            md.push_str("### Parameters\n\n");
+            if let Some(desc) = params.get("description").and_then(|v| v.as_str()) {
+                md.push_str(&format!("{}\n\n", desc));
+            }
+            if let Some(example) = params.get("example").and_then(|v| v.as_str()) {
+                md.push_str(&format!("Example: `{}`\n\n", example));
+            }
+        }
+
+        if let Some(resolution) = glossary.get("resolution") {
+            md.push_str("### Resolution Order\n\n");
+            if let Some(order) = resolution.get("order").and_then(|v| v.as_array()) {
+                for step in order {
+                    if let Some(s) = step.as_str() {
+                        md.push_str(&format!(
+                            "{}. {}\n",
+                            s.chars().next().unwrap_or('1'),
+                            &s[3..]
+                        ));
+                    }
+                }
+                md.push_str("\n");
+            }
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Intent File Format
+    if let Some(intent_file) = ial.get("intent_file") {
+        md.push_str("## Intent File Format\n\n");
+        if let Some(desc) = intent_file.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        if let Some(structure) = intent_file.get("structure") {
+            if let Some(example) = structure.get("example").and_then(|v| v.as_str()) {
+                md.push_str("### Structure\n\n");
+                md.push_str("```intent\n");
+                md.push_str(example);
+                md.push_str("\n```\n\n");
+            }
+        }
+
+        if let Some(linking) = intent_file.get("linking") {
+            md.push_str("### File Linking\n\n");
+            if let Some(desc) = linking.get("description").and_then(|v| v.as_str()) {
+                md.push_str(&format!("{}\n\n", desc));
+            }
+            if let Some(examples) = linking.get("examples").and_then(|v| v.as_array()) {
+                for ex in examples {
+                    if let Some(e) = ex.as_str() {
+                        md.push_str(&format!("- `{}`\n", e));
+                    }
+                }
+                md.push_str("\n");
+            }
+        }
+
+        if let Some(annotations) = intent_file.get("annotations").and_then(|v| v.as_table()) {
+            md.push_str("### Code Annotations\n\n");
+            if let Some(desc) = annotations.get("description").and_then(|v| v.as_str()) {
+                md.push_str(&format!("{}\n\n", desc));
+            }
+            md.push_str("| Annotation | Purpose |\n");
+            md.push_str("|------------|----------|\n");
+            for (ann, purpose) in annotations {
+                if ann == "description" || ann == "example" {
+                    continue;
+                }
+                if let Some(p) = purpose.as_str() {
+                    md.push_str(&format!("| `{}` | {} |\n", ann, p));
+                }
+            }
+            md.push_str("\n");
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Commands
+    if let Some(commands) = ial.get("commands") {
+        md.push_str("## Commands\n\n");
+        if let Some(desc) = commands.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Command | Description |\n");
+        md.push_str("|---------|-------------|\n");
+
+        let cmd_names = ["check", "coverage", "init", "studio"];
+        for cmd in &cmd_names {
+            if let Some(c) = commands.get(*cmd) {
+                let command = c.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let desc = c.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                md.push_str(&format!("| `{}` | {} |\n", command, desc));
+            }
+        }
+        md.push_str("\n");
+    }
+
+    // Write to file
+    let output_path = toml_path.parent().unwrap().join("IAL_REFERENCE.md");
+    fs::write(&output_path, &md)?;
+
+    println!(
+        "{} Generated {}",
+        "✓".green(),
+        output_path.display().to_string().cyan()
+    );
+
+    Ok(())
+}
+
+/// Validate that all stdlib functions are documented
+fn validate_docs(stdlib: &docs::StdlibDocs) -> anyhow::Result<()> {
+    // This would ideally cross-reference with the actual interpreter
+    // For now, just report what's documented
+    let mut total_functions = 0;
+    let mut total_modules = 0;
+
+    if let Some(builtins) = &stdlib.builtins {
+        total_functions += builtins.len();
+    }
+
+    if let Some(modules) = &stdlib.modules {
+        total_modules = modules.len();
+        for module in modules.values() {
+            if let Some(functions) = &module.functions {
+                total_functions += functions.len();
+            }
+        }
+    }
+
+    println!("{}", "Documentation Validation".green().bold());
+    println!();
+    println!(
+        "  {} Documented functions: {}",
+        "✓".green(),
+        total_functions.to_string().cyan()
+    );
+    println!(
+        "  {} Documented modules: {}",
+        "✓".green(),
+        total_modules.to_string().cyan()
+    );
+    println!();
+    println!(
+        "{}",
+        "Note: Full validation against interpreter not yet implemented.".dimmed()
+    );
+    println!(
+        "{}",
+        "This will compare docs/stdlib.toml against actual stdlib modules.".dimmed()
+    );
+
+    Ok(())
 }

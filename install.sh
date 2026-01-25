@@ -232,15 +232,15 @@ build_from_source() {
     fi
 
     # Clone or update repo
-    NTNT_DIR="$(pwd)/ntnt-src"
+    NTNT_DIR="$(pwd)/ntnt"
     if [ -d "$NTNT_DIR" ]; then
-        echo "Updating NTNT source in ./ntnt-src..."
+        echo "Updating NTNT source in ./ntnt..."
         cd "$NTNT_DIR"
         git fetch --quiet origin
         git reset --quiet --hard origin/main
         git clean --quiet -fd
     else
-        echo "Cloning NTNT source to ./ntnt-src..."
+        echo "Cloning NTNT source to ./ntnt..."
         git clone --quiet "https://github.com/$REPO.git" "$NTNT_DIR"
         cd "$NTNT_DIR"
     fi
@@ -280,69 +280,168 @@ elif check_command ntnt; then
 fi
 echo ""
 
+# Detect user's shell for PATH instructions
+USER_SHELL_NAME=$(basename "$SHELL")
+
 # Check if in PATH
 if ! check_command ntnt; then
     echo -e "${YELLOW}NOTE: Add ntnt to your PATH to use it from anywhere.${NC}"
     echo ""
+
+    PATH_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
     if [ "$INSTALL_DIR" = "$HOME/.local/bin" ]; then
-        echo "  Add this to your shell profile (~/.zshrc, ~/.bashrc, etc.):"
-        echo ""
-        echo -e "    ${CYAN}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
-    else
-        echo "  Add this to your shell profile:"
-        echo ""
-        echo -e "    ${CYAN}export PATH=\"$INSTALL_DIR:\$PATH\"${NC}"
+        PATH_LINE="export PATH=\"\$HOME/.local/bin:\$PATH\""
     fi
-    echo ""
-    echo "  Then restart your terminal or run: source ~/.zshrc (or ~/.bashrc)"
+
+    case "$USER_SHELL_NAME" in
+        zsh)
+            echo "  Add to ~/.zshrc:"
+            echo -e "    ${GREEN}$PATH_LINE${NC}"
+            echo ""
+            echo "  Then run: ${CYAN}source ~/.zshrc${NC}"
+            ;;
+        fish)
+            FISH_PATH="$INSTALL_DIR"
+            [ "$INSTALL_DIR" = "$HOME/.local/bin" ] && FISH_PATH="\$HOME/.local/bin"
+            echo "  Add to ~/.config/fish/config.fish:"
+            echo -e "    ${GREEN}fish_add_path $FISH_PATH${NC}"
+            echo ""
+            echo "  Then restart your terminal"
+            ;;
+        *)
+            echo "  Add to ~/.bashrc:"
+            echo -e "    ${GREEN}$PATH_LINE${NC}"
+            echo ""
+            echo "  Then run: ${CYAN}source ~/.bashrc${NC}"
+            ;;
+    esac
     echo ""
 fi
 
-# Offer to download examples (only for binary installs)
-if [ "$INSTALLED_FROM" = "binary" ]; then
+# Download docs, examples, and agent helper files
+download_starter_kit() {
+    NTNT_HOME="$(pwd)/ntnt"
     echo ""
-    echo -n "Would you like to download the examples? (y/n) "
-    read -r DOWNLOAD_EXAMPLES
-    if [ "$DOWNLOAD_EXAMPLES" = "y" ] || [ "$DOWNLOAD_EXAMPLES" = "Y" ]; then
-        EXAMPLES_DIR="$(pwd)/ntnt-examples"
-        echo ""
-        echo "Downloading examples to ./ntnt-examples..."
-        if git clone --depth 1 --filter=blob:none --sparse "https://github.com/$REPO.git" "$EXAMPLES_DIR" 2>/dev/null; then
-            cd "$EXAMPLES_DIR"
-            git sparse-checkout set examples 2>/dev/null
-            # Move examples to root and clean up
-            mv examples/* . 2>/dev/null
-            rm -rf examples .git
-            cd - > /dev/null
-            echo -e "${GREEN}[OK] Examples downloaded to ./ntnt-examples${NC}"
+    echo "Downloading NTNT starter kit (docs, examples, agent guides)..."
+
+    mkdir -p "$NTNT_HOME"
+
+    # Try sparse checkout for efficiency
+    TMP_CLONE=$(mktemp -d)
+    if git clone --depth 1 --filter=blob:none --sparse "https://github.com/$REPO.git" "$TMP_CLONE" 2>/dev/null; then
+        cd "$TMP_CLONE"
+        git sparse-checkout set docs examples .github .claude/skills CLAUDE.md LANGUAGE_SPEC.md ARCHITECTURE.md 2>/dev/null
+
+        # Copy the files we want
+        [ -d "docs" ] && cp -r docs "$NTNT_HOME/"
+        [ -d "examples" ] && cp -r examples "$NTNT_HOME/"
+        [ -d ".github" ] && cp -r .github "$NTNT_HOME/"
+        [ -d ".claude/skills" ] && mkdir -p "$NTNT_HOME/.claude" && cp -r .claude/skills "$NTNT_HOME/.claude/"
+        [ -f "CLAUDE.md" ] && cp CLAUDE.md "$NTNT_HOME/"
+        [ -f "LANGUAGE_SPEC.md" ] && cp LANGUAGE_SPEC.md "$NTNT_HOME/"
+        [ -f "ARCHITECTURE.md" ] && cp ARCHITECTURE.md "$NTNT_HOME/"
+
+        cd - > /dev/null
+        rm -rf "$TMP_CLONE"
+    else
+        # Fallback: full shallow clone
+        rm -rf "$TMP_CLONE"
+        TMP_CLONE=$(mktemp -d)
+        if git clone --depth 1 "https://github.com/$REPO.git" "$TMP_CLONE" 2>/dev/null; then
+            [ -d "$TMP_CLONE/docs" ] && cp -r "$TMP_CLONE/docs" "$NTNT_HOME/"
+            [ -d "$TMP_CLONE/examples" ] && cp -r "$TMP_CLONE/examples" "$NTNT_HOME/"
+            [ -d "$TMP_CLONE/.github" ] && cp -r "$TMP_CLONE/.github" "$NTNT_HOME/"
+            [ -d "$TMP_CLONE/.claude/skills" ] && mkdir -p "$NTNT_HOME/.claude" && cp -r "$TMP_CLONE/.claude/skills" "$NTNT_HOME/.claude/"
+            [ -f "$TMP_CLONE/CLAUDE.md" ] && cp "$TMP_CLONE/CLAUDE.md" "$NTNT_HOME/"
+            [ -f "$TMP_CLONE/LANGUAGE_SPEC.md" ] && cp "$TMP_CLONE/LANGUAGE_SPEC.md" "$NTNT_HOME/"
+            [ -f "$TMP_CLONE/ARCHITECTURE.md" ] && cp "$TMP_CLONE/ARCHITECTURE.md" "$NTNT_HOME/"
+            rm -rf "$TMP_CLONE"
         else
-            # Fallback: full shallow clone if sparse checkout not supported
-            rm -rf "$EXAMPLES_DIR"
-            if git clone --depth 1 "https://github.com/$REPO.git" "$EXAMPLES_DIR" 2>/dev/null; then
-                # Keep only examples
-                mv "$EXAMPLES_DIR/examples"/* "$EXAMPLES_DIR/" 2>/dev/null
-                rm -rf "$EXAMPLES_DIR/examples" "$EXAMPLES_DIR/src" "$EXAMPLES_DIR/tests" "$EXAMPLES_DIR/.git" "$EXAMPLES_DIR/.github"
-                rm -f "$EXAMPLES_DIR/Cargo.toml" "$EXAMPLES_DIR/Cargo.lock" "$EXAMPLES_DIR"/*.md "$EXAMPLES_DIR"/*.sh "$EXAMPLES_DIR"/*.ps1
-                echo -e "${GREEN}[OK] Examples downloaded to ./ntnt-examples${NC}"
-            else
-                echo -e "${YELLOW}Could not download examples. You can browse them at:${NC}"
-                echo "  https://github.com/$REPO/tree/main/examples"
-            fi
+            rm -rf "$TMP_CLONE"
+            echo -e "${YELLOW}Could not download starter kit. You can browse docs at:${NC}"
+            echo "  https://github.com/$REPO"
+            return 1
         fi
     fi
+
+    echo -e "${GREEN}[OK] Starter kit downloaded to ./ntnt/${NC}"
+    echo ""
+    echo "  ./ntnt/docs/              - Documentation"
+    echo "  ./ntnt/examples/          - Example projects"
+    echo "  ./ntnt/CLAUDE.md          - Claude Code instructions"
+    echo "  ./ntnt/.claude/skills/    - Claude Code skills (IDD workflow)"
+    echo "  ./ntnt/.github/copilot-instructions.md  - GitHub Copilot instructions"
+    echo "  ./ntnt/.github/agents/    - AI agent definitions"
+    return 0
+}
+
+# For binary installs, always download the starter kit
+# For source installs, everything is already in ntnt/
+if [ "$INSTALLED_FROM" = "binary" ]; then
+    download_starter_kit
 fi
 
+# Detect user's shell
+detect_shell() {
+    local shell_name=$(basename "$SHELL")
+    case "$shell_name" in
+        bash|zsh|fish) echo "$shell_name" ;;
+        *) echo "bash" ;;  # Default to bash
+    esac
+}
+
+USER_SHELL=$(detect_shell)
+
+# Show shell completion instructions
+show_completion_instructions() {
+    echo -e "${CYAN}Tab Completion (optional):${NC}"
+    echo ""
+    case "$USER_SHELL" in
+        zsh)
+            echo "  Add to ~/.zshrc:"
+            echo -e "    ${GREEN}eval \"\$(ntnt completions zsh)\"${NC}"
+            ;;
+        fish)
+            echo "  Run once:"
+            echo -e "    ${GREEN}ntnt completions fish > ~/.config/fish/completions/ntnt.fish${NC}"
+            ;;
+        *)
+            echo "  Add to ~/.bashrc:"
+            echo -e "    ${GREEN}eval \"\$(ntnt completions bash)\"${NC}"
+            ;;
+    esac
+    echo ""
+}
+
 echo ""
-echo "Get started:"
-echo -e "  ${CYAN}ntnt run hello.tnt${NC}     # Run a file"
-echo -e "  ${CYAN}ntnt --help${NC}            # See all commands"
+echo -e "${CYAN}============================================${NC}"
+echo -e "${CYAN}  Quick Start${NC}"
+echo -e "${CYAN}============================================${NC}"
 echo ""
+echo "Try these commands:"
+echo -e "  ${GREEN}ntnt run hello.tnt${NC}     Run a file"
+echo -e "  ${GREEN}ntnt repl${NC}              Interactive REPL"
+echo -e "  ${GREEN}ntnt --help${NC}            See all commands"
+echo ""
+
 if [ "$INSTALLED_FROM" = "source" ]; then
-    echo "Examples: ./ntnt-src/examples/"
-elif [ -d "$(pwd)/ntnt-examples" ]; then
-    echo "Examples: ./ntnt-examples/"
+    echo "Examples:    ./ntnt/examples/"
+    echo "Docs:        ./ntnt/docs/"
+    echo "Agent guide: ./ntnt/CLAUDE.md"
+elif [ -d "$(pwd)/ntnt" ]; then
+    echo "Examples:    ./ntnt/examples/"
+    echo "Docs:        ./ntnt/docs/"
+    echo "Agent guide: ./ntnt/CLAUDE.md"
 else
     echo "Examples: https://github.com/$REPO/tree/main/examples"
+    echo "Docs:     https://github.com/$REPO"
 fi
-echo "Docs: https://github.com/$REPO"
+echo ""
+
+# Show completion instructions if ntnt is accessible
+if check_command ntnt || [ -x "$INSTALL_DIR/ntnt" ]; then
+    show_completion_instructions
+fi
+
+echo "Happy coding!"
 echo ""

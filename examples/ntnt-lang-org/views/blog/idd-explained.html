@@ -2,15 +2,68 @@
 <a href="/blog" class="back-link">&larr; Back to Blog</a>
 
 <article class="blog-post">
-    <h2>Intent-Driven Development: From Requirements to Verified Code</h2>
-    <div class="blog-meta" style="margin-bottom: 2rem;">January 10, 2026 - NTNT Team</div>
+    <h2>Intent-Driven Development (IDD)</h2>
+    <div class="blog-meta" style="margin-bottom: 2rem;">January 25, 2026 - NTNT Team</div>
 
     <div class="content">
-        <p>Intent-Driven Development (IDD) is a methodology where human requirements become executable specifications. You write what your software should do, the system verifies that your code actually does it.</p>
+        <p>Intent-Driven Development (IDD) is a methodology where human requirements become executable specifications. You write what your software should do in natural language, the system verifies that your code actually does it.</p>
 
-        <h3>A Concrete Example</h3>
+        <p>At the heart of IDD is the <strong>Intent Assertion Language (IAL)</strong>, a term rewriting engine that translates natural language assertions into executable tests.</p>
 
-        <p>Let's say you're building a greeting API. First, write an intent file describing what it should do:</p>
+        <h3>More Than Acceptance Testing</h3>
+
+        <p>IDD isn't just BDD or spec-driven development with different syntax. It spans from unit tests to integration tests to acceptance tests, all in one unified language. Here's a unit test example:</p>
+
+        <pre><code># math.intent
+
+Feature: Math Utilities
+  id: feature.math_utils
+  description: "Core mathematical functions"
+
+  Scenario: Calculate discount correctly
+    When calculating discount
+    &rarr; result matches expected
+
+  Scenario: Discount is deterministic
+    When calculating discount
+    &rarr; discount is predictable
+
+---
+
+## Glossary Extensions (Unit Testing)
+
+| Term | Means |
+|------|-------|
+| calculating discount | call: calculate_discount({price}, {percent}), source: lib/math.tnt, input: test_data.discount_examples |
+| result matches expected | result is {expected} |
+| discount is predictable | property: deterministic |
+
+---
+
+## Test Data
+
+Test Cases: Discount Examples
+  id: test_data.discount_examples
+
+  | price | percent | expected |
+  | 100 | 10 | 90 |
+  | 50 | 25 | 37.5 |
+  | 200 | 0 | 200 |</code></pre>
+
+        <p>This tests a pure function directly, with multiple input/output pairs and property checks. The <code>call:</code> keyword invokes the function, <code>input:</code> specifies the test data table, and <code>property: deterministic</code> verifies the function always returns the same result for the same inputs.</p>
+
+        <p>The same <code>.intent</code> file can mix unit tests with HTTP scenarios:</p>
+
+        <pre><code>  Scenario: Apply discount via API
+    When POST /api/cart/discount with {"percent": 10}
+    &rarr; status 200
+    &rarr; body contains "total"</code></pre>
+
+        <p>One file, one language, all levels of testing.</p>
+
+        <h3>The Core Idea</h3>
+
+        <p>Instead of writing requirements in a document and tests in code, you write both in one place: the <code>.intent</code> file. This file is both human-readable documentation and machine-executable specification.</p>
 
         <pre><code># server.intent
 
@@ -18,10 +71,8 @@
 
 | Term | Means |
 |------|-------|
-| a user visits the {path} | GET {path} |
-| a user visits {path} | GET {path} |
-| home page | / |
-| page loads successfully | status: 200 |
+| page loads successfully | status 200, returns HTML |
+| returns HTML | header "Content-Type" contains "text/html" |
 | they see "{text}" | body contains "{text}" |
 
 ---
@@ -31,18 +82,83 @@ Feature: User Greeting
   description: "Display a personalized greeting"
 
   Scenario: Greet by name
-    description: "User provides their name and gets a personal greeting"
     When a user visits /?name=Alice
     → page loads successfully
     → they see "Hello, Alice"
 
   Scenario: Default greeting
-    description: "User visits without a name and gets default greeting"
-    When a user visits the home page
+    When a user visits /
     → page loads successfully
     → they see "Hello, World"</code></pre>
 
-        <p>Now implement it in NTNT, linking your code to the intent:</p>
+        <h3>The Glossary: Your Domain Language</h3>
+
+        <p>The glossary is where the magic happens. You define terms in natural language, and IAL resolves them into executable checks:</p>
+
+        <pre><code>| Term | Means |
+|------|-------|
+| page loads successfully | status 200, returns HTML |
+| returns HTML | header "Content-Type" contains "text/html" |
+| they see "{text}" | body contains "{text}" |</code></pre>
+
+        <p>When you write <code>→ page loads successfully</code> in a scenario, IAL expands it:</p>
+
+        <ol>
+            <li><code>page loads successfully</code> → <code>status 200, returns HTML</code></li>
+            <li><code>returns HTML</code> → <code>header "Content-Type" contains "text/html"</code></li>
+            <li>Finally resolves to primitives: <code>Check(Equals, response.status, 200)</code> and <code>Check(Contains, response.headers.content-type, "text/html")</code></li>
+        </ol>
+
+        <p>Terms can reference other terms, building a hierarchy from natural language down to executable checks. This is <strong>term rewriting</strong>, the core mechanism of IAL.</p>
+
+        <h3>Built-in Standard Terms</h3>
+
+        <p>IAL includes a vocabulary of standard terms you can use without defining them in your glossary:</p>
+
+        <table style="width: 100%; margin: 1rem 0; border-collapse: collapse;">
+            <tr style="border-bottom: 1px solid var(--border);">
+                <th style="text-align: left; padding: 0.5rem;">Term</th>
+                <th style="text-align: left; padding: 0.5rem;">Meaning</th>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>status 200</code></td>
+                <td style="padding: 0.5rem;">HTTP status equals 200</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>status 2xx</code></td>
+                <td style="padding: 0.5rem;">Any success status (200-299)</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>body contains "{text}"</code></td>
+                <td style="padding: 0.5rem;">Response body includes text</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>body not contains "{text}"</code></td>
+                <td style="padding: 0.5rem;">Response body excludes text</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>header "{name}" contains "{value}"</code></td>
+                <td style="padding: 0.5rem;">Header check</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>content-type is json</code></td>
+                <td style="padding: 0.5rem;">JSON response shorthand</td>
+            </tr>
+            <tr style="border-bottom: 1px solid var(--border);">
+                <td style="padding: 0.5rem;"><code>response time &lt; 500ms</code></td>
+                <td style="padding: 0.5rem;">Performance assertion</td>
+            </tr>
+            <tr>
+                <td style="padding: 0.5rem;"><code>code is valid</code></td>
+                <td style="padding: 0.5rem;">Passes lint checks</td>
+            </tr>
+        </table>
+
+        <p>Your glossary terms extend and build upon these standard terms, creating a domain-specific language for your project.</p>
+
+        <h3>Linking Code to Intent</h3>
+
+        <p>NTNT links your implementation to your intent file using <code>@implements</code> annotations:</p>
 
         <pre><code>// server.tnt
 import { html } from "std/http/server"
@@ -56,27 +172,46 @@ fn home(req) {
 get("/", home)
 listen(8080)</code></pre>
 
-        <p>Run <code>ntnt intent check server.tnt</code> and the system automatically:</p>
+        <p>The annotation <code>// @implements: feature.greeting</code> tells NTNT that this function implements the <code>feature.greeting</code> requirement from your intent file.</p>
+
+        <h3>The Verification Workflow</h3>
+
+        <p>Run <code>ntnt intent check server.tnt</code> and NTNT:</p>
 
         <ol>
+            <li>Finds <code>server.intent</code> (linked by filename)</li>
             <li>Starts your server</li>
-            <li>Makes the HTTP requests defined in scenarios</li>
-            <li>Verifies the assertions pass</li>
-            <li>Reports results</li>
+            <li>Executes each scenario's HTTP requests</li>
+            <li>Resolves assertions through glossary → standard terms → primitives</li>
+            <li>Reports pass/fail for every check</li>
         </ol>
 
-        <h3>Why This Matters</h3>
+        <pre><code>$ ntnt intent check server.tnt
 
-        <p>Traditional development has a gap between requirements and code. Requirements live in documents that quickly become outdated. Tests verify behavior but don't explain intent. Code comments try to bridge the gap but are often ignored.</p>
+🎯 Intent Check: server.intent
 
-        <p>IDD closes this gap:</p>
+Feature: User Greeting
+  ✓ Greet by name (2 checks)
+  ✓ Default greeting (2 checks)
 
-        <ul>
-            <li><strong>Requirements are executable</strong> - They're not just documentation, they're tests</li>
-            <li><strong>Code is traceable</strong> - Every function links back to its requirement</li>
-            <li><strong>Changes are verifiable</strong> - Modify code, run check, know if you broke anything</li>
-            <li><strong>AI agents have clear targets</strong> - Tell an agent to implement <code>feature.greeting</code> and it knows exactly what success looks like</li>
-        </ul>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✓ All scenarios passed (4 checks)</code></pre>
+
+        <h3>Intent Commands</h3>
+
+        <p>NTNT provides several commands for working with intent files:</p>
+
+        <pre><code># Verify implementation matches intent
+ntnt intent check server.tnt
+
+# Show which features have implementations
+ntnt intent coverage server.tnt
+
+# Generate code scaffolding from intent
+ntnt intent init server.intent -o server.tnt
+
+# Visual development with live tests
+ntnt intent studio server.intent</code></pre>
 
         <h3>Intent Studio: Visual Development</h3>
 
@@ -84,15 +219,54 @@ listen(8080)</code></pre>
 
         <pre><code>ntnt intent studio server.intent</code></pre>
 
-        <p>This opens a visual interface at <code>http://127.0.0.1:3001</code> showing your intent file with live pass/fail indicators. As you edit your code, tests re-run automatically and you see results update in real-time.</p>
+        <p>This opens a visual interface at <code>http://127.0.0.1:3001</code> that shows:</p>
+
+        <ul>
+            <li><strong>Health bar:</strong> Overall pass/fail percentage at a glance</li>
+            <li><strong>Feature cards:</strong> Expandable views of each feature and its scenarios</li>
+            <li><strong>Live test results:</strong> Pass/fail indicators update as you code</li>
+            <li><strong>Resolution chains:</strong> See how assertions expand from glossary to primitives</li>
+            <li><strong>Native hot-reload:</strong> Edit your code, changes apply on next request</li>
+        </ul>
+
+        <p>Your app runs on port 8081 while Studio runs on port 3001. Edit your <code>.tnt</code> file, refresh your browser, and see tests re-run instantly.</p>
+
+        <h3>IAL Primitives</h3>
+
+        <p>At the bottom of every resolution chain are <strong>primitives</strong>, the actual executable operations:</p>
+
+        <ul>
+            <li><strong>Http:</strong> Execute HTTP request, capture response</li>
+            <li><strong>Cli:</strong> Execute CLI command, capture output</li>
+            <li><strong>CodeQuality:</strong> Run lint/validation checks</li>
+            <li><strong>FunctionCall:</strong> Call an NTNT function (unit testing)</li>
+            <li><strong>PropertyCheck:</strong> Verify function properties (deterministic, idempotent)</li>
+            <li><strong>Check:</strong> Universal assertion (equals, contains, matches, etc.)</li>
+        </ul>
+
+        <p>You never write primitives directly. You write natural language in your glossary and scenarios; IAL resolves them to primitives automatically.</p>
+
+        <h3>Why This Matters</h3>
+
+        <p>Traditional development has a gap between requirements and code. Requirements live in documents that become outdated. Tests verify behavior but don't explain intent. Code comments try to bridge the gap but are often ignored.</p>
+
+        <p>IDD closes this gap:</p>
+
+        <ul>
+            <li><strong>Requirements are executable:</strong> They're not just documentation, they're tests</li>
+            <li><strong>Code is traceable:</strong> Every function links back to its requirement via <code>@implements</code></li>
+            <li><strong>Changes are verifiable:</strong> Modify code, run check, know if you broke anything</li>
+            <li><strong>Natural language is preserved:</strong> Humans read "page loads successfully", machines execute the checks</li>
+            <li><strong>AI agents have clear targets:</strong> Tell an agent to implement <code>feature.greeting</code> and it knows exactly what success looks like</li>
+        </ul>
 
         <h3>Design by Contract Integration</h3>
 
-        <p>IDD works hand-in-hand with NTNT's contract system. Contracts define function-level specifications:</p>
+        <p>IDD works alongside NTNT's contract system. While intent files define feature-level requirements, contracts define function-level specifications:</p>
 
         <pre><code>fn withdraw(amount: Int) -> Int
     requires amount > 0
-    requires amount <= self.balance
+    requires amount &lt;= self.balance
     ensures result >= 0
 {
     self.balance = self.balance - amount
@@ -103,6 +277,18 @@ listen(8080)</code></pre>
 
         <h3>Getting Started</h3>
 
-        <p>Ready to try IDD? Check out the <a href="/learn">Learn</a> page for installation instructions and a complete walkthrough.</p>
+        <p>Ready to try IDD? Here's the workflow:</p>
+
+        <ol>
+            <li>Create a <code>.intent</code> file describing what you want to build</li>
+            <li>Define your domain language in the Glossary</li>
+            <li>Write features with scenarios and assertions</li>
+            <li>Generate scaffolding: <code>ntnt intent init app.intent -o app.tnt</code></li>
+            <li>Implement with <code>@implements</code> annotations</li>
+            <li>Verify: <code>ntnt intent check app.tnt</code></li>
+            <li>Iterate with Intent Studio: <code>ntnt intent studio app.intent</code></li>
+        </ol>
+
+        <p>Check out the <a href="/learn">Learn</a> page for installation instructions and a complete walkthrough.</p>
     </div>
 </article>

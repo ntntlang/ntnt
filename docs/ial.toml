@@ -1,0 +1,466 @@
+# Intent Assertion Language (IAL) Reference
+# Source of truth for IAL documentation
+# Auto-generates: docs/IAL_REFERENCE.md
+
+[meta]
+version = "0.3.3"
+description = "IAL is a term rewriting engine that translates natural language assertions into executable tests"
+
+# =============================================================================
+# PRIMITIVES - The base execution units
+# =============================================================================
+
+[primitives]
+description = "IAL primitives are the leaf nodes of term resolution - they execute directly"
+
+[primitives.http]
+name = "Http"
+description = "Execute an HTTP request and capture response in context"
+parameters = ["method", "path", "body (optional)", "headers (optional)"]
+context_sets = ["response.status", "response.body", "response.headers.*", "response.time_ms"]
+example = "Http(GET, /api/users)"
+
+[primitives.cli]
+name = "Cli"
+description = "Execute a CLI command and capture output"
+parameters = ["command", "args (optional)"]
+context_sets = ["cli.exit_code", "cli.stdout", "cli.stderr"]
+example = "Cli(ntnt lint file.tnt)"
+
+[primitives.code_quality]
+name = "CodeQuality"
+description = "Run lint/validation checks on source files"
+parameters = ["path"]
+context_sets = ["code.quality.passed", "code.quality.error_count", "code.quality.warning_count", "code.quality.errors"]
+example = "CodeQuality(server.tnt)"
+
+[primitives.read_file]
+name = "ReadFile"
+description = "Read file contents into context"
+parameters = ["path"]
+context_sets = ["file.content", "file.exists"]
+example = "ReadFile(config.json)"
+
+[primitives.function_call]
+name = "FunctionCall"
+description = "Call an NTNT function for unit testing"
+parameters = ["function_name", "args"]
+context_sets = ["result"]
+example = "FunctionCall(add, [1, 2])"
+
+[primitives.property_check]
+name = "PropertyCheck"
+description = "Verify a function property (deterministic, idempotent, round-trips)"
+parameters = ["function_name", "property_type", "test_inputs"]
+context_sets = ["property.passed", "property.failures"]
+example = "PropertyCheck(hash, Deterministic, [\"test\", \"data\"])"
+
+[primitives.check]
+name = "Check"
+description = "Universal assertion - compare context value against expected"
+parameters = ["operation", "context_path", "expected"]
+context_sets = []
+example = "Check(Equals, response.status, 200)"
+
+# =============================================================================
+# CHECK OPERATIONS - Comparison types for Check primitive
+# =============================================================================
+
+[check_operations]
+description = "Operations available for the Check primitive"
+
+[check_operations.equality]
+Equals = "Exact equality"
+NotEquals = "Not equal"
+
+[check_operations.containment]
+Contains = "String contains substring, or array contains element"
+NotContains = "Does not contain"
+
+[check_operations.pattern]
+Matches = "Regex pattern match"
+StartsWith = "String starts with prefix"
+EndsWith = "String ends with suffix"
+
+[check_operations.existence]
+Exists = "Value exists (not null/None)"
+NotExists = "Value does not exist"
+
+[check_operations.comparison]
+LessThan = "Numeric less than"
+GreaterThan = "Numeric greater than"
+InRange = "Value within numeric range (e.g., 200-299)"
+
+[check_operations.type]
+IsType = "Check value type"
+HasLength = "Check length equals value"
+
+# =============================================================================
+# STANDARD TERMS - Built-in assertion vocabulary
+# =============================================================================
+
+[standard_terms]
+description = "Built-in terms that resolve to primitives. Use these in intent file assertions."
+
+# HTTP Status
+[standard_terms.http_status]
+description = "HTTP response status assertions"
+
+[standard_terms.http_status."status: {code}"]
+resolves_to = "Check(Equals, response.status, {code})"
+example = "status: 200"
+
+[standard_terms.http_status."status 2xx"]
+resolves_to = "Check(InRange, response.status, 200-299)"
+example = "status 2xx"
+
+[standard_terms.http_status."status 4xx"]
+resolves_to = "Check(InRange, response.status, 400-499)"
+example = "status 4xx"
+
+[standard_terms.http_status."status 5xx"]
+resolves_to = "Check(InRange, response.status, 500-599)"
+example = "status 5xx"
+
+# HTTP Body
+[standard_terms.http_body]
+description = "HTTP response body assertions"
+
+[standard_terms.http_body."body contains {text}"]
+resolves_to = "Check(Contains, response.body, {text})"
+example = "body contains \"success\""
+
+[standard_terms.http_body."body not contains {text}"]
+resolves_to = "Check(NotContains, response.body, {text})"
+example = "body not contains \"error\""
+
+[standard_terms.http_body."body matches {pattern}"]
+resolves_to = "Check(Matches, response.body, {pattern})"
+example = "body matches \"user_\\d+\""
+
+[standard_terms.http_body."body is empty"]
+resolves_to = "Check(Equals, response.body, \"\")"
+example = "body is empty"
+
+[standard_terms.http_body."body is not empty"]
+resolves_to = "Check(NotEquals, response.body, \"\")"
+example = "body is not empty"
+
+[standard_terms.http_body."body has field {field}"]
+resolves_to = "Check(Exists, response.body.{field})"
+example = "body has field \"id\""
+
+[standard_terms.http_body."response is valid JSON"]
+resolves_to = "Check(IsType, response.body, JSON)"
+example = "response is valid JSON"
+
+# HTTP Headers
+[standard_terms.http_headers]
+description = "HTTP header assertions"
+
+[standard_terms.http_headers."header {name} exists"]
+resolves_to = "Check(Exists, response.headers.{name})"
+example = "header \"Authorization\" exists"
+
+[standard_terms.http_headers."header {name} equals {value}"]
+resolves_to = "Check(Equals, response.headers.{name}, {value})"
+example = "header \"Content-Type\" equals \"application/json\""
+
+[standard_terms.http_headers."header {name} contains {value}"]
+resolves_to = "Check(Contains, response.headers.{name}, {value})"
+example = "header \"Set-Cookie\" contains \"session=\""
+
+# Content-Type shortcuts
+[standard_terms.content_type]
+description = "Content-Type shorthand assertions"
+
+[standard_terms.content_type."content-type is json"]
+resolves_to = "Check(Contains, response.headers.content-type, application/json)"
+example = "content-type is json"
+
+[standard_terms.content_type."content-type is html"]
+resolves_to = "Check(Contains, response.headers.content-type, text/html)"
+example = "content-type is html"
+
+[standard_terms.content_type."content-type is text"]
+resolves_to = "Check(Contains, response.headers.content-type, text/plain)"
+example = "content-type is text"
+
+# Response Time
+[standard_terms.response_time]
+description = "Response time assertions"
+
+[standard_terms.response_time."response time < {ms}ms"]
+resolves_to = "Check(LessThan, response.time_ms, {ms})"
+example = "response time < 500ms"
+
+[standard_terms.response_time."response time < {seconds}s"]
+resolves_to = "Check(LessThan, response.time_ms, {seconds}*1000)"
+example = "response time < 2s"
+
+# CLI
+[standard_terms.cli]
+description = "CLI command assertions"
+
+[standard_terms.cli."exit code is {code}"]
+resolves_to = "Check(Equals, cli.exit_code, {code})"
+example = "exit code is 0"
+
+[standard_terms.cli."exits successfully"]
+resolves_to = "Check(Equals, cli.exit_code, 0)"
+example = "exits successfully"
+
+[standard_terms.cli."stdout contains {text}"]
+resolves_to = "Check(Contains, cli.stdout, {text})"
+example = "stdout contains \"success\""
+
+[standard_terms.cli."stderr contains {text}"]
+resolves_to = "Check(Contains, cli.stderr, {text})"
+example = "stderr contains \"error\""
+
+[standard_terms.cli."stderr is empty"]
+resolves_to = "Check(Equals, cli.stderr, \"\")"
+example = "stderr is empty"
+
+# Code Quality
+[standard_terms.code_quality]
+description = "Code quality/lint assertions"
+
+[standard_terms.code_quality."code passes lint"]
+resolves_to = "Check(Equals, code.quality.passed, true)"
+example = "code passes lint"
+
+[standard_terms.code_quality."no syntax errors"]
+resolves_to = "Check(Equals, code.quality.error_count, 0)"
+example = "no syntax errors"
+
+[standard_terms.code_quality."no lint warnings"]
+resolves_to = "Check(Equals, code.quality.warning_count, 0)"
+example = "no lint warnings"
+
+[standard_terms.code_quality."code is valid"]
+resolves_to = "Check(Equals, code.quality.passed, true)"
+example = "code is valid"
+
+# Unit Test Results
+[standard_terms.unit_test]
+description = "Function result assertions"
+
+[standard_terms.unit_test."result is {expected}"]
+resolves_to = "Check(Equals, result, {expected})"
+example = "result is 42"
+
+[standard_terms.unit_test."result equals {expected}"]
+resolves_to = "Check(Equals, result, {expected})"
+example = "result equals \"hello\""
+
+# Properties
+[standard_terms.properties]
+description = "Function property assertions"
+
+[standard_terms.properties."is deterministic"]
+resolves_to = "PropertyCheck(_, Deterministic)"
+description = "f(x) always returns the same result for the same input"
+example = "is deterministic"
+
+[standard_terms.properties."is idempotent"]
+resolves_to = "PropertyCheck(_, Idempotent)"
+description = "f(f(x)) equals f(x)"
+example = "is idempotent"
+
+[standard_terms.properties."is predictable"]
+resolves_to = "PropertyCheck(_, Deterministic)"
+example = "is predictable"
+
+[standard_terms.properties."is stable"]
+resolves_to = "PropertyCheck(_, Deterministic)"
+example = "is stable"
+
+# String/Value checks
+[standard_terms.string_checks]
+description = "General string and value assertions"
+
+[standard_terms.string_checks."starts with {prefix}"]
+resolves_to = "Check(StartsWith, result, {prefix})"
+example = "starts with \"http://\""
+
+[standard_terms.string_checks."ends with {suffix}"]
+resolves_to = "Check(EndsWith, result, {suffix})"
+example = "ends with \".json\""
+
+[standard_terms.string_checks."does not contain {text}"]
+resolves_to = "Check(NotContains, result, {text})"
+example = "does not contain \"error\""
+
+[standard_terms.string_checks."does not start with {prefix}"]
+resolves_to = "Check(Not(StartsWith), result, {prefix})"
+example = "does not start with \"_\""
+
+[standard_terms.string_checks."does not end with {suffix}"]
+resolves_to = "Check(Not(EndsWith), result, {suffix})"
+example = "does not end with \"_temp\""
+
+[standard_terms.string_checks."is lowercase"]
+resolves_to = "Check(Matches, result, ^[a-z_]+$)"
+example = "is lowercase"
+
+[standard_terms.string_checks."is non-empty"]
+resolves_to = "Check(NotEquals, result, \"\")"
+example = "is non-empty"
+
+[standard_terms.string_checks."uses only {pattern}"]
+resolves_to = "Check(Matches, result, ^{pattern}+$)"
+example = "uses only [a-z0-9_]"
+
+# Bounds
+[standard_terms.bounds]
+description = "Numeric and length bound assertions"
+
+[standard_terms.bounds."length is at most {max}"]
+resolves_to = "Check(LessThan, result.length, {max}+1)"
+example = "length is at most 100"
+
+[standard_terms.bounds."is at least {min}"]
+resolves_to = "Check(GreaterThan, result, {min}-1)"
+example = "is at least 0"
+
+[standard_terms.bounds."is at most {max}"]
+resolves_to = "Check(LessThan, result, {max}+1)"
+example = "is at most 255"
+
+# =============================================================================
+# CONTEXT PATHS - Dot-notation value storage
+# =============================================================================
+
+[context]
+description = "Context stores values during test execution, accessed via dot-notation paths"
+
+[context.response]
+"response.status" = "HTTP status code (number)"
+"response.body" = "HTTP response body (string)"
+"response.headers.*" = "HTTP headers (map, lowercase keys)"
+"response.time_ms" = "Response time in milliseconds"
+
+[context.cli]
+"cli.exit_code" = "Process exit code (number)"
+"cli.stdout" = "Standard output (string)"
+"cli.stderr" = "Standard error (string)"
+
+[context.code_quality]
+"code.quality.passed" = "Whether lint/validation passed (bool)"
+"code.quality.error_count" = "Number of errors found"
+"code.quality.warning_count" = "Number of warnings found"
+"code.quality.errors" = "Array of error messages"
+
+[context.result]
+"result" = "Return value from function calls (any type)"
+
+[context.file]
+"file.content" = "File contents (string)"
+"file.exists" = "Whether file exists (bool)"
+
+# =============================================================================
+# GLOSSARY SYSTEM
+# =============================================================================
+
+[glossary]
+description = "Define domain-specific terms in your .intent file"
+
+[glossary.format]
+syntax = """
+## Glossary
+
+| Term | Means |
+|------|-------|
+| term name | human-readable description |
+| term with {param} | description using {param} |
+"""
+description = "Glossary table defines terms that can be used in assertions"
+
+[glossary.parameters]
+description = "Use {param} syntax for dynamic values in terms"
+example = "| they see {text} | body contains {text} |"
+
+[glossary.resolution]
+description = "Terms resolve through the vocabulary: glossary → standard terms → primitives"
+order = ["1. Check project glossary (defined in .intent file)", "2. Check standard terms (built-in)", "3. If not found, error with suggestions"]
+
+# =============================================================================
+# INTENT FILE FORMAT
+# =============================================================================
+
+[intent_file]
+description = "Structure of .intent files"
+
+[intent_file.structure]
+example = """
+# Project Name
+# Run: ntnt intent check server.tnt
+
+## Overview
+Brief description.
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| custom term | body contains \"expected\" |
+
+---
+
+Feature: Feature Name
+  id: feature.feature_id
+  description: \"Description\"
+  test:
+    - request: GET /path
+      assert:
+        - status: 200
+        - body contains \"text\"
+
+---
+
+Constraint: Constraint Name
+  description: \"Description\"
+  applies_to: [feature.feature_id]
+"""
+
+[intent_file.linking]
+description = "Intent files link to source files by filename"
+examples = ["server.tnt ↔ server.intent", "crypto.tnt ↔ crypto.intent"]
+
+[intent_file.annotations]
+description = "Link code to intent features with annotations"
+"@implements: feature.X" = "Links function to a feature"
+"@supports: constraint.X" = "Links function to a constraint"
+"@utility" = "Marks helper functions"
+"@internal" = "Internal implementation"
+"@infrastructure" = "Config/setup code"
+example = "// @implements: feature.user_login\nfn login_handler(req) { ... }"
+
+# =============================================================================
+# COMMANDS
+# =============================================================================
+
+[commands]
+description = "CLI commands for IAL"
+
+[commands.check]
+command = "ntnt intent check <file>"
+description = "Run tests defined in intent file against implementation"
+example = "ntnt intent check server.tnt"
+
+[commands.coverage]
+command = "ntnt intent coverage <file>"
+description = "Show which features have implementations"
+example = "ntnt intent coverage server.tnt"
+
+[commands.init]
+command = "ntnt intent init <file.intent> -o <output.tnt>"
+description = "Generate code scaffolding from intent file"
+example = "ntnt intent init server.intent -o server.tnt"
+
+[commands.studio]
+command = "ntnt intent studio <file.intent>"
+description = "Visual preview with live test execution"
+example = "ntnt intent studio server.intent"
+default_ports = ["Studio: http://127.0.0.1:3001", "App: http://127.0.0.1:8081"]

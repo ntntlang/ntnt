@@ -1299,8 +1299,9 @@ impl Interpreter {
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
 
-        // Define builtins in the module environment so len(), push(), etc. are available
+        // Define builtins and types in the module environment
         self.define_builtins();
+        self.define_builtin_types();
 
         // Evaluate the module
         self.eval(&ast)?;
@@ -1442,9 +1443,6 @@ impl Interpreter {
             println!("  {} {} -> {}", method, pattern, file);
         }
 
-        println!();
-        println!("Hot-reload enabled: edit route files and changes take effect on next request");
-
         Ok(Value::Int(routes.len() as i64))
     }
 
@@ -1473,8 +1471,9 @@ impl Interpreter {
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
 
-        // Re-define builtins in the new environment
+        // Re-define builtins and types in the new environment
         self.define_builtins();
+        self.define_builtin_types();
 
         // Evaluate the module
         self.eval(&ast)?;
@@ -1577,8 +1576,9 @@ impl Interpreter {
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
 
-        // Re-define builtins
+        // Re-define builtins and types
         self.define_builtins();
+        self.define_builtin_types();
 
         // Inject lib modules into the environment
         for (name, exports) in lib_modules {
@@ -1650,8 +1650,9 @@ impl Interpreter {
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string());
 
-        // Re-define builtins
+        // Re-define builtins and types
         self.define_builtins();
+        self.define_builtin_types();
 
         // Evaluate the module
         self.eval(&ast)?;
@@ -2716,15 +2717,18 @@ impl Interpreter {
 
                 // Check if this is a module call (struct with function field)
                 if let Value::Struct { name, fields } = &obj {
-                    if name.starts_with("module:") {
+                    if name.starts_with("module:") || name.starts_with("lib:") {
                         // This is a module - look up method in its fields
                         if let Some(func) = fields.get(method) {
                             return self.call_function(func.clone(), args);
                         } else {
+                            let module_name = name
+                                .strip_prefix("module:")
+                                .or_else(|| name.strip_prefix("lib:"))
+                                .unwrap_or(name);
                             return Err(IntentError::RuntimeError(format!(
                                 "Module '{}' has no function '{}'",
-                                name.strip_prefix("module:").unwrap_or(name),
-                                method
+                                module_name, method
                             )));
                         }
                     }
@@ -4006,20 +4010,6 @@ impl Interpreter {
         // Enable hot-reload by default for the async server
         self.server_state.hot_reload = true;
 
-        println!(
-            "🚀 Starting NTNT async server (Axum + Tokio) on http://0.0.0.0:{}...",
-            actual_port
-        );
-        println!("   Routes registered: {}", self.server_state.route_count());
-        println!(
-            "   Static directories: {}",
-            self.server_state.static_dirs.len()
-        );
-        if self.server_state.hot_reload && self.main_source_file.is_some() {
-            println!("   Hot-reload: enabled");
-        }
-        println!();
-
         // Create the channel for interpreter communication
         let config = BridgeConfig::default();
         let (tx, mut rx) = create_channel(&config);
@@ -4089,14 +4079,6 @@ impl Interpreter {
 
         // Main thread: process requests from the channel
         // This runs the interpreter in a single thread (required since it's not Send+Sync)
-        println!("Interpreter ready, processing requests...");
-        if self.server_state.hot_reload && self.main_source_file.is_some() {
-            println!(
-                "🔥 Hot-reload enabled: edit your .tnt file and changes apply on next request"
-            );
-        }
-        println!();
-
         loop {
             // Block waiting for requests
             match rx.blocking_recv() {

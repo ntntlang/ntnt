@@ -1,12 +1,5 @@
-// routes/api/status.tnt → GET /api/status
-
 import { json } from "std/http/server"
 
 fn get(req) {
-    return json(map {
-        "status": "ok",
-        "version": "0.1.8",
-        "routing": "file-based",
-        "hot_reload": "working!"
-    })
+    return json(map { "status": "ok" })
 }
