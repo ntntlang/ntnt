@@ -52,7 +52,7 @@ src/
 - **Interpreter**: Variable scoping, function calls, struct instances, trait dispatch
 - **Contracts**: Runtime `requires`/`ensures` enforcement
 - **Invariants**: Automatic struct invariant checking
-- **Built-ins**: 10 math functions + I/O utilities
+- **Built-ins**: Type conversion (str, int, float, type), math (abs, min, max, round, floor, ceil), collections (push, assert), I/O (print, len)
 - **Traits**: Trait declarations with default methods, `impl Trait for Type`
 - **Trait Bounds**: Constrain generics with `<T: Trait>` syntax
 - **Iteration**: For-in loops over arrays, ranges, strings, and maps

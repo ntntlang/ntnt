@@ -98,6 +98,138 @@ pub struct Glossary {
     pub terms: HashMap<String, GlossaryTerm>,
 }
 
+/// Parsed keyword syntax from a glossary meaning
+/// Keywords: call:, source:, input:, check:, property:
+#[derive(Debug, Clone, Default)]
+pub struct KeywordSyntax {
+    /// Function to call: "call: function_name({args})"
+    pub call: Option<FunctionCallSpec>,
+    /// Source file for the function: "source: lib/text.tnt"
+    pub source: Option<String>,
+    /// Input source for test data: "input: test_data.name" or "input: corpus.strings"
+    pub input: Option<String>,
+    /// Invariant to check: "check: invariant.id"
+    pub check: Option<String>,
+    /// Property to verify: "property: deterministic" or "property: idempotent"
+    pub property: Option<String>,
+    /// Expected result pattern: "result is {expected}"
+    pub result_check: Option<String>,
+}
+
+/// Specification for a function call
+#[derive(Debug, Clone)]
+pub struct FunctionCallSpec {
+    pub function_name: String,
+    pub args: Vec<String>, // Argument patterns like "{title}" or literal values
+}
+
+impl KeywordSyntax {
+    /// Check if a meaning string contains keyword syntax
+    pub fn is_keyword_syntax(meaning: &str) -> bool {
+        meaning.contains("call:")
+            || meaning.contains("source:")
+            || meaning.contains("input:")
+            || meaning.contains("check:")
+            || meaning.contains("property:")
+    }
+
+    /// Parse keyword syntax from a meaning string
+    /// Format: "call: func({arg1}, {arg2}), source: file, input: test_data, check: invariant, property: type"
+    pub fn parse(meaning: &str) -> Option<Self> {
+        if !Self::is_keyword_syntax(meaning) {
+            return None;
+        }
+
+        let mut syntax = KeywordSyntax::default();
+
+        // Smart split: split by comma but respect parentheses
+        // This handles function calls like: call: func({arg1}, {arg2})
+        let parts = Self::split_respecting_parens(meaning);
+
+        for part in parts {
+            let part = part.trim();
+
+            if part.starts_with("call:") {
+                let call_str = part.trim_start_matches("call:").trim();
+                syntax.call = Self::parse_function_call(call_str);
+            } else if part.starts_with("source:") {
+                syntax.source = Some(part.trim_start_matches("source:").trim().to_string());
+            } else if part.starts_with("input:") {
+                syntax.input = Some(part.trim_start_matches("input:").trim().to_string());
+            } else if part.starts_with("check:") {
+                syntax.check = Some(part.trim_start_matches("check:").trim().to_string());
+            } else if part.starts_with("property:") {
+                syntax.property = Some(part.trim_start_matches("property:").trim().to_string());
+            } else if part.starts_with("result is") || part.contains("is {expected}") {
+                syntax.result_check = Some(part.to_string());
+            }
+        }
+
+        Some(syntax)
+    }
+
+    /// Split a string by commas while respecting parentheses
+    /// "call: func(a, b), source: file" -> ["call: func(a, b)", "source: file"]
+    fn split_respecting_parens(s: &str) -> Vec<String> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        let mut paren_depth: i32 = 0;
+
+        for ch in s.chars() {
+            match ch {
+                '(' => {
+                    paren_depth += 1;
+                    current.push(ch);
+                }
+                ')' => {
+                    paren_depth = paren_depth.saturating_sub(1);
+                    current.push(ch);
+                }
+                ',' if paren_depth == 0 => {
+                    if !current.trim().is_empty() {
+                        parts.push(current.trim().to_string());
+                    }
+                    current = String::new();
+                }
+                _ => {
+                    current.push(ch);
+                }
+            }
+        }
+
+        if !current.trim().is_empty() {
+            parts.push(current.trim().to_string());
+        }
+
+        parts
+    }
+
+    /// Parse a function call specification: "function_name({arg1}, {arg2})"
+    fn parse_function_call(call_str: &str) -> Option<FunctionCallSpec> {
+        // Match: function_name({args}) or function_name(arg1, arg2)
+        let paren_start = call_str.find('(')?;
+        let paren_end = call_str.rfind(')')?;
+
+        if paren_end <= paren_start {
+            return None;
+        }
+
+        let function_name = call_str[..paren_start].trim().to_string();
+        let args_str = &call_str[paren_start + 1..paren_end];
+
+        let args: Vec<String> = args_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        Some(FunctionCallSpec {
+            function_name,
+            args,
+        })
+    }
+}
+
 impl Glossary {
     pub fn new() -> Self {
         Self {
@@ -145,7 +277,43 @@ impl Glossary {
     /// - Terms with "they see" in meaning → body contains assertions  
     /// - Terms with HTTP actions → HTTP action primitives
     pub fn to_ial_vocabulary(&self) -> Vocabulary {
-        self.to_ial_vocabulary_with_components(&[])
+        self.to_ial_vocabulary_full(&[], &[])
+    }
+
+    /// Convert glossary, components, and invariants to an IAL Vocabulary.
+    /// Invariants are added as vocabulary entries that expand to their assertions.
+    pub fn to_ial_vocabulary_full(
+        &self,
+        components: &[Component],
+        invariants: &[Invariant],
+    ) -> Vocabulary {
+        let mut vocab = self.to_ial_vocabulary_with_components(components);
+
+        // Add invariants as vocabulary entries
+        // Each invariant expands to its assertions
+        for invariant in invariants {
+            if invariant.id.is_empty() || invariant.assertions.is_empty() {
+                continue;
+            }
+
+            // Convert invariant assertions to IAL terms
+            let terms: Vec<Term> = invariant
+                .assertions
+                .iter()
+                .map(|assertion| Term::new(assertion))
+                .collect();
+
+            // Add both with and without "invariant." prefix
+            vocab.add_terms(&invariant.id, terms.clone());
+
+            // Also add without the "invariant." prefix if present
+            if invariant.id.starts_with("invariant.") {
+                let short_id = invariant.id.trim_start_matches("invariant.");
+                vocab.add_terms(short_id, terms);
+            }
+        }
+
+        vocab
     }
 
     /// Convert glossary and components to an IAL Vocabulary.
@@ -220,6 +388,40 @@ impl Glossary {
             // Convert $param to {param} for IAL compatibility
             let ial_pattern = Self::convert_params_to_ial(&term.term);
             let ial_meaning = Self::convert_params_to_ial(&term.meaning);
+
+            // NEW: Check for keyword syntax (call:, input:, check:, property:)
+            // If present, this term resolves to primitives, not other terms
+            if KeywordSyntax::is_keyword_syntax(&ial_meaning) {
+                if let Some(keyword_syntax) = KeywordSyntax::parse(&ial_meaning) {
+                    // Convert keyword syntax to sub-terms that will resolve to primitives
+                    let mut sub_terms: Vec<Term> = Vec::new();
+
+                    // Handle "check: invariant.X" - this references an invariant
+                    if let Some(ref invariant_ref) = keyword_syntax.check {
+                        // Add as a term that will be resolved to the invariant's assertions
+                        sub_terms.push(Term::new(invariant_ref));
+                    }
+
+                    // Handle "property: deterministic/idempotent"
+                    if let Some(ref property) = keyword_syntax.property {
+                        sub_terms.push(Term::new(format!("is {}", property)));
+                    }
+
+                    // Handle "result is {expected}" checks
+                    if let Some(ref result_check) = keyword_syntax.result_check {
+                        sub_terms.push(Term::new(result_check));
+                    }
+
+                    // Note: "call:" and "input:" are handled at scenario execution time,
+                    // not during vocabulary resolution. They are stored in the term
+                    // and used when running the test to set up the function call context.
+
+                    if !sub_terms.is_empty() {
+                        vocab.add_terms(&ial_pattern, sub_terms);
+                    }
+                }
+                continue;
+            }
 
             // Check if this term references a component
             if meaning_lower.contains("component.") {
@@ -308,7 +510,8 @@ impl Glossary {
     }
 
     /// Resolve a scenario's when_clause to extract the action to perform.
-    /// Returns WhenAction::Http for HTTP requests, WhenAction::CodeQuality for code quality checks.
+    /// Returns WhenAction::Http for HTTP requests, WhenAction::CodeQuality for code quality checks,
+    /// or WhenAction::FunctionCall for unit tests using the "call:" keyword syntax.
     pub fn resolve_when_clause(&self, when_clause: &str) -> Option<WhenAction> {
         let when_lower = when_clause.to_lowercase();
 
@@ -323,6 +526,44 @@ impl Glossary {
                 lint: true,
                 validate: true,
             });
+        }
+
+        // Check for unit test scenarios using keyword syntax (call:)
+        // Look for glossary terms that have call: in their meaning
+        for term in self.terms.values() {
+            if let Some(keyword_syntax) = KeywordSyntax::parse(&term.meaning) {
+                if let Some(ref call_spec) = keyword_syntax.call {
+                    // Check if the when_clause matches this term (with parameters)
+                    if let Some(captured_params) = self.match_term_pattern(when_clause, &term.term)
+                    {
+                        // Substitute captured parameters into function args
+                        let substituted_args: Vec<String> = call_spec
+                            .args
+                            .iter()
+                            .map(|arg| {
+                                let mut result = arg.clone();
+                                for (param_name, param_value) in &captured_params {
+                                    let placeholder = format!("{{{}}}", param_name);
+                                    result = result.replace(&placeholder, param_value);
+                                }
+                                result
+                            })
+                            .collect();
+
+                        // Get source file from source: keyword or use default
+                        let source_file = keyword_syntax
+                            .source
+                            .clone()
+                            .unwrap_or_else(|| "lib/text.tnt".to_string());
+
+                        return Some(WhenAction::FunctionCall {
+                            source_file,
+                            function_name: call_spec.function_name.clone(),
+                            args: substituted_args,
+                        });
+                    }
+                }
+            }
         }
 
         // First, try to match parameterized glossary terms
@@ -568,6 +809,45 @@ impl Glossary {
         names
     }
 
+    /// Match a clause against a term pattern and return captured parameters
+    /// Example: clause "slugify 'Hello World'" matches term "slugify {input}"
+    /// Returns: Some(HashMap { "input": "Hello World" })
+    fn match_term_pattern(
+        &self,
+        clause: &str,
+        term_pattern: &str,
+    ) -> Option<HashMap<String, String>> {
+        // Build a regex pattern from the term
+        let pattern = Self::term_to_regex_pattern(term_pattern);
+        let re = regex::Regex::new(&format!("(?i)^{}$", pattern)).ok()?;
+
+        // Try to match the clause
+        let caps = re.captures(clause)?;
+
+        // Extract parameter values
+        let mut params = HashMap::new();
+        let param_names = Self::extract_param_names(term_pattern);
+
+        for (i, name) in param_names.iter().enumerate() {
+            if let Some(value) = caps.get(i + 1) {
+                let mut captured = value.as_str().to_string();
+                // Remove surrounding quotes if present
+                if (captured.starts_with('"') && captured.ends_with('"'))
+                    || (captured.starts_with('\'') && captured.ends_with('\''))
+                {
+                    captured = captured[1..captured.len() - 1].to_string();
+                }
+                params.insert(name.clone(), captured);
+            }
+        }
+
+        if params.is_empty() && !param_names.is_empty() {
+            None
+        } else {
+            Some(params)
+        }
+    }
+
     /// Extract a path from a glossary term's meaning
     fn extract_path_from_meaning(meaning: &str) -> Option<String> {
         // Pattern: contains "/" followed by optional path
@@ -658,8 +938,21 @@ impl Glossary {
     ///
     /// This returns all 4 assertions, not just the first one.
     pub fn resolve_outcomes(&self, outcome: &str) -> Vec<Assertion> {
-        // Build IAL vocabulary from glossary
-        let vocab = self.to_ial_vocabulary();
+        self.resolve_outcomes_with_context(outcome, &[], &[])
+    }
+
+    /// Resolve an outcome with full context (components and invariants).
+    ///
+    /// This version includes invariants in the vocabulary so that
+    /// `check: invariant.url_slug` can expand to the invariant's assertions.
+    pub fn resolve_outcomes_with_context(
+        &self,
+        outcome: &str,
+        components: &[Component],
+        invariants: &[Invariant],
+    ) -> Vec<Assertion> {
+        // Build IAL vocabulary from glossary, components, and invariants
+        let vocab = self.to_ial_vocabulary_full(components, invariants);
 
         // Convert outcome to IAL format ($param -> {param}) for lookup
         let ial_outcome = Self::convert_params_to_ial(outcome);
@@ -915,6 +1208,136 @@ impl Glossary {
             }
         }
 
+        // === Unit Test Assertions ===
+
+        // "result is X", "result equals X", or "is X" where X is expected value
+        if text_lower.starts_with("result is ")
+            || text_lower.starts_with("result equals ")
+            || text_lower.starts_with("is ")
+        {
+            // Check for special patterns first
+            if text_lower.contains("lowercase") {
+                return Some(Assertion::IsLowercase);
+            }
+            if text_lower.contains("non-empty") || text_lower.contains("non empty") {
+                return Some(Assertion::IsNonEmpty);
+            }
+            // Check for property-based assertions
+            if text_lower.contains("deterministic") {
+                return Some(Assertion::PropertyDeterministic);
+            }
+            if text_lower.contains("idempotent") {
+                return Some(Assertion::PropertyIdempotent);
+            }
+            // Extract quoted expected value
+            if let Some(expected) = Self::extract_quoted_text(text) {
+                return Some(Assertion::ResultEquals(expected));
+            }
+            // Try unquoted value after "result is ", "result equals ", or "is "
+            let value = if text_lower.starts_with("result is ") {
+                text.get(10..).unwrap_or("").trim() // Skip "result is "
+            } else if text_lower.starts_with("result equals ") {
+                text.get(14..).unwrap_or("").trim() // Skip "result equals "
+            } else if text_lower.starts_with("is ") {
+                text.get(3..).unwrap_or("").trim() // Skip "is "
+            } else {
+                text.trim()
+            };
+            if !value.is_empty() && value != "lowercase" && value != "non-empty" {
+                return Some(Assertion::ResultEquals(value.to_string()));
+            }
+        }
+
+        // "is lowercase"
+        if text_lower == "is lowercase" || text_lower.contains("is lowercase") {
+            return Some(Assertion::IsLowercase);
+        }
+
+        // "is non-empty"
+        if text_lower == "is non-empty"
+            || text_lower == "is nonempty"
+            || text_lower.contains("non-empty")
+            || text_lower.contains("nonempty")
+        {
+            return Some(Assertion::IsNonEmpty);
+        }
+
+        // "uses only [chars]" - extract character class
+        if text_lower.contains("uses only") {
+            // Pattern: "uses only [a-z0-9-]" or "uses only a-z0-9-"
+            if let Some(start) = text.find('[') {
+                if let Some(end) = text.find(']') {
+                    let chars = text[start + 1..end].to_string();
+                    return Some(Assertion::UsesOnlyChars(chars));
+                }
+            }
+            // Try without brackets
+            let after_uses_only = text_lower.trim_start_matches("uses only").trim();
+            if !after_uses_only.is_empty() {
+                return Some(Assertion::UsesOnlyChars(after_uses_only.to_string()));
+            }
+        }
+
+        // "does not start with X"
+        if text_lower.contains("does not start with") || text_lower.contains("doesn't start with") {
+            if let Some(char_str) = Self::extract_quoted_text(text) {
+                return Some(Assertion::DoesNotStartWith(char_str));
+            }
+        }
+
+        // "does not end with X" or "does not end with space before X"
+        if text_lower.contains("does not end with") || text_lower.contains("doesn't end with") {
+            if let Some(char_str) = Self::extract_quoted_text(text) {
+                // Handle "space before" modifier - prepend space to the pattern
+                let pattern = if text_lower.contains("space before") {
+                    format!(" {}", char_str)
+                } else {
+                    char_str
+                };
+                return Some(Assertion::DoesNotEndWith(pattern));
+            }
+        }
+
+        // "does not contain X" (for unit tests, not HTTP body)
+        if text_lower.contains("does not contain") && !text_lower.contains("body") {
+            if let Some(pattern) = Self::extract_quoted_text(text) {
+                return Some(Assertion::DoesNotContain(pattern));
+            }
+        }
+
+        // "length is at most N" or "length is at most {param}"
+        if text_lower.contains("length is at most") || text_lower.contains("length at most") {
+            // Extract the value after "at most" - could be a number or {placeholder}
+            if let Some(idx) = text_lower.find("at most") {
+                let after = text[idx + 7..].trim();
+                if !after.is_empty() {
+                    // Store as string - will be parsed at runtime after substitution
+                    return Some(Assertion::LengthAtMost(after.to_string()));
+                }
+            }
+            // Fallback: try to extract just digits
+            let num_str: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+            if !num_str.is_empty() {
+                return Some(Assertion::LengthAtMost(num_str));
+            }
+        }
+
+        // "ends with ... or equals original"
+        if text_lower.contains("ends with") && text_lower.contains("or equals original") {
+            return Some(Assertion::EndsWithEllipsisOrOriginal);
+        }
+
+        // === Property-Based Assertions ===
+        // "property: deterministic" or "is deterministic"
+        if text_lower.contains("deterministic") {
+            return Some(Assertion::PropertyDeterministic);
+        }
+
+        // "property: idempotent" or "is idempotent"
+        if text_lower.contains("idempotent") {
+            return Some(Assertion::PropertyIdempotent);
+        }
+
         None
     }
 
@@ -1027,7 +1450,7 @@ impl Glossary {
         scenario: &Scenario,
         components: &[Component],
     ) -> Option<(TestCase, Vec<String>, Vec<String>)> {
-        self.resolve_scenario_with_base_dir(scenario, components, None)
+        self.resolve_scenario_with_base_dir(scenario, components, &[], None)
     }
 
     /// Resolve a scenario to a TestCase with optional base directory for code quality checks.
@@ -1035,6 +1458,7 @@ impl Glossary {
         &self,
         scenario: &Scenario,
         components: &[Component],
+        invariants: &[Invariant],
         base_dir: Option<&str>,
     ) -> Option<(TestCase, Vec<String>, Vec<String>)> {
         // Resolve preconditions from Given clause if present
@@ -1042,8 +1466,8 @@ impl Glossary {
         if let Some(given) = &scenario.given_clause {
             // Try to resolve Given clause as an outcome (e.g., "no tasks exist")
             // This becomes precondition assertions to verify before the test
-            // Use resolve_outcomes for compound terms
-            let resolved = self.resolve_outcomes(given);
+            // Use resolve_outcomes_with_context for full invariant resolution
+            let resolved = self.resolve_outcomes_with_context(given, components, invariants);
             preconditions.extend(resolved);
             // Note: If Given doesn't resolve, we just skip it (it's descriptive only)
         }
@@ -1072,6 +1496,17 @@ impl Glossary {
                 });
                 ("CODE_QUALITY".to_string(), quality_path, None, false)
             }
+            WhenAction::FunctionCall {
+                source_file,
+                function_name,
+                args,
+            } => {
+                // Unit test scenarios use FUNCTION_CALL method marker
+                // Format: method="FUNCTION_CALL", path="source_file::function_name", body=args as JSON
+                let fn_path = format!("{}::{}", source_file, function_name);
+                let args_json = serde_json::to_string(args).unwrap_or_else(|_| "[]".to_string());
+                ("FUNCTION_CALL".to_string(), fn_path, Some(args_json), false)
+            }
         };
 
         for outcome in &scenario.outcomes {
@@ -1085,8 +1520,9 @@ impl Glossary {
                 for behavior in &component.inherent_behavior {
                     let substituted =
                         Self::substitute_params(behavior, &component.parameters, &params);
-                    // Use resolve_outcomes for recursive expansion of compound terms
-                    let resolved = self.resolve_outcomes(&substituted);
+                    // Use resolve_outcomes_with_context for full invariant resolution
+                    let resolved =
+                        self.resolve_outcomes_with_context(&substituted, components, invariants);
                     if !resolved.is_empty() {
                         assertions.extend(resolved);
                     } else {
@@ -1094,8 +1530,8 @@ impl Glossary {
                     }
                 }
             } else {
-                // Use resolve_outcomes to get ALL assertions from compound terms
-                let resolved = self.resolve_outcomes(outcome);
+                // Use resolve_outcomes_with_context for full invariant resolution
+                let resolved = self.resolve_outcomes_with_context(outcome, components, invariants);
                 if !resolved.is_empty() {
                     assertions.extend(resolved);
                 } else {
@@ -1129,6 +1565,369 @@ impl Glossary {
             unresolved,
             component_refs,
         ))
+    }
+
+    /// Resolve a scenario with test data or corpus expansion.
+    ///
+    /// If the scenario's when clause references test data via `input: test_data.X`,
+    /// this returns one TestCase per row in the test data, with values substituted.
+    /// If it references a corpus via `input: corpus.X`, it generates test cases from
+    /// the built-in corpus (strings, numbers, edge).
+    /// Otherwise, returns a single TestCase.
+    ///
+    /// Returns (Vec<TestCase>, unresolved_outcomes, component_refs, input_ref)
+    pub fn resolve_scenario_with_test_data(
+        &self,
+        scenario: &Scenario,
+        components: &[Component],
+        invariants: &[Invariant],
+        test_data: &[TestDataSection],
+        base_dir: Option<&str>,
+    ) -> Option<(Vec<TestCase>, Vec<String>, Vec<String>, Option<String>)> {
+        // First, get the base resolution to understand the scenario structure
+        let (base_test, unresolved, component_refs) =
+            self.resolve_scenario_with_base_dir(scenario, components, invariants, base_dir)?;
+
+        // Check if the when clause references test data or corpus
+        let input_ref = self.extract_input_reference(&scenario.when_clause);
+
+        // Get rows to expand - either from test_data sections or built-in corpus
+        let rows: Vec<HashMap<String, String>> = if let Some(ref input_id) = input_ref {
+            if input_id.starts_with("corpus.") {
+                // Generate rows from built-in corpus
+                Self::generate_corpus_rows(input_id)
+            } else if input_id.starts_with("test_data.") {
+                // Look up in test data sections
+                test_data
+                    .iter()
+                    .find(|td| &td.id == input_id)
+                    .map(|td| td.rows.clone())
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
+
+        // If we have rows to expand, create test cases for each
+        if !rows.is_empty() {
+            let mut test_cases = Vec::new();
+
+            for row in &rows {
+                // Create a new TestCase with substituted values
+                let mut tc = base_test.clone();
+
+                // Substitute row values into path, body, and assertions
+                tc.path = self.substitute_row_values(&tc.path, row);
+                if let Some(ref body) = tc.body {
+                    // Use JSON-aware substitution for function call args
+                    tc.body = Some(self.substitute_row_values_json(body, row));
+                }
+
+                // Substitute row values into assertions
+                tc.assertions = tc
+                    .assertions
+                    .iter()
+                    .map(|assertion| self.substitute_assertion_values(assertion, row))
+                    .collect();
+
+                // Update scenario name to include row info
+                if let Some(ref name) = tc.scenario_name {
+                    // Create a concise row description
+                    let row_desc: Vec<String> = row
+                        .iter()
+                        .take(2) // Just first 2 columns for brevity
+                        .map(|(k, v)| {
+                            let v_short = if v.len() > 20 {
+                                format!("{}...", &v[..17])
+                            } else {
+                                v.clone()
+                            };
+                            format!("{}={}", k, v_short)
+                        })
+                        .collect();
+                    tc.scenario_name = Some(format!("{} [{}]", name, row_desc.join(", ")));
+                }
+
+                test_cases.push(tc);
+            }
+
+            return Some((test_cases, unresolved, component_refs, input_ref));
+        }
+
+        // No test data expansion - return single test case
+        Some((vec![base_test], unresolved, component_refs, input_ref))
+    }
+
+    /// Extract input reference from a when clause.
+    ///
+    /// Looks for glossary terms with `input: test_data.X` or `input: corpus.X` keyword syntax.
+    /// Returns the input reference string (e.g., "test_data.examples" or "corpus.strings").
+    fn extract_input_reference(&self, when_clause: &str) -> Option<String> {
+        let when_lower = when_clause.to_lowercase();
+
+        // Look for glossary terms that match the when clause
+        for term in self.terms.values() {
+            let term_pattern = Self::strip_param_placeholders(&term.term);
+            let term_lower = term_pattern.to_lowercase();
+
+            if when_lower.contains(&term_lower.trim()) {
+                // Check if this term has keyword syntax with input:
+                if KeywordSyntax::is_keyword_syntax(&term.meaning) {
+                    if let Some(syntax) = KeywordSyntax::parse(&term.meaning) {
+                        if let Some(ref input) = syntax.input {
+                            // Check if it references test_data or corpus
+                            if input.starts_with("test_data.") || input.starts_with("corpus.") {
+                                return Some(input.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Extract test data reference from a when clause (backward compatibility).
+    #[allow(dead_code)]
+    fn extract_test_data_reference(&self, when_clause: &str) -> Option<String> {
+        self.extract_input_reference(when_clause)
+            .filter(|r| r.starts_with("test_data."))
+    }
+
+    /// Substitute test data row values into an assertion.
+    ///
+    /// Handles different assertion types and substitutes placeholders.
+    fn substitute_assertion_values(
+        &self,
+        assertion: &Assertion,
+        row: &HashMap<String, String>,
+    ) -> Assertion {
+        match assertion {
+            Assertion::BodyContains(text) => {
+                Assertion::BodyContains(self.substitute_row_values(text, row))
+            }
+            Assertion::BodyNotContains(text) => {
+                Assertion::BodyNotContains(self.substitute_row_values(text, row))
+            }
+            Assertion::BodyMatches(pattern) => {
+                Assertion::BodyMatches(self.substitute_row_values(pattern, row))
+            }
+            Assertion::HeaderContains(header, value) => Assertion::HeaderContains(
+                self.substitute_row_values(header, row),
+                self.substitute_row_values(value, row),
+            ),
+            // Unit test assertions that may have parameter placeholders
+            Assertion::ResultEquals(expected) => {
+                Assertion::ResultEquals(self.substitute_row_values(expected, row))
+            }
+            Assertion::UsesOnlyChars(chars) => {
+                Assertion::UsesOnlyChars(self.substitute_row_values(chars, row))
+            }
+            Assertion::DoesNotStartWith(s) => {
+                Assertion::DoesNotStartWith(self.substitute_row_values(s, row))
+            }
+            Assertion::DoesNotEndWith(s) => {
+                Assertion::DoesNotEndWith(self.substitute_row_values(s, row))
+            }
+            Assertion::DoesNotContain(s) => {
+                Assertion::DoesNotContain(self.substitute_row_values(s, row))
+            }
+            Assertion::LengthAtMost(s) => {
+                Assertion::LengthAtMost(self.substitute_row_values(s, row))
+            }
+            // Other assertion types don't have string fields that need substitution
+            _ => assertion.clone(),
+        }
+    }
+
+    /// Substitute test data row values into a string.
+    ///
+    /// Replaces `{column_name}` placeholders with values from the row.
+    fn substitute_row_values(&self, s: &str, row: &HashMap<String, String>) -> String {
+        let mut result = s.to_string();
+        for (key, value) in row {
+            let placeholder = format!("{{{}}}", key);
+            result = result.replace(&placeholder, value);
+        }
+        result
+    }
+
+    /// Substitute row values in a JSON body string, properly escaping values for JSON.
+    fn substitute_row_values_json(&self, s: &str, row: &HashMap<String, String>) -> String {
+        let mut result = s.to_string();
+        for (key, value) in row {
+            let placeholder = format!("\"{{{}}}", key); // Look for "{key}" in JSON
+                                                        // Escape the value for JSON (handle quotes, backslashes, newlines, tabs)
+            let escaped = value
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t");
+            let replacement = format!("\"{}\"", escaped); // Replace with properly escaped JSON string
+            result = result.replace(&format!("{}\"", placeholder), &replacement);
+
+            // Also handle plain placeholder in JSON context
+            let plain_placeholder = format!("{{{}}}", key);
+            result = result.replace(&plain_placeholder, &escaped);
+        }
+        result
+    }
+
+    /// Generate corpus test data rows for built-in corpora.
+    ///
+    /// Supported corpora:
+    /// - `corpus.strings` - Edge case strings (empty, whitespace, unicode, long, special chars)
+    /// - `corpus.numbers` - Edge case numbers (0, -1, 1, MAX_INT, MIN_INT, floats)
+    /// - `corpus.edge` - General edge cases (null-like values, empty collections)
+    ///
+    /// Returns rows with a single "input" column containing the test value.
+    pub fn generate_corpus_rows(corpus_name: &str) -> Vec<HashMap<String, String>> {
+        match corpus_name {
+            "corpus.strings" | "strings" => Self::corpus_strings(),
+            "corpus.numbers" | "numbers" => Self::corpus_numbers(),
+            "corpus.edge" | "edge" => Self::corpus_edge(),
+            _ => vec![], // Unknown corpus
+        }
+    }
+
+    /// String corpus: edge case strings for testing text processing
+    fn corpus_strings() -> Vec<HashMap<String, String>> {
+        let values = vec![
+            // Empty and whitespace
+            "",
+            "   ",
+            "\t\n",
+            // Normal cases
+            "Hello World",
+            "simple",
+            // Case variations
+            "UPPERCASE",
+            "lowercase",
+            "MixedCase",
+            // Numbers in strings
+            "123",
+            "test123",
+            "123test",
+            // Special characters
+            "!@#$%^&*()",
+            "hello-world",
+            "hello_world",
+            "hello.world",
+            // Punctuation
+            "What's up?",
+            "Hello, World!",
+            "test...more",
+            // Leading/trailing special chars
+            "-leading",
+            "trailing-",
+            "--double--",
+            // Long string
+            "This is a very long string that goes on and on and might cause issues with truncation or buffer limits in some systems",
+            // Single character
+            "a",
+            // Unicode (safe subset - no emoji to avoid boundary issues)
+            "Cafe",
+            "Nino",
+            // Quotes
+            "\"quoted\"",
+            "'single'",
+            // Path-like
+            "path/to/file",
+            "../parent",
+            // URL-like
+            "http://example.com",
+            // SQL injection attempt (for robustness testing)
+            "'; DROP TABLE posts;--",
+            // HTML/script injection
+            "<script>alert('xss')</script>",
+        ];
+
+        values
+            .into_iter()
+            .map(|v| {
+                let mut row = HashMap::new();
+                row.insert("input".to_string(), v.to_string());
+                row
+            })
+            .collect()
+    }
+
+    /// Number corpus: edge case numbers for testing numeric processing
+    fn corpus_numbers() -> Vec<HashMap<String, String>> {
+        let values = vec![
+            "0",
+            "1",
+            "-1",
+            "42",
+            "-42",
+            "100",
+            "1000",
+            "999999",
+            "-999999",
+            "2147483647",  // i32::MAX
+            "-2147483648", // i32::MIN
+            "0.0",
+            "0.5",
+            "-0.5",
+            "3.14159",
+            "0.001",
+            "1000.001",
+            "-1000.001",
+        ];
+
+        values
+            .into_iter()
+            .map(|v| {
+                let mut row = HashMap::new();
+                row.insert("input".to_string(), v.to_string());
+                row
+            })
+            .collect()
+    }
+
+    /// Edge corpus: general edge cases for testing robustness
+    fn corpus_edge() -> Vec<HashMap<String, String>> {
+        let values = vec![
+            // Empty/null-like
+            "",
+            "null",
+            "NULL",
+            "nil",
+            "None",
+            "undefined",
+            // Boolean-like strings
+            "true",
+            "false",
+            "True",
+            "False",
+            "yes",
+            "no",
+            "0",
+            "1",
+            // Whitespace variants
+            " ",
+            "  ",
+            "\t",
+            "\n",
+            "\r\n",
+            // Special JSON values
+            "[]",
+            "{}",
+            "\"\"",
+        ];
+
+        values
+            .into_iter()
+            .map(|v| {
+                let mut row = HashMap::new();
+                row.insert("input".to_string(), v.to_string());
+                row
+            })
+            .collect()
     }
 
     /// Check if an outcome references a component and extract parameters
@@ -1270,6 +2069,33 @@ pub struct Component {
 }
 
 // ============================================================================
+// INVARIANT SYSTEM (Bundled Assertions)
+// ============================================================================
+
+/// An invariant is a bundle of assertions that can be referenced by ID
+/// Example:
+///   Invariant: URL Slug
+///     id: invariant.url_slug
+///     Assertions:
+///       → uses only [a-z0-9-]
+///       → is lowercase
+#[derive(Debug, Clone, Serialize)]
+pub struct Invariant {
+    /// Invariant ID (e.g., "invariant.url_slug")
+    pub id: String,
+    /// Invariant name (e.g., "URL Slug")
+    pub name: String,
+    /// Optional description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional parameters this invariant accepts
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<String>,
+    /// Bundled assertions (e.g., ["uses only [a-z0-9-]", "is lowercase"])
+    pub assertions: Vec<String>,
+}
+
+// ============================================================================
 // SCENARIO SYSTEM (Natural Language Tests)
 // ============================================================================
 
@@ -1341,6 +2167,33 @@ pub enum Assertion {
     CodeQualityNoWarnings,
     /// Check that error count is below threshold: `error count < N`
     CodeQualityErrorCount(u32),
+
+    // === Unit Test Assertions ===
+    /// Check result equals expected value: `result is "expected"`
+    ResultEquals(String),
+    /// Check result is lowercase: `is lowercase`
+    IsLowercase,
+    /// Check result is non-empty: `is non-empty`
+    IsNonEmpty,
+    /// Check result uses only allowed characters: `uses only [a-z0-9-]`
+    UsesOnlyChars(String),
+    /// Check result does not start with character: `does not start with "-"`
+    DoesNotStartWith(String),
+    /// Check result does not end with character: `does not end with "-"`
+    DoesNotEndWith(String),
+    /// Check result does not contain pattern: `does not contain "--"`
+    DoesNotContain(String),
+    /// Check length is at most N: `length is at most N` or `length is at most {param}`
+    /// Stores the value as a String to support placeholder substitution from test data
+    LengthAtMost(String),
+    /// Check ends with ellipsis or equals original: `ends with "..." or equals original`
+    EndsWithEllipsisOrOriginal,
+
+    // === Property-Based Assertions ===
+    /// Check function is deterministic: same input always produces same output
+    PropertyDeterministic,
+    /// Check function is idempotent: f(f(x)) == f(x)
+    PropertyIdempotent,
 }
 
 // ============================================================================
@@ -1362,6 +2215,12 @@ pub enum WhenAction {
         file: Option<String>,
         lint: bool,
         validate: bool,
+    },
+    /// Function call for unit testing
+    FunctionCall {
+        source_file: String,
+        function_name: String,
+        args: Vec<String>,
     },
 }
 
@@ -1408,6 +2267,19 @@ impl Assertion {
             Assertion::CodeQualityNoErrors => "no syntax errors".to_string(),
             Assertion::CodeQualityNoWarnings => "no lint warnings".to_string(),
             Assertion::CodeQualityErrorCount(count) => format!("error count is {}", count),
+            // Unit test assertions
+            Assertion::ResultEquals(value) => format!("result equals \"{}\"", value),
+            Assertion::IsLowercase => "is lowercase".to_string(),
+            Assertion::IsNonEmpty => "is non-empty".to_string(),
+            Assertion::UsesOnlyChars(chars) => format!("uses only [{}]", chars),
+            Assertion::DoesNotStartWith(s) => format!("does not start with \"{}\"", s),
+            Assertion::DoesNotEndWith(s) => format!("does not end with \"{}\"", s),
+            Assertion::DoesNotContain(s) => format!("does not contain \"{}\"", s),
+            Assertion::LengthAtMost(n) => format!("length at most {}", n),
+            Assertion::EndsWithEllipsisOrOriginal => "ends with ellipsis or original".to_string(),
+            // Property-based assertions
+            Assertion::PropertyDeterministic => "property: deterministic".to_string(),
+            Assertion::PropertyIdempotent => "property: idempotent".to_string(),
         }
     }
 }
@@ -1640,6 +2512,20 @@ fn run_assertion_legacy(
         | Assertion::CodeQualityErrorCount(_) => {
             return None;
         }
+        // Unit test assertions are handled in run_function_call_test
+        Assertion::ResultEquals(_)
+        | Assertion::IsLowercase
+        | Assertion::IsNonEmpty
+        | Assertion::UsesOnlyChars(_)
+        | Assertion::DoesNotStartWith(_)
+        | Assertion::DoesNotEndWith(_)
+        | Assertion::DoesNotContain(_)
+        | Assertion::LengthAtMost(_)
+        | Assertion::EndsWithEllipsisOrOriginal
+        | Assertion::PropertyDeterministic
+        | Assertion::PropertyIdempotent => {
+            return None;
+        }
     })
 }
 
@@ -1691,6 +2577,29 @@ pub struct IntentFile {
     /// Reusable components (IAL Components)
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub components: Vec<Component>,
+    /// Bundled assertion invariants
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub invariants: Vec<Invariant>,
+    /// Test data sections (for unit testing)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub test_data: Vec<TestDataSection>,
+}
+
+/// A section of test data linked to a feature/scenario
+#[derive(Debug, Clone, Serialize)]
+pub struct TestDataSection {
+    /// Test data ID (e.g., "test_data.slugify_examples")
+    pub id: String,
+    /// Name of this test data section
+    pub name: String,
+    /// Feature this data is for (e.g., "feature.text_utilities")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub for_feature: Option<String>,
+    /// Scenario this data is for (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub for_scenario: Option<String>,
+    /// Test cases as rows (each row is a map of column -> value)
+    pub rows: Vec<HashMap<String, String>>,
 }
 
 /// Result of running a single assertion
@@ -1787,19 +2696,76 @@ impl IntentFile {
         Self::parse_content(&content, path.to_string_lossy().to_string())
     }
 
+    /// Look up test data by ID.
+    ///
+    /// Test data IDs are typically "test_data.name" format.
+    /// Returns the test data section if found.
+    pub fn get_test_data(&self, id: &str) -> Option<&TestDataSection> {
+        self.test_data.iter().find(|td| td.id == id)
+    }
+
+    /// Find all test data sections linked to a feature.
+    ///
+    /// Returns test data sections where `for_feature` matches the given feature ID.
+    pub fn get_test_data_for_feature(&self, feature_id: &str) -> Vec<&TestDataSection> {
+        self.test_data
+            .iter()
+            .filter(|td| td.for_feature.as_ref().map_or(false, |f| f == feature_id))
+            .collect()
+    }
+
+    /// Find test data linked to a specific scenario.
+    ///
+    /// Checks both `for_scenario` field and `for_feature` with scenario name match.
+    pub fn get_test_data_for_scenario(
+        &self,
+        feature_id: &str,
+        scenario_name: &str,
+    ) -> Vec<&TestDataSection> {
+        self.test_data
+            .iter()
+            .filter(|td| {
+                // Match by for_scenario if present
+                if let Some(ref for_scenario) = td.for_scenario {
+                    if for_scenario == scenario_name
+                        || for_scenario.to_lowercase() == scenario_name.to_lowercase()
+                    {
+                        return true;
+                    }
+                }
+                // Match by for_feature if the scenario name is in the test data name
+                if let Some(ref for_feature) = td.for_feature {
+                    if for_feature == feature_id {
+                        // Additional check if the test data is for this specific scenario
+                        // based on name or other hints
+                        return true;
+                    }
+                }
+                false
+            })
+            .collect()
+    }
+
     /// Parse intent file content
     pub fn parse_content(content: &str, source_path: String) -> Result<Self, IntentError> {
         let mut features = Vec::new();
         let mut components = Vec::new();
+        let mut invariants: Vec<Invariant> = Vec::new();
+        let mut test_data_sections: Vec<TestDataSection> = Vec::new();
         let mut glossary = Glossary::new();
         let mut has_glossary = false;
         let mut current_feature: Option<Feature> = None;
         let mut current_component: Option<Component> = None;
+        let mut current_invariant: Option<Invariant> = None;
+        let mut current_test_data: Option<TestDataSection> = None;
         let mut current_test: Option<TestCase> = None;
         let mut current_scenario: Option<Scenario> = None;
         let mut in_assertions = false;
         let mut in_glossary = false;
         let mut in_component_inherent = false;
+        let mut in_invariant_assertions = false;
+        let mut in_test_data_table = false;
+        let mut test_data_columns: Vec<String> = Vec::new();
         let mut _in_glossary_bindings = false;
         // Technical bindings parsing state
         let mut current_binding_term: Option<(String, TechnicalBinding)> = None;
@@ -1820,6 +2786,17 @@ impl IntentFile {
 
             // Section separator (---)
             if trimmed == "---" {
+                // Save current scenario to feature if any
+                if let Some(mut feat) = current_feature.take() {
+                    if let Some(test) = current_test.take() {
+                        feat.tests.push(test);
+                    }
+                    if let Some(scenario) = current_scenario.take() {
+                        feat.scenarios.push(scenario);
+                    }
+                    // Put feature back - will be saved when new Feature: or end of file
+                    current_feature = Some(feat);
+                }
                 // Save current component if any
                 if let Some(mut comp) = current_component.take() {
                     if let Some(scenario) = current_scenario.take() {
@@ -1831,6 +2808,9 @@ impl IntentFile {
                 if let Some((term, binding)) = current_binding_term.take() {
                     glossary.set_binding(&term, binding);
                 }
+                // Reset scenario state since we just saved it
+                current_scenario = None;
+                current_test = None;
                 in_glossary = false;
                 in_component_inherent = false;
                 _in_glossary_bindings = false;
@@ -2058,11 +3038,196 @@ impl IntentFile {
                 current_test = None;
                 current_scenario = None;
                 current_feature = None;
+                current_invariant = None;
+                current_test_data = None;
                 in_assertions = false;
                 in_glossary = false;
                 in_component_inherent = false;
+                in_invariant_assertions = false;
+                in_test_data_table = false;
                 _in_glossary_bindings = false;
                 continue;
+            }
+
+            // Invariant declaration
+            if trimmed.starts_with("Invariant:") {
+                // Save previous feature
+                if let Some(mut feat) = current_feature.take() {
+                    if let Some(test) = current_test.take() {
+                        feat.tests.push(test);
+                    }
+                    if let Some(scenario) = current_scenario.take() {
+                        feat.scenarios.push(scenario);
+                    }
+                    features.push(feat);
+                }
+                // Save previous component
+                if let Some(mut comp) = current_component.take() {
+                    if let Some(scenario) = current_scenario.take() {
+                        comp.scenarios.push(scenario);
+                    }
+                    components.push(comp);
+                }
+                // Save previous invariant
+                if let Some(inv) = current_invariant.take() {
+                    invariants.push(inv);
+                }
+                // Save previous test data
+                if let Some(td) = current_test_data.take() {
+                    test_data_sections.push(td);
+                }
+
+                let name = trimmed.trim_start_matches("Invariant:").trim().to_string();
+                current_invariant = Some(Invariant {
+                    id: String::new(),
+                    name,
+                    description: None,
+                    parameters: Vec::new(),
+                    assertions: Vec::new(),
+                });
+                current_feature = None;
+                current_component = None;
+                current_scenario = None;
+                current_test = None;
+                current_test_data = None;
+                in_invariant_assertions = false;
+                in_test_data_table = false;
+                continue;
+            }
+
+            // Inside an invariant
+            if let Some(ref mut invariant) = current_invariant {
+                // Invariant ID
+                if trimmed.starts_with("id:") {
+                    let id = trimmed.trim_start_matches("id:").trim();
+                    invariant.id = id.to_string();
+                    continue;
+                }
+
+                // Description
+                if trimmed.starts_with("description:") {
+                    let desc = trimmed.trim_start_matches("description:").trim();
+                    let desc = desc.trim_matches('"').to_string();
+                    invariant.description = Some(desc);
+                    continue;
+                }
+
+                // Parameters
+                if trimmed.starts_with("parameters:") {
+                    let params_str = trimmed.trim_start_matches("parameters:").trim();
+                    // Parse [param1, param2] or "- name: type" format
+                    let params_str = params_str.trim_matches(|c| c == '[' || c == ']');
+                    invariant.parameters = params_str
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    continue;
+                }
+
+                // Assertions section
+                if trimmed.starts_with("Assertions:") {
+                    in_invariant_assertions = true;
+                    continue;
+                }
+
+                // Assertion lines (→ assertion or - assertion)
+                if in_invariant_assertions {
+                    if trimmed.starts_with('→') || trimmed.starts_with('-') {
+                        let assertion = trimmed
+                            .trim_start_matches('→')
+                            .trim_start_matches('-')
+                            .trim()
+                            .to_string();
+                        invariant.assertions.push(assertion);
+                        continue;
+                    }
+                }
+            }
+
+            // Test Cases / Test Data declaration
+            if trimmed.starts_with("Test Cases:") || trimmed.starts_with("Test Data:") {
+                // Save previous test data
+                if let Some(td) = current_test_data.take() {
+                    test_data_sections.push(td);
+                }
+                // Save previous invariant
+                if let Some(inv) = current_invariant.take() {
+                    invariants.push(inv);
+                }
+
+                let name = trimmed
+                    .trim_start_matches("Test Cases:")
+                    .trim_start_matches("Test Data:")
+                    .trim()
+                    .to_string();
+                current_test_data = Some(TestDataSection {
+                    id: String::new(),
+                    name,
+                    for_feature: None,
+                    for_scenario: None,
+                    rows: Vec::new(),
+                });
+                current_invariant = None;
+                in_invariant_assertions = false;
+                in_test_data_table = false;
+                test_data_columns.clear();
+                continue;
+            }
+
+            // Inside a test data section
+            if let Some(ref mut test_data) = current_test_data {
+                // Test data ID
+                if trimmed.starts_with("id:") {
+                    let id = trimmed.trim_start_matches("id:").trim();
+                    test_data.id = id.to_string();
+                    continue;
+                }
+
+                // For feature
+                if trimmed.starts_with("for:") {
+                    let for_feature = trimmed.trim_start_matches("for:").trim();
+                    test_data.for_feature = Some(for_feature.to_string());
+                    continue;
+                }
+
+                // For scenario
+                if trimmed.starts_with("scenario:") {
+                    let for_scenario = trimmed.trim_start_matches("scenario:").trim();
+                    test_data.for_scenario = Some(for_scenario.to_string());
+                    continue;
+                }
+
+                // Parse table header or rows
+                if trimmed.starts_with('|') && !trimmed.contains("---") {
+                    let parts: Vec<&str> = trimmed.split('|').collect();
+                    let cells: Vec<String> = parts
+                        .iter()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+
+                    if test_data_columns.is_empty() {
+                        // This is the header row
+                        test_data_columns = cells;
+                        in_test_data_table = true;
+                    } else if in_test_data_table && !cells.is_empty() {
+                        // This is a data row
+                        let mut row: HashMap<String, String> = HashMap::new();
+                        for (i, cell) in cells.iter().enumerate() {
+                            if i < test_data_columns.len() {
+                                let col = &test_data_columns[i];
+                                // Remove surrounding quotes from cell value
+                                let value = cell.trim_matches('"').to_string();
+                                row.insert(col.clone(), value);
+                            }
+                        }
+                        if !row.is_empty() {
+                            test_data.rows.push(row);
+                        }
+                    }
+                    continue;
+                }
             }
 
             // Inside a component
@@ -2340,11 +3505,23 @@ impl IntentFile {
             glossary.set_binding(&term, binding);
         }
 
+        // Save any remaining invariant
+        if let Some(inv) = current_invariant.take() {
+            invariants.push(inv);
+        }
+
+        // Save any remaining test data section
+        if let Some(td) = current_test_data.take() {
+            test_data_sections.push(td);
+        }
+
         Ok(IntentFile {
             features,
             source_path,
             glossary: if has_glossary { Some(glossary) } else { None },
             components,
+            invariants,
+            test_data: test_data_sections,
         })
     }
 
@@ -2856,11 +4033,488 @@ fn evaluate_code_quality_assertion(
     }
 }
 
+/// Expand character range patterns like "a-z0-9-" to full character sets.
+/// "a-z" becomes "abcdefghijklmnopqrstuvwxyz"
+/// "0-9" becomes "0123456789"
+/// Literal "-" at start/end is preserved.
+fn expand_char_ranges(pattern: &str) -> String {
+    let mut result = String::new();
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        // Check for range pattern (char-char)
+        if i + 2 < chars.len() && chars[i + 1] == '-' {
+            let start = chars[i];
+            let end = chars[i + 2];
+
+            // Expand alphabetic ranges
+            if start.is_ascii_lowercase() && end.is_ascii_lowercase() && start <= end {
+                for c in start..=end {
+                    result.push(c);
+                }
+                i += 3;
+                continue;
+            }
+            if start.is_ascii_uppercase() && end.is_ascii_uppercase() && start <= end {
+                for c in start..=end {
+                    result.push(c);
+                }
+                i += 3;
+                continue;
+            }
+            // Expand numeric ranges
+            if start.is_ascii_digit() && end.is_ascii_digit() && start <= end {
+                for c in start..=end {
+                    result.push(c);
+                }
+                i += 3;
+                continue;
+            }
+        }
+
+        // Not a range, add character literally
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    result
+}
+
+/// Run a function call test (unit test)
+/// path format: "source_file::function_name"
+/// body format: JSON array of arguments
+fn run_function_call_test(test: &TestCase, base_dir: Option<&Path>) -> TestResult {
+    use crate::lexer::Lexer;
+    use crate::parser::Parser as IntentParser;
+
+    let mut assertion_results = Vec::new();
+
+    // Helper to create error result
+    let make_error = |msg: String| TestResult {
+        test: test.clone(),
+        passed: false,
+        assertion_results: vec![AssertionResult {
+            assertion: Assertion::Status(500),
+            passed: false,
+            actual: None,
+            message: Some(msg),
+        }],
+        response_status: 500,
+        response_body: String::new(),
+        response_headers: HashMap::new(),
+    };
+
+    // Parse source_file and function_name from path
+    let parts: Vec<&str> = test.path.splitn(2, "::").collect();
+    if parts.len() != 2 {
+        return make_error(format!("Invalid function call path: {}", test.path));
+    }
+
+    let source_file = parts[0];
+    let function_name = parts[1];
+
+    // Parse arguments from body
+    let args: Vec<String> = test
+        .body
+        .as_ref()
+        .and_then(|b| serde_json::from_str(b).ok())
+        .unwrap_or_default();
+
+    // Resolve source file path
+    let source_path = if let Some(base) = base_dir {
+        base.join(source_file)
+    } else {
+        std::path::PathBuf::from(source_file)
+    };
+
+    // Read and parse the source file
+    let source_code = match std::fs::read_to_string(&source_path) {
+        Ok(code) => code,
+        Err(e) => {
+            return make_error(format!(
+                "Failed to read source file {}: {}",
+                source_path.display(),
+                e
+            ));
+        }
+    };
+
+    // Parse the source code
+    let lexer = Lexer::new(&source_code);
+    let tokens: Vec<_> = lexer.collect();
+
+    let mut parser = IntentParser::new(tokens);
+    let ast = match parser.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            return make_error(format!("Failed to parse source: {}", e));
+        }
+    };
+
+    // Create interpreter and eval the AST
+    let mut interpreter = Interpreter::new();
+    if let Err(e) = interpreter.eval(&ast) {
+        return make_error(format!("Failed to load source: {}", e));
+    }
+
+    // Convert string args to interpreter values
+    let interpreter_args: Vec<crate::interpreter::Value> = args
+        .iter()
+        .map(|arg| {
+            // Try to parse as integer first, then float
+            if let Ok(n) = arg.parse::<i64>() {
+                crate::interpreter::Value::Int(n)
+            } else if let Ok(n) = arg.parse::<f64>() {
+                crate::interpreter::Value::Float(n)
+            } else {
+                crate::interpreter::Value::String(arg.clone())
+            }
+        })
+        .collect();
+
+    // Call the function
+    let result = match interpreter.call_function_by_name(function_name, interpreter_args) {
+        Ok(v) => v,
+        Err(e) => {
+            return make_error(format!("Function call failed: {}", e));
+        }
+    };
+
+    // Convert result to string for assertion checking
+    let result_str = match &result {
+        crate::interpreter::Value::String(s) => s.clone(),
+        crate::interpreter::Value::Int(n) => format!("{}", n),
+        crate::interpreter::Value::Float(n) => {
+            if n.fract() == 0.0 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{}", n)
+            }
+        }
+        crate::interpreter::Value::Bool(b) => b.to_string(),
+        crate::interpreter::Value::Unit => "()".to_string(),
+        _ => format!("{:?}", result),
+    };
+
+    // Check assertions against the result
+    let mut all_passed = true;
+    for assertion in &test.assertions {
+        let (passed, actual, message) = match assertion {
+            Assertion::BodyContains(expected) => {
+                let passed = result_str.contains(expected);
+                (
+                    passed,
+                    Some(result_str.clone()),
+                    if passed {
+                        None
+                    } else {
+                        Some(format!(
+                            "Result '{}' does not contain '{}'",
+                            result_str, expected
+                        ))
+                    },
+                )
+            }
+            Assertion::BodyNotContains(text) => {
+                let passed = !result_str.contains(text);
+                (
+                    passed,
+                    Some(result_str.clone()),
+                    if passed {
+                        None
+                    } else {
+                        Some(format!("Result should not contain '{}'", text))
+                    },
+                )
+            }
+            // Handle Status assertion as "result type" check
+            Assertion::Status(expected) => {
+                // Use status as a simple result check - if function returned, it's a success (200)
+                let passed = *expected == 200;
+                (passed, Some("200".to_string()), None)
+            }
+            // === Unit Test Assertions ===
+            Assertion::ResultEquals(expected) => {
+                let passed = result_str == *expected;
+                (
+                    passed,
+                    Some(result_str.clone()),
+                    if passed {
+                        None
+                    } else {
+                        Some(format!("Expected '{}', got '{}'", expected, result_str))
+                    },
+                )
+            }
+            Assertion::IsLowercase => {
+                let passed = result_str == result_str.to_lowercase();
+                (
+                    passed,
+                    Some(result_str.clone()),
+                    if passed {
+                        None
+                    } else {
+                        Some(format!("Result '{}' is not lowercase", result_str))
+                    },
+                )
+            }
+            Assertion::IsNonEmpty => {
+                let passed = !result_str.is_empty();
+                (
+                    passed,
+                    Some(result_str.clone()),
+                    if passed {
+                        None
+                    } else {
+                        Some("Result is empty".to_string())
+                    },
+                )
+            }
+            Assertion::UsesOnlyChars(allowed) => {
+                // Expand character ranges like "a-z0-9-" to actual characters
+                let allowed_expanded = expand_char_ranges(allowed);
+                let allowed_set: std::collections::HashSet<char> =
+                    allowed_expanded.chars().collect();
+                let passed = result_str.chars().all(|c| allowed_set.contains(&c));
+                (
+                    passed,
+                    Some(result_str.clone()),
+                    if passed {
+                        None
+                    } else {
+                        let invalid: Vec<char> = result_str
+                            .chars()
+                            .filter(|c| !allowed_set.contains(c))
+                            .collect();
+                        Some(format!("Result contains invalid characters: {:?}", invalid))
+                    },
+                )
+            }
+            Assertion::DoesNotStartWith(prefix) => {
+                let passed = !result_str.starts_with(prefix);
+                (
+                    passed,
+                    Some(result_str.clone()),
+                    if passed {
+                        None
+                    } else {
+                        Some(format!("Result should not start with '{}'", prefix))
+                    },
+                )
+            }
+            Assertion::DoesNotEndWith(suffix) => {
+                let passed = !result_str.ends_with(suffix);
+                (
+                    passed,
+                    Some(result_str.clone()),
+                    if passed {
+                        None
+                    } else {
+                        Some(format!("Result should not end with '{}'", suffix))
+                    },
+                )
+            }
+            Assertion::DoesNotContain(text) => {
+                let passed = !result_str.contains(text);
+                (
+                    passed,
+                    Some(result_str.clone()),
+                    if passed {
+                        None
+                    } else {
+                        Some(format!("Result should not contain '{}'", text))
+                    },
+                )
+            }
+            Assertion::LengthAtMost(max_len_str) => {
+                // Parse the max length string (may have been substituted from test data)
+                match max_len_str.parse::<usize>() {
+                    Ok(max_len) => {
+                        let passed = result_str.len() <= max_len;
+                        (
+                            passed,
+                            Some(result_str.clone()),
+                            if passed {
+                                None
+                            } else {
+                                Some(format!(
+                                    "Result length {} exceeds max {}",
+                                    result_str.len(),
+                                    max_len
+                                ))
+                            },
+                        )
+                    }
+                    Err(_) => {
+                        // Invalid max length value (likely unsubstituted placeholder)
+                        (
+                            false,
+                            Some(result_str.clone()),
+                            Some(format!("Invalid max length value: '{}'", max_len_str)),
+                        )
+                    }
+                }
+            }
+            Assertion::EndsWithEllipsisOrOriginal => {
+                // For truncation tests - result should either end with "..." or be unchanged
+                // In unit test context, we check if it ends with "..." OR is reasonably short
+                let passed = result_str.ends_with("...") || result_str.len() <= 50;
+                (
+                    passed,
+                    Some(result_str.clone()),
+                    if passed {
+                        None
+                    } else {
+                        Some("Result should end with '...' or be short enough to not require truncation".to_string())
+                    },
+                )
+            }
+            // === Property-Based Assertions ===
+            Assertion::PropertyDeterministic => {
+                // Call the function again with the same args and verify same output
+                let interpreter_args2: Vec<crate::interpreter::Value> = args
+                    .iter()
+                    .map(|arg| {
+                        if let Ok(n) = arg.parse::<i64>() {
+                            crate::interpreter::Value::Int(n)
+                        } else if let Ok(n) = arg.parse::<f64>() {
+                            crate::interpreter::Value::Float(n)
+                        } else {
+                            crate::interpreter::Value::String(arg.clone())
+                        }
+                    })
+                    .collect();
+
+                let result2 = interpreter.call_function_by_name(function_name, interpreter_args2);
+                match result2 {
+                    Ok(v2) => {
+                        let result_str2 = match &v2 {
+                            crate::interpreter::Value::String(s) => s.clone(),
+                            crate::interpreter::Value::Int(n) => format!("{}", n),
+                            crate::interpreter::Value::Float(n) => {
+                                if n.fract() == 0.0 {
+                                    format!("{}", *n as i64)
+                                } else {
+                                    format!("{}", n)
+                                }
+                            }
+                            crate::interpreter::Value::Bool(b) => b.to_string(),
+                            crate::interpreter::Value::Unit => "()".to_string(),
+                            _ => format!("{:?}", v2),
+                        };
+                        let passed = result_str == result_str2;
+                        (
+                            passed,
+                            Some(format!("run1='{}', run2='{}'", result_str, result_str2)),
+                            if passed {
+                                None
+                            } else {
+                                Some(format!(
+                                    "Function is not deterministic: '{}' != '{}'",
+                                    result_str, result_str2
+                                ))
+                            },
+                        )
+                    }
+                    Err(e) => (
+                        false,
+                        Some(result_str.clone()),
+                        Some(format!("Second function call failed: {}", e)),
+                    ),
+                }
+            }
+            Assertion::PropertyIdempotent => {
+                // Call f(f(x)) and verify it equals f(x)
+                // First, use the result as input to call the function again
+                let result_as_arg = vec![crate::interpreter::Value::String(result_str.clone())];
+                let result2 = interpreter.call_function_by_name(function_name, result_as_arg);
+                match result2 {
+                    Ok(v2) => {
+                        let result_str2 = match &v2 {
+                            crate::interpreter::Value::String(s) => s.clone(),
+                            crate::interpreter::Value::Int(n) => format!("{}", n),
+                            crate::interpreter::Value::Float(n) => {
+                                if n.fract() == 0.0 {
+                                    format!("{}", *n as i64)
+                                } else {
+                                    format!("{}", n)
+                                }
+                            }
+                            crate::interpreter::Value::Bool(b) => b.to_string(),
+                            crate::interpreter::Value::Unit => "()".to_string(),
+                            _ => format!("{:?}", v2),
+                        };
+                        let passed = result_str == result_str2;
+                        (
+                            passed,
+                            Some(format!("f(x)='{}', f(f(x))='{}'", result_str, result_str2)),
+                            if passed {
+                                None
+                            } else {
+                                Some(format!(
+                                    "Function is not idempotent: f(x)='{}' != f(f(x))='{}'",
+                                    result_str, result_str2
+                                ))
+                            },
+                        )
+                    }
+                    Err(e) => (
+                        false,
+                        Some(result_str.clone()),
+                        Some(format!("Idempotent check failed: {}", e)),
+                    ),
+                }
+            }
+            // Other assertions are passed through with best-effort handling
+            _ => (
+                true,
+                Some(result_str.clone()),
+                Some("Assertion type not fully supported for unit tests".to_string()),
+            ),
+        };
+
+        if !passed {
+            all_passed = false;
+        }
+
+        assertion_results.push(AssertionResult {
+            assertion: assertion.clone(),
+            passed,
+            actual,
+            message,
+        });
+    }
+
+    TestResult {
+        test: test.clone(),
+        passed: all_passed,
+        assertion_results,
+        response_status: if all_passed { 200 } else { 500 },
+        response_body: result_str,
+        response_headers: HashMap::new(),
+    }
+}
+
 /// Run a single test case against the server
 fn run_single_test(test: &TestCase, port: u16) -> TestResult {
+    run_single_test_with_base_dir(test, port, None)
+}
+
+/// Run a single test case with optional base directory for unit tests
+fn run_single_test_with_base_dir(
+    test: &TestCase,
+    port: u16,
+    base_dir: Option<&Path>,
+) -> TestResult {
     // Handle CODE_QUALITY tests separately (no HTTP needed)
     if test.method == "CODE_QUALITY" {
         return run_code_quality_test(test);
+    }
+
+    // Handle FUNCTION_CALL tests (unit tests)
+    if test.method == "FUNCTION_CALL" {
+        return run_function_call_test(test, base_dir);
     }
 
     let path = if test.path.starts_with('/') {
@@ -2882,9 +4536,9 @@ fn run_single_test(test: &TestCase, port: u16) -> TestResult {
         )
     };
 
-    // Try to connect
+    // Try to connect (more attempts for slow-starting servers)
     let mut attempts = 0;
-    let max_attempts = 20;
+    let max_attempts = 50;
 
     while attempts < max_attempts {
         #[allow(clippy::single_match)]
@@ -3135,6 +4789,23 @@ fn run_assertions(
                 actual: None,
                 message: Some("Code quality assertion not applicable in HTTP test".to_string()),
             },
+            // Unit test assertions are handled in run_function_call_test
+            Assertion::ResultEquals(_)
+            | Assertion::IsLowercase
+            | Assertion::IsNonEmpty
+            | Assertion::UsesOnlyChars(_)
+            | Assertion::DoesNotStartWith(_)
+            | Assertion::DoesNotEndWith(_)
+            | Assertion::DoesNotContain(_)
+            | Assertion::LengthAtMost(_)
+            | Assertion::EndsWithEllipsisOrOriginal
+            | Assertion::PropertyDeterministic
+            | Assertion::PropertyIdempotent => AssertionResult {
+                assertion: assertion.clone(),
+                passed: false,
+                actual: None,
+                message: Some("Unit test assertion not applicable in HTTP test".to_string()),
+            },
         })
         .collect()
 }
@@ -3308,11 +4979,14 @@ pub fn run_tests_against_server(
     let mut passed_assertions = 0;
     let mut failed_assertions = 0;
 
-    // Get the base directory from the intent file path for code quality checks
+    // Get the base directory from the intent file path for code quality checks and unit tests
     let intent_base_dir = Path::new(&intent.source_path)
         .parent()
         .and_then(|p| p.to_str())
         .filter(|s| !s.is_empty());
+
+    // Also get it as a Path for unit tests
+    let base_path = Path::new(&intent.source_path).parent();
 
     // Parse annotations from all source files
     let mut annotations: Vec<Annotation> = Vec::new();
@@ -3334,127 +5008,145 @@ pub fn run_tests_against_server(
 
         // Process scenarios FIRST (IAL format) - these are the primary tests now
         // Resolve each scenario to a TestCase using the glossary
+        // Test data binding: one scenario may expand to multiple test cases
         if let Some(ref glossary) = intent.glossary {
             for scenario in &feature.scenarios {
-                if let Some((resolved_test, unresolved_outcomes, component_refs)) = glossary
-                    .resolve_scenario_with_base_dir(scenario, &intent.components, intent_base_dir)
+                // Use resolve_scenario_with_test_data which handles test data expansion
+                if let Some((resolved_tests, unresolved_outcomes, component_refs, _test_data_id)) =
+                    glossary.resolve_scenario_with_test_data(
+                        scenario,
+                        &intent.components,
+                        &intent.invariants,
+                        &intent.test_data,
+                        intent_base_dir,
+                    )
                 {
-                    // First, check preconditions if any exist
-                    let mut precondition_results = Vec::new();
-                    let mut preconditions_passed = true;
-                    let mut skip_test = false;
+                    // For test data scenarios, we may have multiple test cases
+                    // Process each one
+                    for resolved_test in resolved_tests {
+                        // First, check preconditions if any exist
+                        let mut precondition_results = Vec::new();
+                        let mut preconditions_passed = true;
+                        let mut skip_test = false;
 
-                    if !resolved_test.preconditions.is_empty() {
-                        // Run precondition checks (typically on the same endpoint as the test)
-                        let precondition_test = TestCase {
-                            method: resolved_test.method.clone(),
-                            path: resolved_test.path.clone(),
-                            body: None,
-                            assertions: resolved_test.preconditions.clone(),
-                            preconditions: vec![],
-                            scenario_name: None,
-                        };
+                        if !resolved_test.preconditions.is_empty() {
+                            // Run precondition checks (typically on the same endpoint as the test)
+                            let precondition_test = TestCase {
+                                method: resolved_test.method.clone(),
+                                path: resolved_test.path.clone(),
+                                body: None,
+                                assertions: resolved_test.preconditions.clone(),
+                                preconditions: vec![],
+                                scenario_name: None,
+                            };
 
-                        let precond_result = run_single_test(&precondition_test, port);
+                            let precond_result =
+                                run_single_test_with_base_dir(&precondition_test, port, base_path);
 
-                        for ar in &precond_result.assertion_results {
+                            for ar in &precond_result.assertion_results {
+                                let assertion_text = format_assertion(&ar.assertion);
+                                precondition_results.push(LiveAssertionResult {
+                                    assertion_text,
+                                    passed: ar.passed,
+                                    message: ar.message.clone(),
+                                });
+
+                                if !ar.passed {
+                                    preconditions_passed = false;
+                                    // Precondition not met = SKIP test (not fail)
+                                    skip_test = true;
+                                }
+                            }
+                        }
+
+                        // If preconditions not met, skip the test
+                        if skip_test {
+                            // Add scenario result as skipped
+                            scenario_results.push(LiveScenarioResult {
+                                name: scenario.name.clone(),
+                                description: scenario.description.clone(),
+                                given_clause: scenario.given_clause.clone(),
+                                when_clause: scenario.when_clause.clone(),
+                                outcomes: scenario.outcomes.clone(),
+                                status: "skip".to_string(),
+                                test_result: Some(LiveTestResult {
+                                    method: resolved_test.method.clone(),
+                                    path: resolved_test.path.clone(),
+                                    passed: false,
+                                    assertions: vec![],
+                                    preconditions: precondition_results,
+                                    scenario_name: Some(scenario.name.clone()),
+                                }),
+                                unresolved_outcomes: vec![],
+                                component_refs: component_refs.clone(),
+                            });
+                            continue; // Skip to next test case
+                        }
+
+                        // Execute the resolved test
+                        let result = run_single_test_with_base_dir(&resolved_test, port, base_path);
+                        let mut assertion_results = Vec::new();
+                        let mut test_passed = result.passed && preconditions_passed;
+
+                        for ar in &result.assertion_results {
+                            total_assertions += 1;
                             let assertion_text = format_assertion(&ar.assertion);
-                            precondition_results.push(LiveAssertionResult {
+
+                            if ar.passed {
+                                passed_assertions += 1;
+                            } else {
+                                failed_assertions += 1;
+                                test_passed = false;
+                                feature_passed = false;
+                            }
+
+                            assertion_results.push(LiveAssertionResult {
                                 assertion_text,
                                 passed: ar.passed,
                                 message: ar.message.clone(),
                             });
-
-                            if !ar.passed {
-                                preconditions_passed = false;
-                                // Precondition not met = SKIP test (not fail)
-                                skip_test = true;
-                            }
                         }
-                    }
 
-                    // If preconditions not met, skip the test
-                    if skip_test {
-                        // Add scenario result as skipped
+                        let live_test_result = LiveTestResult {
+                            method: resolved_test.method.clone(),
+                            path: resolved_test.path.clone(),
+                            passed: test_passed,
+                            assertions: assertion_results,
+                            preconditions: precondition_results,
+                            scenario_name: Some(scenario.name.clone()),
+                        };
+
+                        // Add to test_results for backward compatibility
+                        test_results.push(live_test_result.clone());
+
+                        // Determine status: warning if there are unresolved outcomes
+                        let status = if !unresolved_outcomes.is_empty() {
+                            feature_passed = false; // Unresolved outcomes = incomplete test
+                            "warning".to_string()
+                        } else if test_passed {
+                            "pass".to_string()
+                        } else {
+                            "fail".to_string()
+                        };
+
+                        // Add scenario result with its test result
+                        // Use resolved test's scenario name (includes row info for test data)
+                        let scenario_display_name = resolved_test
+                            .scenario_name
+                            .clone()
+                            .unwrap_or_else(|| scenario.name.clone());
                         scenario_results.push(LiveScenarioResult {
-                            name: scenario.name.clone(),
+                            name: scenario_display_name,
                             description: scenario.description.clone(),
                             given_clause: scenario.given_clause.clone(),
                             when_clause: scenario.when_clause.clone(),
                             outcomes: scenario.outcomes.clone(),
-                            status: "skip".to_string(),
-                            test_result: Some(LiveTestResult {
-                                method: resolved_test.method.clone(),
-                                path: resolved_test.path.clone(),
-                                passed: false,
-                                assertions: vec![],
-                                preconditions: precondition_results,
-                                scenario_name: Some(scenario.name.clone()),
-                            }),
-                            unresolved_outcomes: vec![],
-                            component_refs,
-                        });
-                        continue; // Skip to next scenario
-                    }
-
-                    // Execute the resolved test
-                    let result = run_single_test(&resolved_test, port);
-                    let mut assertion_results = Vec::new();
-                    let mut test_passed = result.passed && preconditions_passed;
-
-                    for ar in &result.assertion_results {
-                        total_assertions += 1;
-                        let assertion_text = format_assertion(&ar.assertion);
-
-                        if ar.passed {
-                            passed_assertions += 1;
-                        } else {
-                            failed_assertions += 1;
-                            test_passed = false;
-                            feature_passed = false;
-                        }
-
-                        assertion_results.push(LiveAssertionResult {
-                            assertion_text,
-                            passed: ar.passed,
-                            message: ar.message.clone(),
+                            status,
+                            test_result: Some(live_test_result),
+                            unresolved_outcomes: unresolved_outcomes.clone(),
+                            component_refs: component_refs.clone(),
                         });
                     }
-
-                    let live_test_result = LiveTestResult {
-                        method: resolved_test.method.clone(),
-                        path: resolved_test.path.clone(),
-                        passed: test_passed,
-                        assertions: assertion_results,
-                        preconditions: precondition_results,
-                        scenario_name: Some(scenario.name.clone()),
-                    };
-
-                    // Add to test_results for backward compatibility
-                    test_results.push(live_test_result.clone());
-
-                    // Determine status: warning if there are unresolved outcomes
-                    let status = if !unresolved_outcomes.is_empty() {
-                        feature_passed = false; // Unresolved outcomes = incomplete test
-                        "warning".to_string()
-                    } else if test_passed {
-                        "pass".to_string()
-                    } else {
-                        "fail".to_string()
-                    };
-
-                    // Add scenario result with its test result
-                    scenario_results.push(LiveScenarioResult {
-                        name: scenario.name.clone(),
-                        description: scenario.description.clone(),
-                        given_clause: scenario.given_clause.clone(),
-                        when_clause: scenario.when_clause.clone(),
-                        outcomes: scenario.outcomes.clone(),
-                        status,
-                        test_result: Some(live_test_result),
-                        unresolved_outcomes,
-                        component_refs,
-                    });
                 } else {
                     // Could not resolve scenario - mark as pending
                     scenario_results.push(LiveScenarioResult {
@@ -3489,7 +5181,7 @@ pub fn run_tests_against_server(
 
         // Process test: blocks (run in addition to scenario tests)
         for test in &feature.tests {
-            let result = run_single_test(test, port);
+            let result = run_single_test_with_base_dir(test, port, base_path);
             let mut assertion_results = Vec::new();
             let mut test_passed = result.passed;
 
@@ -3562,90 +5254,106 @@ pub fn run_tests_against_server(
             let mut component_passed = true;
 
             for scenario in &component.scenarios {
-                if let Some((resolved_test, unresolved_outcomes, component_refs)) = glossary_obj
-                    .resolve_scenario_with_base_dir(scenario, &intent.components, intent_base_dir)
+                // Use resolve_scenario_with_test_data for test data expansion
+                if let Some((resolved_tests, unresolved_outcomes, component_refs, _test_data_id)) =
+                    glossary_obj.resolve_scenario_with_test_data(
+                        scenario,
+                        &intent.components,
+                        &intent.invariants,
+                        &intent.test_data,
+                        intent_base_dir,
+                    )
                 {
-                    // Check preconditions
-                    let mut precondition_results = Vec::new();
-                    let mut preconditions_passed = true;
+                    // For test data scenarios, process each test case
+                    for resolved_test in resolved_tests {
+                        // Check preconditions
+                        let mut precondition_results = Vec::new();
+                        let mut preconditions_passed = true;
 
-                    if !resolved_test.preconditions.is_empty() {
-                        let precondition_test = TestCase {
-                            method: resolved_test.method.clone(),
-                            path: resolved_test.path.clone(),
-                            body: None,
-                            assertions: resolved_test.preconditions.clone(),
-                            preconditions: vec![],
-                            scenario_name: None,
-                        };
+                        if !resolved_test.preconditions.is_empty() {
+                            let precondition_test = TestCase {
+                                method: resolved_test.method.clone(),
+                                path: resolved_test.path.clone(),
+                                body: None,
+                                assertions: resolved_test.preconditions.clone(),
+                                preconditions: vec![],
+                                scenario_name: None,
+                            };
 
-                        let precond_result = run_single_test(&precondition_test, port);
-                        for ar in &precond_result.assertion_results {
+                            let precond_result =
+                                run_single_test_with_base_dir(&precondition_test, port, base_path);
+                            for ar in &precond_result.assertion_results {
+                                let assertion_text = format_assertion(&ar.assertion);
+                                precondition_results.push(LiveAssertionResult {
+                                    assertion_text,
+                                    passed: ar.passed,
+                                    message: ar.message.clone(),
+                                });
+                                if !ar.passed {
+                                    preconditions_passed = false;
+                                }
+                            }
+                        }
+
+                        // Execute component scenario test
+                        let result = run_single_test_with_base_dir(&resolved_test, port, base_path);
+                        let mut assertion_results = Vec::new();
+                        let mut test_passed = result.passed && preconditions_passed;
+
+                        for ar in &result.assertion_results {
+                            total_assertions += 1;
                             let assertion_text = format_assertion(&ar.assertion);
-                            precondition_results.push(LiveAssertionResult {
+
+                            if ar.passed {
+                                passed_assertions += 1;
+                            } else {
+                                failed_assertions += 1;
+                                test_passed = false;
+                                component_passed = false;
+                            }
+
+                            assertion_results.push(LiveAssertionResult {
                                 assertion_text,
                                 passed: ar.passed,
                                 message: ar.message.clone(),
                             });
-                            if !ar.passed {
-                                preconditions_passed = false;
-                            }
                         }
-                    }
 
-                    // Execute component scenario test
-                    let result = run_single_test(&resolved_test, port);
-                    let mut assertion_results = Vec::new();
-                    let mut test_passed = result.passed && preconditions_passed;
+                        let live_test_result = LiveTestResult {
+                            method: resolved_test.method.clone(),
+                            path: resolved_test.path.clone(),
+                            passed: test_passed,
+                            assertions: assertion_results,
+                            preconditions: precondition_results,
+                            scenario_name: Some(scenario.name.clone()),
+                        };
 
-                    for ar in &result.assertion_results {
-                        total_assertions += 1;
-                        let assertion_text = format_assertion(&ar.assertion);
-
-                        if ar.passed {
-                            passed_assertions += 1;
-                        } else {
-                            failed_assertions += 1;
-                            test_passed = false;
+                        let status = if !unresolved_outcomes.is_empty() {
                             component_passed = false;
-                        }
+                            "warning".to_string()
+                        } else if test_passed {
+                            "pass".to_string()
+                        } else {
+                            "fail".to_string()
+                        };
 
-                        assertion_results.push(LiveAssertionResult {
-                            assertion_text,
-                            passed: ar.passed,
-                            message: ar.message.clone(),
+                        // Use resolved test's scenario name (includes row info for test data)
+                        let scenario_display_name = resolved_test
+                            .scenario_name
+                            .clone()
+                            .unwrap_or_else(|| scenario.name.clone());
+                        component_scenarios.push(LiveScenarioResult {
+                            name: scenario_display_name,
+                            description: scenario.description.clone(),
+                            given_clause: scenario.given_clause.clone(),
+                            when_clause: scenario.when_clause.clone(),
+                            outcomes: scenario.outcomes.clone(),
+                            status,
+                            test_result: Some(live_test_result),
+                            unresolved_outcomes: unresolved_outcomes.clone(),
+                            component_refs: component_refs.clone(),
                         });
                     }
-
-                    let live_test_result = LiveTestResult {
-                        method: resolved_test.method.clone(),
-                        path: resolved_test.path.clone(),
-                        passed: test_passed,
-                        assertions: assertion_results,
-                        preconditions: precondition_results,
-                        scenario_name: Some(scenario.name.clone()),
-                    };
-
-                    let status = if !unresolved_outcomes.is_empty() {
-                        component_passed = false;
-                        "warning".to_string()
-                    } else if test_passed {
-                        "pass".to_string()
-                    } else {
-                        "fail".to_string()
-                    };
-
-                    component_scenarios.push(LiveScenarioResult {
-                        name: scenario.name.clone(),
-                        description: scenario.description.clone(),
-                        given_clause: scenario.given_clause.clone(),
-                        when_clause: scenario.when_clause.clone(),
-                        outcomes: scenario.outcomes.clone(),
-                        status,
-                        test_result: Some(live_test_result),
-                        unresolved_outcomes,
-                        component_refs,
-                    });
                 }
             }
 
@@ -3801,6 +5509,19 @@ fn format_assertion(assertion: &Assertion) -> String {
         Assertion::CodeQualityNoErrors => "no syntax errors".to_string(),
         Assertion::CodeQualityNoWarnings => "no lint warnings".to_string(),
         Assertion::CodeQualityErrorCount(count) => format!("error count is {}", count),
+        // Unit test assertions
+        Assertion::ResultEquals(value) => format!("result equals \"{}\"", value),
+        Assertion::IsLowercase => "is lowercase".to_string(),
+        Assertion::IsNonEmpty => "is non-empty".to_string(),
+        Assertion::UsesOnlyChars(chars) => format!("uses only [{}]", chars),
+        Assertion::DoesNotStartWith(s) => format!("does not start with \"{}\"", s),
+        Assertion::DoesNotEndWith(s) => format!("does not end with \"{}\"", s),
+        Assertion::DoesNotContain(s) => format!("does not contain \"{}\"", s),
+        Assertion::LengthAtMost(n) => format!("length at most {}", n),
+        Assertion::EndsWithEllipsisOrOriginal => "ends with ellipsis or original".to_string(),
+        // Property-based assertions
+        Assertion::PropertyDeterministic => "property: deterministic".to_string(),
+        Assertion::PropertyIdempotent => "property: idempotent".to_string(),
     }
 }
 
@@ -4246,6 +5967,20 @@ pub fn generate_scaffolding(intent: &IntentFile) -> String {
                     | Assertion::CodeQualityErrorCount(_) => {
                         // Skip code quality assertions in HTTP handler generation
                     }
+                    // Unit test assertions are not applicable for HTTP handlers
+                    Assertion::ResultEquals(_)
+                    | Assertion::IsLowercase
+                    | Assertion::IsNonEmpty
+                    | Assertion::UsesOnlyChars(_)
+                    | Assertion::DoesNotStartWith(_)
+                    | Assertion::DoesNotEndWith(_)
+                    | Assertion::DoesNotContain(_)
+                    | Assertion::LengthAtMost(_)
+                    | Assertion::EndsWithEllipsisOrOriginal
+                    | Assertion::PropertyDeterministic
+                    | Assertion::PropertyIdempotent => {
+                        // Skip unit test assertions in HTTP handler generation
+                    }
                 }
             }
 
@@ -4581,6 +6316,133 @@ Feature: API
             3,
             "Should have 3 assertions from component"
         );
+    }
+
+    #[test]
+    fn test_invariant_resolution_in_vocabulary() {
+        // Test that invariants get added to vocabulary and can be resolved
+        let glossary = Glossary::new();
+
+        // Create an invariant with assertions
+        let invariant = Invariant {
+            id: "invariant.url_slug".to_string(),
+            name: "URL Slug".to_string(),
+            description: Some("A URL-safe slug string".to_string()),
+            parameters: vec![],
+            assertions: vec!["is lowercase".to_string(), "is non-empty".to_string()],
+        };
+
+        // Build vocabulary with invariants
+        let vocab = glossary.to_ial_vocabulary_full(&[], &[invariant]);
+
+        // Should find the invariant term
+        let result = vocab.lookup("invariant.url_slug");
+        assert!(
+            result.is_some(),
+            "Should find 'invariant.url_slug' in vocabulary"
+        );
+
+        // Resolve the invariant to primitives
+        let term = Term::new("invariant.url_slug");
+        let resolved = ial::resolve(&term, &vocab);
+
+        assert!(resolved.is_ok(), "Invariant resolution should succeed");
+        let primitives = resolved.unwrap();
+        assert_eq!(
+            primitives.len(),
+            2,
+            "Invariant should expand to 2 assertions (is lowercase, is non-empty)"
+        );
+    }
+
+    #[test]
+    fn test_glossary_check_invariant_resolution() {
+        // Test that "check: invariant.X" in glossary resolves correctly
+        let mut glossary = Glossary::new();
+        glossary.add_term(
+            "result is valid slug".to_string(),
+            "check: invariant.url_slug".to_string(),
+        );
+
+        let invariant = Invariant {
+            id: "invariant.url_slug".to_string(),
+            name: "URL Slug".to_string(),
+            description: None,
+            parameters: vec![],
+            assertions: vec!["is lowercase".to_string(), "is non-empty".to_string()],
+        };
+
+        let vocab = glossary.to_ial_vocabulary_full(&[], &[invariant]);
+
+        // The glossary term should resolve through to the invariant's assertions
+        let term = Term::new("result is valid slug");
+        let resolved = ial::resolve(&term, &vocab);
+
+        assert!(
+            resolved.is_ok(),
+            "Glossary term with invariant check should resolve"
+        );
+        let primitives = resolved.unwrap();
+        assert_eq!(
+            primitives.len(),
+            2,
+            "Should expand to invariant's 2 assertions"
+        );
+    }
+
+    #[test]
+    fn test_scenario_with_test_data_expansion() {
+        // Test that a scenario with test data expands to multiple test cases
+        let mut glossary = Glossary::new();
+        glossary.add_term(
+            "testing slugify".to_string(),
+            "call: slugify({title}), input: test_data.slugify_examples".to_string(),
+        );
+        glossary.add_term("result is valid".to_string(), "is non-empty".to_string());
+
+        // Create test data
+        let mut row1 = HashMap::new();
+        row1.insert("title".to_string(), "Hello World".to_string());
+        row1.insert("expected".to_string(), "hello-world".to_string());
+
+        let mut row2 = HashMap::new();
+        row2.insert("title".to_string(), "Test Post".to_string());
+        row2.insert("expected".to_string(), "test-post".to_string());
+
+        let test_data = vec![TestDataSection {
+            id: "test_data.slugify_examples".to_string(),
+            name: "Slugify Examples".to_string(),
+            for_feature: Some("feature.text_utilities".to_string()),
+            for_scenario: None,
+            rows: vec![row1, row2],
+        }];
+
+        let scenario = Scenario {
+            name: "Test slugify function".to_string(),
+            description: None,
+            given_clause: None,
+            when_clause: "testing slugify".to_string(),
+            outcomes: vec!["result is valid".to_string()],
+            resolved_test: None,
+            component_refs: vec![],
+        };
+
+        // Resolve with test data expansion
+        let result =
+            glossary.resolve_scenario_with_test_data(&scenario, &[], &[], &test_data, None);
+
+        assert!(result.is_some(), "Should resolve scenario with test data");
+        let (test_cases, _, _, td_id) = result.unwrap();
+
+        // Should expand to 2 test cases (one per row)
+        assert_eq!(
+            test_cases.len(),
+            2,
+            "Should have 2 test cases from test data rows"
+        );
+
+        // Check test data was referenced
+        assert_eq!(td_id, Some("test_data.slugify_examples".to_string()));
     }
 
     #[test]

@@ -188,10 +188,16 @@ enum IntentCommands {
     /// Runs all tests defined in the .intent file against the NTNT program.
     /// Looks for <name>.intent file automatically, or specify with --intent.
     ///
+    /// Verbosity levels:
+    ///   (default) - Summary: feature pass/fail counts only
+    ///   -v        - Scenarios: show each scenario's pass/fail status
+    ///   -vv       - Assertions: show all assertions and how terms resolved
+    ///
     /// Examples:
     ///   ntnt intent check server.tnt
+    ///   ntnt intent check server.tnt -v
+    ///   ntnt intent check server.tnt -vv
     ///   ntnt intent check server.tnt --intent requirements.intent
-    ///   ntnt intent check server.tnt --verbose
     Check {
         /// The NTNT source file to check
         #[arg(value_name = "FILE")]
@@ -205,9 +211,9 @@ enum IntentCommands {
         #[arg(long = "port", default_value = "18081")]
         port: u16,
 
-        /// Show verbose output including response bodies
-        #[arg(long = "verbose", short = 'v')]
-        verbose: bool,
+        /// Increase output verbosity (-v for scenarios, -vv for assertions)
+        #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
+        verbose: u8,
     },
     /// Show implementation coverage of intent features
     ///
@@ -1063,7 +1069,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
             },
             "builtin_functions": ["print", "len", "str", "abs", "min", "max", "sqrt", "pow", "round", "floor", "ceil", "Some", "None", "Ok", "Err", "unwrap", "unwrap_or", "is_some", "is_none", "is_ok", "is_err"],
             "common_imports": {
-                "std/string": ["split", "join", "trim", "replace", "contains", "starts_with", "ends_with"],
+                "std/string": ["split", "join", "trim", "replace", "replace_first", "contains", "starts_with", "ends_with", "to_lower", "to_upper"],
                 "std/collections": ["push", "pop", "map", "filter", "reduce", "first", "last"],
                 "std/http": ["fetch", "post", "put", "delete", "get_json", "post_json"],
                 "std/http_server": ["listen", "get", "post", "json", "html", "text", "redirect", "serve_static"],
@@ -1962,7 +1968,7 @@ fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
             intent_file,
             port,
             verbose,
-        } => run_intent_check_command(&file, intent_file.as_ref(), port, verbose),
+        } => run_intent_check_command(&file, intent_file.as_ref(), port, verbose as usize),
         IntentCommands::Coverage { file, intent_file } => {
             run_intent_coverage_command(&file, intent_file.as_ref())
         }
@@ -1980,11 +1986,16 @@ fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
 }
 
 /// Run the intent check command
+///
+/// Verbosity levels:
+/// - 0: Summary only (feature pass/fail counts)
+/// - 1: Show scenarios (current default behavior)
+/// - 2+: Show assertions and term resolution
 fn run_intent_check_command(
     input_path: &PathBuf,
     explicit_intent_path: Option<&PathBuf>,
     port: u16,
-    verbose: bool,
+    verbosity: usize,
 ) -> anyhow::Result<()> {
     println!("{}", "=== NTNT Intent Check ===".cyan().bold());
     println!();
@@ -2071,13 +2082,16 @@ fn run_intent_check_command(
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to start app server: {}", e))?;
 
-    // Give the server time to start
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    // Give the server time to start (Axum async server needs more time)
+    std::thread::sleep(std::time::Duration::from_millis(3000));
 
     // Run tests using the new IAL engine
     let results = intent::run_tests_against_server(&intent_file, port, &source_files);
 
-    // Print results
+    // Print results based on verbosity level
+    // 0: Summary only (feature names + totals)
+    // 1: Show scenarios
+    // 2+: Show assertions and term resolution
     println!();
     println!("{}", "=== Test Results ===".cyan().bold());
     println!();
@@ -2088,103 +2102,200 @@ fn run_intent_check_command(
     let mut scenarios_skipped = 0;
     let mut features_failed = 0;
 
+    // Count scenarios for all features (needed for summary)
     for feature in &results.features {
-        let status_icon = if feature.passed {
-            "✓".green()
-        } else {
-            "✗".red()
-        };
-        println!("{} Feature: {}", status_icon, feature.feature_name.bold());
-
+        for scenario in &feature.scenarios {
+            match scenario.status.as_str() {
+                "pass" => scenarios_passed += 1,
+                "fail" => scenarios_failed += 1,
+                "skip" => scenarios_skipped += 1,
+                _ => {}
+            }
+        }
         if !feature.passed {
             features_failed += 1;
         }
+    }
+    for component in &results.components {
+        for scenario in &component.scenarios {
+            match scenario.status.as_str() {
+                "pass" => scenarios_passed += 1,
+                "fail" => scenarios_failed += 1,
+                "skip" => scenarios_skipped += 1,
+                _ => {}
+            }
+        }
+    }
 
-        for scenario in &feature.scenarios {
-            let icon = match scenario.status.as_str() {
-                "pass" => {
-                    scenarios_passed += 1;
-                    "  ✓".green()
-                }
-                "fail" => {
-                    scenarios_failed += 1;
-                    "  ✗".red()
-                }
-                "skip" => {
-                    scenarios_skipped += 1;
-                    "  ⏭️ ".yellow()
-                }
-                _ => "  ⧗".yellow(),
+    // Verbosity 0: Summary only - just feature names with pass/fail counts
+    if verbosity == 0 {
+        for feature in &results.features {
+            let status_icon = if feature.passed {
+                "✓".green()
+            } else {
+                "✗".red()
             };
-            println!("{} {}", icon, scenario.name);
+            let scenario_count = feature.scenarios.len() + feature.tests.len();
+            let passed_count = feature
+                .scenarios
+                .iter()
+                .filter(|s| s.status == "pass")
+                .count()
+                + feature.tests.iter().filter(|t| t.passed).count();
 
-            if verbose {
-                if let Some(ref given) = scenario.given_clause {
-                    println!("      Given {}", given.dimmed());
+            if feature.passed {
+                println!(
+                    "{} {}  {} scenarios",
+                    status_icon,
+                    feature.feature_name.bold(),
+                    scenario_count
+                );
+            } else {
+                println!(
+                    "{} {}  {}/{} scenarios passed",
+                    status_icon,
+                    feature.feature_name.bold(),
+                    passed_count,
+                    scenario_count
+                );
+            }
+        }
+        for component in &results.components {
+            let status_icon = if component.passed {
+                "✓".green()
+            } else {
+                "✗".red()
+            };
+            println!(
+                "{} Component: {}",
+                status_icon,
+                component.component_name.bold()
+            );
+        }
+        println!();
+    } else {
+        // Verbosity 1+: Show scenarios
+        for feature in &results.features {
+            let status_icon = if feature.passed {
+                "✓".green()
+            } else {
+                "✗".red()
+            };
+            println!("{} Feature: {}", status_icon, feature.feature_name.bold());
+
+            for scenario in &feature.scenarios {
+                let icon = match scenario.status.as_str() {
+                    "pass" => "  ✓".green(),
+                    "fail" => "  ✗".red(),
+                    "skip" => "  ⏭️ ".yellow(),
+                    _ => "  ⧗".yellow(),
+                };
+                println!("{} {}", icon, scenario.name);
+
+                // Verbosity 2+: Show assertions and term resolution
+                if verbosity >= 2 {
+                    if let Some(ref given) = scenario.given_clause {
+                        println!("      Given {}", given.dimmed());
+                    }
+                    println!("      When {}", scenario.when_clause.dimmed());
+                    for outcome in &scenario.outcomes {
+                        println!("      → {}", outcome.dimmed());
+                    }
+                    if let Some(ref test_result) = scenario.test_result {
+                        for assertion in &test_result.assertions {
+                            let a_icon = if assertion.passed {
+                                "✓".green()
+                            } else {
+                                "✗".red()
+                            };
+                            println!("        {} {}", a_icon, assertion.assertion_text.dimmed());
+                            // Show failure message if present
+                            if !assertion.passed {
+                                if let Some(ref msg) = assertion.message {
+                                    println!("          {}", msg.red());
+                                }
+                            }
+                        }
+                    }
                 }
-                println!("      When {}", scenario.when_clause.dimmed());
-                for outcome in &scenario.outcomes {
-                    println!("      → {}", outcome.dimmed());
-                }
-                if let Some(ref test_result) = scenario.test_result {
-                    for assertion in &test_result.assertions {
-                        let a_icon = if assertion.passed { "✓" } else { "✗" };
-                        println!("        {} {}", a_icon, assertion.assertion_text.dimmed());
+                // Always show details for failed scenarios (even at verbosity 1)
+                else if scenario.status == "fail" {
+                    if let Some(ref test_result) = scenario.test_result {
+                        for assertion in &test_result.assertions {
+                            if !assertion.passed {
+                                println!("      ✗ {}", assertion.assertion_text.red());
+                                if let Some(ref msg) = assertion.message {
+                                    println!("        {}", msg.red());
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
 
-        for test in &feature.tests {
-            let icon = if test.passed {
-                "  ✓".green()
-            } else {
-                "  ✗".red()
-            };
-            println!("{} {} {}", icon, test.method, test.path);
+            for test in &feature.tests {
+                let icon = if test.passed {
+                    "  ✓".green()
+                } else {
+                    "  ✗".red()
+                };
+                println!("{} {} {}", icon, test.method, test.path);
 
-            if verbose {
-                for assertion in &test.assertions {
-                    let a_icon = if assertion.passed { "✓" } else { "✗" };
-                    println!("      {} {}", a_icon, assertion.assertion_text.dimmed());
+                // Verbosity 2+: Show all assertions
+                if verbosity >= 2 {
+                    for assertion in &test.assertions {
+                        let a_icon = if assertion.passed {
+                            "✓".green()
+                        } else {
+                            "✗".red()
+                        };
+                        println!("      {} {}", a_icon, assertion.assertion_text.dimmed());
+                        if !assertion.passed {
+                            if let Some(ref msg) = assertion.message {
+                                println!("        {}", msg.red());
+                            }
+                        }
+                    }
+                }
+                // Always show details for failed tests (even at verbosity 1)
+                else if !test.passed {
+                    for assertion in &test.assertions {
+                        if !assertion.passed {
+                            println!("      ✗ {}", assertion.assertion_text.red());
+                            if let Some(ref msg) = assertion.message {
+                                println!("        {}", msg.red());
+                            }
+                        }
+                    }
                 }
             }
+
+            println!();
         }
 
-        println!();
-    }
-
-    for component in &results.components {
-        let status_icon = if component.passed {
-            "✓".green()
-        } else {
-            "✗".red()
-        };
-        println!(
-            "{} Component: {}",
-            status_icon,
-            component.component_name.bold()
-        );
-
-        for scenario in &component.scenarios {
-            let icon = match scenario.status.as_str() {
-                "pass" => {
-                    scenarios_passed += 1;
-                    "  ✓".green()
-                }
-                "fail" => {
-                    scenarios_failed += 1;
-                    "  ✗".red()
-                }
-                "skip" => {
-                    scenarios_skipped += 1;
-                    "  ⏭️ ".yellow()
-                }
-                _ => "  ⧗".yellow(),
+        for component in &results.components {
+            let status_icon = if component.passed {
+                "✓".green()
+            } else {
+                "✗".red()
             };
-            println!("{} {}", icon, scenario.name);
+            println!(
+                "{} Component: {}",
+                status_icon,
+                component.component_name.bold()
+            );
+
+            for scenario in &component.scenarios {
+                let icon = match scenario.status.as_str() {
+                    "pass" => "  ✓".green(),
+                    "fail" => "  ✗".red(),
+                    "skip" => "  ⏭️ ".yellow(),
+                    _ => "  ⧗".yellow(),
+                };
+                println!("{} {}", icon, scenario.name);
+            }
+            println!();
         }
-        println!();
     }
 
     println!("{}", "=== Summary ===".cyan().bold());

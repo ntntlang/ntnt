@@ -2,6 +2,34 @@
 // @implements: feature.blog_list
 
 import { response } from "std/http/server"
+import { replace, to_lower, trim, split } from "std/string"
+
+// Simple slugify (inline to avoid module import bug with builtins)
+fn simple_slugify(title) {
+    let mut text = to_lower(trim(title))
+    text = replace(text, " ", "-")
+    text = replace(text, "'", "")
+    text = replace(text, "?", "")
+    text = replace(text, "!", "")
+    text = replace(text, ":", "")
+    return text
+}
+
+// Simple excerpt (first N chars)
+fn simple_excerpt(text, max_len) {
+    if len(text) <= max_len {
+        return text
+    }
+    // Just truncate and add ellipsis
+    let chars = split(text, "")
+    let mut result = ""
+    for i in 0..max_len {
+        if i < len(chars) {
+            result = result + chars[i]
+        }
+    }
+    return result + "..."
+}
 
 // Cacheable HTML response for Cloudflare CDN
 fn cached_html(body, max_age) {
@@ -25,25 +53,30 @@ fn render_page(content, title) {
     })
 }
 
-// GET /blog - Blog list page
-fn get(req) {
-    // Blog post data - could come from database or files
-    let posts = [
+// Blog post definitions with full content
+// Return static array for simplicity (avoids push() issues)
+fn get_blog_posts() {
+    return [
         map {
-            "slug": "welcome",
+            "slug": "introducing-ntnt-a-programming-language-for-the-ai-era",
             "title": "Introducing NTNT: A Programming Language for the AI Era",
             "date": "January 15, 2026",
             "author": "NTNT Team",
-            "excerpt": "NTNT is a full-featured language with contracts, pattern matching, generics, and a comprehensive stdlib. Designed for AI-assisted development with built-in verification."
+            "excerpt": "NTNT is a full-featured language with contracts, pattern matching, generics, and a comprehensive stdlib..."
         },
         map {
-            "slug": "idd-explained",
+            "slug": "intent-driven-development-from-requirements-to-verified-code",
             "title": "Intent-Driven Development: From Requirements to Verified Code",
             "date": "January 10, 2026",
             "author": "NTNT Team",
-            "excerpt": "Write what your software should do in .intent files. The system verifies your code actually does it. Full traceability from requirement to implementation."
+            "excerpt": "Write what your software should do in .intent files. The system verifies your code actually does it..."
         }
     ]
+}
+
+// GET /blog - Blog list page
+fn get(req) {
+    let posts = get_blog_posts()
 
     let content = template("views/blog.html", map {
         "posts": posts

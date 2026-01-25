@@ -241,8 +241,8 @@ Define domain-specific terms in your `.intent` file:
 | Term | Means |
 |------|-------|
 | success response | status 2xx, body contains "ok" |
-| they see "$text" | body contains "$text" |
-| they don't see "$text" | body not contains "$text" |
+| they see {text} | body contains {text} |
+| they don't see {text} | body not contains {text} |
 ```
 
 Then use natural language in tests:
@@ -263,10 +263,10 @@ Feature: User Profile
 |---------|-------------|
 | `status 200` | Exact status code |
 | `status 2xx` | Any success status |
-| `body contains "$text"` | Body includes text |
-| `body not contains "$text"` | Body excludes text |
-| `header "$name" contains "$value"` | Header check |
-| `redirects to $path` | Redirect check |
+| `body contains {text}` | Body includes text |
+| `body not contains {text}` | Body excludes text |
+| `header {name} contains {value}` | Header check |
+| `redirects to {path}` | Redirect check |
 
 ### Preconditions (Given Clauses)
 
@@ -662,7 +662,10 @@ execute(db, "INSERT INTO users (age) VALUES ($1)", [age])
 
 ### Built-in (no import)
 
-`print`, `len`, `str`, `int`, `float`, `abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `trunc`, `sign`, `clamp`, `Some`, `None`, `Ok`, `Err`, `unwrap`, `unwrap_or`, `is_some`, `is_none`, `is_ok`, `is_err`
+**Type conversion:** `str`, `int`, `float`, `type`
+**Math:** `abs`, `min`, `max`, `sqrt`, `pow`, `round`, `floor`, `ceil`, `trunc`, `sign`, `clamp`
+**I/O:** `print`, `len`, `push`, `assert`
+**Option/Result:** `Some`, `None`, `Ok`, `Err`, `unwrap`, `unwrap_or`, `is_some`, `is_none`, `is_ok`, `is_err`
 
 ### Environment Variables
 
@@ -712,7 +715,8 @@ fetch(map {
 ### Common imports
 
 ```ntnt
-import { split, join, trim, replace } from "std/string"
+import { split, join, trim, replace, replace_chars, remove_chars, keep_chars } from "std/string"
+import { contains, starts_with, ends_with, replace_pattern, matches_pattern } from "std/string"
 import { encode, decode, parse_query, build_query } from "std/url"
 import { push, pop, keys, values, entries, has_key, get_key } from "std/collections"
 import { fetch, download, Cache } from "std/http"  // HTTP client

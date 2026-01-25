@@ -627,24 +627,24 @@ fn home_handler(req) {
 - [x] JSON path: `body json "$.users[0].name" equals "Alice"`
 - [x] Redirects: `redirects to /path`
 - [x] Content-type: `returns JSON`, `returns HTML`
-- [ ] Response timing: `responds in under $time`
+- [ ] Response timing: `responds in under {time}`
 
 **CLI Assertions (IAL Vocabulary)**
 
-- [x] Exit codes: `exits successfully`, `exits with code $n`
-- [x] Output: `output shows "$text"`, `output matches $pattern`
-- [x] Errors: `error shows "$text"`, `no error output`
+- [x] Exit codes: `exits successfully`, `exits with code {n}`
+- [x] Output: `output shows {text}`, `output matches {pattern}`
+- [x] Errors: `error shows {text}`, `no error output`
 
 **File Assertions (IAL Vocabulary)**
 
-- [x] Existence: `file "$path" exists`, `file "$path" is created`
-- [x] Content: `file "$path" contains "$text"`
-- [x] Directories: `directory "$path" exists`
+- [x] Existence: `file {path} exists`, `file {path} is created`
+- [x] Content: `file {path} contains {text}`
+- [x] Directories: `directory {path} exists`
 
 **Database Assertions (IAL Vocabulary - Definitions ready)**
 
 - [x] Row operations: `record is created`, `record is updated`, `record is deleted`
-- [x] Queries: `row exists where $condition`, `row count is $n`
+- [x] Queries: `row exists where {condition}`, `row count is {n}`
 - [ ] Database verification: `verify_db:` with SQL queries (execution pending)
 - [ ] State before/after comparison
 

@@ -159,7 +159,7 @@ Contracts are machine-readable specifications for agents and executable document
 | **Web**         | `std/http/server`, `std/http`            | HTTP server with routing, middleware, static files; HTTP client with fetch/post |
 | **Data**        | `std/json`, `std/csv`, `std/db/postgres` | Parse and stringify; PostgreSQL with transactions                               |
 | **I/O**         | `std/fs`, `std/path`, `std/env`          | File operations, path manipulation, environment variables                       |
-| **Text**        | `std/string`, `std/url`                  | Split, join, trim, replace; URL encode/decode/parse                             |
+| **Text**        | `std/string`, `std/url`                  | Split, join, trim, replace, replace_chars, regex (replace_pattern, matches_pattern); URL encode/decode/parse |
 | **Utilities**   | `std/time`, `std/math`, `std/crypto`     | Timestamps, formatting, sleep; trig, log, exp; SHA256, HMAC, UUID               |
 | **Collections** | `std/collections`                        | Array and map operations: push, pop, keys, values, get_key                      |
 | **Concurrency** | `std/concurrent`                         | Go-style channels: send, recv, try_recv                                         |
@@ -273,7 +273,7 @@ ntnt intent studio server.intent
 
 ## Current Status
 
-**Version 0.3.1** - Intent Assertion Language + IDD
+**Version 0.3.3** - String Functions + Regex Support
 
 NTNT includes:
 

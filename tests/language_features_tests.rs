@@ -745,3 +745,302 @@ print(val)
     );
     assert!(stdout.contains("42"), "Should unwrap Some(42)");
 }
+
+// ============================================================================
+// String Functions: replace_chars, remove_chars, keep_chars
+// ============================================================================
+
+#[test]
+fn test_replace_chars_basic() {
+    let code = r#"
+import { replace_chars } from "std/string"
+let result = replace_chars("hello world", " ", "-")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "replace_chars should work");
+    assert!(
+        stdout.contains("hello-world"),
+        "Should replace space with hyphen"
+    );
+}
+
+#[test]
+fn test_replace_chars_multiple() {
+    let code = r#"
+import { replace_chars } from "std/string"
+let result = replace_chars("a.b,c;d", ".,;", "-")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "replace_chars with multiple chars should work"
+    );
+    assert!(
+        stdout.contains("a-b-c-d"),
+        "Should replace all specified chars"
+    );
+}
+
+#[test]
+fn test_replace_chars_empty_replacement() {
+    let code = r#"
+import { replace_chars } from "std/string"
+let result = replace_chars("a1b2c3", "123", "")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "replace_chars with empty replacement should work"
+    );
+    assert!(stdout.contains("abc"), "Should remove digits");
+}
+
+#[test]
+fn test_remove_chars_basic() {
+    let code = r#"
+import { remove_chars } from "std/string"
+let result = remove_chars("hello123world", "0123456789")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "remove_chars should work");
+    assert!(stdout.contains("helloworld"), "Should remove all digits");
+}
+
+#[test]
+fn test_remove_chars_punctuation() {
+    let code = r#"
+import { remove_chars } from "std/string"
+let result = remove_chars("Hello, World!", ",.! ")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "remove_chars with punctuation should work");
+    assert!(
+        stdout.contains("HelloWorld"),
+        "Should remove punctuation and spaces"
+    );
+}
+
+#[test]
+fn test_keep_chars_basic() {
+    let code = r#"
+import { keep_chars } from "std/string"
+let result = keep_chars("abc123def456", "0123456789")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "keep_chars should work");
+    assert!(stdout.contains("123456"), "Should keep only digits");
+}
+
+#[test]
+fn test_keep_chars_letters() {
+    let code = r#"
+import { keep_chars } from "std/string"
+let result = keep_chars("H3ll0 W0rld!", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "keep_chars with letters should work");
+    assert!(stdout.contains("HllWrld"), "Should keep only letters");
+}
+
+#[test]
+fn test_replace_all_function() {
+    let code = r#"
+import { replace_all } from "std/string"
+let result = replace_all("foo bar foo baz foo", "foo", "qux")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "replace_all should work");
+    assert!(
+        stdout.contains("qux bar qux baz qux"),
+        "Should replace all occurrences"
+    );
+}
+
+// ============================================================================
+// Regex Functions: replace_pattern, matches_pattern, find_pattern, etc.
+// ============================================================================
+
+#[test]
+fn test_replace_pattern_basic() {
+    let code = r#"
+import { replace_pattern } from "std/string"
+let result = replace_pattern("hello 123 world 456", r"[0-9]+", "NUM")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "replace_pattern should work");
+    assert!(
+        stdout.contains("hello NUM world NUM"),
+        "Should replace all number sequences"
+    );
+}
+
+#[test]
+fn test_replace_pattern_whitespace() {
+    let code = r#"
+import { replace_pattern } from "std/string"
+let result = replace_pattern("hello   world  test", r"\s+", " ")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "replace_pattern with whitespace should work");
+    assert!(
+        stdout.contains("hello world test"),
+        "Should normalize whitespace"
+    );
+}
+
+#[test]
+fn test_replace_pattern_slugify() {
+    let code = r#"
+import { replace_pattern, to_lower, trim_chars } from "std/string"
+let title = "Hello, World! (2024)"
+let slug = to_lower(title)
+let slug = replace_pattern(slug, r"[^a-z0-9]+", "-")
+let slug = trim_chars(slug, "-")
+print(slug)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "replace_pattern for slugify should work");
+    assert!(
+        stdout.contains("hello-world-2024"),
+        "Should create a proper slug"
+    );
+}
+
+#[test]
+fn test_matches_pattern_basic() {
+    let code = r#"
+import { matches_pattern } from "std/string"
+print(matches_pattern("hello123", r"[0-9]+"))
+print(matches_pattern("hello", r"[0-9]+"))
+print(matches_pattern("test@example.com", r"@"))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "matches_pattern should work");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true", "Should match digits");
+    assert_eq!(lines[1], "false", "Should not match when no digits");
+    assert_eq!(lines[2], "true", "Should match @ symbol");
+}
+
+#[test]
+fn test_matches_pattern_email() {
+    let code = r#"
+import { matches_pattern } from "std/string"
+let email_pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+print(matches_pattern("test@example.com", email_pattern))
+print(matches_pattern("invalid-email", email_pattern))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "matches_pattern for email should work");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true", "Should match valid email");
+    assert_eq!(lines[1], "false", "Should not match invalid email");
+}
+
+#[test]
+fn test_find_pattern_basic() {
+    let code = r#"
+import { find_pattern } from "std/string"
+let result = find_pattern("hello 123 world", r"[0-9]+")
+match result {
+    Some(m) => print("found: " + m),
+    None => print("not found")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "find_pattern should work");
+    assert!(stdout.contains("found: 123"), "Should find the number");
+}
+
+#[test]
+fn test_find_pattern_no_match() {
+    let code = r#"
+import { find_pattern } from "std/string"
+let result = find_pattern("hello world", r"[0-9]+")
+match result {
+    Some(m) => print("found: " + m),
+    None => print("not found")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "find_pattern with no match should work");
+    assert!(stdout.contains("not found"), "Should return None");
+}
+
+#[test]
+fn test_find_all_pattern_basic() {
+    let code = r#"
+import { find_all_pattern } from "std/string"
+let matches = find_all_pattern("a1b2c3d4", r"[0-9]")
+print(len(matches))
+for m in matches {
+    print(m)
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "find_all_pattern should work");
+    assert!(stdout.contains("4"), "Should find 4 matches");
+    assert!(stdout.contains("1"), "Should find 1");
+    assert!(stdout.contains("2"), "Should find 2");
+    assert!(stdout.contains("3"), "Should find 3");
+    assert!(stdout.contains("4"), "Should find 4");
+}
+
+#[test]
+fn test_find_all_pattern_words() {
+    let code = r#"
+import { find_all_pattern } from "std/string"
+let matches = find_all_pattern("foo bar baz foo qux foo", r"foo")
+print(len(matches))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "find_all_pattern for words should work");
+    assert!(stdout.contains("3"), "Should find 3 occurrences of foo");
+}
+
+#[test]
+fn test_split_pattern_basic() {
+    let code = r#"
+import { split_pattern } from "std/string"
+let parts = split_pattern("a1b2c3d", r"[0-9]")
+print(len(parts))
+for p in parts {
+    print(p)
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "split_pattern should work");
+    assert!(stdout.contains("4"), "Should have 4 parts");
+    assert!(stdout.contains("a"), "Should contain a");
+    assert!(stdout.contains("b"), "Should contain b");
+    assert!(stdout.contains("c"), "Should contain c");
+    assert!(stdout.contains("d"), "Should contain d");
+}
+
+#[test]
+fn test_split_pattern_whitespace() {
+    let code = r#"
+import { split_pattern } from "std/string"
+let parts = split_pattern("hello   world  test", r"\s+")
+print(len(parts))
+for p in parts {
+    print("[" + p + "]")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "split_pattern with whitespace should work");
+    assert!(stdout.contains("3"), "Should have 3 parts");
+    assert!(stdout.contains("[hello]"), "Should contain hello");
+    assert!(stdout.contains("[world]"), "Should contain world");
+    assert!(stdout.contains("[test]"), "Should contain test");
+}

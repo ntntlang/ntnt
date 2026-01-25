@@ -1,0 +1,954 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IAL Explorer - Intent Assertion Language</title>
+    <style>
+      :root {
+        --bg-primary: #0d1117;
+        --bg-secondary: #161b22;
+        --bg-tertiary: #21262d;
+        --bg-elevated: #1c2128;
+        --border: #30363d;
+        --border-hover: #484f58;
+        --text-primary: #e6edf3;
+        --text-secondary: #8b949e;
+        --text-muted: #6e7681;
+        --green: #3fb950;
+        --green-bg: rgba(63, 185, 80, 0.15);
+        --red: #f85149;
+        --red-bg: rgba(248, 81, 73, 0.15);
+        --yellow: #d29922;
+        --yellow-bg: rgba(210, 153, 34, 0.15);
+        --blue: #58a6ff;
+        --blue-bg: rgba(88, 166, 255, 0.15);
+        --purple: #a371f7;
+        --purple-bg: rgba(163, 113, 247, 0.15);
+        --orange: #f0883e;
+        --orange-bg: rgba(240, 136, 62, 0.15);
+        --teal: #39c5cf;
+        --teal-bg: rgba(57, 197, 207, 0.15);
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        line-height: 1.6;
+        font-size: 14px;
+      }
+
+      /* Header */
+      .header {
+        background: var(--bg-secondary);
+        border-bottom: 1px solid var(--border);
+        padding: 16px 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        position: sticky;
+        top: 0;
+        z-index: 50;
+      }
+
+      .logo {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-weight: 600;
+        font-size: 16px;
+      }
+
+      .logo .ial {
+        color: var(--purple);
+      }
+
+      .header-subtitle {
+        color: var(--text-muted);
+        font-size: 13px;
+        font-weight: 400;
+      }
+
+      .header-right {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .file-select {
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 12px;
+        color: var(--text-primary);
+        font-size: 13px;
+        cursor: pointer;
+      }
+
+      /* Main container */
+      .container {
+        display: grid;
+        grid-template-columns: 1fr 350px;
+        min-height: calc(100vh - 60px);
+      }
+
+      @media (max-width: 900px) {
+        .container {
+          grid-template-columns: 1fr;
+        }
+        .sidebar {
+          display: none;
+        }
+      }
+
+      /* Intent file view */
+      .intent-view {
+        padding: 24px;
+        overflow-y: auto;
+      }
+
+      .intent-content {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 20px 24px;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+
+      /* Syntax highlighting */
+      .intent-content .comment {
+        color: var(--text-muted);
+      }
+
+      .intent-content .section-header {
+        color: var(--purple);
+        font-weight: 600;
+      }
+
+      .intent-content .keyword {
+        color: var(--orange);
+        font-weight: 500;
+      }
+
+      .intent-content .feature-name {
+        color: var(--blue);
+        font-weight: 500;
+      }
+
+      .intent-content .string {
+        color: var(--green);
+      }
+
+      .intent-content .arrow {
+        color: var(--teal);
+        font-weight: 600;
+      }
+
+      .intent-content .separator {
+        color: var(--text-muted);
+      }
+
+      /* Glossary terms - the magic! */
+      .glossary-term {
+        background: var(--purple-bg);
+        color: var(--purple);
+        padding: 1px 4px;
+        border-radius: 3px;
+        cursor: help;
+        transition: all 0.15s ease;
+        position: relative;
+      }
+
+      .glossary-term:hover {
+        background: rgba(163, 113, 247, 0.35);
+        box-shadow: 0 0 0 2px rgba(163, 113, 247, 0.3);
+      }
+
+      .glossary-term.level-1 {
+        background: var(--blue-bg);
+        color: var(--blue);
+      }
+
+      .glossary-term.level-1:hover {
+        background: rgba(88, 166, 255, 0.35);
+        box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.3);
+      }
+
+      .glossary-term.level-2 {
+        background: var(--teal-bg);
+        color: var(--teal);
+      }
+
+      .glossary-term.level-2:hover {
+        background: rgba(57, 197, 207, 0.35);
+        box-shadow: 0 0 0 2px rgba(57, 197, 207, 0.3);
+      }
+
+      .glossary-term.primitive {
+        background: var(--green-bg);
+        color: var(--green);
+      }
+
+      .glossary-term.primitive:hover {
+        background: rgba(63, 185, 80, 0.35);
+        box-shadow: 0 0 0 2px rgba(63, 185, 80, 0.3);
+      }
+
+      /* Popover that follows mouse */
+      .popover {
+        position: fixed;
+        background: var(--bg-elevated);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px;
+        min-width: 320px;
+        max-width: 450px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+        z-index: 1000;
+        pointer-events: none;
+        opacity: 0;
+        transform: translateY(8px);
+        transition: opacity 0.15s ease, transform 0.15s ease;
+      }
+
+      .popover.visible {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      .popover-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin-bottom: 12px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .popover-title .term-badge {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-weight: 500;
+      }
+
+      .popover-title .term-badge.glossary {
+        background: var(--purple-bg);
+        color: var(--purple);
+      }
+
+      .popover-title .term-badge.primitive {
+        background: var(--green-bg);
+        color: var(--green);
+      }
+
+      /* Resolution chain in popover */
+      .resolution-chain {
+        font-family: ui-monospace, monospace;
+        font-size: 12px;
+      }
+
+      .resolution-step {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 6px 0;
+        border-left: 2px solid var(--border);
+        padding-left: 12px;
+        margin-left: 4px;
+      }
+
+      .resolution-step:first-child {
+        border-left-color: var(--purple);
+      }
+
+      .resolution-step.level-1 {
+        margin-left: 20px;
+        border-left-color: var(--blue);
+      }
+
+      .resolution-step.level-2 {
+        margin-left: 36px;
+        border-left-color: var(--teal);
+      }
+
+      .resolution-step.primitive {
+        margin-left: 52px;
+        border-left-color: var(--green);
+      }
+
+      .step-arrow {
+        color: var(--text-muted);
+        flex-shrink: 0;
+      }
+
+      .step-term {
+        color: var(--purple);
+      }
+
+      .step-term.level-1 {
+        color: var(--blue);
+      }
+
+      .step-term.level-2 {
+        color: var(--teal);
+      }
+
+      .step-term.primitive {
+        color: var(--green);
+        font-weight: 500;
+      }
+
+      .step-source {
+        color: var(--text-muted);
+        font-size: 10px;
+        margin-left: auto;
+      }
+
+      /* Primitive check box */
+      .primitive-checks {
+        background: var(--bg-tertiary);
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin-top: 12px;
+        font-size: 11px;
+      }
+
+      .primitive-checks-title {
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-size: 10px;
+        margin-bottom: 8px;
+      }
+
+      .primitive-check {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 0;
+        font-family: ui-monospace, monospace;
+        color: var(--green);
+      }
+
+      .primitive-check .check-icon {
+        opacity: 0.7;
+      }
+
+      /* Sidebar - Glossary reference */
+      .sidebar {
+        background: var(--bg-secondary);
+        border-left: 1px solid var(--border);
+        padding: 20px;
+        overflow-y: auto;
+      }
+
+      .sidebar-title {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--text-muted);
+        margin-bottom: 16px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .glossary-list {
+        list-style: none;
+      }
+
+      .glossary-item {
+        padding: 10px 12px;
+        margin-bottom: 6px;
+        background: var(--bg-tertiary);
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.1s ease;
+      }
+
+      .glossary-item:hover {
+        background: var(--bg-elevated);
+        border-left: 3px solid var(--purple);
+        padding-left: 9px;
+      }
+
+      .glossary-item .term {
+        font-weight: 500;
+        color: var(--purple);
+        font-size: 13px;
+        margin-bottom: 4px;
+      }
+
+      .glossary-item .means {
+        font-size: 12px;
+        color: var(--text-secondary);
+        font-family: ui-monospace, monospace;
+      }
+
+      /* Legend */
+      .legend {
+        background: var(--bg-tertiary);
+        border-radius: 6px;
+        padding: 12px;
+        margin-bottom: 20px;
+      }
+
+      .legend-title {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--text-muted);
+        margin-bottom: 10px;
+      }
+
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 0;
+        font-size: 12px;
+      }
+
+      .legend-color {
+        width: 12px;
+        height: 12px;
+        border-radius: 3px;
+      }
+
+      .legend-color.glossary { background: var(--purple-bg); border: 1px solid var(--purple); }
+      .legend-color.level-1 { background: var(--blue-bg); border: 1px solid var(--blue); }
+      .legend-color.level-2 { background: var(--teal-bg); border: 1px solid var(--teal); }
+      .legend-color.primitive { background: var(--green-bg); border: 1px solid var(--green); }
+
+      /* Instructions */
+      .instructions {
+        background: var(--blue-bg);
+        border: 1px solid rgba(88, 166, 255, 0.3);
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 20px;
+        font-size: 13px;
+        color: var(--blue);
+      }
+
+      .instructions strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      /* Mockup label */
+      .mockup-label {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: var(--yellow);
+        color: #000;
+        padding: 8px 16px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        z-index: 100;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="header">
+      <div class="logo">
+        <span class="ial">IAL</span> Explorer
+        <span class="header-subtitle">Intent Assertion Language Visualizer</span>
+      </div>
+      <div class="header-right">
+        <select class="file-select">
+          <option>ntnt-lang-org/server.intent</option>
+          <option>ial_demo/server.intent</option>
+          <option>snowgauge/snowgauge.intent</option>
+        </select>
+      </div>
+    </header>
+
+    <div class="container">
+      <div class="intent-view">
+        <div class="instructions">
+          <strong>✨ Hover over highlighted terms to see the magic of IAL decomposition</strong>
+          Move your mouse over any purple-highlighted term to see how natural language assertions resolve into executable checks.
+        </div>
+
+        <div class="intent-content" id="intent-content">
+<span class="comment"># NTNT Language Website</span>
+<span class="comment"># Official website for ntnt-lang.org</span>
+<span class="comment"># Run: ntnt intent check server.tnt</span>
+
+<span class="section-header">## Overview</span>
+A clean, modern website introducing the NTNT programming language.
+Built with NTNT's file-based routing, external templates, and middleware.
+
+<span class="separator">---</span>
+
+<span class="section-header">## Glossary</span>
+
+| Term | Means |
+|------|-------|
+| <span class="glossary-term" data-term="a visitor goes to the home page">a visitor goes to the home page</span> | GET / |
+| <span class="glossary-term" data-term="a visitor goes to the learn page">a visitor goes to the learn page</span> | GET /learn |
+| <span class="glossary-term" data-term="a visitor goes to the blog">a visitor goes to the blog</span> | GET /blog |
+| <span class="glossary-term" data-term="page loads successfully">page loads successfully</span> | status 200, <span class="glossary-term" data-term="returns HTML">returns HTML</span> |
+| <span class="glossary-term" data-term="returns HTML">returns HTML</span> | header "Content-Type" contains "text/html" |
+| <span class="glossary-term" data-term="has site branding">has site branding</span> | body contains "ntnt-logo", body contains "NTNT" |
+| <span class="glossary-term" data-term="has powered badge">has powered badge</span> | body contains "Powered by NTNT", body contains "powered-badge" |
+| <span class="glossary-term" data-term="has navigation">has navigation</span> | body contains "Learn", body contains "Blog" |
+| <span class="glossary-term" data-term="has proper layout">has proper layout</span> | <span class="glossary-term" data-term="has site branding">has site branding</span>, <span class="glossary-term" data-term="has navigation">has navigation</span>, body contains "footer" |
+| <span class="glossary-term" data-term="they see">they see "{text}"</span> | body contains "{text}" |
+| <span class="glossary-term" data-term="they don't see">they don't see "{text}"</span> | body not contains "{text}" |
+| <span class="glossary-term" data-term="page not found">page not found</span> | status 404 |
+| <span class="glossary-term" data-term="blog post exists">blog post exists</span> | status 200, <span class="glossary-term" data-term="returns HTML">returns HTML</span> |
+
+<span class="separator">---</span>
+
+<span class="keyword">Feature:</span> <span class="feature-name">Homepage</span>
+  id: feature.homepage
+  description: <span class="string">"Landing page introducing NTNT with modern full-width hero and glass header"</span>
+
+  <span class="keyword">Scenario:</span> Visitor discovers NTNT
+    description: <span class="string">"A new visitor lands on the homepage and learns about NTNT"</span>
+    <span class="keyword">When</span> <span class="glossary-term" data-term="a visitor goes to the home page">a visitor goes to the home page</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="page loads successfully">page loads successfully</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="has proper layout">has proper layout</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Experimental"</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Intent-Driven Development"</span>
+
+  <span class="keyword">Scenario:</span> Visitor sees call-to-action
+    description: <span class="string">"The homepage prominently displays action buttons"</span>
+    <span class="keyword">When</span> <span class="glossary-term" data-term="a visitor goes to the home page">a visitor goes to the home page</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Get Started"</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Learn More"</span>
+
+  <span class="keyword">Scenario:</span> Visitor sees feature highlights
+    description: <span class="string">"The homepage highlights NTNT's key features"</span>
+    <span class="keyword">When</span> <span class="glossary-term" data-term="a visitor goes to the home page">a visitor goes to the home page</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Why NTNT?"</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Full-Featured Language"</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Design by Contract"</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Intent Studio"</span>
+
+<span class="separator">---</span>
+
+<span class="keyword">Feature:</span> <span class="feature-name">Learn Page</span>
+  id: feature.learn_page
+  description: <span class="string">"Getting started guide and documentation links"</span>
+
+  <span class="keyword">Scenario:</span> Developer reads the quick start guide
+    description: <span class="string">"A developer visits the learn page to get started"</span>
+    <span class="keyword">When</span> <span class="glossary-term" data-term="a visitor goes to the learn page">a visitor goes to the learn page</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="page loads successfully">page loads successfully</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="has proper layout">has proper layout</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Installation"</span>
+
+  <span class="keyword">Scenario:</span> Developer learns about IDD
+    description: <span class="string">"The learn page explains Intent-Driven Development"</span>
+    <span class="keyword">When</span> <span class="glossary-term" data-term="a visitor goes to the learn page">a visitor goes to the learn page</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Intent-Driven Development"</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "@implements"</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "ntnt intent check"</span>
+
+<span class="separator">---</span>
+
+<span class="keyword">Feature:</span> <span class="feature-name">Blog List</span>
+  id: feature.blog_list
+  description: <span class="string">"Blog index showing all posts with excerpts"</span>
+
+  <span class="keyword">Scenario:</span> Visitor browses the blog
+    description: <span class="string">"A visitor views the list of blog posts"</span>
+    <span class="keyword">When</span> <span class="glossary-term" data-term="a visitor goes to the blog">a visitor goes to the blog</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="page loads successfully">page loads successfully</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="has proper layout">has proper layout</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Blog"</span>
+
+  <span class="keyword">Scenario:</span> Blog shows available posts
+    description: <span class="string">"The blog index lists all published posts"</span>
+    <span class="keyword">When</span> <span class="glossary-term" data-term="a visitor goes to the blog">a visitor goes to the blog</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Introducing NTNT"</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Intent-Driven Development"</span>
+
+<span class="separator">---</span>
+
+<span class="keyword">Feature:</span> <span class="feature-name">Blog Post View</span>
+  id: feature.blog_post
+  description: <span class="string">"Individual blog post with full content"</span>
+
+  <span class="keyword">Scenario:</span> Reading the introduction post
+    description: <span class="string">"A visitor reads the introductory blog post about NTNT"</span>
+    <span class="keyword">When</span> a visitor goes to /blog/introducing-ntnt-a-programming-language-for-the-ai-era
+    <span class="arrow">→</span> <span class="glossary-term" data-term="blog post exists">blog post exists</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="has proper layout">has proper layout</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "Introducing NTNT"</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="they see">they see "NTNT Team"</span>
+
+  <span class="keyword">Scenario:</span> Visiting a non-existent post
+    description: <span class="string">"A visitor tries to access a post that doesn't exist"</span>
+    <span class="keyword">When</span> a visitor goes to /blog/does-not-exist
+    <span class="arrow">→</span> <span class="glossary-term" data-term="page not found">page not found</span>
+
+<span class="separator">---</span>
+
+<span class="keyword">Feature:</span> <span class="feature-name">Site Branding</span>
+  id: feature.site_branding
+  description: <span class="string">"Consistent branding elements across the site"</span>
+
+  <span class="keyword">Scenario:</span> Footer shows NTNT attribution
+    description: <span class="string">"The footer includes a 'Powered by NTNT' badge"</span>
+    <span class="keyword">When</span> <span class="glossary-term" data-term="a visitor goes to the home page">a visitor goes to the home page</span>
+    <span class="arrow">→</span> <span class="glossary-term" data-term="has powered badge">has powered badge</span>
+
+<span class="separator">---</span>
+
+<span class="keyword">Constraint:</span> Responsive Design
+  description: <span class="string">"Website should be mobile-friendly with proper viewport meta"</span>
+  applies_to: [feature.homepage, feature.learn_page, feature.blog_list, feature.blog_post]
+
+<span class="keyword">Constraint:</span> Accessible
+  description: <span class="string">"Use semantic HTML, proper heading hierarchy, and sufficient contrast"</span>
+  applies_to: [feature.homepage, feature.learn_page, feature.blog_list, feature.blog_post]
+        </div>
+      </div>
+
+      <div class="sidebar">
+        <div class="legend">
+          <div class="legend-title">Resolution Depth</div>
+          <div class="legend-item">
+            <div class="legend-color glossary"></div>
+            <span>Glossary term (Level 0)</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-color level-1"></div>
+            <span>Expanded term (Level 1)</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-color level-2"></div>
+            <span>Nested term (Level 2)</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-color primitive"></div>
+            <span>Primitive check (executable)</span>
+          </div>
+        </div>
+
+        <div class="sidebar-title">Glossary Terms (13)</div>
+        <ul class="glossary-list">
+          <li class="glossary-item" data-term="a visitor goes to the home page">
+            <div class="term">a visitor goes to the home page</div>
+            <div class="means">→ GET /</div>
+          </li>
+          <li class="glossary-item" data-term="a visitor goes to the learn page">
+            <div class="term">a visitor goes to the learn page</div>
+            <div class="means">→ GET /learn</div>
+          </li>
+          <li class="glossary-item" data-term="a visitor goes to the blog">
+            <div class="term">a visitor goes to the blog</div>
+            <div class="means">→ GET /blog</div>
+          </li>
+          <li class="glossary-item" data-term="page loads successfully">
+            <div class="term">page loads successfully</div>
+            <div class="means">→ status 200, returns HTML</div>
+          </li>
+          <li class="glossary-item" data-term="has proper layout">
+            <div class="term">has proper layout</div>
+            <div class="means">→ has site branding, has navigation, body contains "footer"</div>
+          </li>
+          <li class="glossary-item" data-term="has site branding">
+            <div class="term">has site branding</div>
+            <div class="means">→ body contains "ntnt-logo", body contains "NTNT"</div>
+          </li>
+          <li class="glossary-item" data-term="has navigation">
+            <div class="term">has navigation</div>
+            <div class="means">→ body contains "Learn", body contains "Blog"</div>
+          </li>
+          <li class="glossary-item" data-term="has powered badge">
+            <div class="term">has powered badge</div>
+            <div class="means">→ body contains "Powered by NTNT", body contains "powered-badge"</div>
+          </li>
+          <li class="glossary-item" data-term="returns HTML">
+            <div class="term">returns HTML</div>
+            <div class="means">→ header "Content-Type" contains "text/html"</div>
+          </li>
+          <li class="glossary-item" data-term="they see">
+            <div class="term">they see "{text}"</div>
+            <div class="means">→ body contains "{text}"</div>
+          </li>
+          <li class="glossary-item" data-term="they don't see">
+            <div class="term">they don't see "{text}"</div>
+            <div class="means">→ body not contains "{text}"</div>
+          </li>
+          <li class="glossary-item" data-term="blog post exists">
+            <div class="term">blog post exists</div>
+            <div class="means">→ status 200, returns HTML</div>
+          </li>
+          <li class="glossary-item" data-term="page not found">
+            <div class="term">page not found</div>
+            <div class="means">→ status 404</div>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Popover element -->
+    <div class="popover" id="popover">
+      <div class="popover-title">
+        <span id="popover-term">Term</span>
+        <span class="term-badge glossary" id="popover-badge">GLOSSARY</span>
+      </div>
+      <div class="resolution-chain" id="popover-chain">
+        <!-- Filled dynamically -->
+      </div>
+      <div class="primitive-checks" id="popover-primitives">
+        <div class="primitive-checks-title">Executable Checks</div>
+        <!-- Filled dynamically -->
+      </div>
+    </div>
+
+    <div class="mockup-label">MOCKUP</div>
+
+    <script>
+      // Glossary definitions with their resolutions
+      const glossary = {
+        'a visitor goes to the home page': {
+          means: 'GET /',
+          primitive: true,
+          check: 'fetch("/", { method: "GET" })'
+        },
+        'a visitor goes to the learn page': {
+          means: 'GET /learn',
+          primitive: true,
+          check: 'fetch("/learn", { method: "GET" })'
+        },
+        'a visitor goes to the blog': {
+          means: 'GET /blog',
+          primitive: true,
+          check: 'fetch("/blog", { method: "GET" })'
+        },
+        'page loads successfully': {
+          means: 'status 200, returns HTML',
+          children: [
+            { term: 'status 200', primitive: true, check: 'Check(response.status == 200)' },
+            { term: 'returns HTML', children: [
+              { term: 'header "Content-Type" contains "text/html"', primitive: true, check: 'Check(headers["Content-Type"].includes("text/html"))' }
+            ]}
+          ]
+        },
+        'has proper layout': {
+          means: 'has site branding, has navigation, body contains "footer"',
+          children: [
+            { term: 'has site branding', children: [
+              { term: 'body contains "ntnt-logo"', primitive: true, check: 'Check(body.includes("ntnt-logo"))' },
+              { term: 'body contains "NTNT"', primitive: true, check: 'Check(body.includes("NTNT"))' }
+            ]},
+            { term: 'has navigation', children: [
+              { term: 'body contains "Learn"', primitive: true, check: 'Check(body.includes("Learn"))' },
+              { term: 'body contains "Blog"', primitive: true, check: 'Check(body.includes("Blog"))' }
+            ]},
+            { term: 'body contains "footer"', primitive: true, check: 'Check(body.includes("footer"))' }
+          ]
+        },
+        'has site branding': {
+          means: 'body contains "ntnt-logo", body contains "NTNT"',
+          children: [
+            { term: 'body contains "ntnt-logo"', primitive: true, check: 'Check(body.includes("ntnt-logo"))' },
+            { term: 'body contains "NTNT"', primitive: true, check: 'Check(body.includes("NTNT"))' }
+          ]
+        },
+        'has navigation': {
+          means: 'body contains "Learn", body contains "Blog"',
+          children: [
+            { term: 'body contains "Learn"', primitive: true, check: 'Check(body.includes("Learn"))' },
+            { term: 'body contains "Blog"', primitive: true, check: 'Check(body.includes("Blog"))' }
+          ]
+        },
+        'has powered badge': {
+          means: 'body contains "Powered by NTNT", body contains "powered-badge"',
+          children: [
+            { term: 'body contains "Powered by NTNT"', primitive: true, check: 'Check(body.includes("Powered by NTNT"))' },
+            { term: 'body contains "powered-badge"', primitive: true, check: 'Check(body.includes("powered-badge"))' }
+          ]
+        },
+        'returns HTML': {
+          means: 'header "Content-Type" contains "text/html"',
+          primitive: true,
+          check: 'Check(headers["Content-Type"].includes("text/html"))'
+        },
+        'they see': {
+          means: 'body contains {text}',
+          primitive: true,
+          check: 'Check(body.includes("{text}"))'
+        },
+        "they don't see": {
+          means: 'body not contains {text}',
+          primitive: true,
+          check: 'Check(!body.includes("{text}"))'
+        },
+        'blog post exists': {
+          means: 'status 200, returns HTML',
+          children: [
+            { term: 'status 200', primitive: true, check: 'Check(response.status == 200)' },
+            { term: 'returns HTML', children: [
+              { term: 'header "Content-Type" contains "text/html"', primitive: true, check: 'Check(headers["Content-Type"].includes("text/html"))' }
+            ]}
+          ]
+        },
+        'page not found': {
+          means: 'status 404',
+          primitive: true,
+          check: 'Check(response.status == 404)'
+        }
+      };
+
+      const popover = document.getElementById('popover');
+      const popoverTerm = document.getElementById('popover-term');
+      const popoverBadge = document.getElementById('popover-badge');
+      const popoverChain = document.getElementById('popover-chain');
+      const popoverPrimitives = document.getElementById('popover-primitives');
+
+      // Build resolution chain HTML
+      function buildResolutionChain(term, definition) {
+        let html = '';
+        let primitives = [];
+
+        function addStep(item, level) {
+          const levelClass = level === 0 ? '' : level === 1 ? 'level-1' : level === 2 ? 'level-2' : 'primitive';
+          const termClass = item.primitive ? 'primitive' : levelClass;
+
+          html += `
+            <div class="resolution-step ${levelClass}">
+              <span class="step-arrow">→</span>
+              <span class="step-term ${termClass}">${item.term}</span>
+            </div>
+          `;
+
+          if (item.primitive && item.check) {
+            primitives.push(item.check);
+          }
+
+          if (item.children) {
+            item.children.forEach(child => addStep(child, level + 1));
+          }
+        }
+
+        // Start with the original term
+        html += `
+          <div class="resolution-step">
+            <span class="step-arrow">→</span>
+            <span class="step-term">${term}</span>
+            <span class="step-source">glossary</span>
+          </div>
+        `;
+
+        // If the definition is itself a primitive (direct mapping), show it as such
+        if (definition.primitive) {
+          html += `
+            <div class="resolution-step primitive">
+              <span class="step-arrow">→</span>
+              <span class="step-term primitive">${definition.means}</span>
+            </div>
+          `;
+          if (definition.check) {
+            primitives.push(definition.check);
+          }
+        } else {
+          // Add the "means" expansion
+          html += `
+            <div class="resolution-step level-1">
+              <span class="step-arrow">→</span>
+              <span class="step-term level-1">${definition.means}</span>
+            </div>
+          `;
+
+          // Add children
+          if (definition.children) {
+            definition.children.forEach(child => addStep(child, 2));
+          }
+        }
+
+        return { html, primitives };
+      }
+
+      // Handle mouse movement for glossary terms
+      document.querySelectorAll('.glossary-term').forEach(term => {
+        term.addEventListener('mouseenter', (e) => {
+          const termKey = e.target.dataset.term;
+          const definition = glossary[termKey];
+
+          if (definition) {
+            popoverTerm.textContent = termKey;
+            const { html, primitives } = buildResolutionChain(termKey, definition);
+            popoverChain.innerHTML = html;
+
+            // Build primitives section
+            if (primitives.length > 0) {
+              popoverPrimitives.innerHTML = `
+                <div class="primitive-checks-title">Executable Checks (${primitives.length})</div>
+                ${primitives.map(p => `<div class="primitive-check"><span class="check-icon">✓</span> ${p}</div>`).join('')}
+              `;
+              popoverPrimitives.style.display = 'block';
+            } else {
+              popoverPrimitives.style.display = 'none';
+            }
+
+            popover.classList.add('visible');
+          }
+        });
+
+        term.addEventListener('mouseleave', () => {
+          popover.classList.remove('visible');
+        });
+
+        term.addEventListener('mousemove', (e) => {
+          // Position popover to follow mouse
+          const x = e.clientX + 20;
+          const y = e.clientY + 10;
+
+          // Keep popover in viewport
+          const popoverRect = popover.getBoundingClientRect();
+          const maxX = window.innerWidth - popoverRect.width - 20;
+          const maxY = window.innerHeight - popoverRect.height - 20;
+
+          popover.style.left = Math.min(x, maxX) + 'px';
+          popover.style.top = Math.min(y, maxY) + 'px';
+        });
+      });
+
+      // Sidebar glossary item click
+      document.querySelectorAll('.glossary-item').forEach(item => {
+        item.addEventListener('click', () => {
+          const termKey = item.dataset.term;
+          // Find and scroll to the first instance of this term
+          const termEl = document.querySelector(`.glossary-term[data-term="${termKey}"]`);
+          if (termEl) {
+            termEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            // Flash highlight
+            termEl.style.animation = 'flash 0.5s ease';
+            setTimeout(() => termEl.style.animation = '', 500);
+          }
+        });
+      });
+    </script>
+
+    <style>
+      @keyframes flash {
+        0%, 100% { box-shadow: 0 0 0 2px rgba(163, 113, 247, 0.3); }
+        50% { box-shadow: 0 0 0 6px rgba(163, 113, 247, 0.5); }
+      }
+    </style>
+  </body>
+</html>

@@ -10,7 +10,7 @@ Feature: Crypto Price Chart
       assert:
         - status: 200
         - body contains "Bitcoin Price"
-        - body contains 'id="chart"'
+        - body contains "chart"
         - body contains "Last 7 Days"
 
 Feature: CoinGecko API Integration

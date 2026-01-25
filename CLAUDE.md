@@ -184,8 +184,8 @@ Define domain-specific terms in your `.intent` file:
 | Term | Means |
 |------|-------|
 | success response | status 2xx, body contains "ok" |
-| they see "$text" | body contains "$text" |
-| they don't see "$text" | body not contains "$text" |
+| they see {text} | body contains {text} |
+| they don't see {text} | body not contains {text} |
 | logged in user | component.authenticated_user |
 ```
 
@@ -208,14 +208,14 @@ Feature: User Profile
 |---------|-------------|
 | `status 200` | Exact status code |
 | `status 2xx` | Any success status |
-| `body contains "$text"` | Body includes text |
-| `body not contains "$text"` | Body excludes text |
-| `body matches $pattern` | Regex match |
-| `header "$name" contains "$value"` | Header check |
-| `redirects to $path` | Redirect check |
+| `body contains {text}` | Body includes text |
+| `body not contains {text}` | Body excludes text |
+| `body matches {pattern}` | Regex match |
+| `header {name} contains {value}` | Header check |
+| `redirects to {path}` | Redirect check |
 | `returns JSON` | Content-Type check |
 | `exits successfully` | CLI exit code 0 |
-| `file "$path" exists` | File existence |
+| `file {path} exists` | File existence |
 
 ### Components (Reusable Templates)
 
@@ -332,6 +332,26 @@ push(arr, item)   // ✅ CORRECT
 "hello".len()     // ❌ WRONG
 ```
 
+## Global Builtin Functions
+
+These functions are available everywhere without importing:
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `len(x)` | Length of string or array | `len("hello")` → `5` |
+| `str(x)` | Convert any value to string | `str(42)` → `"42"` |
+| `int(x)` | Convert to integer | `int("42")` → `42` |
+| `float(x)` | Convert to float | `float("3.14")` → `3.14` |
+| `type(x)` | Get type name as string | `type([1,2])` → `"Array"` |
+| `print(x)` | Print to stdout | `print("Hello")` |
+| `push(arr, item)` | Add item to array (mutates) | `push(arr, 5)` |
+| `assert(cond)` | Assert condition is true | `assert(x > 0)` |
+| `abs(n)` | Absolute value | `abs(-5)` → `5` |
+| `min(a, b)` | Minimum of two numbers | `min(3, 7)` → `3` |
+| `max(a, b)` | Maximum of two numbers | `max(3, 7)` → `7` |
+| `round(n)` | Round to nearest integer | `round(3.7)` → `4` |
+| `floor(n)` | Round down | `floor(3.7)` → `3` |
+
 ## HTTP Server - Global Builtins vs Module Exports
 
 **CRITICAL:** HTTP routing functions are GLOBAL BUILTINS. Only response builders need importing.
@@ -413,7 +433,41 @@ ntnt intent studio file.intent # Visual preview with live tests (opens :3001)
 
 ## Standard Library Modules
 
-- `std/string` - split, join, trim, replace, contains, starts_with, ends_with
+### std/string - String Manipulation
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `split(s, delim)` | Split string into array | `split("a,b", ",")` → `["a","b"]` |
+| `join(arr, delim)` | Join array into string | `join(["a","b"], ",")` → `"a,b"` |
+| `trim(s)` | Remove leading/trailing whitespace | `trim("  hi  ")` → `"hi"` |
+| `trim_chars(s, chars)` | Trim specific characters | `trim_chars("-hi-", "-")` → `"hi"` |
+| `to_lower(s)` | Convert to lowercase | `to_lower("Hi")` → `"hi"` |
+| `to_upper(s)` | Convert to uppercase | `to_upper("Hi")` → `"HI"` |
+| `replace(s, from, to)` | Replace all occurrences | `replace("hi", "i", "o")` → `"ho"` |
+| `replace_first(s, from, to)` | Replace first occurrence | `replace_first("aa", "a", "b")` → `"ba"` |
+| `replace_chars(s, chars, repl)` | Replace any char in set | `replace_chars("a.b_c", "._", "-")` → `"a-b-c"` |
+| `remove_chars(s, chars)` | Remove all chars in set | `remove_chars("a!b?", "!?")` → `"ab"` |
+| `keep_chars(s, allowed)` | Keep only specified chars | `keep_chars("a1b2", "ab")` → `"ab"` |
+| `contains(s, sub)` | Check if contains substring | `contains("hello", "ell")` → `true` |
+| `starts_with(s, prefix)` | Check prefix | `starts_with("hello", "he")` → `true` |
+| `ends_with(s, suffix)` | Check suffix | `ends_with("hello", "lo")` → `true` |
+| `index_of(s, sub)` | Find first index (-1 if not found) | `index_of("hello", "l")` → `2` |
+| `last_index_of(s, sub)` | Find last index | `last_index_of("hello", "l")` → `3` |
+| `substring(s, start, end)` | Extract substring | `substring("hello", 1, 4)` → `"ell"` |
+| `char_at(s, idx)` | Get character at index | `char_at("hello", 0)` → `"h"` |
+| `chars(s)` | Split into character array | `chars("hi")` → `["h","i"]` |
+| `repeat(s, n)` | Repeat string n times | `repeat("ab", 3)` → `"ababab"` |
+| `pad_left(s, len, char)` | Pad start to length | `pad_left("5", 3, "0")` → `"005"` |
+| `pad_right(s, len, char)` | Pad end to length | `pad_right("5", 3, "0")` → `"500"` |
+| `reverse(s)` | Reverse string | `reverse("abc")` → `"cba"` |
+| `replace_pattern(s, regex, repl)` | Regex replace all | `replace_pattern("a1b2", r"\d", "X")` → `"aXbX"` |
+| `matches_pattern(s, regex)` | Regex match check | `matches_pattern("test123", r"\d+")` → `true` |
+| `find_pattern(s, regex)` | Find first match | `find_pattern("ab12cd", r"\d+")` → `Some("12")` |
+| `find_all_pattern(s, regex)` | Find all matches | `find_all_pattern("a1b2", r"\d")` → `["1","2"]` |
+| `split_pattern(s, regex)` | Split by regex | `split_pattern("a1b2c", r"\d")` → `["a","b","c"]` |
+
+### Other Modules
+
 - `std/url` - encode, decode, parse_query, build_query
 - `std/env` - get_env, load_env, set_env, all_env
 - `std/collections` - push, pop, keys, values, entries, has_key, get_key, first, last

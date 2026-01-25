@@ -2,8 +2,10 @@
 //!
 //! This module contains the `resolve` function - a pure function that takes a term
 //! and recursively rewrites it until reaching primitives. This is ~30 lines of core logic.
+//!
+//! Includes cycle detection to prevent infinite loops in glossary definitions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::primitives::{Primitive, Value};
 use super::vocabulary::{Definition, Term, Vocabulary};
@@ -30,31 +32,95 @@ impl std::error::Error for ResolveError {}
 /// 2. If it's a primitive → return it (base case)
 /// 3. If it's more terms → substitute params and recurse (recursive case)
 ///
+/// Includes cycle detection: if the same term pattern appears twice in the
+/// resolution path, an error is returned with the cycle shown.
+///
 /// # Arguments
 /// * `term` - The term to resolve
 /// * `vocab` - The vocabulary containing all term definitions
 ///
 /// # Returns
 /// * `Ok(Vec<Primitive>)` - The resolved primitives
-/// * `Err(ResolveError)` - If term not found or resolution fails
+/// * `Err(ResolveError)` - If term not found, cycle detected, or resolution fails
 pub fn resolve(term: &Term, vocab: &Vocabulary) -> Result<Vec<Primitive>, ResolveError> {
-    resolve_with_depth(term, vocab, 0)
+    let mut path = Vec::new();
+    let mut visited = HashSet::new();
+    resolve_with_cycle_detection(term, vocab, 0, &mut path, &mut visited)
 }
 
-/// Maximum recursion depth to prevent infinite loops
-const MAX_DEPTH: usize = 100;
+/// Maximum recursion depth as a safety net (in addition to cycle detection)
+const MAX_DEPTH: usize = 50;
 
-/// Internal resolve with depth tracking
-fn resolve_with_depth(
+/// Normalize a term text for cycle detection.
+/// Strips parameters to detect cycles like: "a {x}" -> "b {x}" -> "a {y}"
+fn normalize_term_for_cycle(text: &str) -> String {
+    // Replace quoted strings and parameter-like values with placeholders
+    let re = regex::Regex::new(r#"("[^"]*"|\{[^}]+\}|\S+)"#).unwrap();
+    let mut normalized = String::new();
+    let mut last_end = 0;
+
+    for cap in re.captures_iter(text) {
+        let m = cap.get(0).unwrap();
+        normalized.push_str(&text[last_end..m.start()]);
+
+        let matched = m.as_str();
+        if matched.starts_with('"') || matched.starts_with('{') {
+            // Replace quoted strings and {param} with a placeholder
+            normalized.push_str("<P>");
+        } else {
+            // Keep literal words
+            normalized.push_str(matched);
+        }
+        last_end = m.end();
+    }
+    normalized.push_str(&text[last_end..]);
+    normalized.to_lowercase()
+}
+
+/// Internal resolve with cycle detection and depth tracking
+fn resolve_with_cycle_detection(
     term: &Term,
     vocab: &Vocabulary,
     depth: usize,
+    path: &mut Vec<String>,
+    visited: &mut HashSet<String>,
 ) -> Result<Vec<Primitive>, ResolveError> {
-    // Check for infinite recursion
+    // Check for maximum depth (safety net)
     if depth > MAX_DEPTH {
         return Err(ResolveError {
             term: term.text.clone(),
-            message: format!("Maximum recursion depth ({}) exceeded", MAX_DEPTH),
+            message: format!(
+                "Maximum recursion depth ({}) exceeded. Resolution path:\n  {}",
+                MAX_DEPTH,
+                path.join("\n  → ")
+            ),
+        });
+    }
+
+    // Normalize the term for cycle detection
+    let normalized = normalize_term_for_cycle(&term.text);
+
+    // Check for cycle
+    if visited.contains(&normalized) {
+        // Build a clear cycle visualization
+        let cycle_start = path
+            .iter()
+            .position(|p| normalize_term_for_cycle(p) == normalized);
+        let cycle_path = if let Some(start) = cycle_start {
+            let mut cycle: Vec<_> = path[start..].to_vec();
+            cycle.push(term.text.clone());
+            cycle.join(" → ")
+        } else {
+            format!("... → {}", term.text)
+        };
+
+        return Err(ResolveError {
+            term: term.text.clone(),
+            message: format!(
+                "Cycle detected in glossary definitions:\n  {}\n\nThis creates an infinite loop. \
+                 Check your glossary for circular references.",
+                cycle_path
+            ),
         });
     }
 
@@ -75,16 +141,30 @@ fn resolve_with_depth(
 
                 // Recursive case: more terms - substitute and resolve each
                 Definition::Terms(sub_terms) => {
+                    // Add this term to the path for cycle detection
+                    path.push(term.text.clone());
+                    visited.insert(normalized.clone());
+
                     let mut results = Vec::new();
 
                     for sub_term in sub_terms {
                         // Substitute params from parent into sub-term
                         let substituted = sub_term.substitute(&all_params);
 
-                        // Recurse
-                        let resolved = resolve_with_depth(&substituted, vocab, depth + 1)?;
+                        // Recurse with updated path
+                        let resolved = resolve_with_cycle_detection(
+                            &substituted,
+                            vocab,
+                            depth + 1,
+                            path,
+                            visited,
+                        )?;
                         results.extend(resolved);
                     }
+
+                    // Remove from path when done (backtrack)
+                    path.pop();
+                    visited.remove(&normalized);
 
                     Ok(results)
                 }
@@ -145,6 +225,36 @@ fn substitute_primitive(primitive: &Primitive, params: &HashMap<String, Value>) 
             file: file.as_ref().map(|f| substitute_string(f, params)),
             lint: *lint,
             validate: *validate,
+        },
+
+        Primitive::FunctionCall {
+            source_file,
+            function_name,
+            args,
+        } => Primitive::FunctionCall {
+            source_file: substitute_string(source_file, params),
+            function_name: substitute_string(function_name, params),
+            args: args.iter().map(|a| substitute_value(a, params)).collect(),
+        },
+
+        Primitive::PropertyCheck {
+            property,
+            source_file,
+            function_name,
+            input,
+        } => Primitive::PropertyCheck {
+            property: property.clone(),
+            source_file: substitute_string(source_file, params),
+            function_name: substitute_string(function_name, params),
+            input: substitute_value(input, params),
+        },
+
+        Primitive::InvariantCheck {
+            invariant_id,
+            value,
+        } => Primitive::InvariantCheck {
+            invariant_id: substitute_string(invariant_id, params),
+            value: substitute_value(value, params),
         },
     }
 }
@@ -303,5 +413,131 @@ mod tests {
 
         let result = resolve(&term, &vocab);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cycle_detection_direct() {
+        // Create a vocabulary with a direct cycle: A -> A
+        let mut vocab = Vocabulary::new();
+        vocab.add_terms(
+            "self referencing term",
+            vec![Term::new("self referencing term")],
+        );
+
+        let term = Term::new("self referencing term");
+        let result = resolve(&term, &vocab);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("Cycle detected"),
+            "Expected cycle detection error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_cycle_detection_indirect() {
+        // Create a vocabulary with an indirect cycle: A -> B -> C -> A
+        let mut vocab = Vocabulary::new();
+        vocab.add_terms("term A", vec![Term::new("term B")]);
+        vocab.add_terms("term B", vec![Term::new("term C")]);
+        vocab.add_terms("term C", vec![Term::new("term A")]);
+
+        let term = Term::new("term A");
+        let result = resolve(&term, &vocab);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("Cycle detected"),
+            "Expected cycle detection error, got: {}",
+            err.message
+        );
+        // The error should show the cycle path
+        assert!(
+            err.message.contains("term A") && err.message.contains("term B"),
+            "Error should show cycle path, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_cycle_detection_with_params() {
+        // Cycle with different parameter values should still be detected
+        // "foo {x}" -> "bar {x}" -> "foo {y}" (cycle on normalized "foo <P>")
+        let mut vocab = Vocabulary::new();
+        vocab.add_terms("foo {x}", vec![Term::new("bar {x}")]);
+        vocab.add_terms("bar {y}", vec![Term::new("foo {y}")]);
+
+        let term = Term::new("foo \"test\"");
+        let result = resolve(&term, &vocab);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("Cycle detected"),
+            "Expected cycle detection error with params, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn test_no_false_positive_diamond() {
+        // Diamond pattern should NOT be detected as a cycle:
+        //       A
+        //      / \
+        //     B   C
+        //      \ /
+        //       D (primitive)
+        //
+        // A resolves to both B and C, both of which resolve to D
+        // This is NOT a cycle because D is a primitive (base case)
+        let mut vocab = Vocabulary::new();
+        vocab.add_primitive(
+            "primitive D",
+            Primitive::Check {
+                op: CheckOp::Equals,
+                path: "test".to_string(),
+                expected: Value::String("value".to_string()),
+            },
+        );
+        vocab.add_terms("term B", vec![Term::new("primitive D")]);
+        vocab.add_terms("term C", vec![Term::new("primitive D")]);
+        vocab.add_terms("term A", vec![Term::new("term B"), Term::new("term C")]);
+
+        let term = Term::new("term A");
+        let result = resolve(&term, &vocab);
+
+        assert!(result.is_ok(), "Diamond pattern should not be a cycle");
+        let primitives = result.unwrap();
+        assert_eq!(
+            primitives.len(),
+            2,
+            "Should resolve to 2 primitives (D twice)"
+        );
+    }
+
+    #[test]
+    fn test_normalize_term_for_cycle() {
+        // Test the normalization function
+        // Quoted strings become <P>
+        assert_eq!(
+            normalize_term_for_cycle("body contains \"hello\""),
+            "body contains <p>"
+        );
+        // {param} placeholders become <P>
+        assert_eq!(
+            normalize_term_for_cycle("body contains {text}"),
+            "body contains <p>"
+        );
+        // Literal words stay as-is (lowercased)
+        assert_eq!(normalize_term_for_cycle("status is 2xx"), "status is 2xx");
+        assert_eq!(normalize_term_for_cycle("simple term"), "simple term");
+        // Mixed: params replaced, literals kept
+        assert_eq!(
+            normalize_term_for_cycle("user {name} sees \"welcome\""),
+            "user <p> sees <p>"
+        );
     }
 }

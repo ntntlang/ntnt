@@ -1,0 +1,70 @@
+// Text utility functions for the NTNT website
+// @implements: feature.text_utilities
+
+import { trim, to_lower, trim_chars, substring, last_index_of, replace_pattern } from "std/string"
+
+// Convert a title to a URL-safe slug
+// Examples:
+//   "Hello World" → "hello-world"
+//   "What's Up?" → "whats-up"
+//   "UPPERCASE TITLE" → "uppercase-title"
+//   "" → "post" (fallback)
+fn slugify(title) {
+    // Coerce to string, trim whitespace, convert to lowercase
+    let mut text = to_lower(trim(str(title)))
+
+    // Handle empty input
+    if len(text) == 0 {
+        return "post"
+    }
+
+    // Remove apostrophes and quotes (these should disappear, not become hyphens)
+    text = replace_pattern(text, r#"['"]"#, "")
+
+    // Replace all other non-alphanumeric sequences with a single hyphen
+    text = replace_pattern(text, r"[^a-z0-9]+", "-")
+
+    // Remove leading/trailing hyphens
+    text = trim_chars(text, "-")
+
+    // If we ended up with empty string, use fallback
+    if len(text) == 0 {
+        return "post"
+    }
+
+    return text
+}
+
+// Truncate text to max_length, breaking at word boundary, adding "..." if truncated
+// Examples:
+//   truncate_excerpt("Hello world", 20) → "Hello world"
+//   truncate_excerpt("This is a long sentence that needs truncating", 20) → "This is a long..."
+//   truncate_excerpt("", 20) → ""
+fn truncate_excerpt(text, max_length) {
+    let trimmed = trim(text)
+
+    // If text fits, return as-is
+    if len(trimmed) <= max_length {
+        return trimmed
+    }
+
+    // Reserve space for "..."
+    let target_length = max_length - 3
+
+    if target_length <= 0 {
+        return "..."
+    }
+
+    // Find the last space before target_length
+    let truncated = substring(trimmed, 0, target_length)
+    let last_space = last_index_of(truncated, " ")
+
+    if last_space > 0 {
+        // Break at word boundary
+        return substring(truncated, 0, last_space) + "..."
+    }
+
+    // No space found, just hard truncate
+    return truncated + "..."
+}
+

@@ -268,95 +268,95 @@ These terms are **built-in** and available without definition. They form the fou
 
 ### 5.1 Universal Outcomes
 
-| Term                    | Technical Translation                           |
-| ----------------------- | ----------------------------------------------- |
-| `succeeds`              | No error thrown, operation completes            |
-| `fails`                 | Operation throws error or returns error status  |
-| `fails with "$message"` | Error message contains `$message`               |
-| `takes less than $time` | Completes within duration (e.g., `500ms`, `2s`) |
-| `no error`              | Operation completed without throwing            |
+| Term                     | Technical Translation                           |
+| ------------------------ | ----------------------------------------------- |
+| `succeeds`               | No error thrown, operation completes            |
+| `fails`                  | Operation throws error or returns error status  |
+| `fails with {message}`   | Error message contains `{message}`              |
+| `takes less than {time}` | Completes within duration (e.g., `500ms`, `2s`) |
+| `no error`               | Operation completed without throwing            |
 
 ### 5.2 HTTP Outcomes
 
-| Term                               | Technical Translation                      |
-| ---------------------------------- | ------------------------------------------ |
-| `they see "$text"`                 | `body contains "$text"`                    |
-| `they don't see "$text"`           | `body not contains "$text"`                |
-| `page contains "$text"`            | `body contains "$text"`                    |
-| `redirects to $path`               | `status 3xx` + `Location header == $path`  |
-| `returns status $code`             | `response.status == $code`                 |
-| `returns JSON`                     | `Content-Type contains "application/json"` |
-| `returns HTML`                     | `Content-Type contains "text/html"`        |
-| `response includes "$field"`       | JSON path `$field` exists                  |
-| `"$field" is "$value"`             | JSON path `$field == $value`               |
-| `header "$name" is "$value"`       | `headers[$name] == $value`                 |
-| `header "$name" contains "$value"` | `headers[$name].contains($value)`          |
+| Term                              | Technical Translation                      |
+| --------------------------------- | ------------------------------------------ |
+| `they see {text}`                 | `body contains {text}`                     |
+| `they don't see {text}`           | `body not contains {text}`                 |
+| `page contains {text}`            | `body contains {text}`                     |
+| `redirects to {path}`             | `status 3xx` + `Location header == {path}` |
+| `returns status {code}`           | `response.status == {code}`                |
+| `returns JSON`                    | `Content-Type contains "application/json"` |
+| `returns HTML`                    | `Content-Type contains "text/html"`        |
+| `response includes {field}`       | JSON path `{field}` exists                 |
+| `{field} is {value}`              | JSON path `{field} == {value}`             |
+| `header {name} is {value}`        | `headers[{name}] == {value}`               |
+| `header {name} contains {value}`  | `headers[{name}].contains({value})`        |
 
 ### 5.3 CLI Outcomes
 
-| Term                      | Technical Translation     |
-| ------------------------- | ------------------------- |
-| `exits successfully`      | `exit_code == 0`          |
-| `exits with error`        | `exit_code != 0`          |
-| `exits with code $n`      | `exit_code == $n`         |
-| `output shows "$text"`    | `stdout contains "$text"` |
-| `output matches $pattern` | `stdout matches $pattern` |
-| `error shows "$text"`     | `stderr contains "$text"` |
-| `no error output`         | `stderr is empty`         |
+| Term                     | Technical Translation      |
+| ------------------------ | -------------------------- |
+| `exits successfully`     | `exit_code == 0`           |
+| `exits with error`       | `exit_code != 0`           |
+| `exits with code {n}`    | `exit_code == {n}`         |
+| `output shows {text}`    | `stdout contains {text}`   |
+| `output matches {pattern}` | `stdout matches {pattern}` |
+| `error shows {text}`     | `stderr contains {text}`   |
+| `no error output`        | `stderr is empty`          |
 
 ### 5.4 File Outcomes
 
-| Term                             | Technical Translation                     |
-| -------------------------------- | ----------------------------------------- |
-| `file "$path" exists`            | `fs.exists($path) == true`                |
-| `file "$path" is created`        | `fs.exists($path) == true` (after action) |
-| `file "$path" is deleted`        | `fs.exists($path) == false`               |
-| `file "$path" contains "$text"`  | `fs.read($path).contains($text)`          |
-| `file "$path" is empty`          | `fs.size($path) == 0`                     |
-| `directory "$path" exists`       | `fs.isDirectory($path)`                   |
-| `directory "$path" has $n files` | File count matches                        |
+| Term                            | Technical Translation                      |
+| ------------------------------- | ------------------------------------------ |
+| `file {path} exists`            | `fs.exists({path}) == true`                |
+| `file {path} is created`        | `fs.exists({path}) == true` (after action) |
+| `file {path} is deleted`        | `fs.exists({path}) == false`               |
+| `file {path} contains {text}`   | `fs.read({path}).contains({text})`         |
+| `file {path} is empty`          | `fs.size({path}) == 0`                     |
+| `directory {path} exists`       | `fs.isDirectory({path})`                   |
+| `directory {path} has {n} files` | File count matches                        |
 
 ### 5.5 Database Outcomes
 
-| Term                             | Technical Translation                        |
-| -------------------------------- | -------------------------------------------- |
-| `record is created`              | Row count increases by 1                     |
-| `record is updated`              | Row exists with new values                   |
-| `record is deleted`              | Row no longer exists                         |
-| `row exists where $condition`    | `SELECT ... WHERE $condition` returns ≥1 row |
-| `no row exists where $condition` | `SELECT ... WHERE $condition` returns 0 rows |
-| `row count is $n`                | Result set has exactly $n rows               |
-| `row count of "$table" is $n`    | Table has exactly $n rows                    |
-| `row count increases by $n`      | $n more rows than before action              |
-| `"$column" is "$value"`          | `result[0].$column == $value`                |
+| Term                            | Technical Translation                         |
+| ------------------------------- | --------------------------------------------- |
+| `record is created`             | Row count increases by 1                      |
+| `record is updated`             | Row exists with new values                    |
+| `record is deleted`             | Row no longer exists                          |
+| `row exists where {condition}`  | `SELECT ... WHERE {condition}` returns ≥1 row |
+| `no row exists where {condition}` | `SELECT ... WHERE {condition}` returns 0 rows |
+| `row count is {n}`              | Result set has exactly {n} rows               |
+| `row count of {table} is {n}`   | Table has exactly {n} rows                    |
+| `row count increases by {n}`    | {n} more rows than before action              |
+| `{column} is {value}`           | `result[0].{column} == {value}`               |
 
 ### 5.6 Event & Side Effect Outcomes
 
-| Term                                    | Technical Translation               |
-| --------------------------------------- | ----------------------------------- |
-| `email is sent to "$address"`           | Email delivery triggered to address |
-| `event "$name" is emitted`              | Event published to message bus      |
-| `event "$name" has "$field" = "$value"` | Event payload field matches         |
-| `no event "$name"`                      | Event was not published             |
-| `"$message" is logged`                  | Log output contains message         |
-| `no errors are logged`                  | No ERROR level log entries          |
+| Term                                   | Technical Translation               |
+| -------------------------------------- | ----------------------------------- |
+| `email is sent to {address}`           | Email delivery triggered to address |
+| `event {name} is emitted`              | Event published to message bus      |
+| `event {name} has {field} = {value}`   | Event payload field matches         |
+| `no event {name}`                      | Event was not published             |
+| `{message} is logged`                  | Log output contains message         |
+| `no errors are logged`                 | No ERROR level log entries          |
 
 ### 5.7 Behavioral Properties
 
-| Term                                     | Technical Translation                   |
-| ---------------------------------------- | --------------------------------------- |
-| `when repeated $n times, still $outcome` | Idempotency: run $n times, same result  |
-| `when called simultaneously, $outcome`   | Thread safety: parallel execution works |
-| `makes at most $n database queries`      | Query count ≤ $n                        |
-| `makes no external calls`                | No HTTP/network requests made           |
-| `data is unchanged`                      | No mutations to database/state          |
+| Term                                    | Technical Translation                   |
+| --------------------------------------- | --------------------------------------- |
+| `when repeated {n} times, still {outcome}` | Idempotency: run {n} times, same result |
+| `when called simultaneously, {outcome}` | Thread safety: parallel execution works |
+| `makes at most {n} database queries`    | Query count ≤ {n}                       |
+| `makes no external calls`               | No HTTP/network requests made           |
+| `data is unchanged`                     | No mutations to database/state          |
 
 ### 5.8 Timing Assertions
 
-| Term                      | Technical Translation  |
-| ------------------------- | ---------------------- |
-| `responds in under $time` | Response time < $time  |
-| `completes within $time`  | Total duration < $time |
+| Term                      | Technical Translation   |
+| ------------------------- | ----------------------- |
+| `responds in under {time}` | Response time < {time} |
+| `completes within {time}` | Total duration < {time} |
 
 ---
 
@@ -438,9 +438,9 @@ rejected:
 | Term | Means |
 |------|-------|
 | user runs | Executes command from terminal |
-| with flag $flag | Command includes the specified flag |
-| with input file "$path" | Command receives file as input |
-| in directory "$path" | Command runs in specified directory |
+| with flag {flag} | Command includes the specified flag |
+| with input file {path} | Command receives file as input |
+| in directory {path} | Command runs in specified directory |
 | help is shown | Usage information displayed |
 | version is shown | Version number displayed |
 | file is converted | Input file transformed to output format |
@@ -794,9 +794,9 @@ Reference components in your feature scenarios using the glossary term pattern:
 
 | Term | Means |
 |------|-------|
-| error popup with "$message" | → component.error_popup(message: $message) |
-| success toast with "$message" | → component.success_toast(message: $message) |
-| confirmation dialog asking "$question" | → component.confirm_dialog(question: $question) |
+| error popup with {message} | → component.error_popup(message: {message}) |
+| success toast with {message} | → component.success_toast(message: {message}) |
+| confirmation dialog asking {question} | → component.confirm_dialog(question: {question}) |
 ```
 
 Then use naturally:
@@ -888,7 +888,7 @@ Component: Confirmation Dialog
 
 | Term | Means |
 |------|-------|
-| error popup with "$message" | → component.error_popup(message: $message) |
+| error popup with {message} | → component.error_popup(message: {message}) |
 
 ---
 
@@ -1023,8 +1023,8 @@ Component: Success Toast
 
 | Term | Means |
 |------|-------|
-| product card for "$name" at "$price" | → component.product_card(product_name: $name, price: $price) |
-| success toast with "$message" | → component.success_toast(message: $message) |
+| product card for {name} at {price} | → component.product_card(product_name: {name}, price: {price}) |
+| success toast with {message} | → component.success_toast(message: {message}) |
 
 ---
 
@@ -1368,35 +1368,35 @@ The temporal extension adds assertions about **when** things happen, not just **
 
 #### 14.1.1 Temporal Triggers
 
-| Term                           | Means                                           |
-| ------------------------------ | ----------------------------------------------- |
-| `after $duration`              | Trigger fires after delay (e.g., `after 500ms`) |
-| `every $interval`              | Trigger fires repeatedly                        |
-| `at frame $n`                  | Trigger at specific frame (games)               |
-| `when $condition becomes true` | Trigger on state change                         |
+| Term                              | Means                                              |
+| --------------------------------- | -------------------------------------------------- |
+| `after {duration}`                | Trigger fires after delay (e.g., `after 500ms`)    |
+| `every {interval}`                | Trigger fires repeatedly                           |
+| `at frame {n}`                    | Trigger at specific frame (games)                  |
+| `when {condition} becomes true`   | Trigger on state change                            |
 
 #### 14.1.2 Temporal Outcomes
 
-| Term                                     | Technical Translation                            |
-| ---------------------------------------- | ------------------------------------------------ |
-| `within $time, $assertion`               | Assert becomes true before deadline              |
-| `after $delay, $assertion`               | Assert checked after delay                       |
-| `continuously for $duration, $assertion` | Assert holds true for entire duration            |
-| `eventually $assertion`                  | Assert becomes true at some point (with timeout) |
-| `never $assertion`                       | Assert never becomes true during scenario        |
-| `for at least $duration, $assertion`     | Assert holds for minimum time                    |
-| `exactly $n times during $duration`      | Event occurs exactly N times                     |
-| `at most $n times per $duration`         | Rate limiting check                              |
+| Term                                        | Technical Translation                            |
+| ------------------------------------------- | ------------------------------------------------ |
+| `within {time}, {assertion}`                | Assert becomes true before deadline              |
+| `after {delay}, {assertion}`                | Assert checked after delay                       |
+| `continuously for {duration}, {assertion}`  | Assert holds true for entire duration            |
+| `eventually {assertion}`                    | Assert becomes true at some point (with timeout) |
+| `never {assertion}`                         | Assert never becomes true during scenario        |
+| `for at least {duration}, {assertion}`      | Assert holds for minimum time                    |
+| `exactly {n} times during {duration}`       | Event occurs exactly N times                     |
+| `at most {n} times per {duration}`          | Rate limiting check                              |
 
 #### 14.1.3 Frame-Based Assertions (Games)
 
-| Term                           | Technical Translation            |
-| ------------------------------ | -------------------------------- |
-| `every frame, $assertion`      | Assert on each render frame      |
-| `for $n frames, $assertion`    | Assert holds for N frames        |
-| `within $n frames, $assertion` | Assert true before N frames pass |
-| `frame rate stays above $fps`  | Performance assertion            |
-| `frame time stays below $ms`   | Performance assertion            |
+| Term                              | Technical Translation            |
+| --------------------------------- | -------------------------------- |
+| `every frame, {assertion}`        | Assert on each render frame      |
+| `for {n} frames, {assertion}`     | Assert holds for N frames        |
+| `within {n} frames, {assertion}`  | Assert true before N frames pass |
+| `frame rate stays above {fps}`    | Performance assertion            |
+| `frame time stays below {ms}`     | Performance assertion            |
 
 #### 14.1.4 Temporal Examples
 
@@ -1504,14 +1504,14 @@ StateMachine: Order Lifecycle
 
 #### 14.2.2 State Machine Assertions
 
-| Term                                      | Technical Translation           |
-| ----------------------------------------- | ------------------------------- |
-| `$entity is in state "$state"`            | Current state check             |
-| `$entity transitions to "$state"`         | State change occurs             |
-| `$entity can transition to "$state"`      | Transition is valid             |
-| `$entity cannot transition to "$state"`   | Transition is invalid           |
-| `transition from "$a" to "$b" is valid`   | Validates against state machine |
-| `all transitions follow statemachine.$id` | Full compliance check           |
+| Term                                       | Technical Translation           |
+| ------------------------------------------ | ------------------------------- |
+| `{entity} is in state {state}`             | Current state check             |
+| `{entity} transitions to {state}`          | State change occurs             |
+| `{entity} can transition to {state}`       | Transition is valid             |
+| `{entity} cannot transition to {state}`    | Transition is invalid           |
+| `transition from {a} to {b} is valid`      | Validates against state machine |
+| `all transitions follow statemachine.{id}` | Full compliance check           |
 
 #### 14.2.3 State Machine Examples
 
@@ -1588,27 +1588,27 @@ The streaming extension handles continuous data flows rather than discrete reque
 
 #### 14.3.1 Stream Triggers
 
-| Term                        | Means                     |
-| --------------------------- | ------------------------- |
-| `subscribing to $stream`    | Opens stream subscription |
-| `publishing to $stream`     | Sends to stream           |
-| `$stream receives $message` | Message arrives on stream |
+| Term                         | Means                     |
+| ---------------------------- | ------------------------- |
+| `subscribing to {stream}`    | Opens stream subscription |
+| `publishing to {stream}`     | Sends to stream           |
+| `{stream} receives {message}` | Message arrives on stream |
 
 #### 14.3.2 Stream Outcomes
 
-| Term                                  | Technical Translation            |
-| ------------------------------------- | -------------------------------- |
-| `stream emits $n items`               | Exactly N items received         |
-| `stream emits item within $time`      | At least one item before timeout |
-| `stream emits item matching $pattern` | Item matches condition           |
-| `all stream items satisfy $condition` | Every item passes                |
-| `no stream items satisfy $condition`  | No items pass                    |
+| Term                                   | Technical Translation            |
+| -------------------------------------- | -------------------------------- |
+| `stream emits {n} items`               | Exactly N items received         |
+| `stream emits item within {time}`      | At least one item before timeout |
+| `stream emits item matching {pattern}` | Item matches condition           |
+| `all stream items satisfy {condition}` | Every item passes                |
+| `no stream items satisfy {condition}` | No items pass                    |
 | `stream completes`                    | Stream closes normally           |
-| `stream completes within $time`       | Closes before timeout            |
+| `stream completes within {time}`      | Closes before timeout            |
 | `stream errors`                       | Stream fails                     |
-| `stream errors with "$message"`       | Specific error                   |
-| `stream throughput >= $rate`          | Items per second                 |
-| `stream backpressure stays below $n`  | Queue size limit                 |
+| `stream errors with {message}`        | Specific error                   |
+| `stream throughput >= {rate}`         | Items per second                 |
+| `stream backpressure stays below {n}` | Queue size limit                 |
 | `stream maintains order`              | Items arrive in send order       |
 | `exactly once delivery`               | No duplicates, no drops          |
 | `at least once delivery`              | May duplicate, no drops          |
@@ -1683,60 +1683,60 @@ The spatial extension adds assertions about position, distance, collision, and v
 
 #### 14.4.1 Position Assertions
 
-| Term                           | Technical Translation                |
-| ------------------------------ | ------------------------------------ |
-| `$object is at ($x, $y)`       | 2D position check                    |
-| `$object is at ($x, $y, $z)`   | 3D position check                    |
-| `$object is at position $name` | Named position (e.g., "spawn point") |
-| `$object.x is $value`          | Single axis check                    |
-| `$object is within $bounds`    | Bounding box check                   |
-| `$object is inside $region`    | Named region check                   |
-| `$object is outside $region`   | Not in region                        |
+| Term                              | Technical Translation                |
+| --------------------------------- | ------------------------------------ |
+| `{object} is at ({x}, {y})`       | 2D position check                    |
+| `{object} is at ({x}, {y}, {z})`  | 3D position check                    |
+| `{object} is at position {name}`  | Named position (e.g., "spawn point") |
+| `{object}.x is {value}`           | Single axis check                    |
+| `{object} is within {bounds}`     | Bounding box check                   |
+| `{object} is inside {region}`     | Named region check                   |
+| `{object} is outside {region}`    | Not in region                        |
 
 #### 14.4.2 Distance & Relationship Assertions
 
 | Term                               | Technical Translation           |
 | ---------------------------------- | ------------------------------- |
-| `$a is within $distance of $b`     | Distance check                  |
-| `$a is at least $distance from $b` | Minimum distance                |
-| `$a is exactly $distance from $b`  | Exact distance (with tolerance) |
-| `$a is above $b`                   | Y position comparison           |
-| `$a is below $b`                   | Y position comparison           |
-| `$a is left of $b`                 | X position comparison           |
-| `$a is right of $b`                | X position comparison           |
-| `$a is in front of $b`             | Z or facing direction           |
-| `$a is behind $b`                  | Opposite of facing              |
-| `$a is facing $b`                  | Rotation/direction check        |
-| `$a is facing direction $angle`    | Absolute rotation               |
+| `{a} is within {distance} of {b}`  | Distance check                  |
+| `{a} is at least {distance} from {b}` | Minimum distance             |
+| `{a} is exactly {distance} from {b}` | Exact distance (with tolerance) |
+| `{a} is above {b}`                 | Y position comparison           |
+| `{a} is below {b}`                 | Y position comparison           |
+| `{a} is left of {b}`               | X position comparison           |
+| `{a} is right of {b}`              | X position comparison           |
+| `{a} is in front of {b}`           | Z or facing direction           |
+| `{a} is behind {b}`                | Opposite of facing              |
+| `{a} is facing {b}`                | Rotation/direction check        |
+| `{a} is facing direction {angle}`  | Absolute rotation               |
 
 #### 14.4.3 Collision & Physics Assertions
 
-| Term                                  | Technical Translation      |
-| ------------------------------------- | -------------------------- |
-| `$a collides with $b`                 | Physics collision detected |
-| `$a does not collide with $b`         | No collision               |
-| `$a overlaps $b`                      | Bounding volumes intersect |
-| `$object is grounded`                 | Touching ground/floor      |
-| `$object is airborne`                 | Not grounded               |
-| `$object is moving`                   | Velocity > 0               |
-| `$object is stationary`               | Velocity = 0               |
-| `$object velocity is ($vx, $vy, $vz)` | Exact velocity             |
-| `$object speed is $value`             | Velocity magnitude         |
-| `$object is falling`                  | Negative Y velocity        |
-| `$object is rising`                   | Positive Y velocity        |
+| Term                                    | Technical Translation      |
+| --------------------------------------- | -------------------------- |
+| `{a} collides with {b}`                 | Physics collision detected |
+| `{a} does not collide with {b}`         | No collision               |
+| `{a} overlaps {b}`                      | Bounding volumes intersect |
+| `{object} is grounded`                  | Touching ground/floor      |
+| `{object} is airborne`                  | Not grounded               |
+| `{object} is moving`                    | Velocity > 0               |
+| `{object} is stationary`                | Velocity = 0               |
+| `{object} velocity is ({vx}, {vy}, {vz})` | Exact velocity           |
+| `{object} speed is {value}`             | Velocity magnitude         |
+| `{object} is falling`                   | Negative Y velocity        |
+| `{object} is rising`                    | Positive Y velocity        |
 
 #### 14.4.4 Visibility & Rendering Assertions
 
-| Term                            | Technical Translation   |
-| ------------------------------- | ----------------------- |
-| `$object is visible`            | Rendered and not culled |
-| `$object is hidden`             | Not rendered            |
-| `$object is visible to camera`  | In view frustum         |
-| `$object is visible to $other`  | Line of sight check     |
-| `$object is occluded by $other` | Blocked from view       |
-| `$object is on screen`          | Within screen bounds    |
-| `$object is off screen`         | Outside screen bounds   |
-| `$object is in layer "$layer"`  | Render layer check      |
+| Term                              | Technical Translation   |
+| --------------------------------- | ----------------------- |
+| `{object} is visible`             | Rendered and not culled |
+| `{object} is hidden`              | Not rendered            |
+| `{object} is visible to camera`   | In view frustum         |
+| `{object} is visible to {other}`  | Line of sight check     |
+| `{object} is occluded by {other}` | Blocked from view       |
+| `{object} is on screen`           | Within screen bounds    |
+| `{object} is off screen`          | Outside screen bounds   |
+| `{object} is in layer {layer}`    | Render layer check      |
 
 #### 14.4.5 Spatial Examples
 
@@ -1823,39 +1823,39 @@ The probabilistic extension handles non-deterministic outcomes with statistical 
 
 #### 14.5.1 Statistical Outcomes
 
-| Term                                                     | Technical Translation                |
-| -------------------------------------------------------- | ------------------------------------ |
-| `succeeds at least $percent% of the time`                | P(success) ≥ threshold (over N runs) |
-| `fails at most $percent% of the time`                    | P(failure) ≤ threshold               |
-| `result is "$value" approximately $percent% of the time` | Distribution check                   |
-| `average $metric is within $tolerance of $expected`      | Mean check                           |
-| `$metric has standard deviation < $value`                | Variance check                       |
-| `distribution matches $distribution`                     | Statistical distribution test        |
-| `results are uniformly distributed`                      | Uniform distribution check           |
+| Term                                                       | Technical Translation                |
+| ---------------------------------------------------------- | ------------------------------------ |
+| `succeeds at least {percent}% of the time`                 | P(success) ≥ threshold (over N runs) |
+| `fails at most {percent}% of the time`                     | P(failure) ≤ threshold               |
+| `result is {value} approximately {percent}% of the time`   | Distribution check                   |
+| `average {metric} is within {tolerance} of {expected}`     | Mean check                           |
+| `{metric} has standard deviation < {value}`                | Variance check                       |
+| `distribution matches {distribution}`                      | Statistical distribution test        |
+| `results are uniformly distributed`                        | Uniform distribution check           |
 
 #### 14.5.2 ML Model Assertions
 
-| Term                                                    | Technical Translation     |
-| ------------------------------------------------------- | ------------------------- |
-| `accuracy is at least $percent%`                        | Model accuracy metric     |
-| `precision is at least $percent%`                       | Precision metric          |
-| `recall is at least $percent%`                          | Recall metric             |
-| `F1 score is at least $value`                           | F1 metric                 |
-| `AUC is at least $value`                                | Area under ROC curve      |
-| `confidence score > $threshold`                         | Model certainty           |
-| `prediction is one of $options`                         | Valid output classes      |
-| `prediction matches expected for $percent% of test set` | Test set accuracy         |
-| `model latency < $time`                                 | Inference speed           |
-| `model size < $size`                                    | Memory/storage constraint |
+| Term                                                      | Technical Translation     |
+| --------------------------------------------------------- | ------------------------- |
+| `accuracy is at least {percent}%`                         | Model accuracy metric     |
+| `precision is at least {percent}%`                        | Precision metric          |
+| `recall is at least {percent}%`                           | Recall metric             |
+| `F1 score is at least {value}`                            | F1 metric                 |
+| `AUC is at least {value}`                                 | Area under ROC curve      |
+| `confidence score > {threshold}`                          | Model certainty           |
+| `prediction is one of {options}`                          | Valid output classes      |
+| `prediction matches expected for {percent}% of test set`  | Test set accuracy         |
+| `model latency < {time}`                                  | Inference speed           |
+| `model size < {size}`                                     | Memory/storage constraint |
 
 #### 14.5.3 Fairness & Bias Assertions
 
-| Term                                             | Technical Translation                   |
-| ------------------------------------------------ | --------------------------------------- |
-| `results are independent of "$attribute"`        | No correlation with protected attribute |
-| `accuracy is similar across "$attribute" groups` | Group fairness                          |
-| `false positive rate is similar across groups`   | Equalized odds                          |
-| `no demographic has accuracy below $percent%`    | Minimum group performance               |
+| Term                                              | Technical Translation                   |
+| ------------------------------------------------- | --------------------------------------- |
+| `results are independent of {attribute}`          | No correlation with protected attribute |
+| `accuracy is similar across {attribute} groups`   | Group fairness                          |
+| `false positive rate is similar across groups`    | Equalized odds                          |
+| `no demographic has accuracy below {percent}%`    | Minimum group performance               |
 
 #### 14.5.4 Probabilistic Examples
 
@@ -1979,30 +1979,30 @@ The mobile extension adds gestures, device features, and lifecycle management.
 
 #### 14.6.3 Mobile Outcomes
 
-| Term                                         | Technical Translation      |
-| -------------------------------------------- | -------------------------- |
-| `haptic feedback is triggered`               | Vibration/haptic           |
-| `keyboard is shown`                          | Soft keyboard visible      |
-| `keyboard is dismissed`                      | Soft keyboard hidden       |
-| `screen scrolls to $element`                 | Element scrolled into view |
-| `pull-to-refresh indicator is shown`         | Refresh UI visible         |
-| `navigation goes to $screen`                 | Screen navigation          |
-| `back navigation goes to $screen`            | Back button behavior       |
-| `deep link opens $screen`                    | URL scheme handling        |
-| `share sheet is shown`                       | Native share dialog        |
-| `permission is requested for "$permission"`  | Permission dialog          |
-| `permission "$permission" is granted/denied` | Permission result          |
+| Term                                        | Technical Translation      |
+| ------------------------------------------- | -------------------------- |
+| `haptic feedback is triggered`              | Vibration/haptic           |
+| `keyboard is shown`                         | Soft keyboard visible      |
+| `keyboard is dismissed`                     | Soft keyboard hidden       |
+| `screen scrolls to {element}`               | Element scrolled into view |
+| `pull-to-refresh indicator is shown`        | Refresh UI visible         |
+| `navigation goes to {screen}`               | Screen navigation          |
+| `back navigation goes to {screen}`          | Back button behavior       |
+| `deep link opens {screen}`                  | URL scheme handling        |
+| `share sheet is shown`                      | Native share dialog        |
+| `permission is requested for {permission}`  | Permission dialog          |
+| `permission {permission} is granted/denied` | Permission result          |
 
 #### 14.6.4 Mobile Layout Assertions
 
 | Term                               | Technical Translation         |
 | ---------------------------------- | ----------------------------- |
-| `$element is tappable`             | Touch target ≥ 44pt           |
-| `$element fits on screen`          | No horizontal scroll needed   |
+| `{element} is tappable`            | Touch target ≥ 44pt           |
+| `{element} fits on screen`         | No horizontal scroll needed   |
 | `content is readable`              | Font size ≥ minimum           |
-| `layout adapts to $orientation`    | Responsive layout             |
+| `layout adapts to {orientation}`   | Responsive layout             |
 | `safe areas are respected`         | Notch/home indicator handling |
-| `keyboard does not cover $element` | Keyboard avoidance            |
+| `keyboard does not cover {element}` | Keyboard avoidance           |
 
 #### 14.6.5 Mobile Examples
 
@@ -2104,26 +2104,26 @@ The hardware extension adds assertions for physical devices and sensors.
 
 #### 14.7.1 Sensor Triggers
 
-| Term                                          | Means                 |
-| --------------------------------------------- | --------------------- |
-| `sensor "$name" reads $value`                 | Sensor input          |
-| `sensor "$name" reads above/below $threshold` | Threshold trigger     |
-| `button "$name" is pressed`                   | Physical button input |
-| `button "$name" is released`                  | Button release        |
-| `switch "$name" is on/off`                    | Toggle state          |
+| Term                                         | Means                 |
+| -------------------------------------------- | --------------------- |
+| `sensor {name} reads {value}`                | Sensor input          |
+| `sensor {name} reads above/below {threshold}` | Threshold trigger     |
+| `button {name} is pressed`                   | Physical button input |
+| `button {name} is released`                  | Button release        |
+| `switch {name} is on/off`                    | Toggle state          |
 
 #### 14.7.2 Actuator Outcomes
 
-| Term                              | Technical Translation |
-| --------------------------------- | --------------------- |
-| `LED "$name" is on/off`           | LED state             |
-| `LED "$name" is color "$color"`   | RGB LED state         |
-| `motor "$name" is running`        | Motor active          |
-| `motor "$name" speed is $value`   | Motor speed           |
-| `servo "$name" angle is $degrees` | Servo position        |
-| `relay "$name" is open/closed`    | Relay state           |
-| `display shows "$text"`           | LCD/display output    |
-| `buzzer sounds at $frequency`     | Audio output          |
+| Term                             | Technical Translation |
+| -------------------------------- | --------------------- |
+| `LED {name} is on/off`           | LED state             |
+| `LED {name} is color {color}`    | RGB LED state         |
+| `motor {name} is running`        | Motor active          |
+| `motor {name} speed is {value}`  | Motor speed           |
+| `servo {name} angle is {degrees}` | Servo position        |
+| `relay {name} is open/closed`    | Relay state           |
+| `display shows {text}`           | LCD/display output    |
+| `buzzer sounds at {frequency}`   | Audio output          |
 
 #### 14.7.3 Communication Outcomes
 
@@ -2245,7 +2245,7 @@ If the built-in extensions don't cover your domain, you can create custom extens
 | Term | Means |
 |------|-------|
 | patient vitals are normal | Heart rate, BP, O2 within healthy ranges |
-| alert is escalated to "$role" | Notification sent to medical staff |
+| alert is escalated to {role} | Notification sent to medical staff |
 | medication is administered | Drug delivery logged |
 | dosage is within safe limits | Dose < max for patient weight |
 
@@ -2337,21 +2337,21 @@ Feature: ICU Monitoring
 
 Quick reference for all built-in standard terms:
 
-**Outcomes:** `succeeds`, `fails`, `fails with "$msg"`, `no error`, `takes less than $time`
+**Outcomes:** `succeeds`, `fails`, `fails with {msg}`, `no error`, `takes less than {time}`
 
-**HTTP:** `they see "$text"`, `they don't see "$text"`, `redirects to $path`, `returns status $code`, `returns JSON`, `returns HTML`, `response includes "$field"`, `"$field" is "$value"`, `header "$name" is/contains "$value"`
+**HTTP:** `they see {text}`, `they don't see {text}`, `redirects to {path}`, `returns status {code}`, `returns JSON`, `returns HTML`, `response includes {field}`, `{field} is {value}`, `header {name} is/contains {value}`
 
-**CLI:** `exits successfully`, `exits with error`, `exits with code $n`, `output shows "$text"`, `output matches $pattern`, `error shows "$text"`, `no error output`
+**CLI:** `exits successfully`, `exits with error`, `exits with code {n}`, `output shows {text}`, `output matches {pattern}`, `error shows {text}`, `no error output`
 
-**Files:** `file "$path" exists/is created/is deleted/contains "$text"/is empty`, `directory "$path" exists/has $n files`
+**Files:** `file {path} exists/is created/is deleted/contains {text}/is empty`, `directory {path} exists/has {n} files`
 
-**Database:** `record is created/updated/deleted`, `row exists where $cond`, `no row exists where $cond`, `row count is/increases by $n`, `"$column" is "$value"`
+**Database:** `record is created/updated/deleted`, `row exists where {cond}`, `no row exists where {cond}`, `row count is/increases by {n}`, `{column} is {value}`
 
-**Events:** `email is sent to "$addr"`, `event "$name" is emitted`, `no event "$name"`, `"$message" is logged`
+**Events:** `email is sent to {addr}`, `event {name} is emitted`, `no event {name}`, `{message} is logged`
 
-**Behavioral:** `when repeated $n times, still $outcome`, `when called simultaneously, $outcome`, `makes at most $n database queries`, `makes no external calls`, `data is unchanged`
+**Behavioral:** `when repeated {n} times, still {outcome}`, `when called simultaneously, {outcome}`, `makes at most {n} database queries`, `makes no external calls`, `data is unchanged`
 
-**Timing:** `responds in under $time`, `completes within $time`
+**Timing:** `responds in under {time}`, `completes within {time}`
 
 ---
 

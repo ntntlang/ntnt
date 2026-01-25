@@ -1,6 +1,6 @@
 # NTNT Language Specification
 
-## Version 0.3.0
+## Version 0.3.3
 
 This document specifies the syntax, semantics, and core features of the NTNT programming language.
 
@@ -444,6 +444,22 @@ NTNT provides built-in functions available without imports.
 | `print`  | `(...args) -> Unit`   | Print values to stdout    |
 | `len`    | `(collection) -> Int` | Length of string or array |
 
+### Type Conversion Functions
+
+| Function | Signature               | Description                        |
+| -------- | ----------------------- | ---------------------------------- |
+| `str`    | `(value) -> String`     | Convert any value to string        |
+| `int`    | `(value) -> Int`        | Convert to integer (parse strings) |
+| `float`  | `(value) -> Float`      | Convert to float (parse strings)   |
+| `type`   | `(value) -> String`     | Get type name as string            |
+
+### Collection Functions
+
+| Function | Signature                      | Description                   |
+| -------- | ------------------------------ | ----------------------------- |
+| `push`   | `(arr, item) -> Unit`          | Add item to array (mutates)   |
+| `assert` | `(condition) -> Unit`          | Assert condition is true      |
+
 ### Math Functions
 
 | Function | Signature                                         | Description              |
@@ -706,13 +722,13 @@ All IAL knowledge lives in the **Vocabulary**, which contains:
 
 | Pattern | Resolves To |
 |---------|-------------|
-| `status $code` | `Check(Equals, "response.status", $code)` |
+| `status {code}` | `Check(Equals, "response.status", {code})` |
 | `status 2xx` | `Check(InRange, "response.status", 200-299)` |
-| `body contains "$text"` | `Check(Contains, "response.body", "$text")` |
-| `body not contains "$text"` | `Check(NotContains, "response.body", "$text")` |
-| `body matches $pattern` | `Check(Matches, "response.body", $pattern)` |
-| `header "$name" contains "$value"` | `Check(Contains, "response.headers.$name", "$value")` |
-| `redirects to $path` | `Check(Contains, "response.headers.Location", "$path")` |
+| `body contains {text}` | `Check(Contains, "response.body", {text})` |
+| `body not contains {text}` | `Check(NotContains, "response.body", {text})` |
+| `body matches {pattern}` | `Check(Matches, "response.body", {pattern})` |
+| `header {name} contains {value}` | `Check(Contains, "response.headers.{name}", {value})` |
+| `redirects to {path}` | `Check(Contains, "response.headers.Location", {path})` |
 | `returns JSON` | `Check(Contains, "response.headers.Content-Type", "application/json")` |
 
 ### Standard Terms (CLI)
@@ -720,17 +736,17 @@ All IAL knowledge lives in the **Vocabulary**, which contains:
 | Pattern | Resolves To |
 |---------|-------------|
 | `exits successfully` | `Check(Equals, "cli.exit_code", 0)` |
-| `exits with code $n` | `Check(Equals, "cli.exit_code", $n)` |
-| `output shows "$text"` | `Check(Contains, "cli.stdout", "$text")` |
-| `error shows "$text"` | `Check(Contains, "cli.stderr", "$text")` |
+| `exits with code {n}` | `Check(Equals, "cli.exit_code", {n})` |
+| `output shows {text}` | `Check(Contains, "cli.stdout", {text})` |
+| `error shows {text}` | `Check(Contains, "cli.stderr", {text})` |
 
 ### Standard Terms (Files)
 
 | Pattern | Resolves To |
 |---------|-------------|
-| `file "$path" exists` | `Check(Exists, "file", "$path")` |
-| `file "$path" contains "$text"` | `ReadFile("$path") + Check(Contains, _, "$text")` |
-| `directory "$path" exists` | `Check(Exists, "directory", "$path")` |
+| `file {path} exists` | `Check(Exists, "file", {path})` |
+| `file {path} contains {text}` | `ReadFile({path}) + Check(Contains, _, {text})` |
+| `directory {path} exists` | `Check(Exists, "directory", {path})` |
 
 ### Glossary Definitions
 
@@ -742,8 +758,8 @@ Define domain-specific terms in `.intent` files:
 | Term | Means |
 |------|-------|
 | success response | status 2xx, body contains "ok" |
-| they see "$text" | body contains "$text" |
-| they don't see "$text" | body not contains "$text" |
+| they see {text} | body contains {text} |
+| they don't see {text} | body not contains {text} |
 | authenticated | header "Authorization" contains "Bearer" |
 ```
 
@@ -846,7 +862,7 @@ import { helper } from "./lib/utils"
 
 | Module            | Functions                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `std/string`      | **Comprehensive:** split, join, concat, repeat, reverse, trim, trim_left, trim_right, trim_chars, to_upper, to_lower, capitalize, title, to_snake_case, to_camel_case, to_pascal_case, to_kebab_case, slugify, contains, starts_with, ends_with, index_of, last_index_of, count, replace, replace_all, char_at, substring, chars, lines, words, truncate, pad_left, pad_right, center, is_empty, is_blank, is_numeric, is_alpha, is_alphanumeric, is_lowercase, is_uppercase, is_whitespace, matches |
+| `std/string`      | **Comprehensive:** split, join, concat, repeat, reverse, trim, trim_left, trim_right, trim_chars, to_upper, to_lower, capitalize, title, to_snake_case, to_camel_case, to_pascal_case, to_kebab_case, slugify, contains, starts_with, ends_with, index_of, last_index_of, count, replace, replace_first, replace_chars, remove_chars, keep_chars, char_at, substring, chars, lines, words, truncate, pad_left, pad_right, center, is_empty, is_blank, is_numeric, is_alpha, is_alphanumeric, is_lowercase, is_uppercase, is_whitespace, matches, **regex:** replace_pattern, matches_pattern, find_pattern, find_all_pattern, split_pattern |
 | `std/math`        | **Trig:** sin, cos, tan, asin, acos, atan, atan2. **Hyperbolic:** sinh, cosh, tanh. **Log/Exp:** log, log10, log2, exp, exp2, cbrt. **Utility:** hypot, degrees, radians, is_nan, is_finite, is_infinite. **Random:** random, random_int, random_range. **Constants:** PI, E, TAU, INFINITY, NEG_INFINITY                                                                                                                                                                                            |
 | `std/collections` | push, pop, shift, first, last, reverse, slice, concat, is_empty, contains, index_of, sort, map, filter, reduce, find, **keys, values, entries, has_key, get_key** (map iteration)                                                                                                                                                                                                                                                                                                                    |
 | `std/env`         | get_env, load_env, args, cwd                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -890,8 +906,20 @@ slugify("Hello World!")     // "hello-world"
 contains(s, "fox")          // true/false
 last_index_of(s, "the")     // last position
 count(s, "the")             // occurrence count
-replace("hi hi", "hi", "yo") // "yo hi" (first only)
-replace_all("hi hi", "hi", "yo") // "yo yo"
+replace("hi hi", "hi", "yo") // "yo yo" (all occurrences)
+replace_first("hi hi", "hi", "yo") // "yo hi" (first only)
+
+// Character-set operations
+replace_chars("a.b_c", "._", "-")  // "a-b-c" (replace any char in set)
+remove_chars("a!b?c", "!?")        // "abc" (remove all chars in set)
+keep_chars("a1b2c3", "abc")        // "abc" (keep only allowed chars)
+
+// Regex operations
+replace_pattern("a1b2", r"\d", "X")     // "aXbX" (replace all matches)
+matches_pattern("test123", r"\d+")      // true (does it match?)
+find_pattern("ab12cd", r"\d+")          // Some("12") (first match)
+find_all_pattern("a1b2c3", r"\d")       // ["1", "2", "3"] (all matches)
+split_pattern("a1b2c", r"\d")           // ["a", "b", "c"] (split by pattern)
 
 // Extraction
 lines("a\nb\nc")            // ["a", "b", "c"]

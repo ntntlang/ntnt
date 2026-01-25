@@ -1,0 +1,1568 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NTNT Intent Studio - Mockup</title>
+    <style>
+      :root {
+        --bg-primary: #0d1117;
+        --bg-secondary: #161b22;
+        --bg-tertiary: #21262d;
+        --bg-elevated: #1c2128;
+        --border: #30363d;
+        --border-hover: #484f58;
+        --text-primary: #e6edf3;
+        --text-secondary: #8b949e;
+        --text-muted: #6e7681;
+        --green: #3fb950;
+        --green-bg: rgba(63, 185, 80, 0.15);
+        --red: #f85149;
+        --red-bg: rgba(248, 81, 73, 0.15);
+        --yellow: #d29922;
+        --yellow-bg: rgba(210, 153, 34, 0.15);
+        --blue: #58a6ff;
+        --blue-bg: rgba(88, 166, 255, 0.15);
+        --purple: #a371f7;
+        --purple-bg: rgba(163, 113, 247, 0.15);
+        --gray: #484f58;
+        --gray-bg: rgba(72, 79, 88, 0.15);
+        --teal: #137ea2;
+      }
+
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        line-height: 1.5;
+        font-size: 13px;
+      }
+
+      /* Header */
+      .header {
+        background: var(--bg-secondary);
+        border-bottom: 1px solid var(--border);
+        padding: 0 16px;
+        height: 48px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        position: sticky;
+        top: 0;
+        z-index: 100;
+      }
+
+      .logo {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .logo img {
+        height: 24px;
+        width: 24px;
+        vertical-align: middle;
+      }
+
+      .logo .brand {
+        color: var(--text-primary);
+      }
+
+      .logo .intent {
+        color: var(--purple);
+      }
+
+      .logo .studio {
+        color: var(--text-primary);
+      }
+
+      .file-name {
+        color: var(--text-secondary);
+        font-size: 12px;
+        padding: 4px 8px;
+        background: var(--bg-tertiary);
+        border-radius: 4px;
+        white-space: nowrap;
+      }
+
+      /* Header controls */
+      .header-controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-left: auto;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      /* Responsive header for narrow viewports */
+      @media (max-width: 700px) {
+        .header {
+          height: auto;
+          padding: 12px 16px;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+
+        .logo {
+          order: 1;
+        }
+
+        .file-name {
+          order: 2;
+        }
+
+        .header-controls {
+          order: 3;
+          width: 100%;
+          justify-content: flex-start;
+          margin-left: 0;
+          padding-top: 8px;
+          border-top: 1px solid var(--border);
+          margin-top: 4px;
+        }
+
+        .auto-refresh {
+          margin-left: auto;
+        }
+      }
+
+      @media (max-width: 480px) {
+        .header-controls {
+          gap: 6px;
+        }
+
+        .btn {
+          padding: 6px 8px;
+          font-size: 11px;
+        }
+
+        .auto-refresh span {
+          display: none;
+        }
+
+        .status-pill span:not(.status-dot) {
+          display: none;
+        }
+      }
+
+      /* Search bar (moved to filter area) */
+      .search-bar {
+        position: relative;
+        margin-bottom: 12px;
+      }
+
+      .search-bar input {
+        width: 100%;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 10px 14px 10px 38px;
+        color: var(--text-primary);
+        font-size: 13px;
+        outline: none;
+      }
+
+      .search-bar input::placeholder {
+        color: var(--text-muted);
+      }
+
+      .search-bar input:focus {
+        border-color: var(--blue);
+        background: var(--bg-tertiary);
+      }
+
+      .search-bar-icon {
+        position: absolute;
+        left: 12px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: var(--text-muted);
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        border: 1px solid transparent;
+        transition: all 0.1s ease;
+      }
+
+      .btn-primary {
+        background: var(--green);
+        color: #0d1117;
+      }
+
+      .btn-primary:hover {
+        background: #2ea043;
+      }
+
+      .btn-secondary {
+        background: var(--bg-tertiary);
+        border-color: var(--border);
+        color: var(--text-primary);
+      }
+
+      .btn-secondary:hover {
+        background: var(--bg-elevated);
+        border-color: var(--border-hover);
+      }
+
+      /* Auto-refresh toggle */
+      .auto-refresh {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--text-secondary);
+      }
+
+      .toggle {
+        width: 32px;
+        height: 18px;
+        background: var(--bg-tertiary);
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        position: relative;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+
+      .toggle.active {
+        background: var(--green-bg);
+        border-color: var(--green);
+      }
+
+      .toggle::after {
+        content: "";
+        position: absolute;
+        width: 12px;
+        height: 12px;
+        background: var(--text-muted);
+        border-radius: 50%;
+        top: 2px;
+        left: 2px;
+        transition: all 0.2s ease;
+      }
+
+      .toggle.active::after {
+        left: 16px;
+        background: var(--green);
+      }
+
+      /* Status pill */
+      .status-pill {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        background: var(--bg-tertiary);
+        border-radius: 20px;
+        font-size: 12px;
+        color: var(--text-secondary);
+      }
+
+      .status-pill.passing {
+        background: var(--green-bg);
+        color: var(--green);
+      }
+
+      .status-pill.failing {
+        background: var(--red-bg);
+        color: var(--red);
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: currentColor;
+        animation: pulse 2s infinite;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.5;
+        }
+      }
+
+      /* Main container */
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+
+      /* Summary bar with health visualization */
+      .summary-bar {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 20px 24px;
+        margin-bottom: 20px;
+      }
+
+      .summary-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+
+      .summary-title {
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .summary-subtitle {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-top: 2px;
+      }
+
+      /* Health bar (the graph) */
+      .health-section {
+        margin-bottom: 16px;
+      }
+
+      .health-bar-container {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .health-bar {
+        flex: 1;
+        height: 12px;
+        background: var(--bg-tertiary);
+        border-radius: 6px;
+        overflow: hidden;
+        display: flex;
+      }
+
+      .health-segment {
+        height: 100%;
+        transition: width 0.3s ease;
+      }
+
+      .health-segment.pass {
+        background: var(--green);
+      }
+
+      .health-segment.fail {
+        background: var(--red);
+      }
+
+      .health-segment.warn {
+        background: var(--yellow);
+      }
+
+      .health-segment.skip {
+        background: var(--gray);
+      }
+
+      .health-percent {
+        font-size: 18px;
+        font-weight: 600;
+        min-width: 50px;
+        text-align: right;
+      }
+
+      .health-percent.good {
+        color: var(--green);
+      }
+      .health-percent.warn {
+        color: var(--yellow);
+      }
+      .health-percent.bad {
+        color: var(--red);
+      }
+
+      /* Stats row */
+      .summary-stats {
+        display: flex;
+        gap: 24px;
+        flex-wrap: wrap;
+      }
+
+      .stat {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .stat-icon {
+        font-size: 14px;
+      }
+
+      .stat-icon.pass {
+        color: var(--green);
+      }
+      .stat-icon.fail {
+        color: var(--red);
+      }
+      .stat-icon.warn {
+        color: var(--yellow);
+      }
+      .stat-icon.skip {
+        color: var(--gray);
+      }
+      .stat-icon.unlinked {
+        color: var(--purple);
+      }
+
+      .stat-value {
+        font-weight: 600;
+      }
+
+      .stat-label {
+        color: var(--text-secondary);
+      }
+
+      /* Filter bar */
+      .filter-bar {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 20px;
+        flex-wrap: wrap;
+      }
+
+      .filter-chip {
+        padding: 6px 12px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        font-size: 12px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        transition: all 0.1s ease;
+        color: var(--text-secondary);
+      }
+
+      .filter-chip:hover {
+        background: var(--bg-tertiary);
+      }
+
+      .filter-chip.active {
+        background: var(--blue-bg);
+        border-color: var(--blue);
+        color: var(--blue);
+      }
+
+      .filter-chip.active.danger {
+        background: var(--red-bg);
+        border-color: var(--red);
+        color: var(--red);
+      }
+
+      .filter-chip.active.warning {
+        background: var(--yellow-bg);
+        border-color: var(--yellow);
+        color: var(--yellow);
+      }
+
+      .filter-chip.active.skip {
+        background: var(--gray-bg);
+        border-color: var(--gray);
+        color: var(--text-secondary);
+      }
+
+      .filter-chip.active.unlinked {
+        background: var(--purple-bg);
+        border-color: var(--purple);
+        color: var(--purple);
+      }
+
+      .filter-count {
+        background: var(--bg-tertiary);
+        padding: 2px 6px;
+        border-radius: 10px;
+        font-size: 10px;
+      }
+
+      .filter-chip.active .filter-count {
+        background: rgba(255, 255, 255, 0.15);
+      }
+
+      /* Feature card */
+      .feature-card {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        margin-bottom: 8px;
+        overflow: hidden;
+      }
+
+      .feature-header {
+        padding: 12px 16px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+
+      .feature-header:hover {
+        background: var(--bg-tertiary);
+      }
+
+      .feature-left {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .feature-icon {
+        width: 20px;
+        height: 20px;
+        border-radius: 4px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+      }
+
+      .feature-icon.pass {
+        background: var(--green-bg);
+        color: var(--green);
+      }
+      .feature-icon.fail {
+        background: var(--red-bg);
+        color: var(--red);
+      }
+      .feature-icon.warn {
+        background: var(--yellow-bg);
+        color: var(--yellow);
+      }
+      .feature-icon.skip {
+        background: var(--gray-bg);
+        color: var(--text-muted);
+      }
+
+      .feature-name {
+        font-weight: 500;
+        font-size: 14px;
+      }
+
+      .feature-right {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .feature-stats {
+        display: flex;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+
+      .expand-icon {
+        color: var(--text-muted);
+        font-size: 10px;
+        transition: transform 0.2s;
+      }
+
+      .feature-card.expanded .expand-icon {
+        transform: rotate(180deg);
+      }
+
+      /* Badges */
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 10px;
+        font-weight: 500;
+        text-transform: uppercase;
+      }
+
+      .badge.unit {
+        background: var(--purple-bg);
+        color: var(--purple);
+      }
+      .badge.http {
+        background: var(--blue-bg);
+        color: var(--blue);
+      }
+      .badge.property {
+        background: var(--green-bg);
+        color: var(--green);
+      }
+
+      /* Scenarios */
+      .scenarios {
+        border-top: 1px solid var(--border);
+        display: none;
+      }
+
+      .feature-card.expanded .scenarios {
+        display: block;
+      }
+
+      /* Feature description (shown when expanded) */
+      .feature-description {
+        padding: 12px 16px;
+        background: var(--bg-primary);
+        border-bottom: 1px solid var(--border);
+        font-size: 13px;
+        color: var(--text-secondary);
+        line-height: 1.6;
+      }
+
+      .feature-description .feature-id {
+        font-family: ui-monospace, monospace;
+        font-size: 11px;
+        color: var(--purple);
+        margin-bottom: 6px;
+      }
+
+      .feature-description .feature-meta {
+        display: flex;
+        gap: 16px;
+        margin-top: 8px;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      .feature-description .feature-meta span {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      .scenario {
+        border-bottom: 1px solid var(--border);
+      }
+
+      .scenario:last-child {
+        border-bottom: none;
+      }
+
+      .scenario-header {
+        padding: 10px 16px 10px 46px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+
+      .scenario-header:hover {
+        background: var(--bg-tertiary);
+      }
+
+      .scenario-left {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .scenario-icon {
+        font-size: 12px;
+      }
+
+      .scenario-icon.pass {
+        color: var(--green);
+      }
+      .scenario-icon.fail {
+        color: var(--red);
+      }
+      .scenario-icon.warn {
+        color: var(--yellow);
+      }
+      .scenario-icon.skip {
+        color: var(--text-muted);
+      }
+
+      .scenario-name {
+        font-size: 13px;
+      }
+
+      .scenario-meta {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      /* Assertions */
+      .assertions {
+        background: var(--bg-primary);
+        display: none;
+        padding: 12px 16px 12px 46px;
+      }
+
+      .scenario.expanded .assertions {
+        display: block;
+      }
+
+      .when-clause {
+        padding: 10px 14px;
+        background: var(--bg-tertiary);
+        border-radius: 6px;
+        margin-bottom: 12px;
+        font-size: 12px;
+      }
+
+      .when-label {
+        color: var(--purple);
+        font-weight: 500;
+        margin-bottom: 4px;
+      }
+
+      .when-text {
+        color: var(--text-primary);
+      }
+
+      .resolution {
+        font-size: 11px;
+        color: var(--text-muted);
+        margin-top: 6px;
+        padding-left: 12px;
+        border-left: 2px solid var(--border);
+      }
+
+      .assertion {
+        padding: 6px 0;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .assertion:last-child {
+        border-bottom: none;
+      }
+
+      .assertion-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+      }
+
+      .assertion-icon {
+        font-size: 11px;
+      }
+
+      .assertion-icon.pass {
+        color: var(--green);
+      }
+      .assertion-icon.fail {
+        color: var(--red);
+      }
+
+      .assertion-text {
+        font-size: 12px;
+        color: var(--text-primary);
+      }
+
+      .assertion-expand {
+        color: var(--text-muted);
+        font-size: 10px;
+        margin-left: auto;
+      }
+
+      /* Assertion detail (expanded) */
+      .assertion-detail {
+        display: none;
+        margin-top: 8px;
+        padding: 12px;
+        background: var(--bg-tertiary);
+        border-radius: 6px;
+        font-size: 11px;
+      }
+
+      .assertion.expanded .assertion-detail {
+        display: block;
+      }
+
+      .resolution-chain {
+        margin-bottom: 10px;
+      }
+
+      .resolution-step {
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        padding: 3px 0;
+      }
+
+      .resolution-arrow {
+        color: var(--text-muted);
+      }
+
+      .resolution-term {
+        color: var(--blue);
+      }
+
+      .resolution-primitive {
+        color: var(--green);
+        font-family: ui-monospace, monospace;
+        font-size: 11px;
+      }
+
+      .check-results {
+        border-top: 1px solid var(--border);
+        padding-top: 8px;
+      }
+
+      .check-result {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 0;
+      }
+
+      .check-result.pass {
+        color: var(--green);
+      }
+      .check-result.fail {
+        color: var(--red);
+      }
+
+      /* Failure detail */
+      .failure-detail {
+        background: var(--red-bg);
+        border: 1px solid rgba(248, 81, 73, 0.3);
+        border-radius: 6px;
+        padding: 12px;
+        margin-top: 8px;
+      }
+
+      .failure-title {
+        color: var(--red);
+        font-weight: 500;
+        margin-bottom: 8px;
+      }
+
+      .failure-row {
+        font-size: 11px;
+        margin: 4px 0;
+      }
+
+      .failure-label {
+        color: var(--text-muted);
+      }
+
+      .failure-value {
+        font-family: ui-monospace, monospace;
+        color: var(--text-primary);
+      }
+
+      /* Corpus results */
+      .corpus-summary {
+        background: var(--blue-bg);
+        border: 1px solid rgba(88, 166, 255, 0.3);
+        border-radius: 6px;
+        padding: 12px;
+        margin-top: 8px;
+        font-size: 11px;
+      }
+
+      .corpus-title {
+        color: var(--blue);
+        font-weight: 500;
+        margin-bottom: 6px;
+      }
+
+      .corpus-stat {
+        color: var(--text-secondary);
+      }
+
+      /* Invariant bundle */
+      .invariant-bundle {
+        background: var(--bg-elevated);
+        border-radius: 6px;
+        padding: 12px;
+        margin-top: 8px;
+      }
+
+      .invariant-title {
+        color: var(--purple);
+        font-weight: 500;
+        font-size: 11px;
+        margin-bottom: 8px;
+      }
+
+      .invariant-check {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 0;
+        font-size: 11px;
+      }
+
+      /* Section header */
+      .section-header {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--text-muted);
+        padding: 16px 0 8px 0;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      /* Warning/Skip states */
+      .not-implemented {
+        padding: 12px 16px;
+        background: var(--yellow-bg);
+        border-left: 3px solid var(--yellow);
+        margin: 8px 16px;
+        border-radius: 4px;
+        font-size: 12px;
+        color: var(--yellow);
+      }
+
+      .skipped-reason {
+        padding: 12px 16px;
+        background: var(--gray-bg);
+        border-left: 3px solid var(--gray);
+        margin: 8px 16px;
+        border-radius: 4px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+
+      /* Mockup label */
+      .mockup-label {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: var(--yellow);
+        color: #000;
+        padding: 8px 16px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">
+        <img
+          src="data:image/png;base64,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"
+          alt="NTNT"
+          style="height: 24px; width: 24px; vertical-align: middle; margin-right: 8px"
+        />NTNT Intent Studio
+      </div>
+      <span class="file-name">server.intent</span>
+
+      <div class="header-controls">
+        <div class="auto-refresh">
+          <span>Auto-refresh</span>
+          <div class="toggle" onclick="this.classList.toggle('active')"></div>
+        </div>
+        <button class="btn btn-secondary">🌐 Open App</button>
+        <button class="btn btn-primary">▶ Run Tests</button>
+        <div class="status-pill passing">
+          <span class="status-dot"></span>
+          Watching
+        </div>
+      </div>
+    </header>
+
+    <div class="container">
+      <!-- Summary bar with health visualization -->
+      <div class="summary-bar">
+        <div class="summary-top">
+          <div>
+            <div class="summary-title">NTNT Language Website</div>
+            <div class="summary-subtitle">9 features · 24 scenarios · Last run: 2s ago</div>
+          </div>
+        </div>
+
+        <!-- Health bar (the graph) -->
+        <div class="health-section">
+          <div class="health-bar-container">
+            <div class="health-bar">
+              <div class="health-segment pass" style="width: 88%"></div>
+              <div class="health-segment fail" style="width: 0%"></div>
+              <div class="health-segment warn" style="width: 8%"></div>
+              <div class="health-segment skip" style="width: 4%"></div>
+            </div>
+            <div class="health-percent good">88%</div>
+          </div>
+        </div>
+
+        <!-- Stats row -->
+        <div class="summary-stats">
+          <div class="stat">
+            <span class="stat-icon pass">✓</span>
+            <span class="stat-value">21</span>
+            <span class="stat-label">Passing</span>
+          </div>
+          <div class="stat">
+            <span class="stat-icon fail">✕</span>
+            <span class="stat-value">0</span>
+            <span class="stat-label">Failing</span>
+          </div>
+          <div class="stat">
+            <span class="stat-icon warn">⚠</span>
+            <span class="stat-value">2</span>
+            <span class="stat-label">Warnings</span>
+          </div>
+          <div class="stat">
+            <span class="stat-icon skip">○</span>
+            <span class="stat-value">1</span>
+            <span class="stat-label">Skipped</span>
+          </div>
+          <div class="stat">
+            <span class="stat-icon unlinked">◇</span>
+            <span class="stat-value">0</span>
+            <span class="stat-label">Unlinked</span>
+          </div>
+          <div class="stat" style="margin-left: auto">
+            <span class="stat-value">410</span>
+            <span class="stat-label">Total Checks</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Filter bar -->
+      <div class="filter-bar">
+        <span class="filter-chip active">All <span class="filter-count">9</span></span>
+        <span class="filter-chip danger">✕ Failing <span class="filter-count">0</span></span>
+        <span class="filter-chip warning">⚠ Warnings <span class="filter-count">2</span></span>
+        <span class="filter-chip skip">○ Skipped <span class="filter-count">1</span></span>
+        <span class="filter-chip unlinked">◇ Unlinked <span class="filter-count">0</span></span>
+        <span class="filter-chip">📦 Unit Tests <span class="filter-count">1</span></span>
+      </div>
+
+      <!-- Search bar -->
+      <div class="search-bar">
+        <span class="search-bar-icon">🔍</span>
+        <input type="text" placeholder="Search features, scenarios, assertions..." />
+      </div>
+
+      <!-- Feature: Code Quality -->
+      <div class="feature-card">
+        <div class="feature-header" onclick="toggleFeature(this)">
+          <div class="feature-left">
+            <div class="feature-icon pass">✓</div>
+            <div class="feature-name">Code Quality</div>
+          </div>
+          <div class="feature-right">
+            <div class="feature-stats">1 scenario · 3 checks</div>
+            <span class="expand-icon">▼</span>
+          </div>
+        </div>
+        <div class="scenarios">
+          <div class="scenario">
+            <div class="scenario-header">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">All code is valid</span>
+              </div>
+              <span class="scenario-meta">3 checks</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Feature: Homepage (expanded example) -->
+      <div class="feature-card expanded">
+        <div class="feature-header" onclick="toggleFeature(this)">
+          <div class="feature-left">
+            <div class="feature-icon pass">✓</div>
+            <div class="feature-name">Homepage</div>
+            <span class="badge http">HTTP</span>
+          </div>
+          <div class="feature-right">
+            <div class="feature-stats">3 scenarios · 12 checks</div>
+            <span class="expand-icon">▼</span>
+          </div>
+        </div>
+        <div class="scenarios">
+          <div class="feature-description">
+            <div class="feature-id">feature.homepage</div>
+            Landing page introducing NTNT with modern full-width hero and glass header
+            <div class="feature-meta">
+              <span>📍 Design: Hero with warm premium gradient, glass header with backdrop blur</span>
+            </div>
+          </div>
+          <!-- Scenario expanded to show assertions -->
+          <div class="scenario expanded">
+            <div class="scenario-header" onclick="toggleScenario(this)">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">Visitor discovers NTNT</span>
+              </div>
+              <span class="scenario-meta">5 checks</span>
+            </div>
+            <div class="assertions">
+              <div class="when-clause">
+                <div class="when-label">When</div>
+                <div class="when-text">a visitor goes to the home page</div>
+                <div class="resolution">→ GET /</div>
+              </div>
+
+              <!-- Assertion with resolution chain visible -->
+              <div class="assertion expanded">
+                <div class="assertion-header" onclick="toggleAssertion(this)">
+                  <span class="assertion-icon pass">✓</span>
+                  <span class="assertion-text">page loads successfully</span>
+                  <span class="assertion-expand">▼</span>
+                </div>
+                <div class="assertion-detail">
+                  <div class="resolution-chain">
+                    <div class="resolution-step">
+                      <span class="resolution-arrow">→</span>
+                      <span class="resolution-term">page loads successfully</span>
+                    </div>
+                    <div class="resolution-step" style="padding-left: 16px">
+                      <span class="resolution-arrow">→</span>
+                      <span class="resolution-term">status 200, returns HTML</span>
+                    </div>
+                    <div class="resolution-step" style="padding-left: 32px">
+                      <span class="resolution-arrow">→</span>
+                      <span class="resolution-primitive">Check(status == 200)</span>
+                    </div>
+                    <div class="resolution-step" style="padding-left: 32px">
+                      <span class="resolution-arrow">→</span>
+                      <span class="resolution-primitive">Check(Content-Type contains "text/html")</span>
+                    </div>
+                  </div>
+                  <div class="check-results">
+                    <div class="check-result pass">✓ status 200</div>
+                    <div class="check-result pass">✓ Content-Type: text/html</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="assertion">
+                <div class="assertion-header" onclick="toggleAssertion(this)">
+                  <span class="assertion-icon pass">✓</span>
+                  <span class="assertion-text">has proper layout</span>
+                  <span class="assertion-expand">▶</span>
+                </div>
+              </div>
+
+              <div class="assertion">
+                <div class="assertion-header">
+                  <span class="assertion-icon pass">✓</span>
+                  <span class="assertion-text">they see "Experimental"</span>
+                </div>
+              </div>
+
+              <div class="assertion">
+                <div class="assertion-header">
+                  <span class="assertion-icon pass">✓</span>
+                  <span class="assertion-text">they see "Intent-Driven Development"</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="scenario">
+            <div class="scenario-header" onclick="toggleScenario(this)">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">Visitor sees call-to-action</span>
+              </div>
+              <span class="scenario-meta">2 checks</span>
+            </div>
+          </div>
+
+          <div class="scenario">
+            <div class="scenario-header" onclick="toggleScenario(this)">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">Visitor sees feature highlights</span>
+              </div>
+              <span class="scenario-meta">4 checks</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Feature with a warning (not implemented) -->
+      <div class="feature-card expanded">
+        <div class="feature-header" onclick="toggleFeature(this)">
+          <div class="feature-left">
+            <div class="feature-icon warn">⚠</div>
+            <div class="feature-name">User Authentication</div>
+            <span class="badge http">HTTP</span>
+          </div>
+          <div class="feature-right">
+            <div class="feature-stats">2 scenarios · 1 warning</div>
+            <span class="expand-icon">▼</span>
+          </div>
+        </div>
+        <div class="scenarios">
+          <div class="feature-description">
+            <div class="feature-id">feature.user_auth</div>
+            Users can log in and out of their accounts using email and password
+            <div class="feature-meta">
+              <span>🔒 Secure session handling with JWT tokens</span>
+            </div>
+          </div>
+          <div class="scenario">
+            <div class="scenario-header">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">Login page loads</span>
+              </div>
+              <span class="scenario-meta">3 checks</span>
+            </div>
+          </div>
+          <div class="scenario">
+            <div class="scenario-header">
+              <div class="scenario-left">
+                <span class="scenario-icon warn">⚠</span>
+                <span class="scenario-name">User can log in with valid credentials</span>
+              </div>
+              <span class="scenario-meta">not implemented</span>
+            </div>
+          </div>
+          <div class="not-implemented">⚠ Scenario "User can log in with valid credentials" has no @implements annotation in code</div>
+        </div>
+      </div>
+
+      <!-- Feature with skipped scenario -->
+      <div class="feature-card expanded">
+        <div class="feature-header" onclick="toggleFeature(this)">
+          <div class="feature-left">
+            <div class="feature-icon pass">✓</div>
+            <div class="feature-name">Payment Processing</div>
+            <span class="badge http">HTTP</span>
+          </div>
+          <div class="feature-right">
+            <div class="feature-stats">2 scenarios · 1 skipped</div>
+            <span class="expand-icon">▼</span>
+          </div>
+        </div>
+        <div class="scenarios">
+          <div class="feature-description">
+            <div class="feature-id">feature.payment</div>
+            Handle checkout flow and payment processing via Stripe integration
+            <div class="feature-meta">
+              <span>💳 Supports credit cards and digital wallets</span>
+              <span>🔗 Depends on: feature.user_auth</span>
+            </div>
+          </div>
+          <div class="scenario">
+            <div class="scenario-header">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">Checkout page displays</span>
+              </div>
+              <span class="scenario-meta">4 checks</span>
+            </div>
+          </div>
+          <div class="scenario">
+            <div class="scenario-header">
+              <div class="scenario-left">
+                <span class="scenario-icon skip">○</span>
+                <span class="scenario-name">Credit card payment succeeds</span>
+              </div>
+              <span class="scenario-meta">skipped</span>
+            </div>
+          </div>
+          <div class="skipped-reason">○ Skipped: Precondition failed - "User authentication not available"</div>
+        </div>
+      </div>
+
+      <!-- Collapsed features -->
+      <div class="feature-card">
+        <div class="feature-header" onclick="toggleFeature(this)">
+          <div class="feature-left">
+            <div class="feature-icon pass">✓</div>
+            <div class="feature-name">Learn Page</div>
+          </div>
+          <div class="feature-right">
+            <div class="feature-stats">5 scenarios · 18 checks</div>
+            <span class="expand-icon">▼</span>
+          </div>
+        </div>
+        <div class="scenarios"></div>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-header" onclick="toggleFeature(this)">
+          <div class="feature-left">
+            <div class="feature-icon pass">✓</div>
+            <div class="feature-name">Blog List</div>
+          </div>
+          <div class="feature-right">
+            <div class="feature-stats">2 scenarios · 6 checks</div>
+            <span class="expand-icon">▼</span>
+          </div>
+        </div>
+        <div class="scenarios"></div>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-header" onclick="toggleFeature(this)">
+          <div class="feature-left">
+            <div class="feature-icon pass">✓</div>
+            <div class="feature-name">Blog Post View</div>
+          </div>
+          <div class="feature-right">
+            <div class="feature-stats">3 scenarios · 10 checks</div>
+            <span class="expand-icon">▼</span>
+          </div>
+        </div>
+        <div class="scenarios"></div>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-header" onclick="toggleFeature(this)">
+          <div class="feature-left">
+            <div class="feature-icon pass">✓</div>
+            <div class="feature-name">Static Assets</div>
+          </div>
+          <div class="feature-right">
+            <div class="feature-stats">3 scenarios · 9 checks</div>
+            <span class="expand-icon">▼</span>
+          </div>
+        </div>
+        <div class="scenarios"></div>
+      </div>
+
+      <!-- Unit Tests Section -->
+      <div class="section-header">
+        <span>Unit Tests</span>
+        <span class="badge unit">Function Testing</span>
+      </div>
+
+      <!-- Text Utilities - Unit test feature expanded -->
+      <div class="feature-card expanded">
+        <div class="feature-header" onclick="toggleFeature(this)">
+          <div class="feature-left">
+            <div class="feature-icon pass">✓</div>
+            <div class="feature-name">Text Utilities</div>
+            <span class="badge unit">Unit</span>
+          </div>
+          <div class="feature-right">
+            <div class="feature-stats">6 scenarios · 347 checks</div>
+            <span class="expand-icon">▼</span>
+          </div>
+        </div>
+        <div class="scenarios">
+          <div class="feature-description">
+            <div class="feature-id">feature.text_utilities</div>
+            Utility functions for text processing used across the site
+            <div class="feature-meta">
+              <span>📁 Source: lib/text.tnt</span>
+              <span>🧪 13 test cases + 30 corpus inputs</span>
+            </div>
+          </div>
+          <!-- Scenario with test data + invariant -->
+          <div class="scenario expanded">
+            <div class="scenario-header" onclick="toggleScenario(this)">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">Blog titles become clean URLs</span>
+              </div>
+              <span class="scenario-meta">13 examples × 7 checks</span>
+            </div>
+            <div class="assertions">
+              <div class="when-clause">
+                <div class="when-label">When</div>
+                <div class="when-text">generating a slug from a title</div>
+                <div class="resolution">→ call: slugify({title}) · source: lib/text.tnt · input: test_data.slugify_examples</div>
+              </div>
+
+              <div class="assertion expanded">
+                <div class="assertion-header" onclick="toggleAssertion(this)">
+                  <span class="assertion-icon pass">✓</span>
+                  <span class="assertion-text">slug is URL-safe</span>
+                  <span class="assertion-expand">▼</span>
+                </div>
+                <div class="assertion-detail">
+                  <div class="resolution-chain">
+                    <div class="resolution-step">
+                      <span class="resolution-arrow">→</span>
+                      <span class="resolution-term">slug is URL-safe</span>
+                    </div>
+                    <div class="resolution-step" style="padding-left: 16px">
+                      <span class="resolution-arrow">→</span>
+                      <span class="resolution-term">check: invariant.url_slug</span>
+                    </div>
+                  </div>
+                  <div class="invariant-bundle">
+                    <div class="invariant-title">Invariant: URL Slug (6 assertions)</div>
+                    <div class="invariant-check"><span class="assertion-icon pass">✓</span> uses only [a-z0-9-]</div>
+                    <div class="invariant-check"><span class="assertion-icon pass">✓</span> is lowercase</div>
+                    <div class="invariant-check"><span class="assertion-icon pass">✓</span> does not start with "-"</div>
+                    <div class="invariant-check"><span class="assertion-icon pass">✓</span> does not end with "-"</div>
+                    <div class="invariant-check"><span class="assertion-icon pass">✓</span> does not contain "--"</div>
+                    <div class="invariant-check"><span class="assertion-icon pass">✓</span> is non-empty</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="assertion">
+                <div class="assertion-header">
+                  <span class="assertion-icon pass">✓</span>
+                  <span class="assertion-text">slug matches expected format</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Property check scenario -->
+          <div class="scenario expanded">
+            <div class="scenario-header" onclick="toggleScenario(this)">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">Slugs are predictable</span>
+              </div>
+              <span class="scenario-meta">13 examples × 2 properties</span>
+            </div>
+            <div class="assertions">
+              <div class="when-clause">
+                <div class="when-label">When</div>
+                <div class="when-text">generating a slug from a title</div>
+                <div class="resolution">→ call: slugify({title}) · input: test_data.slugify_examples</div>
+              </div>
+
+              <div class="assertion">
+                <div class="assertion-header">
+                  <span class="assertion-icon pass">✓</span>
+                  <span class="assertion-text">slug is predictable</span>
+                  <span class="badge property" style="margin-left: 8px">Deterministic</span>
+                </div>
+              </div>
+
+              <div class="assertion">
+                <div class="assertion-header">
+                  <span class="assertion-icon pass">✓</span>
+                  <span class="assertion-text">slug is stable</span>
+                  <span class="badge property" style="margin-left: 8px">Idempotent</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Corpus testing scenario -->
+          <div class="scenario expanded">
+            <div class="scenario-header" onclick="toggleScenario(this)">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">Slugs handle any input</span>
+              </div>
+              <span class="scenario-meta">30 corpus × 6 checks</span>
+            </div>
+            <div class="assertions">
+              <div class="when-clause">
+                <div class="when-label">When</div>
+                <div class="when-text">generating a slug from user input</div>
+                <div class="resolution">→ call: slugify({input}) · input: corpus.strings</div>
+              </div>
+
+              <div class="corpus-summary">
+                <div class="corpus-title">Corpus Testing: strings (30 inputs)</div>
+                <div class="corpus-stat">✓ All edge cases passed</div>
+                <div class="corpus-stat" style="margin-top: 4px; font-size: 10px; color: var(--text-muted)">empty, whitespace, unicode, special chars, SQL injection, long strings...</div>
+              </div>
+
+              <div class="assertion">
+                <div class="assertion-header">
+                  <span class="assertion-icon pass">✓</span>
+                  <span class="assertion-text">slug is URL-safe</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Collapsed scenarios -->
+          <div class="scenario">
+            <div class="scenario-header" onclick="toggleScenario(this)">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">Blog excerpts fit the preview</span>
+              </div>
+              <span class="scenario-meta">4 examples × 2 checks</span>
+            </div>
+          </div>
+
+          <div class="scenario">
+            <div class="scenario-header" onclick="toggleScenario(this)">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">Excerpts preserve short content</span>
+              </div>
+              <span class="scenario-meta">3 examples</span>
+            </div>
+          </div>
+
+          <div class="scenario">
+            <div class="scenario-header" onclick="toggleScenario(this)">
+              <div class="scenario-left">
+                <span class="scenario-icon pass">✓</span>
+                <span class="scenario-name">Excerpts are predictable</span>
+              </div>
+              <span class="scenario-meta">property check</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mockup-label">MOCKUP V2</div>
+
+    <script>
+      function toggleFeature(header) {
+        const card = header.parentElement;
+        card.classList.toggle("expanded");
+      }
+
+      function toggleScenario(header) {
+        const scenario = header.parentElement;
+        scenario.classList.toggle("expanded");
+      }
+
+      function toggleAssertion(header) {
+        const assertion = header.parentElement;
+        assertion.classList.toggle("expanded");
+        const icon = header.querySelector(".assertion-expand");
+        if (icon) {
+          icon.textContent = assertion.classList.contains("expanded") ? "▼" : "▶";
+        }
+      }
+
+      // Filter chip interaction
+      document.querySelectorAll(".filter-chip").forEach((chip) => {
+        chip.addEventListener("click", function () {
+          if (this.textContent.includes("All")) {
+            document.querySelectorAll(".filter-chip").forEach((c) => c.classList.remove("active"));
+            this.classList.add("active");
+          } else {
+            document.querySelector(".filter-chip").classList.remove("active"); // Remove 'All'
+            this.classList.toggle("active");
+            // If no filters active, activate 'All'
+            const anyActive = document.querySelectorAll(".filter-chip.active").length > 0;
+            if (!anyActive) {
+              document.querySelector(".filter-chip").classList.add("active");
+            }
+          }
+        });
+      });
+    </script>
+  </body>
+</html>

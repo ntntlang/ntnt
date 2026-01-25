@@ -374,8 +374,8 @@ Define domain-specific terms in your `.intent` file:
 | Term | Means |
 |------|-------|
 | success response | status 2xx, body contains "ok" |
-| they see "$text" | body contains "$text" |
-| they don't see "$text" | body not contains "$text" |
+| they see {text} | body contains {text} |
+| they don't see {text} | body not contains {text} |
 | logged in user | component.authenticated_user |
 ```
 
@@ -399,27 +399,27 @@ Feature: User Profile
 |---------|-------------|
 | `status 200` | Exact status code |
 | `status 2xx` | Any 2xx status |
-| `body contains "$text"` | Body includes text |
-| `body not contains "$text"` | Body excludes text |
-| `body matches $pattern` | Regex match |
-| `header "$name" contains "$value"` | Header check |
-| `redirects to $path` | Redirect check |
+| `body contains {text}` | Body includes text |
+| `body not contains {text}` | Body excludes text |
+| `body matches {pattern}` | Regex match |
+| `header {name} contains {value}` | Header check |
+| `redirects to {path}` | Redirect check |
 | `returns JSON` | Content-Type check |
 
 **CLI:**
 | Pattern | Description |
 |---------|-------------|
 | `exits successfully` | Exit code 0 |
-| `exits with code $n` | Specific exit code |
-| `output shows "$text"` | Stdout check |
-| `error shows "$text"` | Stderr check |
+| `exits with code {n}` | Specific exit code |
+| `output shows {text}` | Stdout check |
+| `error shows {text}` | Stderr check |
 
 **Files:**
 | Pattern | Description |
 |---------|-------------|
-| `file "$path" exists` | File existence |
-| `file "$path" contains "$text"` | File content |
-| `directory "$path" exists` | Directory existence |
+| `file {path} exists` | File existence |
+| `file {path} contains {text}` | File content |
+| `directory {path} exists` | Directory existence |
 
 ### Components
 
@@ -913,6 +913,9 @@ print(response.body)      // ERROR if fetch() returned Err
 | `str(x)`                                            | Convert any value to string |
 | `int(x)`                                            | Convert string to integer   |
 | `float(x)`                                          | Convert string to float     |
+| `type(x)`                                           | Get type name as string     |
+| `push(arr, item)`                                   | Add item to array (mutates) |
+| `assert(cond)`                                      | Assert condition is true    |
 | `abs(x)`                                            | Absolute value              |
 | `min(a, b)`                                         | Minimum of two values       |
 | `max(a, b)`                                         | Maximum of two values       |
@@ -930,7 +933,10 @@ print(response.body)      // ERROR if fetch() returned Err
 
 ```ntnt
 // String operations
-import { split, join, trim, replace, contains, starts_with, ends_with } from "std/string"
+import { split, join, trim, replace, replace_chars, remove_chars, keep_chars } from "std/string"
+import { contains, starts_with, ends_with, substring, index_of } from "std/string"
+import { to_lower, to_upper, trim_chars } from "std/string"
+import { replace_pattern, matches_pattern, find_pattern, find_all_pattern, split_pattern } from "std/string"  // regex
 
 // URL encoding/decoding and form parsing
 import { encode, decode, parse_query, build_query } from "std/url"

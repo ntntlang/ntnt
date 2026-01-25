@@ -413,6 +413,33 @@ impl Interpreter {
         self.environment.borrow_mut().define(name, value);
     }
 
+    /// Call a function by name with the given arguments
+    ///
+    /// This is useful for external callers (like the IAL test runner) that want
+    /// to invoke NTNT functions after loading a module.
+    pub fn call_function_by_name(&mut self, name: &str, args: Vec<Value>) -> Result<Value> {
+        // Look up the function in the environment
+        let func = self
+            .environment
+            .borrow()
+            .get(name)
+            .ok_or_else(|| IntentError::UndefinedVariable(name.to_string()))?;
+
+        // Verify it's a function
+        match &func {
+            Value::Function { .. } | Value::NativeFunction { .. } => {}
+            _ => {
+                return Err(IntentError::TypeError(format!(
+                    "Expected function, got {}",
+                    func.type_name()
+                )))
+            }
+        }
+
+        // Call the function
+        self.call_function(func, args)
+    }
+
     /// Set the main source file for hot-reload tracking
     pub fn set_main_source_file(&mut self, path: &str) {
         self.main_source_file = Some(path.to_string());
@@ -1271,6 +1298,9 @@ impl Interpreter {
 
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
+
+        // Define builtins in the module environment so len(), push(), etc. are available
+        self.define_builtins();
 
         // Evaluate the module
         self.eval(&ast)?;

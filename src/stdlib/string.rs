@@ -556,7 +556,7 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // replace(str, from, to) -> String - Replace first occurrence
+    // replace(str, from, to) -> String - Replace all occurrences
     module.insert(
         "replace".to_string(),
         Value::NativeFunction {
@@ -564,7 +564,7 @@ pub fn init() -> HashMap<String, Value> {
             arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(from), Value::String(to)) => {
-                    Ok(Value::String(s.replacen(from.as_str(), to.as_str(), 1)))
+                    Ok(Value::String(s.replace(from.as_str(), to.as_str())))
                 }
                 _ => Err(IntentError::TypeError(
                     "replace() requires three strings".to_string(),
@@ -573,18 +573,216 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // replace_all(str, from, to) -> String - Replace all occurrences
+    // replace_first(str, from, to) -> String - Replace only first occurrence
     module.insert(
-        "replace_all".to_string(),
+        "replace_first".to_string(),
         Value::NativeFunction {
-            name: "replace_all".to_string(),
+            name: "replace_first".to_string(),
             arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(from), Value::String(to)) => {
-                    Ok(Value::String(s.replace(from.as_str(), to.as_str())))
+                    Ok(Value::String(s.replacen(from.as_str(), to.as_str(), 1)))
                 }
                 _ => Err(IntentError::TypeError(
-                    "replace_all() requires three strings".to_string(),
+                    "replace_first() requires three strings".to_string(),
+                )),
+            },
+        },
+    );
+
+    // replace_chars(str, chars, replacement) -> String - Replace any character in chars set
+    module.insert(
+        "replace_chars".to_string(),
+        Value::NativeFunction {
+            name: "replace_chars".to_string(),
+            arity: 3,
+            func: |args| match (&args[0], &args[1], &args[2]) {
+                (Value::String(s), Value::String(chars), Value::String(replacement)) => {
+                    let char_set: std::collections::HashSet<char> = chars.chars().collect();
+                    let result: String = s
+                        .chars()
+                        .flat_map(|c| {
+                            if char_set.contains(&c) {
+                                replacement.chars().collect::<Vec<_>>()
+                            } else {
+                                vec![c]
+                            }
+                        })
+                        .collect();
+                    Ok(Value::String(result))
+                }
+                _ => Err(IntentError::TypeError(
+                    "replace_chars() requires three strings".to_string(),
+                )),
+            },
+        },
+    );
+
+    // remove_chars(str, chars) -> String - Remove all characters in chars set
+    module.insert(
+        "remove_chars".to_string(),
+        Value::NativeFunction {
+            name: "remove_chars".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(chars)) => {
+                    let char_set: std::collections::HashSet<char> = chars.chars().collect();
+                    let result: String = s.chars().filter(|c| !char_set.contains(c)).collect();
+                    Ok(Value::String(result))
+                }
+                _ => Err(IntentError::TypeError(
+                    "remove_chars() requires two strings".to_string(),
+                )),
+            },
+        },
+    );
+
+    // keep_chars(str, allowed) -> String - Keep only characters in allowed set
+    module.insert(
+        "keep_chars".to_string(),
+        Value::NativeFunction {
+            name: "keep_chars".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(allowed)) => {
+                    let char_set: std::collections::HashSet<char> = allowed.chars().collect();
+                    let result: String = s.chars().filter(|c| char_set.contains(c)).collect();
+                    Ok(Value::String(result))
+                }
+                _ => Err(IntentError::TypeError(
+                    "keep_chars() requires two strings".to_string(),
+                )),
+            },
+        },
+    );
+
+    // ========== Regex Operations ==========
+
+    // replace_pattern(str, pattern, replacement) -> String - Replace all regex matches
+    module.insert(
+        "replace_pattern".to_string(),
+        Value::NativeFunction {
+            name: "replace_pattern".to_string(),
+            arity: 3,
+            func: |args| match (&args[0], &args[1], &args[2]) {
+                (Value::String(s), Value::String(pattern), Value::String(replacement)) => {
+                    match regex::Regex::new(pattern) {
+                        Ok(re) => Ok(Value::String(
+                            re.replace_all(s, replacement.as_str()).to_string(),
+                        )),
+                        Err(e) => Err(IntentError::RuntimeError(format!(
+                            "Invalid regex pattern: {}",
+                            e
+                        ))),
+                    }
+                }
+                _ => Err(IntentError::TypeError(
+                    "replace_pattern() requires three strings".to_string(),
+                )),
+            },
+        },
+    );
+
+    // matches_pattern(str, pattern) -> Bool - Check if string matches regex pattern
+    module.insert(
+        "matches_pattern".to_string(),
+        Value::NativeFunction {
+            name: "matches_pattern".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
+                    Ok(re) => Ok(Value::Bool(re.is_match(s))),
+                    Err(e) => Err(IntentError::RuntimeError(format!(
+                        "Invalid regex pattern: {}",
+                        e
+                    ))),
+                },
+                _ => Err(IntentError::TypeError(
+                    "matches_pattern() requires two strings".to_string(),
+                )),
+            },
+        },
+    );
+
+    // find_pattern(str, pattern) -> Option<String> - Find first regex match
+    module.insert(
+        "find_pattern".to_string(),
+        Value::NativeFunction {
+            name: "find_pattern".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
+                    Ok(re) => match re.find(s) {
+                        Some(m) => Ok(Value::EnumValue {
+                            enum_name: "Option".to_string(),
+                            variant: "Some".to_string(),
+                            values: vec![Value::String(m.as_str().to_string())],
+                        }),
+                        None => Ok(Value::EnumValue {
+                            enum_name: "Option".to_string(),
+                            variant: "None".to_string(),
+                            values: vec![],
+                        }),
+                    },
+                    Err(e) => Err(IntentError::RuntimeError(format!(
+                        "Invalid regex pattern: {}",
+                        e
+                    ))),
+                },
+                _ => Err(IntentError::TypeError(
+                    "find_pattern() requires two strings".to_string(),
+                )),
+            },
+        },
+    );
+
+    // find_all_pattern(str, pattern) -> [String] - Find all regex matches
+    module.insert(
+        "find_all_pattern".to_string(),
+        Value::NativeFunction {
+            name: "find_all_pattern".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
+                    Ok(re) => {
+                        let matches: Vec<Value> = re
+                            .find_iter(s)
+                            .map(|m| Value::String(m.as_str().to_string()))
+                            .collect();
+                        Ok(Value::Array(matches))
+                    }
+                    Err(e) => Err(IntentError::RuntimeError(format!(
+                        "Invalid regex pattern: {}",
+                        e
+                    ))),
+                },
+                _ => Err(IntentError::TypeError(
+                    "find_all_pattern() requires two strings".to_string(),
+                )),
+            },
+        },
+    );
+
+    // split_pattern(str, pattern) -> [String] - Split by regex pattern
+    module.insert(
+        "split_pattern".to_string(),
+        Value::NativeFunction {
+            name: "split_pattern".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
+                    Ok(re) => {
+                        let parts: Vec<Value> =
+                            re.split(s).map(|p| Value::String(p.to_string())).collect();
+                        Ok(Value::Array(parts))
+                    }
+                    Err(e) => Err(IntentError::RuntimeError(format!(
+                        "Invalid regex pattern: {}",
+                        e
+                    ))),
+                },
+                _ => Err(IntentError::TypeError(
+                    "split_pattern() requires two strings".to_string(),
                 )),
             },
         },
@@ -956,6 +1154,23 @@ pub fn init() -> HashMap<String, Value> {
     );
 
     // ========== Aliases for compatibility ==========
+
+    // replace_all(str, from, to) -> String (alias for replace)
+    module.insert(
+        "replace_all".to_string(),
+        Value::NativeFunction {
+            name: "replace_all".to_string(),
+            arity: 3,
+            func: |args| match (&args[0], &args[1], &args[2]) {
+                (Value::String(s), Value::String(from), Value::String(to)) => {
+                    Ok(Value::String(s.replace(from.as_str(), to.as_str())))
+                }
+                _ => Err(IntentError::TypeError(
+                    "replace_all() requires three strings".to_string(),
+                )),
+            },
+        },
+    );
 
     // upper(str) -> String (alias for to_upper)
     module.insert(

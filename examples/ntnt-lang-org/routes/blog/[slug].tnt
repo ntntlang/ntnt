@@ -3,6 +3,18 @@
 
 import { response } from "std/http/server"
 import { has_key } from "std/collections"
+import { replace, to_lower, trim } from "std/string"
+
+// Simple slugify (inline to avoid module import bug with builtins)
+fn simple_slugify(title) {
+    let mut text = to_lower(trim(title))
+    text = replace(text, " ", "-")
+    text = replace(text, "'", "")
+    text = replace(text, "?", "")
+    text = replace(text, "!", "")
+    text = replace(text, ":", "")
+    return text
+}
 
 // Cacheable HTML response for Cloudflare CDN
 fn cached_html(body, max_age) {
@@ -33,21 +45,24 @@ fn render_page(content, title) {
     })
 }
 
-// GET /blog/{slug} - Individual blog post
-fn get(req) {
-    let slug = req.params.slug
-
-    // Map of valid blog posts to their template files and titles
-    let valid_posts = map {
-        "welcome": map {
+// Blog post definitions - static map for simplicity
+fn get_valid_posts() {
+    return map {
+        "introducing-ntnt-a-programming-language-for-the-ai-era": map {
             "template": "views/blog/welcome.html",
             "title": "Welcome to the NTNT Blog"
         },
-        "idd-explained": map {
+        "intent-driven-development-from-requirements-to-verified-code": map {
             "template": "views/blog/idd-explained.html",
             "title": "Intent-Driven Development Explained"
         }
     }
+}
+
+// GET /blog/{slug} - Individual blog post
+fn get(req) {
+    let slug = req.params.slug
+    let valid_posts = get_valid_posts()
 
     // Check if slug is valid
     if has_key(valid_posts, slug) {

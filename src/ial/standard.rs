@@ -316,6 +316,164 @@ pub fn standard_vocabulary() -> Vocabulary {
         },
     );
 
+    // ========================================
+    // Unit Test / Property Assertions
+    // ========================================
+
+    // "result is {expected}" → Check result equals expected value
+    vocab.add_primitive(
+        "result is {expected}",
+        Primitive::Check {
+            op: CheckOp::Equals,
+            path: "result".to_string(),
+            expected: Value::String("{expected}".to_string()),
+        },
+    );
+
+    // "result equals {expected}" → Same as result is
+    vocab.add_primitive(
+        "result equals {expected}",
+        Primitive::Check {
+            op: CheckOp::Equals,
+            path: "result".to_string(),
+            expected: Value::String("{expected}".to_string()),
+        },
+    );
+
+    // "is deterministic" → Property check (marked with special term)
+    // This is handled during scenario execution, not as a primitive
+    vocab.add_terms(
+        "is deterministic",
+        vec![Term::new("property: deterministic")],
+    );
+
+    // "is idempotent" → Property check
+    vocab.add_terms("is idempotent", vec![Term::new("property: idempotent")]);
+
+    // "is predictable" → Same as deterministic
+    vocab.add_terms("is predictable", vec![Term::new("is deterministic")]);
+
+    // "is stable" → Same as idempotent
+    vocab.add_terms("is stable", vec![Term::new("is idempotent")]);
+
+    // ========================================
+    // String/Value Assertions for Unit Tests
+    // ========================================
+
+    // "uses only {pattern}" → Check result matches character pattern
+    vocab.add_primitive(
+        "uses only {pattern}",
+        Primitive::Check {
+            op: CheckOp::Matches,
+            path: "result".to_string(),
+            expected: Value::Regex("^{pattern}+$".to_string()),
+        },
+    );
+
+    // "is lowercase" → Check result is all lowercase
+    vocab.add_primitive(
+        "is lowercase",
+        Primitive::Check {
+            op: CheckOp::Matches,
+            path: "result".to_string(),
+            expected: Value::Regex(r"^[^A-Z]*$".to_string()),
+        },
+    );
+
+    // "is non-empty" → Check result is not empty
+    vocab.add_primitive(
+        "is non-empty",
+        Primitive::Check {
+            op: CheckOp::NotEquals,
+            path: "result".to_string(),
+            expected: Value::String(String::new()),
+        },
+    );
+
+    // "does not start with {prefix}" → Check result doesn't start with prefix
+    vocab.add_primitive(
+        "does not start with {prefix}",
+        Primitive::Check {
+            op: CheckOp::Matches,
+            path: "result".to_string(),
+            expected: Value::Regex(r"^(?!{prefix}).*$".to_string()),
+        },
+    );
+
+    // "does not end with {suffix}" → Check result doesn't end with suffix
+    vocab.add_primitive(
+        "does not end with {suffix}",
+        Primitive::Check {
+            op: CheckOp::Matches,
+            path: "result".to_string(),
+            expected: Value::Regex(r"^.*(?<!{suffix})$".to_string()),
+        },
+    );
+
+    // "does not contain {text}" → Check result doesn't contain text
+    vocab.add_primitive(
+        "does not contain {text}",
+        Primitive::Check {
+            op: CheckOp::NotContains,
+            path: "result".to_string(),
+            expected: Value::String("{text}".to_string()),
+        },
+    );
+
+    // "starts with {prefix}" → Check result starts with prefix
+    vocab.add_primitive(
+        "starts with {prefix}",
+        Primitive::Check {
+            op: CheckOp::StartsWith,
+            path: "result".to_string(),
+            expected: Value::String("{prefix}".to_string()),
+        },
+    );
+
+    // "ends with {suffix}" → Check result ends with suffix
+    vocab.add_primitive(
+        "ends with {suffix}",
+        Primitive::Check {
+            op: CheckOp::EndsWith,
+            path: "result".to_string(),
+            expected: Value::String("{suffix}".to_string()),
+        },
+    );
+
+    // ========================================
+    // Bounds Assertions
+    // ========================================
+
+    // "length is at most {max}" → Check string/array length <= max
+    vocab.add_primitive(
+        "length is at most {max}",
+        Primitive::Check {
+            op: CheckOp::LessThan, // We'll add LTE later
+            path: "result.length".to_string(),
+            expected: Value::Number(0.0), // Placeholder
+        },
+    );
+
+    // "is at least {min}" → Check numeric result >= min
+    vocab.add_primitive(
+        "is at least {min}",
+        Primitive::Check {
+            op: CheckOp::GreaterThan,
+            path: "result".to_string(),
+            expected: Value::Number(0.0), // Placeholder
+        },
+    );
+
+    // "is at most {max}" → Check numeric result <= max
+    vocab.add_primitive(
+        "is at most {max}",
+        Primitive::Check {
+            op: CheckOp::LessThan,
+            path: "result".to_string(),
+            expected: Value::Number(0.0), // Placeholder
+        },
+    );
+
     vocab
 }
 

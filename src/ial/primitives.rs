@@ -39,6 +39,38 @@ pub enum Primitive {
     /// Read file contents
     ReadFile { path: String },
 
+    // === Unit Testing Primitives ===
+    /// Function call: invoke a NTNT function and capture the result
+    /// The result is stored in context at "result" path
+    FunctionCall {
+        /// Source file containing the function (relative to intent file)
+        source_file: String,
+        /// Function name to call
+        function_name: String,
+        /// Arguments to pass (as Value types)
+        args: Vec<Value>,
+    },
+
+    /// Property check: verify a property holds for a function
+    PropertyCheck {
+        /// The property to check
+        property: PropertyType,
+        /// Source file containing the function
+        source_file: String,
+        /// Function name to check
+        function_name: String,
+        /// Test input to use
+        input: Value,
+    },
+
+    /// Invariant check: expand and verify an invariant
+    InvariantCheck {
+        /// Invariant ID (e.g., "invariant.url_slug")
+        invariant_id: String,
+        /// Value to check against the invariant
+        value: Value,
+    },
+
     // === Checks (verify values in Context) ===
     /// Universal check: operation on a path with expected value
     Check {
@@ -72,6 +104,25 @@ pub enum CheckOp {
     GreaterThan,
     /// Numeric in range (inclusive)
     InRange,
+    /// String starts with prefix
+    StartsWith,
+    /// String ends with suffix
+    EndsWith,
+    /// Value is of a specific type
+    IsType,
+    /// Value has specific length
+    HasLength,
+}
+
+/// Property types for property-based testing
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum PropertyType {
+    /// f(x) == f(x) for same input (same input produces same output)
+    Deterministic,
+    /// f(f(x)) == f(x) (applying function twice gives same result as once)
+    Idempotent,
+    /// g(f(x)) == x for some inverse function g
+    RoundTrips { inverse_function: String },
 }
 
 /// Values in the system - what primitives operate on.

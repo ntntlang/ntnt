@@ -21,8 +21,11 @@ Built with NTNT's file-based routing, external templates, and middleware.
 | a visitor goes to the {path} | GET {path} |
 | a visitor goes to {path} | GET {path} |
 | home page | / |
+| the home page | / |
 | learn page | /learn |
+| the learn page | /learn |
 | blog | /blog |
+| the blog | /blog |
 | page loads successfully | status 200, returns HTML |
 | returns HTML | header "Content-Type" contains "text/html" |
 | has site branding | body contains "ntnt-logo", body contains "NTNT" |
@@ -181,10 +184,11 @@ Feature: Blog List
 Feature: Blog Post View
   id: feature.blog_post
   description: "Individual blog post with full content"
+  note: "Blog post slugs are generated from titles using slugify()"
 
   Scenario: Reading the introduction post
     description: "A visitor reads the introductory blog post about NTNT"
-    When a visitor goes to /blog/welcome
+    When a visitor goes to /blog/introducing-ntnt-a-programming-language-for-the-ai-era
     → blog post exists
     → has proper layout
     → they see "Introducing NTNT"
@@ -193,7 +197,7 @@ Feature: Blog Post View
 
   Scenario: Reading the IDD explained post
     description: "A visitor learns about Intent-Driven Development"
-    When a visitor goes to /blog/idd-explained
+    When a visitor goes to /blog/intent-driven-development-from-requirements-to-verified-code
     → blog post exists
     → has proper layout
     → they see "Intent-Driven Development"
@@ -251,6 +255,46 @@ Feature: Site Branding
 
 ---
 
+Feature: Text Utilities
+  id: feature.text_utilities
+  description: "Utility functions for text processing used across the site"
+  source: lib/text.tnt
+
+  Scenario: Blog titles become clean URLs
+    description: "Post titles are converted to URL-safe slugs"
+    When generating a slug from a title
+    → slug is URL-safe
+    → slug matches expected format
+
+  Scenario: Slugs are predictable
+    description: "The same title always produces the same slug"
+    When generating a slug from a title
+    → slug is predictable
+    → slug is stable
+
+  Scenario: Slugs handle any input
+    description: "Edge cases and weird inputs don't break slug generation"
+    When generating a slug from user input
+    → slug is URL-safe
+
+  Scenario: Blog excerpts fit the preview
+    description: "Long content is truncated for blog previews"
+    When generating an excerpt from content
+    → excerpt respects the limit
+    → excerpt ends cleanly
+
+  Scenario: Excerpts preserve short content
+    description: "Short content is not truncated unnecessarily"
+    When generating an excerpt from short content
+    → excerpt matches original
+
+  Scenario: Excerpts are predictable
+    description: "The same content always produces the same excerpt"
+    When generating an excerpt from content
+    → excerpt is predictable
+
+---
+
 Constraint: Responsive Design
   description: "Website should be mobile-friendly with proper viewport meta"
   applies_to: [feature.homepage, feature.learn_page, feature.blog_list, feature.blog_post]
@@ -262,3 +306,124 @@ Constraint: Accessible
 Constraint: Fast Loading
   description: "Pages should load quickly with minimal blocking resources"
   applies_to: [feature.homepage, feature.learn_page, feature.blog_list]
+
+---
+---
+
+## System-Managed Sections
+
+The sections below are managed by the system/agent. Humans confirm the scenarios above;
+the system uses these sections to execute verification.
+
+---
+
+## Glossary Extensions (Unit Testing)
+
+| Term | Means |
+|------|-------|
+| generating a slug from a title | call: slugify({title}), source: lib/text.tnt, input: test_data.slugify_examples |
+| generating a slug from user input | call: slugify({input}), source: lib/text.tnt, input: corpus.strings |
+| slug is URL-safe | check: invariant.url_slug |
+| slug matches expected format | result is {expected} |
+| slug is predictable | property: deterministic |
+| slug is stable | property: idempotent |
+| generating an excerpt from content | call: truncate_excerpt({content}, {max_length}), source: lib/text.tnt, input: test_data.excerpt_examples |
+| generating an excerpt from short content | call: truncate_excerpt({content}, {max_length}), source: lib/text.tnt, input: test_data.excerpt_short |
+| excerpt respects the limit | check: invariant.excerpt_length |
+| excerpt ends cleanly | check: invariant.excerpt_ending |
+| excerpt matches original | result is {expected} |
+| excerpt is predictable | property: deterministic |
+
+---
+
+## Invariants
+
+Invariant: URL Slug
+  id: invariant.url_slug
+  description: "A URL-safe slug string"
+
+  Assertions:
+    → uses only [a-z0-9-]
+    → is lowercase
+    → does not start with "-"
+    → does not end with "-"
+    → does not contain "--"
+    → is non-empty
+
+Invariant: Excerpt Length
+  id: invariant.excerpt_length
+  parameters:
+    - max_length: Int
+  description: "Excerpt does not exceed maximum length"
+
+  Assertions:
+    → length is at most {max_length}
+
+Invariant: Excerpt Ending
+  id: invariant.excerpt_ending
+  description: "Excerpt ends cleanly (not mid-word)"
+
+  Assertions:
+    → ends with "..." or equals original
+    → does not end with space before "..."
+
+---
+
+## Test Data
+
+Test Cases: Slugify Examples
+  id: test_data.slugify_examples
+  for: feature.text_utilities
+  scenario: Blog titles become clean URLs
+
+  | title | expected |
+  | "Hello World" | "hello-world" |
+  | "My First Post!" | "my-first-post" |
+  | "What's the Deal?" | "whats-the-deal" |
+  | "UPPERCASE TITLE" | "uppercase-title" |
+  | "  Extra   Spaces  " | "extra-spaces" |
+  | "Numbers 123 Here" | "numbers-123-here" |
+  | "Special @#$% Chars" | "special-chars" |
+  | "already-valid-slug" | "already-valid-slug" |
+  | "Trailing Punctuation..." | "trailing-punctuation" |
+  | "---Leading Dashes" | "leading-dashes" |
+  | "" | "post" |
+  | "   " | "post" |
+  | "Introducing NTNT: A Programming Language for the AI Era" | "introducing-ntnt-a-programming-language-for-the-ai-era" |
+
+Test Cases: Excerpt Examples
+  id: test_data.excerpt_examples
+  for: feature.text_utilities
+  scenario: Blog excerpts fit the preview
+
+  | content | max_length | expected |
+  | "This is a long sentence that needs to be truncated for the preview." | 30 | "This is a long sentence..." |
+  | "Short text" | 50 | "Short text" |
+  | "Word boundary test here now" | 20 | "Word boundary test..." |
+  | "NoSpacesInThisTextAtAll" | 10 | "NoSpace..." |
+
+Test Cases: Excerpt Short Content
+  id: test_data.excerpt_short
+  for: feature.text_utilities
+  scenario: Excerpts preserve short content
+
+  | content | max_length | expected |
+  | "Hello" | 100 | "Hello" |
+  | "Short" | 10 | "Short" |
+  | "" | 50 | "" |
+
+Test Cases: String Corpus
+  id: test_data.corpus_strings
+  for: feature.text_utilities
+  scenario: Slugs handle any input
+
+  | input |
+  | "Normal Title" |
+  | "" |
+  | "   " |
+  | "!@#$%^&*()" |
+  | "---multiple---dashes---" |
+  | "MixedCASE Title" |
+  | "Numbers 12345" |
+  | "Very Long Title That Goes On And On And On For Many Words" |
+  | "a" |

@@ -85,7 +85,7 @@ Component: Success Response
     → status is 2xx
     → content-type is "application/json"
     → they see "ok"
-    → they see "$message"
+    → they see {message}
 ```
 
 **Testing Model:**
@@ -152,7 +152,7 @@ Longest-match greedy tokenization. Convert patterns to regex for parameter extra
 1. Parse assertion → match glossary term with parameters
 2. Resolve to component reference: `component.id(param: value)`
 3. Look up component by ID
-4. Substitute `$param` in inherent behavior
+4. Substitute `{param}` in inherent behavior
 5. Execute all expanded assertions
 
 ### 5.3 Data Structures
@@ -212,7 +212,7 @@ Component: Success Response
     → status is 2xx
     → content-type is "application/json"
     → they see "ok"
-    → they see "$message"
+    → they see {message}
 
 Component: Error Response
   id: component.error_response
@@ -220,7 +220,7 @@ Component: Error Response
   Inherent Behavior:
     → status is 4xx or 5xx
     → they see "error"
-    → they see "$message"
+    → they see {message}
 
 ---
 
@@ -522,7 +522,7 @@ Component: Success Response
   Inherent Behavior:
     → status is 2xx
     → body contains "ok"
-    → body contains "$message"
+    → body contains {message}
 ```
 
 Parses to:
