@@ -197,13 +197,19 @@ fn test_html_is_valid_structure() {
 /// Set NTNT_TEST_BINARY env var to override.
 fn run_ntnt(args: &[&str]) -> (String, String, i32) {
     let binary = std::env::var("NTNT_TEST_BINARY").ok().unwrap_or_else(|| {
+        // Account for .exe extension on Windows
+        let exe = std::env::consts::EXE_SUFFIX;
+        let debug_path = format!("./target/debug/ntnt{}", exe);
+        let dev_release_path = format!("./target/dev-release/ntnt{}", exe);
+        let release_path = format!("./target/release/ntnt{}", exe);
+
         // Prefer debug binary since cargo test rebuilds it
-        if std::path::Path::new("./target/debug/ntnt").exists() {
-            "./target/debug/ntnt".to_string()
-        } else if std::path::Path::new("./target/dev-release/ntnt").exists() {
-            "./target/dev-release/ntnt".to_string()
+        if std::path::Path::new(&debug_path).exists() {
+            debug_path
+        } else if std::path::Path::new(&dev_release_path).exists() {
+            dev_release_path
         } else {
-            "./target/release/ntnt".to_string()
+            release_path
         }
     });
 
@@ -223,12 +229,18 @@ fn run_ntnt(args: &[&str]) -> (String, String, i32) {
 /// Helper to start Intent Studio as a background process
 fn start_intent_studio(intent_file: &str, studio_port: u16, app_port: u16) -> Child {
     let binary = std::env::var("NTNT_TEST_BINARY").ok().unwrap_or_else(|| {
-        if std::path::Path::new("./target/debug/ntnt").exists() {
-            "./target/debug/ntnt".to_string()
-        } else if std::path::Path::new("./target/dev-release/ntnt").exists() {
-            "./target/dev-release/ntnt".to_string()
+        // Account for .exe extension on Windows
+        let exe = std::env::consts::EXE_SUFFIX;
+        let debug_path = format!("./target/debug/ntnt{}", exe);
+        let dev_release_path = format!("./target/dev-release/ntnt{}", exe);
+        let release_path = format!("./target/release/ntnt{}", exe);
+
+        if std::path::Path::new(&debug_path).exists() {
+            debug_path
+        } else if std::path::Path::new(&dev_release_path).exists() {
+            dev_release_path
         } else {
-            "./target/release/ntnt".to_string()
+            release_path
         }
     });
 
