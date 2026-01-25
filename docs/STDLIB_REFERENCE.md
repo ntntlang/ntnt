@@ -67,7 +67,7 @@ These functions are available everywhere without importing.
 Collection manipulation utilities
 
 ```ntnt
-import { keys, last, first } from "std/collections"
+import { entries, first, get_key } from "std/collections"
 ```
 
 ### Functions
@@ -91,7 +91,7 @@ import { keys, last, first } from "std/collections"
 Concurrency primitives
 
 ```ntnt
-import { recv, send, channel } from "std/concurrent"
+import { channel, recv, send } from "std/concurrent"
 ```
 
 ### Functions
@@ -110,7 +110,7 @@ import { recv, send, channel } from "std/concurrent"
 CSV parsing and generation
 
 ```ntnt
-import { stringify_with_headers, parse, parse_with_headers } from "std/csv"
+import { parse, parse_with_headers, stringify } from "std/csv"
 ```
 
 ### Functions
@@ -129,7 +129,7 @@ import { stringify_with_headers, parse, parse_with_headers } from "std/csv"
 Environment variables and process info
 
 ```ntnt
-import { get_env, args, set_env } from "std/env"
+import { all_env, args, cwd } from "std/env"
 ```
 
 ### Functions
@@ -150,7 +150,7 @@ import { get_env, args, set_env } from "std/env"
 File system operations
 
 ```ntnt
-import { is_dir, readdir, is_file } from "std/fs"
+import { exists, is_dir, is_file } from "std/fs"
 ```
 
 ### Functions
@@ -172,7 +172,7 @@ import { is_dir, readdir, is_file } from "std/fs"
 HTTP client for making requests
 
 ```ntnt
-import { fetch, download } from "std/http"
+import { download, fetch } from "std/http"
 ```
 
 ### Functions
@@ -189,7 +189,7 @@ import { fetch, download } from "std/http"
 HTTP response builders and request parsing utilities
 
 ```ntnt
-import { parse_json, parse_form, json } from "std/http/server"
+import { html, json, parse_form } from "std/http/server"
 ```
 
 ### Functions
@@ -211,7 +211,7 @@ import { parse_json, parse_form, json } from "std/http/server"
 JSON parsing and serialization
 
 ```ntnt
-import { stringify_pretty, stringify, parse } from "std/json"
+import { parse, stringify, stringify_pretty } from "std/json"
 ```
 
 ### Functions
@@ -229,7 +229,7 @@ import { stringify_pretty, stringify, parse } from "std/json"
 Mathematical functions and constants
 
 ```ntnt
-import { is_infinite, log2, exp } from "std/math"
+import { acos, asin, atan } from "std/math"
 ```
 
 ### Constants
@@ -279,7 +279,7 @@ import { is_infinite, log2, exp } from "std/math"
 File path manipulation
 
 ```ntnt
-import { join, extname, basename } from "std/path"
+import { basename, dirname, extname } from "std/path"
 ```
 
 ### Functions
@@ -298,7 +298,7 @@ import { join, extname, basename } from "std/path"
 Comprehensive string manipulation functions
 
 ```ntnt
-import { replace_chars, trim_left, trim_chars } from "std/string"
+import { capitalize, center, char_at } from "std/string"
 ```
 
 ### Functions
@@ -365,7 +365,7 @@ import { replace_chars, trim_left, trim_chars } from "std/string"
 Date and time operations
 
 ```ntnt
-import { now, format, parse } from "std/time"
+import { add_days, add_months, format } from "std/time"
 ```
 
 ### Functions
@@ -385,7 +385,7 @@ import { now, format, parse } from "std/time"
 URL encoding and query string operations
 
 ```ntnt
-import { parse_query, encode, build_query } from "std/url"
+import { build_query, decode, encode } from "std/url"
 ```
 
 ### Functions

@@ -30,7 +30,7 @@
 
 use colored::*;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -957,8 +957,11 @@ impl Glossary {
         // Convert outcome to IAL format ($param -> {param}) for lookup
         let ial_outcome = Self::convert_params_to_ial(outcome);
 
+        // Initialize cycle detection state
+        let mut visited = HashSet::new();
+
         // Try to resolve through IAL vocabulary first
-        let mut assertions = self.resolve_outcomes_via_ial(&ial_outcome, &vocab);
+        let mut assertions = self.resolve_outcomes_via_ial(&ial_outcome, &vocab, &mut visited, 0);
 
         // If no IAL resolution, fall back to direct pattern matching
         if assertions.is_empty() {
@@ -970,9 +973,73 @@ impl Glossary {
         assertions
     }
 
-    /// Resolve an outcome through IAL vocabulary lookup and term expansion
-    /// Returns ALL assertions from compound terms (recursive)
-    fn resolve_outcomes_via_ial(&self, outcome: &str, vocab: &Vocabulary) -> Vec<Assertion> {
+    /// Maximum recursion depth for glossary resolution (safety limit)
+    const MAX_GLOSSARY_DEPTH: usize = 50;
+
+    /// Normalize a term for cycle detection.
+    /// Strips parameter values to detect cycles like: "a {x}" -> "b {x}" -> "a {y}"
+    fn normalize_for_cycle(text: &str) -> String {
+        // Simple normalization: replace quoted strings and {param} values with placeholders
+        let mut result = String::new();
+        let mut chars = text.chars().peekable();
+
+        while let Some(c) = chars.next() {
+            if c == '"' {
+                // Skip quoted string content
+                result.push_str("<P>");
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next == '"' {
+                        break;
+                    }
+                }
+            } else if c == '{' {
+                // Skip {param} content
+                result.push_str("<P>");
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next == '}' {
+                        break;
+                    }
+                }
+            } else {
+                result.push(c);
+            }
+        }
+
+        result.to_lowercase()
+    }
+
+    /// Resolve an outcome through IAL vocabulary lookup and term expansion.
+    /// Returns ALL assertions from compound terms (recursive).
+    ///
+    /// Includes cycle detection and max depth limits to prevent infinite loops
+    /// from cyclic glossary definitions.
+    fn resolve_outcomes_via_ial(
+        &self,
+        outcome: &str,
+        vocab: &Vocabulary,
+        visited: &mut HashSet<String>,
+        depth: usize,
+    ) -> Vec<Assertion> {
+        // Safety: max depth check
+        if depth > Self::MAX_GLOSSARY_DEPTH {
+            // Graceful degradation: return empty rather than crash
+            return vec![];
+        }
+
+        // Normalize term for cycle detection
+        let normalized = Self::normalize_for_cycle(outcome);
+
+        // Safety: cycle detection
+        if visited.contains(&normalized) {
+            // Cycle detected - return empty to avoid infinite loop
+            return vec![];
+        }
+
+        // Mark as visiting
+        visited.insert(normalized.clone());
+
         let mut assertions = Vec::new();
 
         // Look up in vocabulary - this handles parameterized terms
@@ -989,7 +1056,12 @@ impl Glossary {
                             assertions.push(assertion);
                         } else {
                             // Recursively resolve through vocabulary (this handles nested terms)
-                            let nested = self.resolve_outcomes_via_ial(&substituted.text, vocab);
+                            let nested = self.resolve_outcomes_via_ial(
+                                &substituted.text,
+                                vocab,
+                                visited,
+                                depth + 1,
+                            );
                             if !nested.is_empty() {
                                 assertions.extend(nested);
                             } else {
@@ -1011,6 +1083,9 @@ impl Glossary {
                 }
             }
         }
+
+        // Unmark as visiting (allow term to be used in different branches)
+        visited.remove(&normalized);
 
         assertions
     }
@@ -2571,6 +2646,9 @@ pub struct Feature {
 pub struct IntentFile {
     pub features: Vec<Feature>,
     pub source_path: String,
+    /// Project title from ## Title section
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// IAL glossary (if present)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub glossary: Option<Glossary>,
@@ -2754,6 +2832,8 @@ impl IntentFile {
         let mut test_data_sections: Vec<TestDataSection> = Vec::new();
         let mut glossary = Glossary::new();
         let mut has_glossary = false;
+        let mut title: Option<String> = None;
+        let mut expecting_title = false;
         let mut current_feature: Option<Feature> = None;
         let mut current_component: Option<Component> = None;
         let mut current_invariant: Option<Invariant> = None;
@@ -2815,6 +2895,30 @@ impl IntentFile {
                 in_component_inherent = false;
                 _in_glossary_bindings = false;
                 in_binding_assert_list = false;
+                continue;
+            }
+
+            // Capture title from next line after ## Title header
+            if expecting_title && title.is_none() {
+                title = Some(trimmed.to_string());
+                expecting_title = false;
+                continue;
+            }
+
+            // Title section header: ## Title
+            if trimmed.starts_with("## Title") {
+                // The title can be on the same line after "## Title" or "## Title:"
+                // Format: ## Title: My Project Title or ## Title My Project Title
+                let title_text = trimmed
+                    .trim_start_matches("## Title")
+                    .trim_start_matches(':')
+                    .trim();
+                if !title_text.is_empty() {
+                    title = Some(title_text.to_string());
+                } else {
+                    // Title is on the next line
+                    expecting_title = true;
+                }
                 continue;
             }
 
@@ -3518,6 +3622,7 @@ impl IntentFile {
         Ok(IntentFile {
             features,
             source_path,
+            title,
             glossary: if has_glossary { Some(glossary) } else { None },
             components,
             invariants,
@@ -4867,7 +4972,7 @@ fn navigate_json_path<'a>(
 }
 
 /// Results from running tests against a live server (for Intent Studio)
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LiveTestResults {
     pub features: Vec<LiveFeatureResult>,
     pub components: Vec<LiveComponentResult>,
@@ -4876,13 +4981,42 @@ pub struct LiveTestResults {
     pub failed_assertions: usize,
     pub linked_features: usize,
     pub total_features: usize,
+    /// Project title from ## Title section
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Glossary terms if present (for IAL format)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub glossary: Option<Vec<GlossaryTermDisplay>>,
+    /// Summary statistics for quick overview
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<LiveTestSummary>,
+}
+
+/// Summary statistics for test results
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveTestSummary {
+    /// Total number of features
+    pub total_features: usize,
+    /// Total number of scenarios across all features
+    pub total_scenarios: usize,
+    /// Total number of assertions
+    pub total_assertions: usize,
+    /// Number of passing scenarios
+    pub passing_scenarios: usize,
+    /// Number of failing scenarios
+    pub failing_scenarios: usize,
+    /// Number of scenarios with warnings (unresolved outcomes)
+    pub warning_scenarios: usize,
+    /// Number of skipped scenarios (precondition not met)
+    pub skipped_scenarios: usize,
+    /// Number of features without @implements annotations
+    pub unlinked_features: usize,
+    /// Pass percentage (0.0 to 100.0)
+    pub pass_percentage: f32,
 }
 
 /// A glossary term for display in the UI
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GlossaryTermDisplay {
     pub term: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4894,7 +5028,7 @@ pub struct GlossaryTermDisplay {
 }
 
 /// Result for a single feature in live testing
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LiveFeatureResult {
     pub feature_id: String,
     pub feature_name: String,
@@ -4964,6 +5098,49 @@ pub struct LiveAssertionResult {
     pub assertion_text: String,
     pub passed: bool,
     pub message: Option<String>,
+    /// Resolution trace showing how this assertion was derived (optional, for debugging)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_trace: Option<AssertionResolutionTrace>,
+    /// Individual check results for this assertion
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<LiveCheckResult>,
+}
+
+/// Trace of how an assertion was resolved from natural language
+#[derive(Debug, Clone, Serialize)]
+pub struct AssertionResolutionTrace {
+    /// The original outcome text (e.g., "success response")
+    pub original_outcome: String,
+    /// Steps in the resolution process
+    pub steps: Vec<AssertionResolutionStep>,
+    /// Final assertion texts
+    pub final_assertions: Vec<String>,
+}
+
+/// A single step in assertion resolution
+#[derive(Debug, Clone, Serialize)]
+pub struct AssertionResolutionStep {
+    /// The term being resolved
+    pub term: String,
+    /// What it expanded to
+    pub expanded_to: Vec<String>,
+    /// Nesting depth
+    pub depth: usize,
+}
+
+/// Result for an individual check within an assertion
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveCheckResult {
+    /// Description of what was checked (e.g., "status equals 200")
+    pub check: String,
+    /// Whether this check passed
+    pub passed: bool,
+    /// Expected value (if applicable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    /// Actual value (if applicable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
 }
 
 /// Run tests against an already-running server (no interpreter needed)
@@ -5049,6 +5226,8 @@ pub fn run_tests_against_server(
                                     assertion_text,
                                     passed: ar.passed,
                                     message: ar.message.clone(),
+                                    resolution_trace: None,
+                                    checks: vec![],
                                 });
 
                                 if !ar.passed {
@@ -5104,6 +5283,8 @@ pub fn run_tests_against_server(
                                 assertion_text,
                                 passed: ar.passed,
                                 message: ar.message.clone(),
+                                resolution_trace: None,
+                                checks: vec![],
                             });
                         }
 
@@ -5201,6 +5382,8 @@ pub fn run_tests_against_server(
                     assertion_text,
                     passed: ar.passed,
                     message: ar.message.clone(),
+                    resolution_trace: None,
+                    checks: vec![],
                 });
             }
 
@@ -5288,6 +5471,8 @@ pub fn run_tests_against_server(
                                     assertion_text,
                                     passed: ar.passed,
                                     message: ar.message.clone(),
+                                    resolution_trace: None,
+                                    checks: vec![],
                                 });
                                 if !ar.passed {
                                     preconditions_passed = false;
@@ -5316,6 +5501,8 @@ pub fn run_tests_against_server(
                                 assertion_text,
                                 passed: ar.passed,
                                 message: ar.message.clone(),
+                                resolution_trace: None,
+                                checks: vec![],
                             });
                         }
 
@@ -5368,6 +5555,66 @@ pub fn run_tests_against_server(
         }
     }
 
+    // Calculate summary statistics
+    let mut total_scenarios = 0;
+    let mut passing_scenarios = 0;
+    let mut failing_scenarios = 0;
+    let mut warning_scenarios = 0;
+    let mut skipped_scenarios = 0;
+
+    for feature in &feature_results {
+        for scenario in &feature.scenarios {
+            total_scenarios += 1;
+            match scenario.status.as_str() {
+                "pass" => passing_scenarios += 1,
+                "fail" => failing_scenarios += 1,
+                "warning" => warning_scenarios += 1,
+                "skip" => skipped_scenarios += 1,
+                _ => {}
+            }
+        }
+        // Also count tests that aren't scenarios
+        total_scenarios += feature.tests.len();
+        for test in &feature.tests {
+            if test.passed {
+                passing_scenarios += 1;
+            } else {
+                failing_scenarios += 1;
+            }
+        }
+    }
+
+    for component in &component_results {
+        for scenario in &component.scenarios {
+            total_scenarios += 1;
+            match scenario.status.as_str() {
+                "pass" => passing_scenarios += 1,
+                "fail" => failing_scenarios += 1,
+                "warning" => warning_scenarios += 1,
+                "skip" => skipped_scenarios += 1,
+                _ => {}
+            }
+        }
+    }
+
+    let pass_percentage = if total_assertions > 0 {
+        (passed_assertions as f32 / total_assertions as f32) * 100.0
+    } else {
+        100.0
+    };
+
+    let summary = LiveTestSummary {
+        total_features,
+        total_scenarios,
+        total_assertions,
+        passing_scenarios,
+        failing_scenarios,
+        warning_scenarios,
+        skipped_scenarios,
+        unlinked_features: total_features - linked_features,
+        pass_percentage,
+    };
+
     LiveTestResults {
         features: feature_results,
         components: component_results,
@@ -5376,7 +5623,9 @@ pub fn run_tests_against_server(
         failed_assertions,
         linked_features,
         total_features,
+        title: intent.title.clone(),
         glossary,
+        summary: Some(summary),
     }
 }
 
@@ -6777,5 +7026,104 @@ Component: Auth
         assert_eq!(component.scenarios.len(), 2);
         assert_eq!(component.scenarios[0].name, "Valid login");
         assert_eq!(component.scenarios[1].name, "Invalid login");
+    }
+
+    #[test]
+    fn test_glossary_cycle_detection() {
+        // Create a glossary with a cycle: a -> b -> a
+        let content = r#"# Test App
+
+## Glossary
+| Term | Means |
+|------|-------|
+| term a | term b |
+| term b | term a |
+
+---
+
+Feature: Test
+  id: feature.test
+
+  Scenario: Cycle test
+    When testing
+    → term a
+"#;
+        let intent =
+            IntentFile::parse_content(content, "test.intent".to_string()).expect("Should parse");
+
+        let glossary = intent.glossary.unwrap();
+
+        // This should NOT hang - cycle detection should kick in
+        // and return empty vec (graceful degradation)
+        let assertions = glossary.resolve_outcomes("term a");
+
+        // With cycle detection, this should return empty (cycle detected)
+        // rather than infinite loop
+        assert!(
+            assertions.is_empty(),
+            "Cyclic glossary should return empty due to cycle detection"
+        );
+    }
+
+    #[test]
+    fn test_glossary_max_depth_protection() {
+        // Create a deeply nested glossary (but not cyclic)
+        // This tests the max depth limit
+        let mut glossary_content = String::from("| Term | Means |\n|------|-------|\n");
+        for i in 0..60 {
+            glossary_content.push_str(&format!("| level {} | level {} |\n", i, i + 1));
+        }
+        glossary_content.push_str("| level 60 | status 200 |\n");
+
+        let content = format!(
+            r#"# Test App
+
+## Glossary
+{}
+
+---
+
+Feature: Test
+  id: feature.test
+
+  Scenario: Deep test
+    When testing
+    → level 0
+"#,
+            glossary_content
+        );
+
+        let intent =
+            IntentFile::parse_content(&content, "test.intent".to_string()).expect("Should parse");
+
+        let glossary = intent.glossary.unwrap();
+
+        // This should NOT stack overflow - max depth should kick in
+        let assertions = glossary.resolve_outcomes("level 0");
+
+        // With max depth of 50, this should return empty after hitting the limit
+        // (60 levels deep exceeds the 50 max depth limit)
+        assert!(
+            assertions.is_empty(),
+            "Deep nesting beyond MAX_DEPTH should return empty"
+        );
+    }
+
+    #[test]
+    fn test_glossary_normalize_for_cycle() {
+        // Test the normalization function
+        // Note: normalize_for_cycle lowercases the output
+        assert_eq!(
+            Glossary::normalize_for_cycle("they see \"Hello\""),
+            "they see <p>"
+        );
+        assert_eq!(
+            Glossary::normalize_for_cycle("user visits {path}"),
+            "user visits <p>"
+        );
+        assert_eq!(
+            Glossary::normalize_for_cycle("a \"quoted\" {param} test"),
+            "a <p> <p> test"
+        );
     }
 }

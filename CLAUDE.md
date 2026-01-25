@@ -61,6 +61,20 @@ get("/api", handler)
 listen(8080)
 ```
 
+## Template Strings
+
+Use triple-quoted strings `"""..."""` with `{{expr}}` for HTML templates (single `{}` pass through for CSS):
+
+```ntnt
+let page = """
+<style>h1 { color: blue; }</style>
+<h1>Hello, {{name}}!</h1>
+{{#for item in items}}<li>{{item}}</li>{{/for}}
+"""
+```
+
+See [LANGUAGE_GUIDE.md](LANGUAGE_GUIDE.md#template-strings) for loops, conditionals, and filters.
+
 ## Intent-Driven Development (IDD)
 
 IDD is **collaborative**. Always present the `.intent` file to the user before implementing.

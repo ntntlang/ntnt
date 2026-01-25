@@ -8,6 +8,7 @@ pub mod contracts;
 pub mod error;
 pub mod ial;
 pub mod intent;
+pub mod intent_studio_server;
 pub mod interpreter;
 pub mod lexer;
 pub mod parser;

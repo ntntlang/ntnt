@@ -33,7 +33,7 @@ fn about(req) {
 fn api_status(req) {
     return json(map {
         "status": "ok",
-        "version": "0.3.3",
+        "version": "0.3.5",
         "features": ["routes", "middleware", "contracts"]
     })
 }
@@ -42,7 +42,7 @@ fn api_status(req) {
 // Route Parameters
 // ============================================
 fn get_user(req) {
-    let id = req.params.id
+    let id = req.params["id"]
     return json(map {
         "id": id,
         "name": "User " + id,
@@ -51,8 +51,8 @@ fn get_user(req) {
 }
 
 fn get_user_post(req) {
-    let user_id = req.params.user_id
-    let post_id = req.params.post_id
+    let user_id = req.params["user_id"]
+    let post_id = req.params["post_id"]
     return json(map {
         "user_id": user_id,
         "post_id": post_id,
@@ -84,7 +84,7 @@ requires req.body != ""
 }
 
 fn update_user(req) {
-    let id = req.params.id
+    let id = req.params["id"]
     return json(map {
         "message": "User " + id + " updated",
         "body": req.body
@@ -92,12 +92,12 @@ fn update_user(req) {
 }
 
 fn delete_user(req) {
-    let id = req.params.id
+    let id = req.params["id"]
     return json(map { "message": "User " + id + " deleted" })
 }
 
 fn patch_user(req) {
-    let id = req.params.id
+    let id = req.params["id"]
     return json(map {
         "message": "User " + id + " partially updated",
         "body": req.body

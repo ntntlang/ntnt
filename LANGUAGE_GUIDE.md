@@ -10,16 +10,71 @@ A practical guide to learning NTNT with examples. For complete reference documen
 
 ## Table of Contents
 
-1. [Template Strings](#template-strings)
-2. [Types](#types)
-3. [Contracts](#contracts)
-4. [Traits](#traits)
-5. [Control Flow](#control-flow)
-6. [Concurrency](#concurrency)
-7. [HTTP Client](#http-client)
-8. [HTTP Server](#http-server)
-9. [Database](#database)
-10. [Time](#time)
+1. [Intent-Driven Development](#intent-driven-development)
+2. [Template Strings](#template-strings)
+3. [Types](#types)
+4. [Contracts](#contracts)
+5. [Traits](#traits)
+6. [Control Flow](#control-flow)
+7. [Concurrency](#concurrency)
+8. [HTTP Client](#http-client)
+9. [HTTP Server](#http-server)
+10. [Database](#database)
+11. [Time](#time)
+
+---
+
+## Intent-Driven Development
+
+NTNT's core workflow is **Intent-Driven Development (IDD)** - you define requirements as executable specifications, then implement code that satisfies them.
+
+### Quick Start
+
+1. **Define requirements** in a `.intent` file:
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the home page | / |
+| the page loads | status 200 |
+| they see {text} | body contains {text} |
+
+---
+
+Feature: Home Page
+  id: feature.home
+
+  Scenario: Welcome message
+    When a user visits the home page
+    → the page loads
+    → they see "Welcome"
+```
+
+2. **Implement** with `@implements` annotations:
+
+```ntnt
+import { html } from "std/http/server"
+
+// @implements: feature.home
+fn home(req) {
+    return html("<h1>Welcome</h1>")
+}
+
+get("/", home)
+listen(8080)
+```
+
+3. **Verify** with Intent Studio or command line:
+
+```bash
+ntnt intent studio server.intent  # Visual preview with live tests
+ntnt intent check server.tnt      # Command line verification
+```
+
+For comprehensive IDD documentation, see [docs/AI_AGENT_GUIDE.md](docs/AI_AGENT_GUIDE.md#intent-driven-development-idd).
 
 ---
 

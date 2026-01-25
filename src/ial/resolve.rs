@@ -4,11 +4,52 @@
 //! and recursively rewrites it until reaching primitives. This is ~30 lines of core logic.
 //!
 //! Includes cycle detection to prevent infinite loops in glossary definitions.
+//!
+//! # Resolution Traces
+//!
+//! For debugging and visualization, use `resolve_with_trace()` to get a step-by-step
+//! record of how a term was resolved. This is used by Intent Studio to show
+//! resolution chains in the UI.
 
 use std::collections::{HashMap, HashSet};
 
+use serde::Serialize;
+
 use super::primitives::{Primitive, Value};
 use super::vocabulary::{Definition, Term, Vocabulary};
+
+// ============================================================================
+// Resolution Traces
+// ============================================================================
+
+/// A single step in the resolution process
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolutionStep {
+    /// The term being resolved at this step
+    pub term: String,
+    /// Where this term was found: "glossary", "standard", "primitive"
+    pub source: String,
+    /// Nesting depth (0 = top level)
+    pub depth: usize,
+    /// What this term resolved to (term texts or primitive descriptions)
+    pub resolved_to: Vec<String>,
+}
+
+/// Complete trace of a resolution from term to primitives
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolutionTrace {
+    /// The original term that was resolved
+    pub original_term: String,
+    /// Each step in the resolution process
+    pub steps: Vec<ResolutionStep>,
+    /// Human-readable descriptions of the final primitives
+    pub final_primitives: Vec<String>,
+    /// Whether resolution succeeded
+    pub success: bool,
+    /// Error message if resolution failed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
 
 /// Error during resolution
 #[derive(Debug, Clone)]
@@ -45,7 +86,83 @@ impl std::error::Error for ResolveError {}
 pub fn resolve(term: &Term, vocab: &Vocabulary) -> Result<Vec<Primitive>, ResolveError> {
     let mut path = Vec::new();
     let mut visited = HashSet::new();
-    resolve_with_cycle_detection(term, vocab, 0, &mut path, &mut visited)
+    resolve_with_cycle_detection(term, vocab, 0, &mut path, &mut visited, None)
+}
+
+/// Resolve a term to primitives and collect a resolution trace.
+///
+/// This is the same as `resolve()` but also returns a step-by-step trace
+/// of how the term was resolved. Use this for debugging or visualization.
+///
+/// # Arguments
+/// * `term` - The term to resolve
+/// * `vocab` - The vocabulary containing all term definitions
+///
+/// # Returns
+/// A tuple of (primitives, trace) where trace shows each resolution step.
+pub fn resolve_with_trace(
+    term: &Term,
+    vocab: &Vocabulary,
+) -> (Result<Vec<Primitive>, ResolveError>, ResolutionTrace) {
+    let mut path = Vec::new();
+    let mut visited = HashSet::new();
+    let mut steps = Vec::new();
+
+    let result =
+        resolve_with_cycle_detection(term, vocab, 0, &mut path, &mut visited, Some(&mut steps));
+
+    let trace = ResolutionTrace {
+        original_term: term.text.clone(),
+        steps,
+        final_primitives: match &result {
+            Ok(primitives) => primitives.iter().map(primitive_to_string).collect(),
+            Err(_) => vec![],
+        },
+        success: result.is_ok(),
+        error: result.as_ref().err().map(|e| e.message.clone()),
+    };
+
+    (result, trace)
+}
+
+/// Convert a primitive to a human-readable string for traces
+fn primitive_to_string(primitive: &Primitive) -> String {
+    match primitive {
+        Primitive::Check { op, path, expected } => {
+            format!("check: {} {:?} {:?}", path, op, expected)
+        }
+        Primitive::Http { method, path, .. } => {
+            format!("http: {} {}", method, path)
+        }
+        Primitive::Cli { command, args } => {
+            format!("cli: {} {}", command, args.join(" "))
+        }
+        Primitive::Sql { query, .. } => {
+            format!("sql: {}", query)
+        }
+        Primitive::ReadFile { path } => {
+            format!("read_file: {}", path)
+        }
+        Primitive::CodeQuality {
+            file,
+            lint,
+            validate,
+        } => {
+            format!(
+                "code_quality: file={:?} lint={} validate={}",
+                file, lint, validate
+            )
+        }
+        Primitive::FunctionCall { function_name, .. } => {
+            format!("function_call: {}", function_name)
+        }
+        Primitive::PropertyCheck { property, .. } => {
+            format!("property_check: {:?}", property)
+        }
+        Primitive::InvariantCheck { invariant_id, .. } => {
+            format!("invariant_check: {}", invariant_id)
+        }
+    }
 }
 
 /// Maximum recursion depth as a safety net (in addition to cycle detection)
@@ -77,13 +194,14 @@ fn normalize_term_for_cycle(text: &str) -> String {
     normalized.to_lowercase()
 }
 
-/// Internal resolve with cycle detection and depth tracking
+/// Internal resolve with cycle detection, depth tracking, and optional trace collection
 fn resolve_with_cycle_detection(
     term: &Term,
     vocab: &Vocabulary,
     depth: usize,
     path: &mut Vec<String>,
     visited: &mut HashSet<String>,
+    mut trace: Option<&mut Vec<ResolutionStep>>,
 ) -> Result<Vec<Primitive>, ResolveError> {
     // Check for maximum depth (safety net)
     if depth > MAX_DEPTH {
@@ -136,7 +254,19 @@ fn resolve_with_cycle_detection(
             match definition {
                 // Base case: primitive - substitute params and return
                 Definition::Primitive(primitive) => {
-                    Ok(vec![substitute_primitive(primitive, &all_params)])
+                    let result = substitute_primitive(primitive, &all_params);
+
+                    // Record trace step if tracing
+                    if let Some(steps) = trace {
+                        steps.push(ResolutionStep {
+                            term: term.text.clone(),
+                            source: "primitive".to_string(),
+                            depth,
+                            resolved_to: vec![primitive_to_string(&result)],
+                        });
+                    }
+
+                    Ok(vec![result])
                 }
 
                 // Recursive case: more terms - substitute and resolve each
@@ -145,19 +275,41 @@ fn resolve_with_cycle_detection(
                     path.push(term.text.clone());
                     visited.insert(normalized.clone());
 
+                    // Collect sub-term texts for trace
+                    let sub_term_texts: Vec<String> = sub_terms
+                        .iter()
+                        .map(|t| t.substitute(&all_params).text)
+                        .collect();
+
+                    // Add the trace step before recursing
+                    if let Some(ref mut steps) = trace {
+                        steps.push(ResolutionStep {
+                            term: term.text.clone(),
+                            // Heuristic: depth 0-1 likely glossary, deeper is standard vocab
+                            source: if depth <= 1 {
+                                "glossary".to_string()
+                            } else {
+                                "standard".to_string()
+                            },
+                            depth,
+                            resolved_to: sub_term_texts,
+                        });
+                    }
+
                     let mut results = Vec::new();
 
                     for sub_term in sub_terms {
                         // Substitute params from parent into sub-term
                         let substituted = sub_term.substitute(&all_params);
 
-                        // Recurse with updated path
+                        // Recurse with updated path (pass trace through)
                         let resolved = resolve_with_cycle_detection(
                             &substituted,
                             vocab,
                             depth + 1,
                             path,
                             visited,
+                            trace.as_deref_mut().map(|s| s as &mut Vec<ResolutionStep>),
                         )?;
                         results.extend(resolved);
                     }
@@ -539,5 +691,42 @@ mod tests {
             normalize_term_for_cycle("user {name} sees \"welcome\""),
             "user <p> sees <p>"
         );
+    }
+
+    #[test]
+    fn test_resolve_with_trace() {
+        let vocab = test_vocab();
+        let term = Term::new("success response");
+
+        let (result, trace) = resolve_with_trace(&term, &vocab);
+
+        // Should succeed
+        assert!(result.is_ok());
+        assert!(trace.success);
+        assert!(trace.error.is_none());
+
+        // Should have steps
+        assert!(!trace.steps.is_empty(), "Trace should have steps");
+
+        // First step should be the original term
+        assert_eq!(trace.steps[0].term, "success response");
+        assert_eq!(trace.steps[0].depth, 0);
+
+        // Should have final primitives
+        assert_eq!(trace.final_primitives.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_with_trace_error() {
+        let vocab = test_vocab();
+        let term = Term::new("unknown term");
+
+        let (result, trace) = resolve_with_trace(&term, &vocab);
+
+        // Should fail
+        assert!(result.is_err());
+        assert!(!trace.success);
+        assert!(trace.error.is_some());
+        assert!(trace.final_primitives.is_empty());
     }
 }

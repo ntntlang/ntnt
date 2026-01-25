@@ -1,0 +1,50 @@
+#!/bin/bash
+# Pre-commit hook - runs before each commit
+# Install: cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Or run: ./scripts/install-hooks.sh
+
+echo "Running pre-commit checks..."
+
+# Format check
+if ! cargo fmt --all -- --check; then
+    echo "❌ Formatting check failed. Run: cargo fmt --all"
+    exit 1
+fi
+
+# Regenerate documentation and auto-stage if changed
+echo "Regenerating documentation..."
+
+# Build if needed (use dev-release for speed)
+if [ ! -f "./target/dev-release/ntnt" ] && [ ! -f "./target/release/ntnt" ]; then
+    echo "Building ntnt..."
+    cargo build --profile dev-release --quiet
+fi
+
+# Prefer dev-release, fall back to release
+if [ -f "./target/dev-release/ntnt" ]; then
+    NTNT="./target/dev-release/ntnt"
+elif [ -f "./target/release/ntnt" ]; then
+    NTNT="./target/release/ntnt"
+else
+    echo "❌ No ntnt binary found. Run: cargo build --profile dev-release"
+    exit 1
+fi
+
+# Regenerate docs
+$NTNT docs --generate 2>/dev/null
+
+# Check if docs changed
+DOCS_CHANGED=false
+for doc in docs/STDLIB_REFERENCE.md docs/SYNTAX_REFERENCE.md docs/IAL_REFERENCE.md; do
+    if [ -f "$doc" ] && ! git diff --quiet "$doc" 2>/dev/null; then
+        DOCS_CHANGED=true
+        git add "$doc"
+        echo "  Auto-staged: $doc"
+    fi
+done
+
+if [ "$DOCS_CHANGED" = true ]; then
+    echo "📝 Documentation updated and staged"
+fi
+
+echo "✅ Pre-commit checks passed!"

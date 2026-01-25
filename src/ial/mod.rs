@@ -42,7 +42,9 @@ pub mod vocabulary;
 // Re-export main types
 pub use execute::{execute, execute_all, Context, ExecuteResult};
 pub use primitives::{CheckOp, Primitive, Value};
-pub use resolve::{resolve, resolve_all, ResolveError};
+pub use resolve::{
+    resolve, resolve_all, resolve_with_trace, ResolutionStep, ResolutionTrace, ResolveError,
+};
 pub use standard::{parse_glossary, standard_vocabulary};
 pub use vocabulary::{Definition, Pattern, Term, Vocabulary};
 

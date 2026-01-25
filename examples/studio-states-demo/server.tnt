@@ -1,0 +1,26 @@
+// Studio States Demo Server
+// A minimal server to demonstrate all Intent Studio states
+
+import { html } from "std/http/server"
+
+// @implements: feature.passing
+fn home_handler(req) {
+    return html("<html><body><h1>Welcome</h1><p>This is the home page.</p></body></html>")
+}
+
+// @implements: feature.failing
+fn about_handler(req) {
+    return html("<html><body><h1>About</h1><p>This is the about page.</p></body></html>")
+}
+
+// @implements: feature.warning
+fn warning_demo(req) {
+    return html("<html><body><h1>Warning Demo</h1></body></html>")
+}
+
+// Note: feature.unlinked has NO @implements annotation - intentionally unlinked
+
+get("/", home_handler)
+get("/about", about_handler)
+
+listen(8081)

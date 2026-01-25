@@ -1,0 +1,61 @@
+# Intent Studio States Demo
+# This example demonstrates all possible states in Intent Studio
+# Run: ntnt intent studio server.intent
+
+## Title
+Studio States Demo
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| the home page | / |
+| the about page | /about |
+| the page loads | status 200 |
+| they see {text} | body contains {text} |
+| they don't see {text} | body not contains {text} |
+
+---
+
+Feature: Passing Feature
+  id: feature.passing
+  description: "This feature has all passing tests"
+
+  Scenario: Home page works
+    When a user visits the home page
+    → the page loads
+    → they see "Welcome"
+
+---
+
+Feature: Failing Feature
+  id: feature.failing
+  description: "This feature has a failing assertion"
+
+  Scenario: Looking for impossible text
+    When a user visits the home page
+    → the page loads
+    → they see "THIS_TEXT_DOES_NOT_EXIST_ANYWHERE"
+
+---
+
+Feature: Warning Feature
+  id: feature.warning
+  description: "This feature has unresolved glossary terms"
+
+  Scenario: Uses undefined term
+    When a user visits the home page
+    → the page loads
+    → this_term_is_not_in_glossary
+
+---
+
+Feature: Unlinked Feature
+  id: feature.unlinked
+  description: "This feature has no @implements annotation in the code"
+
+  Scenario: Page still works
+    When a user visits the home page
+    → the page loads
+

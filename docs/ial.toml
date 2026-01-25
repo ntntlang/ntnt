@@ -397,31 +397,50 @@ example = """
 # Project Name
 # Run: ntnt intent check server.tnt
 
+## Title
+My Application
+
 ## Overview
-Brief description.
+Brief description of what this project does.
 
 ## Glossary
 
 | Term | Means |
 |------|-------|
-| custom term | body contains \"expected\" |
+| a user visits {path} | GET {path} |
+| the home page | / |
+| the about page | /about |
+| the page loads | status 200 |
+| they see {text} | body contains {text} |
+| they don't see {text} | body not contains {text} |
 
 ---
 
-Feature: Feature Name
-  id: feature.feature_id
-  description: \"Description\"
-  test:
-    - request: GET /path
-      assert:
-        - status: 200
-        - body contains \"text\"
+Feature: Home Page
+  id: feature.home_page
+  description: \"Display welcome message on home page\"
+
+  Scenario: Visitor sees welcome
+    When a user visits the home page
+    → the page loads
+    → they see \"Welcome\"
 
 ---
 
-Constraint: Constraint Name
-  description: \"Description\"
-  applies_to: [feature.feature_id]
+Feature: About Page
+  id: feature.about_page
+  description: \"About page with company info\"
+
+  Scenario: Visitor sees about info
+    When a user visits the about page
+    → the page loads
+    → they see \"About Us\"
+
+---
+
+Constraint: No Errors
+  description: \"Pages should not show error messages\"
+  applies_to: [feature.home_page, feature.about_page]
 """
 
 [intent_file.linking]

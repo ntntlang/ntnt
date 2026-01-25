@@ -2,6 +2,9 @@
 # Official website for ntnt-lang.org
 # Run: ntnt intent check server.tnt
 
+## Title
+NTNT Programming Language Website
+
 ## Overview
 A clean, modern website introducing the NTNT programming language.
 Built with NTNT's file-based routing, external templates, and middleware.

@@ -5,7 +5,10 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::*;
-use ntnt::{intent, interpreter::Interpreter, lexer::Lexer, parser::Parser as IntentParser};
+use ntnt::{
+    intent, intent_studio_server, interpreter::Interpreter, lexer::Lexer,
+    parser::Parser as IntentParser,
+};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::fs;
@@ -268,6 +271,10 @@ enum IntentCommands {
         /// Increase output verbosity (-v for scenarios, -vv for assertions)
         #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count)]
         verbose: u8,
+
+        /// Output results as JSON (for programmatic access)
+        #[arg(long)]
+        json: bool,
     },
     /// Show implementation coverage of intent features
     ///
@@ -2032,7 +2039,8 @@ fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
             intent_file,
             port,
             verbose,
-        } => run_intent_check_command(&file, intent_file.as_ref(), port, verbose as usize),
+            json,
+        } => run_intent_check_command(&file, intent_file.as_ref(), port, verbose as usize, json),
         IntentCommands::Coverage { file, intent_file } => {
             run_intent_coverage_command(&file, intent_file.as_ref())
         }
@@ -2060,9 +2068,13 @@ fn run_intent_check_command(
     explicit_intent_path: Option<&PathBuf>,
     port: u16,
     verbosity: usize,
+    json_output: bool,
 ) -> anyhow::Result<()> {
-    println!("{}", "=== NTNT Intent Check ===".cyan().bold());
-    println!();
+    // Suppress banner output in JSON mode
+    if !json_output {
+        println!("{}", "=== NTNT Intent Check ===".cyan().bold());
+        println!();
+    }
 
     // Verify file exists
     if !input_path.exists() {
@@ -2106,9 +2118,11 @@ fn run_intent_check_command(
         }
     };
 
-    println!("Source: {}", ntnt_path.display().to_string().green());
-    println!("Intent: {}", intent_file_path.display().to_string().green());
-    println!();
+    if !json_output {
+        println!("Source: {}", ntnt_path.display().to_string().green());
+        println!("Intent: {}", intent_file_path.display().to_string().green());
+        println!();
+    }
 
     // Parse intent file (new IAL format)
     let intent_file = match intent::IntentFile::parse(&intent_file_path) {
@@ -2130,7 +2144,9 @@ fn run_intent_check_command(
         .collect();
 
     // Run tests against the app server (same as Intent Studio)
-    println!("Starting server on port {}...", port);
+    if !json_output {
+        println!("Starting server on port {}...", port);
+    }
 
     // Get the current executable path to run ntnt
     let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ntnt"));
@@ -2151,6 +2167,22 @@ fn run_intent_check_command(
 
     // Run tests using the new IAL engine
     let results = intent::run_tests_against_server(&intent_file, port, &source_files);
+
+    // JSON output mode: print JSON and exit
+    if json_output {
+        // Kill app server before output
+        let _ = app_process.kill();
+
+        let json = serde_json::to_string_pretty(&results)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize results: {}", e))?;
+        println!("{}", json);
+
+        // Exit with appropriate code
+        if results.failed_assertions > 0 {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     // Print results based on verbosity level
     // 0: Summary only (feature names + totals)
@@ -2542,10 +2574,8 @@ fn run_intent_studio_command(
     app_port: u16,
     no_open: bool,
 ) -> anyhow::Result<()> {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
     use std::process::{Child, Command};
-    use std::time::SystemTime;
+    use std::sync::Arc;
 
     // Verify the file exists
     if !input_path.exists() {
@@ -2586,7 +2616,6 @@ fn run_intent_studio_command(
     // .tnt file is optional (Studio can still show intent without running tests)
     let tnt_path = tnt_path_opt;
 
-    let intent_path_str = intent_path.to_string_lossy().to_string();
     let addr = format!("127.0.0.1:{}", port);
 
     println!();
@@ -2605,7 +2634,6 @@ fn run_intent_studio_command(
         let current_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ntnt"));
 
         // Set up environment to override the listen port
-        // We'll use a special env var that the interpreter checks
         println!(
             "  {} Starting app from {}",
             "🚀".green(),
@@ -2663,21 +2691,7 @@ fn run_intent_studio_command(
     println!("  {} Press Ctrl+C to stop", "📝".dimmed());
     println!();
 
-    // Set up Ctrl+C handler to clean up child process
-    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let r = running.clone();
-
-    ctrlc::set_handler(move || {
-        r.store(false, std::sync::atomic::Ordering::SeqCst);
-    })
-    .expect("Error setting Ctrl-C handler");
-
-    // Start simple HTTP server with non-blocking accepts BEFORE opening browser
-    let listener = TcpListener::bind(&addr)
-        .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", addr, e))?;
-    listener.set_nonblocking(true)?;
-
-    // Now open browser (server is ready to accept connections)
+    // Open browser before starting server
     if !no_open {
         let url = format!("http://{}", addr);
         #[cfg(target_os = "macos")]
@@ -2696,295 +2710,51 @@ fn run_intent_studio_command(
         }
     }
 
-    // Track file modification time for change detection
-    let mut last_modified = fs::metadata(&intent_path)
-        .and_then(|m| m.modified())
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+    // Create async server state
+    let state = Arc::new(intent_studio_server::StudioState::new(
+        intent_path.clone(),
+        tnt_path.clone(),
+        app_port,
+    ));
 
-    // Main loop
-    while running.load(std::sync::atomic::Ordering::SeqCst) {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                // Set stream back to blocking for read/write
-                stream.set_nonblocking(false)?;
+    // Build Tokio runtime for the async server
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create Tokio runtime: {}", e))?;
 
-                let mut buffer = [0; 4096];
-                if stream.read(&mut buffer).is_ok() {
-                    let request = String::from_utf8_lossy(&buffer);
+    // Run the async server with graceful shutdown
+    let server_result = runtime.block_on(async {
+        use tokio::signal;
 
-                    // Parse request path
-                    let path = request
-                        .lines()
-                        .next()
-                        .and_then(|line| line.split_whitespace().nth(1))
-                        .unwrap_or("/");
+        let app = intent_studio_server::create_router(state);
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", addr, e))?;
 
-                    let response = if path == "/check-update" {
-                        // Endpoint for checking if file has changed
-                        let current_modified = fs::metadata(&intent_path)
-                            .and_then(|m| m.modified())
-                            .unwrap_or(SystemTime::UNIX_EPOCH);
-
-                        let changed = current_modified != last_modified;
-                        if changed {
-                            last_modified = current_modified;
-                        }
-
-                        let body = if changed { "changed" } else { "unchanged" };
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
-                            body.len(),
-                            body
-                        )
-                    } else if path == "/app-status" {
-                        // Check if app is responding and healthy
-                        let app_url = format!("http://127.0.0.1:{}/", app_port);
-                        let status = match reqwest::blocking::Client::builder()
-                            .timeout(std::time::Duration::from_secs(2))
-                            .build()
-                            .and_then(|client| client.get(&app_url).send())
-                        {
-                            Ok(resp) => {
-                                let status_code = resp.status().as_u16();
-                                // Consider 404 and 5xx as "error" states (routes not registered or server error)
-                                if status_code == 404 {
-                                    format!(
-                                        r#"{{"running": true, "healthy": false, "status": {}, "error": "No routes registered (404)"}}"#,
-                                        status_code
-                                    )
-                                } else if status_code >= 500 {
-                                    format!(
-                                        r#"{{"running": true, "healthy": false, "status": {}, "error": "Server error"}}"#,
-                                        status_code
-                                    )
-                                } else {
-                                    format!(
-                                        r#"{{"running": true, "healthy": true, "status": {}}}"#,
-                                        status_code
-                                    )
-                                }
-                            }
-                            Err(e) => {
-                                let error_msg = e.to_string().replace('"', "\\\"");
-                                format!(
-                                    r#"{{"running": false, "healthy": false, "error": "{}"}}"#,
-                                    error_msg
-                                )
-                            }
-                        };
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
-                            status.len(),
-                            status
-                        )
-                    } else if path == "/run-tests" {
-                        // Run tests against the app server
-                        match intent::IntentFile::parse(&intent_path) {
-                            Ok(intent_file) => {
-                                // Collect all source files for annotation checking
-                                let project_dir = tnt_path
-                                    .as_ref()
-                                    .and_then(|p| p.parent())
-                                    .unwrap_or(std::path::Path::new("."));
-                                let source_files: Vec<(String, String)> =
-                                    collect_tnt_files(&project_dir.to_path_buf())
-                                        .unwrap_or_default()
-                                        .into_iter()
-                                        .filter_map(|p| {
-                                            let content = fs::read_to_string(&p).ok()?;
-                                            Some((p.to_string_lossy().to_string(), content))
-                                        })
-                                        .collect();
-                                let results = intent::run_tests_against_server(
-                                    &intent_file,
-                                    app_port,
-                                    &source_files,
-                                );
-                                let json = serde_json::to_string(&results)
-                                    .unwrap_or_else(|_| "{}".to_string());
-                                format!(
-                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
-                                    json.len(),
-                                    json
-                                )
-                            }
-                            Err(e) => {
-                                let error = format!(
-                                    r#"{{"error": "{}"}}"#,
-                                    e.to_string().replace('"', "\\\"")
-                                );
-                                format!(
-                                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                    error.len(),
-                                    error
-                                )
-                            }
-                        }
-                    } else {
-                        // Main page - render the intent file
-                        match intent::IntentFile::parse(&intent_path) {
-                            Ok(intent_file) => {
-                                let html = render_intent_studio_html(
-                                    &intent_file,
-                                    &intent_path_str,
-                                    app_port,
-                                );
-                                format!(
-                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n{}",
-                                    html.len(),
-                                    html
-                                )
-                            }
-                            Err(e) => {
-                                let html =
-                                    render_intent_studio_error(&e.to_string(), &intent_path_str);
-                                format!(
-                                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
-                                    html.len(),
-                                    html
-                                )
-                            }
-                        }
-                    };
-
-                    let _ = stream.write_all(response.as_bytes());
-                    let _ = stream.flush();
-                }
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No connection pending, sleep briefly and check shutdown
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            Err(e) => {
-                eprintln!("Connection error: {}", e);
-            }
-        }
-    }
+        // Serve with graceful shutdown on Ctrl+C
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                signal::ctrl_c()
+                    .await
+                    .expect("Failed to install Ctrl+C handler");
+                println!();
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("Server error: {}", e))
+    });
 
     // Clean up: kill the app process if we started it
     if let Some(mut child) = app_process {
-        println!("\n  {} Stopping app server...", "🛑".red());
+        println!("  {} Stopping app server...", "🛑".red());
         let _ = child.kill();
         let _ = child.wait();
     }
 
     println!("  {} Intent Studio stopped", "👋".dimmed());
 
-    Ok(())
+    server_result
 }
-
-/// Intent Studio Lite HTML (embedded at compile time)
-const INTENT_STUDIO_LITE_HTML: &str = include_str!("intent_studio_lite.html");
-
-/// Render the Intent Studio HTML page (Lite version with IAL support)
-fn render_intent_studio_html(
-    _intent_file: &intent::IntentFile,
-    file_path: &str,
-    app_port: u16,
-) -> String {
-    // Return the Lite HTML with placeholders filled in
-    INTENT_STUDIO_LITE_HTML
-        .replace("server.intent", &html_escape(file_path))
-        .replace(
-            "http://localhost:8081",
-            &format!("http://127.0.0.1:{}", app_port),
-        )
-}
-
-/// Render error page for Intent Studio
-fn render_intent_studio_error(error: &str, file_path: &str) -> String {
-    format!(
-        r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Intent Studio - Error</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: #0d1117;
-            color: #e6edf3;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 100vh;
-            margin: 0;
-        }}
-        .error-box {{
-            background: #161b22;
-            border: 1px solid #f85149;
-            border-radius: 12px;
-            padding: 2rem;
-            max-width: 600px;
-            text-align: center;
-        }}
-        .error-icon {{
-            font-size: 3rem;
-            margin-bottom: 1rem;
-        }}
-        .error-title {{
-            font-size: 1.5rem;
-            margin-bottom: 0.5rem;
-        }}
-        .error-file {{
-            color: #8b949e;
-            font-size: 0.9rem;
-            margin-bottom: 1rem;
-        }}
-        .error-message {{
-            background: #21262d;
-            padding: 1rem;
-            border-radius: 8px;
-            font-family: 'SF Mono', monospace;
-            font-size: 0.85rem;
-            color: #f85149;
-            text-align: left;
-            white-space: pre-wrap;
-        }}
-        .retry-note {{
-            color: #8b949e;
-            font-size: 0.85rem;
-            margin-top: 1rem;
-        }}
-    </style>
-</head>
-<body>
-    <div class="error-box">
-        <div class="error-icon">⚠️</div>
-        <div class="error-title">Parse Error</div>
-        <div class="error-file">{file_path}</div>
-        <div class="error-message">{error}</div>
-        <div class="retry-note">Fix the error and save - the page will refresh automatically.</div>
-    </div>
-    
-    <script>
-        setInterval(async () => {{
-            try {{
-                const response = await fetch('/check-update');
-                const text = await response.text();
-                if (text === 'changed') {{
-                    window.location.reload();
-                }}
-            }} catch (e) {{}}
-        }}, 2000);
-    </script>
-</body>
-</html>"##,
-        file_path = html_escape(file_path),
-        error = html_escape(error)
-    )
-}
-
-/// Simple HTML escaping
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
 /// Collect all .tnt files from a path (file or directory)
 fn collect_tnt_files(path: &PathBuf) -> anyhow::Result<Vec<PathBuf>> {
     use std::ffi::OsStr;
@@ -4048,9 +3818,12 @@ fn generate_stdlib_markdown(stdlib: &docs::StdlibDocs, toml_path: &PathBuf) -> a
 
             md.push_str("```ntnt\n");
             if let Some(functions) = &module.functions {
-                let func_names: Vec<_> = functions.keys().take(3).collect();
+                // Sort keys for deterministic output
+                let mut func_names: Vec<_> = functions.keys().collect();
+                func_names.sort();
                 let import_list = func_names
                     .iter()
+                    .take(3)
                     .map(|s| s.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");

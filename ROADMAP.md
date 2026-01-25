@@ -30,7 +30,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, etc.)
 - [x] CLI with REPL, run, parse, lex, check commands
 - [x] VS Code extension with syntax highlighting
-- [x] 241 unit tests passing
+- [x] Comprehensive test suite
 - [x] File extension: `.tnt`
 - [x] Algebraic Data Types with enums
 - [x] Option<T> and Result<T, E> built-ins
@@ -63,14 +63,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Auto-generated documentation (STDLIB_REFERENCE.md, SYNTAX_REFERENCE.md, IAL_REFERENCE.md)
 - [x] External templates with `template()` function (Mustache-style syntax)
 - [x] Async HTTP server (Axum + Tokio) with bridge to sync interpreter
-
----
-
-## Up Next 🔜
-
-High-priority items actively being worked on:
-
-- [ ] **Hot reload for new files** - Currently hot reload only detects changes to existing files. New files in `lib/`, `routes/`, and `middleware/` directories should be automatically discovered without requiring a server restart.
+- [ ] Hot reload for new files (currently only detects changes to existing files)
 
 ---
 
