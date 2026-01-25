@@ -129,7 +129,7 @@ a:hover {
 
 .hero {
     text-align: center;
-    padding: 9rem 2rem 7rem 2rem;
+    padding: 8rem 2rem 5rem 2rem;
     background: linear-gradient(135deg, var(--hero-warm-start) 0%, var(--hero-warm-mid) 45%, var(--hero-warm-glow) 100%);
     color: white;
     width: 100vw;
@@ -236,7 +236,7 @@ a:hover {
     color: var(--navy);
     padding: 1rem 1.5rem;
     border-radius: 12px;
-    margin: 3rem 0 2rem 0;
+    margin: 2rem 0;
     display: flex;
     align-items: center;
     gap: 0.75rem;
@@ -247,11 +247,11 @@ a:hover {
 }
 
 .section {
-    margin: 3.5rem 0;
+    margin: 3rem 0;
 }
 
 .section:first-of-type {
-    margin-top: 2rem;
+    margin-top: 0;
 }
 
 /* Intro Section */
@@ -847,7 +847,7 @@ pre code[class*="language-"] {
     }
 
     .hero {
-        padding: 6rem 1.5rem 4rem 1.5rem;
+        padding: 5.5rem 1.5rem 3rem 1.5rem;
     }
 
     .hero h2 {

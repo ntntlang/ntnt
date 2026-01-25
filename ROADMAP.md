@@ -583,6 +583,7 @@ Feature: Site Selection
 **IAL is a term rewriting system** where natural language assertions are recursively resolved to executable primitives.
 
 Architecture:
+
 ```
 "they see success response"
     ↓ vocabulary lookup
@@ -596,6 +597,7 @@ Architecture:
 ```
 
 **Core Implementation (src/ial/):**
+
 - [x] `vocabulary.rs` - Pattern matching and term storage
 - [x] `resolve.rs` - Recursive term → primitive resolution (~30 lines core logic)
 - [x] `execute.rs` - Primitive execution against Context
@@ -603,10 +605,12 @@ Architecture:
 - [x] `standard.rs` - Standard vocabulary definitions
 
 **Primitives (fixed set - new assertions are vocabulary, not code):**
+
 - Actions: `Http`, `Cli`, `Sql`, `ReadFile`
 - Checks: `Equals`, `NotEquals`, `Contains`, `NotContains`, `Matches`, `Exists`, `NotExists`, `LessThan`, `GreaterThan`, `InRange`
 
 **High-level API:**
+
 ```rust
 pub fn run_assertions(assertions: &[String], vocab: &Vocabulary, port: u16) -> IalResult<Vec<ExecuteResult>>
 pub fn run_scenario(method: &str, path: &str, body: Option<&str>, assertions: &[String], vocab: &Vocabulary, port: u16) -> IalResult<(bool, Vec<ExecuteResult>)>
