@@ -295,10 +295,16 @@ if ! check_command ntnt; then
 
     case "$USER_SHELL_NAME" in
         zsh)
-            echo "  Add to ~/.zshrc:"
+            # Check for .zprofile (login) vs .zshrc (interactive)
+            if [ -f "$HOME/.zprofile" ] && [ ! -f "$HOME/.zshrc" ]; then
+                PROFILE_FILE="~/.zprofile"
+            else
+                PROFILE_FILE="~/.zshrc"
+            fi
+            echo "  Add to $PROFILE_FILE:"
             echo -e "    ${GREEN}$PATH_LINE${NC}"
             echo ""
-            echo -e "  Then run: ${CYAN}source ~/.zshrc${NC}"
+            echo -e "  Then run: ${CYAN}source $PROFILE_FILE${NC}"
             ;;
         fish)
             FISH_PATH="$INSTALL_DIR"
@@ -309,10 +315,19 @@ if ! check_command ntnt; then
             echo "  Then restart your terminal"
             ;;
         *)
-            echo "  Add to ~/.bashrc:"
+            # Detect the right bash profile file
+            # macOS uses .bash_profile for login shells, Linux typically uses .bashrc
+            if [ -f "$HOME/.bash_profile" ]; then
+                PROFILE_FILE="~/.bash_profile"
+            elif [ -f "$HOME/.profile" ]; then
+                PROFILE_FILE="~/.profile"
+            else
+                PROFILE_FILE="~/.bashrc"
+            fi
+            echo "  Add to $PROFILE_FILE:"
             echo -e "    ${GREEN}$PATH_LINE${NC}"
             echo ""
-            echo -e "  Then run: ${CYAN}source ~/.bashrc${NC}"
+            echo -e "  Then run: ${CYAN}source $PROFILE_FILE${NC}"
             ;;
     esac
     echo ""
@@ -326,49 +341,81 @@ download_starter_kit() {
 
     mkdir -p "$NTNT_HOME"
 
-    # Try sparse checkout for efficiency (use --no-cone for mixed file/directory patterns)
-    TMP_CLONE=$(mktemp -d)
-    if git clone --depth 1 --filter=blob:none --sparse "https://github.com/$REPO.git" "$TMP_CLONE" 2>/dev/null; then
-        cd "$TMP_CLONE"
-        # Use --no-cone mode to allow mixed directory and file patterns
-        git sparse-checkout set --no-cone 'docs/*' 'examples/*' '.github/*' '.claude/skills/*' 'CLAUDE.md' 2>/dev/null
+    # Helper to copy files from extracted archive
+    copy_starter_files() {
+        local src="$1"
+        [ -d "$src/docs" ] && cp -r "$src/docs" "$NTNT_HOME/"
+        [ -d "$src/examples" ] && cp -r "$src/examples" "$NTNT_HOME/"
+        [ -d "$src/.github" ] && cp -r "$src/.github" "$NTNT_HOME/"
+        [ -d "$src/.claude/skills" ] && mkdir -p "$NTNT_HOME/.claude" && cp -r "$src/.claude/skills" "$NTNT_HOME/.claude/"
+        [ -f "$src/CLAUDE.md" ] && cp "$src/CLAUDE.md" "$NTNT_HOME/"
+    }
 
-        # Copy the files we want
-        [ -d "docs" ] && cp -r docs "$NTNT_HOME/"
-        [ -d "examples" ] && cp -r examples "$NTNT_HOME/"
-        [ -d ".github" ] && cp -r .github "$NTNT_HOME/"
-        [ -d ".claude/skills" ] && mkdir -p "$NTNT_HOME/.claude" && cp -r .claude/skills "$NTNT_HOME/.claude/"
-        [ -f "CLAUDE.md" ] && cp CLAUDE.md "$NTNT_HOME/"
+    # Method 1: Try git sparse checkout (most efficient)
+    if check_command git; then
+        TMP_CLONE=$(mktemp -d)
+        if git clone --depth 1 --filter=blob:none --sparse "https://github.com/$REPO.git" "$TMP_CLONE" 2>/dev/null; then
+            cd "$TMP_CLONE"
+            git sparse-checkout set --no-cone 'docs/*' 'examples/*' '.github/*' '.claude/skills/*' 'CLAUDE.md' 2>/dev/null
+            copy_starter_files "."
+            cd - > /dev/null
+            rm -rf "$TMP_CLONE"
+            echo -e "${GREEN}[OK] Starter kit downloaded to ./ntnt/${NC}"
+            echo ""
+            echo "  ./ntnt/docs/              - Documentation"
+            echo "  ./ntnt/examples/          - Example projects"
+            echo "  ./ntnt/CLAUDE.md          - Claude Code instructions"
+            echo "  ./ntnt/.claude/skills/    - Claude Code skills (IDD workflow)"
+            echo "  ./ntnt/.github/copilot-instructions.md  - GitHub Copilot instructions"
+            return 0
+        fi
+        rm -rf "$TMP_CLONE"
 
-        cd - > /dev/null
-        rm -rf "$TMP_CLONE"
-    else
-        # Fallback: full shallow clone
-        rm -rf "$TMP_CLONE"
+        # Method 2: Try full shallow clone
         TMP_CLONE=$(mktemp -d)
         if git clone --depth 1 "https://github.com/$REPO.git" "$TMP_CLONE" 2>/dev/null; then
-            [ -d "$TMP_CLONE/docs" ] && cp -r "$TMP_CLONE/docs" "$NTNT_HOME/"
-            [ -d "$TMP_CLONE/examples" ] && cp -r "$TMP_CLONE/examples" "$NTNT_HOME/"
-            [ -d "$TMP_CLONE/.github" ] && cp -r "$TMP_CLONE/.github" "$NTNT_HOME/"
-            [ -d "$TMP_CLONE/.claude/skills" ] && mkdir -p "$NTNT_HOME/.claude" && cp -r "$TMP_CLONE/.claude/skills" "$NTNT_HOME/.claude/"
-            [ -f "$TMP_CLONE/CLAUDE.md" ] && cp "$TMP_CLONE/CLAUDE.md" "$NTNT_HOME/"
+            copy_starter_files "$TMP_CLONE"
             rm -rf "$TMP_CLONE"
-        else
-            rm -rf "$TMP_CLONE"
-            echo -e "${YELLOW}Could not download starter kit. You can browse docs at:${NC}"
-            echo "  https://github.com/$REPO"
-            return 1
+            echo -e "${GREEN}[OK] Starter kit downloaded to ./ntnt/${NC}"
+            echo ""
+            echo "  ./ntnt/docs/              - Documentation"
+            echo "  ./ntnt/examples/          - Example projects"
+            echo "  ./ntnt/CLAUDE.md          - Claude Code instructions"
+            echo "  ./ntnt/.claude/skills/    - Claude Code skills (IDD workflow)"
+            echo "  ./ntnt/.github/copilot-instructions.md  - GitHub Copilot instructions"
+            return 0
         fi
+        rm -rf "$TMP_CLONE"
     fi
 
-    echo -e "${GREEN}[OK] Starter kit downloaded to ./ntnt/${NC}"
-    echo ""
-    echo "  ./ntnt/docs/              - Documentation"
-    echo "  ./ntnt/examples/          - Example projects"
-    echo "  ./ntnt/CLAUDE.md          - Claude Code instructions"
-    echo "  ./ntnt/.claude/skills/    - Claude Code skills (IDD workflow)"
-    echo "  ./ntnt/.github/copilot-instructions.md  - GitHub Copilot instructions"
-    return 0
+    # Method 3: Download tarball via curl/wget (no git required)
+    TMP_DIR=$(mktemp -d)
+    TARBALL="$TMP_DIR/ntnt.tar.gz"
+    TARBALL_URL="https://github.com/$REPO/archive/refs/heads/main.tar.gz"
+
+    if download_file "$TARBALL_URL" "$TARBALL"; then
+        if tar -xzf "$TARBALL" -C "$TMP_DIR" 2>/dev/null; then
+            # GitHub extracts to repo-branch format (e.g., ntnt-main/)
+            EXTRACTED_DIR=$(find "$TMP_DIR" -maxdepth 1 -type d -name "ntnt-*" | head -1)
+            if [ -n "$EXTRACTED_DIR" ] && [ -d "$EXTRACTED_DIR" ]; then
+                copy_starter_files "$EXTRACTED_DIR"
+                rm -rf "$TMP_DIR"
+                echo -e "${GREEN}[OK] Starter kit downloaded to ./ntnt/${NC}"
+                echo ""
+                echo "  ./ntnt/docs/              - Documentation"
+                echo "  ./ntnt/examples/          - Example projects"
+                echo "  ./ntnt/CLAUDE.md          - Claude Code instructions"
+                echo "  ./ntnt/.claude/skills/    - Claude Code skills (IDD workflow)"
+                echo "  ./ntnt/.github/copilot-instructions.md  - GitHub Copilot instructions"
+                return 0
+            fi
+        fi
+    fi
+    rm -rf "$TMP_DIR"
+
+    echo -e "${YELLOW}Could not download starter kit. You can browse docs at:${NC}"
+    echo "  https://github.com/$REPO"
+    return 1
 }
 
 # For binary installs, always download the starter kit
