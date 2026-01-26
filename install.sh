@@ -351,44 +351,7 @@ download_starter_kit() {
         [ -f "$src/CLAUDE.md" ] && cp "$src/CLAUDE.md" "$NTNT_HOME/"
     }
 
-    # Method 1: Try git sparse checkout (most efficient)
-    if check_command git; then
-        TMP_CLONE=$(mktemp -d)
-        if git clone --depth 1 --filter=blob:none --sparse "https://github.com/$REPO.git" "$TMP_CLONE" 2>/dev/null; then
-            cd "$TMP_CLONE"
-            git sparse-checkout set --no-cone 'docs/*' 'examples/*' '.github/*' '.claude/skills/*' 'CLAUDE.md' 2>/dev/null
-            copy_starter_files "."
-            cd - > /dev/null
-            rm -rf "$TMP_CLONE"
-            echo -e "${GREEN}[OK] Starter kit downloaded to ./ntnt/${NC}"
-            echo ""
-            echo "  ./ntnt/docs/              - Documentation"
-            echo "  ./ntnt/examples/          - Example projects"
-            echo "  ./ntnt/CLAUDE.md          - Claude Code instructions"
-            echo "  ./ntnt/.claude/skills/    - Claude Code skills (IDD workflow)"
-            echo "  ./ntnt/.github/copilot-instructions.md  - GitHub Copilot instructions"
-            return 0
-        fi
-        rm -rf "$TMP_CLONE"
-
-        # Method 2: Try full shallow clone
-        TMP_CLONE=$(mktemp -d)
-        if git clone --depth 1 "https://github.com/$REPO.git" "$TMP_CLONE" 2>/dev/null; then
-            copy_starter_files "$TMP_CLONE"
-            rm -rf "$TMP_CLONE"
-            echo -e "${GREEN}[OK] Starter kit downloaded to ./ntnt/${NC}"
-            echo ""
-            echo "  ./ntnt/docs/              - Documentation"
-            echo "  ./ntnt/examples/          - Example projects"
-            echo "  ./ntnt/CLAUDE.md          - Claude Code instructions"
-            echo "  ./ntnt/.claude/skills/    - Claude Code skills (IDD workflow)"
-            echo "  ./ntnt/.github/copilot-instructions.md  - GitHub Copilot instructions"
-            return 0
-        fi
-        rm -rf "$TMP_CLONE"
-    fi
-
-    # Method 3: Download tarball via curl/wget (no git required)
+    # Download tarball via curl/wget (preferred - no git required)
     TMP_DIR=$(mktemp -d)
     TARBALL="$TMP_DIR/ntnt.tar.gz"
     TARBALL_URL="https://github.com/$REPO/archive/refs/heads/main.tar.gz"
