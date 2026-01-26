@@ -329,11 +329,12 @@ function Download-StarterKit {
     $tmpClone = Join-Path $env:TEMP "ntnt-clone-$(Get-Random)"
 
     try {
-        # Try sparse checkout for efficiency
+        # Try sparse checkout for efficiency (use --no-cone for mixed file/directory patterns)
         $null = git clone --depth 1 --filter=blob:none --sparse "https://github.com/$script:Repo.git" $tmpClone 2>&1
         if ($LASTEXITCODE -eq 0) {
             Push-Location $tmpClone
-            $null = git sparse-checkout set docs examples .github .claude/skills CLAUDE.md LANGUAGE_SPEC.md ARCHITECTURE.md 2>&1
+            # Use --no-cone mode to allow mixed directory and file patterns
+            $null = git sparse-checkout set --no-cone "docs/*" "examples/*" ".github/*" ".claude/skills/*" "CLAUDE.md" 2>&1
 
             # Copy the files we want
             if (Test-Path "docs") { Copy-Item -Recurse "docs" $script:NtntHome -Force }
@@ -344,8 +345,6 @@ function Download-StarterKit {
                 Copy-Item -Recurse ".claude\skills" "$script:NtntHome\.claude\" -Force
             }
             if (Test-Path "CLAUDE.md") { Copy-Item "CLAUDE.md" $script:NtntHome -Force }
-            if (Test-Path "LANGUAGE_SPEC.md") { Copy-Item "LANGUAGE_SPEC.md" $script:NtntHome -Force }
-            if (Test-Path "ARCHITECTURE.md") { Copy-Item "ARCHITECTURE.md" $script:NtntHome -Force }
 
             Pop-Location
             Remove-Item -Recurse -Force $tmpClone -ErrorAction SilentlyContinue
@@ -368,8 +367,6 @@ function Download-StarterKit {
                     Copy-Item -Recurse "$tmpClone\.claude\skills" "$script:NtntHome\.claude\" -Force
                 }
                 if (Test-Path "$tmpClone\CLAUDE.md") { Copy-Item "$tmpClone\CLAUDE.md" $script:NtntHome -Force }
-                if (Test-Path "$tmpClone\LANGUAGE_SPEC.md") { Copy-Item "$tmpClone\LANGUAGE_SPEC.md" $script:NtntHome -Force }
-                if (Test-Path "$tmpClone\ARCHITECTURE.md") { Copy-Item "$tmpClone\ARCHITECTURE.md" $script:NtntHome -Force }
                 Remove-Item -Recurse -Force $tmpClone -ErrorAction SilentlyContinue
             } else {
                 throw "Clone failed"
@@ -389,7 +386,6 @@ function Download-StarterKit {
     Write-Host "  .\ntnt\CLAUDE.md          - Claude Code instructions"
     Write-Host "  .\ntnt\.claude\skills\    - Claude Code skills (IDD workflow)"
     Write-Host "  .\ntnt\.github\copilot-instructions.md  - GitHub Copilot instructions"
-    Write-Host "  .\ntnt\.github\agents\    - AI agent definitions"
     return $true
 }
 
