@@ -298,7 +298,7 @@ if ! check_command ntnt; then
             echo "  Add to ~/.zshrc:"
             echo -e "    ${GREEN}$PATH_LINE${NC}"
             echo ""
-            echo "  Then run: ${CYAN}source ~/.zshrc${NC}"
+            echo -e "  Then run: ${CYAN}source ~/.zshrc${NC}"
             ;;
         fish)
             FISH_PATH="$INSTALL_DIR"
@@ -312,7 +312,7 @@ if ! check_command ntnt; then
             echo "  Add to ~/.bashrc:"
             echo -e "    ${GREEN}$PATH_LINE${NC}"
             echo ""
-            echo "  Then run: ${CYAN}source ~/.bashrc${NC}"
+            echo -e "  Then run: ${CYAN}source ~/.bashrc${NC}"
             ;;
     esac
     echo ""
@@ -326,11 +326,12 @@ download_starter_kit() {
 
     mkdir -p "$NTNT_HOME"
 
-    # Try sparse checkout for efficiency
+    # Try sparse checkout for efficiency (use --no-cone for mixed file/directory patterns)
     TMP_CLONE=$(mktemp -d)
     if git clone --depth 1 --filter=blob:none --sparse "https://github.com/$REPO.git" "$TMP_CLONE" 2>/dev/null; then
         cd "$TMP_CLONE"
-        git sparse-checkout set docs examples .github .claude/skills CLAUDE.md LANGUAGE_SPEC.md ARCHITECTURE.md 2>/dev/null
+        # Use --no-cone mode to allow mixed directory and file patterns
+        git sparse-checkout set --no-cone 'docs/*' 'examples/*' '.github/*' '.claude/skills/*' 'CLAUDE.md' 2>/dev/null
 
         # Copy the files we want
         [ -d "docs" ] && cp -r docs "$NTNT_HOME/"
@@ -338,8 +339,6 @@ download_starter_kit() {
         [ -d ".github" ] && cp -r .github "$NTNT_HOME/"
         [ -d ".claude/skills" ] && mkdir -p "$NTNT_HOME/.claude" && cp -r .claude/skills "$NTNT_HOME/.claude/"
         [ -f "CLAUDE.md" ] && cp CLAUDE.md "$NTNT_HOME/"
-        [ -f "LANGUAGE_SPEC.md" ] && cp LANGUAGE_SPEC.md "$NTNT_HOME/"
-        [ -f "ARCHITECTURE.md" ] && cp ARCHITECTURE.md "$NTNT_HOME/"
 
         cd - > /dev/null
         rm -rf "$TMP_CLONE"
@@ -353,8 +352,6 @@ download_starter_kit() {
             [ -d "$TMP_CLONE/.github" ] && cp -r "$TMP_CLONE/.github" "$NTNT_HOME/"
             [ -d "$TMP_CLONE/.claude/skills" ] && mkdir -p "$NTNT_HOME/.claude" && cp -r "$TMP_CLONE/.claude/skills" "$NTNT_HOME/.claude/"
             [ -f "$TMP_CLONE/CLAUDE.md" ] && cp "$TMP_CLONE/CLAUDE.md" "$NTNT_HOME/"
-            [ -f "$TMP_CLONE/LANGUAGE_SPEC.md" ] && cp "$TMP_CLONE/LANGUAGE_SPEC.md" "$NTNT_HOME/"
-            [ -f "$TMP_CLONE/ARCHITECTURE.md" ] && cp "$TMP_CLONE/ARCHITECTURE.md" "$NTNT_HOME/"
             rm -rf "$TMP_CLONE"
         else
             rm -rf "$TMP_CLONE"
@@ -371,7 +368,6 @@ download_starter_kit() {
     echo "  ./ntnt/CLAUDE.md          - Claude Code instructions"
     echo "  ./ntnt/.claude/skills/    - Claude Code skills (IDD workflow)"
     echo "  ./ntnt/.github/copilot-instructions.md  - GitHub Copilot instructions"
-    echo "  ./ntnt/.github/agents/    - AI agent definitions"
     return 0
 }
 
