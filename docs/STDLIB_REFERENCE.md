@@ -2,7 +2,7 @@
 
 > **Auto-generated from [stdlib.toml](stdlib.toml)** - Do not edit directly.
 >
-> Last updated: v0.3.3
+> Last updated: v0.3.5
 
 ## Table of Contents
 

@@ -3385,6 +3385,9 @@ mod docs {
     }
 }
 
+// Embed stdlib.toml at compile time (35KB - negligible size increase)
+const EMBEDDED_STDLIB_DOCS: &str = include_str!("../docs/stdlib.toml");
+
 /// Run the docs command
 fn run_docs_command(
     query: Option<String>,
@@ -3392,10 +3395,16 @@ fn run_docs_command(
     generate_md: bool,
     json_output: bool,
 ) -> anyhow::Result<()> {
-    // Find the stdlib.toml file relative to the executable or in known locations
-    let docs_path = find_stdlib_toml()?;
-    let content = fs::read_to_string(&docs_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", docs_path.display(), e))?;
+    // For --generate and --validate, we need the actual file path
+    // For normal usage, use embedded docs so it works from anywhere
+    let (content, docs_path) = if generate_md || validate {
+        let path = find_stdlib_toml()?;
+        let content = fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+        (content, Some(path))
+    } else {
+        (EMBEDDED_STDLIB_DOCS.to_string(), None)
+    };
 
     let stdlib: docs::StdlibDocs = toml::from_str(&content)
         .map_err(|e| anyhow::anyhow!("Failed to parse stdlib.toml: {}", e))?;
@@ -3405,7 +3414,8 @@ fn run_docs_command(
     }
 
     if generate_md {
-        // Generate all reference docs
+        // Generate all reference docs - docs_path is guaranteed Some here
+        let docs_path = docs_path.unwrap();
         generate_stdlib_markdown(&stdlib, &docs_path)?;
         generate_syntax_markdown(&docs_path)?;
         generate_ial_markdown(&docs_path)?;
@@ -3424,6 +3434,7 @@ fn find_stdlib_toml() -> anyhow::Result<PathBuf> {
     let paths = [
         PathBuf::from("docs/stdlib.toml"),
         PathBuf::from("../docs/stdlib.toml"),
+        PathBuf::from("ntnt/docs/stdlib.toml"), // Starter kit location
     ];
 
     for path in &paths {
@@ -3449,8 +3460,16 @@ fn find_stdlib_toml() -> anyhow::Result<PathBuf> {
         }
     }
 
+    // Try home directory starter kit
+    if let Ok(home) = std::env::var("HOME") {
+        let path = PathBuf::from(home).join("ntnt/docs/stdlib.toml");
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
     Err(anyhow::anyhow!(
-        "Could not find docs/stdlib.toml. Run from the NTNT project directory."
+        "Could not find docs/stdlib.toml. Run --generate or --validate from the NTNT project directory."
     ))
 }
 

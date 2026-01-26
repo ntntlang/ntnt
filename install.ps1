@@ -326,67 +326,52 @@ function Download-StarterKit {
 
     New-Item -ItemType Directory -Force -Path $script:NtntHome | Out-Null
 
-    $tmpClone = Join-Path $env:TEMP "ntnt-clone-$(Get-Random)"
+    # Download zip from GitHub (no git required)
+    $tmpDir = Join-Path $env:TEMP "ntnt-starter-$(Get-Random)"
+    $zipFile = Join-Path $tmpDir "ntnt.zip"
+    $zipUrl = "https://github.com/$script:Repo/archive/refs/heads/main.zip"
 
     try {
-        # Try sparse checkout for efficiency (use --no-cone for mixed file/directory patterns)
-        $null = git clone --depth 1 --filter=blob:none --sparse "https://github.com/$script:Repo.git" $tmpClone 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Push-Location $tmpClone
-            # Use --no-cone mode to allow mixed directory and file patterns
-            $null = git sparse-checkout set --no-cone "docs/*" "examples/*" ".github/*" ".claude/skills/*" "CLAUDE.md" 2>&1
+        New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 
-            # Copy the files we want
-            if (Test-Path "docs") { Copy-Item -Recurse "docs" $script:NtntHome -Force }
-            if (Test-Path "examples") { Copy-Item -Recurse "examples" $script:NtntHome -Force }
-            if (Test-Path ".github") { Copy-Item -Recurse ".github" $script:NtntHome -Force }
-            if (Test-Path ".claude\skills") {
+        # Download the zip file
+        $webClient = New-Object System.Net.WebClient
+        $webClient.DownloadFile($zipUrl, $zipFile)
+
+        # Extract
+        Expand-Archive -Path $zipFile -DestinationPath $tmpDir -Force
+
+        # Find extracted directory (e.g., ntnt-main)
+        $extractedDir = Get-ChildItem -Path $tmpDir -Directory -Filter "ntnt-*" | Select-Object -First 1
+
+        if ($extractedDir) {
+            $src = $extractedDir.FullName
+            if (Test-Path "$src\docs") { Copy-Item -Recurse "$src\docs" $script:NtntHome -Force }
+            if (Test-Path "$src\examples") { Copy-Item -Recurse "$src\examples" $script:NtntHome -Force }
+            if (Test-Path "$src\.github") { Copy-Item -Recurse "$src\.github" $script:NtntHome -Force }
+            if (Test-Path "$src\.claude\skills") {
                 New-Item -ItemType Directory -Force -Path "$script:NtntHome\.claude" | Out-Null
-                Copy-Item -Recurse ".claude\skills" "$script:NtntHome\.claude\" -Force
+                Copy-Item -Recurse "$src\.claude\skills" "$script:NtntHome\.claude\" -Force
             }
-            if (Test-Path "CLAUDE.md") { Copy-Item "CLAUDE.md" $script:NtntHome -Force }
-
-            Pop-Location
-            Remove-Item -Recurse -Force $tmpClone -ErrorAction SilentlyContinue
-        } else {
-            throw "Sparse checkout failed"
+            if (Test-Path "$src\CLAUDE.md") { Copy-Item "$src\CLAUDE.md" $script:NtntHome -Force }
         }
+
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        Write-Host "[OK] Starter kit downloaded to .\ntnt\" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "  .\ntnt\docs\              - Documentation"
+        Write-Host "  .\ntnt\examples\          - Example projects"
+        Write-Host "  .\ntnt\CLAUDE.md          - Claude Code instructions"
+        Write-Host "  .\ntnt\.claude\skills\    - Claude Code skills (IDD workflow)"
+        Write-Host "  .\ntnt\.github\copilot-instructions.md  - GitHub Copilot instructions"
+        return $true
     } catch {
-        # Fallback: full shallow clone
-        Remove-Item -Recurse -Force $tmpClone -ErrorAction SilentlyContinue
-        $tmpClone = Join-Path $env:TEMP "ntnt-clone-$(Get-Random)"
-
-        try {
-            $null = git clone --depth 1 "https://github.com/$script:Repo.git" $tmpClone 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                if (Test-Path "$tmpClone\docs") { Copy-Item -Recurse "$tmpClone\docs" $script:NtntHome -Force }
-                if (Test-Path "$tmpClone\examples") { Copy-Item -Recurse "$tmpClone\examples" $script:NtntHome -Force }
-                if (Test-Path "$tmpClone\.github") { Copy-Item -Recurse "$tmpClone\.github" $script:NtntHome -Force }
-                if (Test-Path "$tmpClone\.claude\skills") {
-                    New-Item -ItemType Directory -Force -Path "$script:NtntHome\.claude" | Out-Null
-                    Copy-Item -Recurse "$tmpClone\.claude\skills" "$script:NtntHome\.claude\" -Force
-                }
-                if (Test-Path "$tmpClone\CLAUDE.md") { Copy-Item "$tmpClone\CLAUDE.md" $script:NtntHome -Force }
-                Remove-Item -Recurse -Force $tmpClone -ErrorAction SilentlyContinue
-            } else {
-                throw "Clone failed"
-            }
-        } catch {
-            Remove-Item -Recurse -Force $tmpClone -ErrorAction SilentlyContinue
-            Write-Host "Could not download starter kit. You can browse docs at:" -ForegroundColor Yellow
-            Write-Host "  https://github.com/$script:Repo"
-            return $false
-        }
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        Write-Host "Could not download starter kit. You can browse docs at:" -ForegroundColor Yellow
+        Write-Host "  https://github.com/$script:Repo"
+        return $false
     }
-
-    Write-Host "[OK] Starter kit downloaded to .\ntnt\" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "  .\ntnt\docs\              - Documentation"
-    Write-Host "  .\ntnt\examples\          - Example projects"
-    Write-Host "  .\ntnt\CLAUDE.md          - Claude Code instructions"
-    Write-Host "  .\ntnt\.claude\skills\    - Claude Code skills (IDD workflow)"
-    Write-Host "  .\ntnt\.github\copilot-instructions.md  - GitHub Copilot instructions"
-    return $true
 }
 
 # For binary installs, always download the starter kit
