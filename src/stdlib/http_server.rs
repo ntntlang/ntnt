@@ -46,6 +46,7 @@ pub struct Route {
 pub struct RouteSource {
     pub file_path: Option<String>, // None for inline routes
     pub mtime: Option<SystemTime>, // Last modification time
+    pub imported_files: HashMap<String, SystemTime>, // Tracked imports for this route
 }
 
 /// Server state stored in the interpreter
@@ -86,7 +87,7 @@ impl ServerState {
 
     /// Add a route without source file info (inline routes)
     pub fn add_route(&mut self, method: &str, pattern: &str, handler: Value) {
-        self.add_route_with_source(method, pattern, handler, None);
+        self.add_route_with_source(method, pattern, handler, None, HashMap::new());
     }
 
     /// Add a route with source file info for hot-reload
@@ -96,6 +97,7 @@ impl ServerState {
         pattern: &str,
         handler: Value,
         file_path: Option<String>,
+        imported_files: HashMap<String, SystemTime>,
     ) {
         let route = Route {
             method: method.to_string(),
@@ -108,7 +110,11 @@ impl ServerState {
             .as_ref()
             .and_then(|p| std::fs::metadata(p).ok().and_then(|m| m.modified().ok()));
 
-        let source = RouteSource { file_path, mtime };
+        let source = RouteSource {
+            file_path,
+            mtime,
+            imported_files,
+        };
         self.routes.push((route, handler, source));
     }
 
@@ -132,18 +138,31 @@ impl ServerState {
         None
     }
 
-    /// Check if a route needs reloading based on file mtime
+    /// Check if a route needs reloading based on file mtime or imported files
     pub fn needs_reload(&self, route_index: usize) -> bool {
         if !self.hot_reload {
             return false;
         }
 
         if let Some((_, _, source)) = self.routes.get(route_index) {
+            // Check main route file
             if let (Some(file_path), Some(cached_mtime)) = (&source.file_path, &source.mtime) {
-                // Check current file mtime
                 if let Ok(metadata) = std::fs::metadata(file_path) {
                     if let Ok(current_mtime) = metadata.modified() {
-                        return current_mtime > *cached_mtime;
+                        if current_mtime > *cached_mtime {
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            // Check imported files
+            for (import_path, import_mtime) in &source.imported_files {
+                if let Ok(metadata) = std::fs::metadata(import_path) {
+                    if let Ok(current_mtime) = metadata.modified() {
+                        if current_mtime > *import_mtime {
+                            return true;
+                        }
                     }
                 }
             }
@@ -152,7 +171,12 @@ impl ServerState {
     }
 
     /// Update a route's handler after hot-reload
-    pub fn update_route_handler(&mut self, route_index: usize, new_handler: Value) {
+    pub fn update_route_handler(
+        &mut self,
+        route_index: usize,
+        new_handler: Value,
+        new_imported_files: HashMap<String, SystemTime>,
+    ) {
         if let Some((_, handler, source)) = self.routes.get_mut(route_index) {
             *handler = new_handler;
             // Update mtime
@@ -161,6 +185,8 @@ impl ServerState {
                     .ok()
                     .and_then(|m| m.modified().ok());
             }
+            // Update imported files
+            source.imported_files = new_imported_files;
         }
     }
 

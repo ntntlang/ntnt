@@ -8,19 +8,19 @@ use std::collections::HashMap;
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // parse(csv_str, delimiter?) -> Array of Arrays
-    // parse("a,b,c\n1,2,3") -> [["a","b","c"], ["1","2","3"]]
+    // parse_csv(csv_str, delimiter?) -> Array of Arrays
+    // parse_csv("a,b,c\n1,2,3") -> [["a","b","c"], ["1","2","3"]]
     module.insert(
-        "parse".to_string(),
+        "parse_csv".to_string(),
         Value::NativeFunction {
-            name: "csv_parse".to_string(),
+            name: "parse_csv".to_string(),
             arity: 1,
             func: |args| {
                 let csv_string = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
                         return Err(IntentError::TypeError(
-                            "csv.parse() requires a string".to_string(),
+                            "parse_csv() requires a string".to_string(),
                         ))
                     }
                 };

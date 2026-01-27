@@ -3,7 +3,7 @@
 # Auto-generates: docs/IAL_REFERENCE.md
 
 [meta]
-version = "0.3.3"
+# Note: Version is read from Cargo.toml at compile time
 description = "IAL is a term rewriting engine that translates natural language assertions into executable tests"
 
 # =============================================================================
@@ -384,6 +384,39 @@ example = "| they see {text} | body contains {text} |"
 [glossary.resolution]
 description = "Terms resolve through the vocabulary: glossary → standard terms → primitives"
 order = ["1. Check project glossary (defined in .intent file)", "2. Check standard terms (built-in)", "3. If not found, error with suggestions"]
+
+[glossary.keywords]
+description = "Glossary terms can use special keywords to invoke function calls for unit testing"
+example = """
+## Glossary
+
+| Term | Means |
+|------|-------|
+| rounding {value} | call: round_1dp({value}), source: utils.tnt |
+| validating {email} | call: is_valid_email({email}), source: validators.tnt |
+"""
+
+[glossary.keywords.table]
+"call:" = { description = "Function to invoke", example = "call: my_function({param})" }
+"source:" = { description = "Source file containing the function (required)", example = "source: myfile.tnt" }
+"input:" = { description = "Test data reference for expansion", example = "input: test_data.examples" }
+"property:" = { description = "Property to verify", example = "property: deterministic" }
+
+[glossary.keywords.usage]
+description = "Usage in Scenarios"
+example = """
+Feature: Email Validation
+  id: feature.unit_email
+
+  Scenario: Valid email accepted
+    When validating \"user@example.com\"
+    → result is true
+
+  Scenario: Invalid email rejected
+    When validating \"not-an-email\"
+    → result is false
+"""
+note = "The `source:` keyword is **required** - it tells IAL which .tnt file contains the function to call."
 
 # =============================================================================
 # INTENT FILE FORMAT

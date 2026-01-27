@@ -8,7 +8,7 @@
 //   fetch(map { ... })   - Full options: method, json, form, headers, auth, cookies, timeout
 
 import { fetch } from "std/http"
-import { parse } from "std/json"
+import { parse_json } from "std/json"
 
 print("=== HTTP Client Demo (Unified fetch API) ===")
 print("")
@@ -28,7 +28,7 @@ print("")
 print("--- 2. GET JSON ---")
 match fetch("https://httpbin.org/json") {
     Ok(response) => {
-        match parse(response.body) {
+        match parse_json(response.body) {
             Ok(data) => {
                 print("Title: " + data["slideshow"]["title"])
                 print("Author: " + data["slideshow"]["author"])
@@ -50,7 +50,7 @@ let payload = map {
 
 match fetch(map { "url": "https://httpbin.org/post", "method": "POST", "json": payload }) {
     Ok(response) => {
-        match parse(response.body) {
+        match parse_json(response.body) {
             Ok(data) => {
                 print("Server echoed: " + data["json"]["name"])
             },

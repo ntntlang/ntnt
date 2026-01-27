@@ -7,7 +7,7 @@
 # Run: ntnt docs --generate  (to regenerate markdown)
 
 [meta]
-version = "0.3.5"
+# Note: Version is read from Cargo.toml at compile time
 generated_files = [
     "docs/STDLIB_REFERENCE.md",
     "docs/AI_AGENT_GUIDE.md"
@@ -53,6 +53,18 @@ signature = "push(arr: Array, item: Any) -> Array"
 description = "Returns a new array with the item appended"
 examples = ["push([1, 2], 3) // [1, 2, 3]"]
 
+[builtins.filter]
+signature = "filter(arr: Array, predicate: Fn) -> Array"
+description = "Returns a new array containing only elements for which predicate returns true"
+examples = ["fn is_even(x) { x % 2 == 0 }", "filter([1, 2, 3, 4], is_even) // [2, 4]"]
+notes = "Predicate must be a named function (not inline)"
+
+[builtins.transform]
+signature = "transform(arr: Array, fn: Fn) -> Array"
+description = "Returns a new array with fn applied to each element"
+examples = ["fn double(x) { x * 2 }", "transform([1, 2, 3], double) // [2, 4, 6]"]
+notes = "Transform function must be a named function (not inline)"
+
 [builtins.assert]
 signature = "assert(condition: Bool) -> Unit"
 description = "Throws an error if the condition is false"
@@ -74,9 +86,9 @@ description = "Returns the larger of two numbers"
 examples = ["max(3, 7) // 7"]
 
 [builtins.round]
-signature = "round(n: Float) -> Int"
-description = "Rounds a number to the nearest integer"
-examples = ["round(3.7) // 4", "round(3.2) // 3"]
+signature = "round(n: Float, decimals?: Int) -> Int | Float"
+description = "Rounds a number to the nearest integer, or to N decimal places if decimals is specified"
+examples = ["round(3.7) // 4", "round(3.14159, 2) // 3.14"]
 
 [builtins.floor]
 signature = "floor(n: Float) -> Int"
@@ -666,10 +678,10 @@ examples = ["download(\"https://example.com/file.zip\", \"./downloads/file.zip\"
 [modules."std/json"]
 description = "JSON parsing and serialization"
 
-[modules."std/json".functions.parse]
-signature = "parse(json: String) -> Result<Any, String>"
+[modules."std/json".functions.parse_json]
+signature = "parse_json(json: String) -> Result<Any, String>"
 description = "Parses a JSON string into a value"
-examples = ["parse(\"{\\\"key\\\": \\\"value\\\"}\")"]
+examples = ["parse_json(\"{\\\"key\\\": \\\"value\\\"}\")"]
 
 [modules."std/json".functions.stringify]
 signature = "stringify(value: Any) -> String"
@@ -778,14 +790,14 @@ description = "Returns new array with last item removed"
 examples = ["pop([1, 2, 3]) // [1, 2]"]
 
 [modules."std/collections".functions.first]
-signature = "first(arr: Array) -> Option<Any>"
-description = "Returns the first element or None"
-examples = ["first([1, 2, 3]) // Some(1)"]
+signature = "first(arr: Array, default?: Any) -> Option<Any> | Any"
+description = "Returns the first element. Without default returns Option, with default returns value or default"
+examples = ["first([1, 2, 3]) // Some(1)", "first([], 0) // 0"]
 
 [modules."std/collections".functions.last]
-signature = "last(arr: Array) -> Option<Any>"
-description = "Returns the last element or None"
-examples = ["last([1, 2, 3]) // Some(3)"]
+signature = "last(arr: Array, default?: Any) -> Option<Any> | Any"
+description = "Returns the last element. Without default returns Option, with default returns value or default"
+examples = ["last([1, 2, 3]) // Some(3)", "last([], 0) // 0"]
 
 [modules."std/collections".functions.keys]
 signature = "keys(map: Map) -> [String]"
@@ -808,9 +820,9 @@ description = "Returns true if map contains key"
 examples = ["has_key(map { \"a\": 1 }, \"a\") // true"]
 
 [modules."std/collections".functions.get_key]
-signature = "get_key(map: Map, key: String) -> Option<Any>"
-description = "Gets value by key or None"
-examples = ["get_key(map { \"a\": 1 }, \"a\") // Some(1)"]
+signature = "get_key(map: Map, key: String, default?: Any) -> Option<Any> | Any"
+description = "Gets value by key. Without default returns Option, with default returns value or default"
+examples = ["get_key(map { \"a\": 1 }, \"a\") // Some(1)", "get_key(map {}, \"a\", \"default\") // \"default\""]
 
 # ============================================================================
 # std/time - Date/Time
@@ -829,10 +841,10 @@ signature = "format(dt: DateTime, fmt: String) -> String"
 description = "Formats a datetime using strftime-style format"
 examples = ["format(now(), \"%Y-%m-%d\") // \"2024-01-15\""]
 
-[modules."std/time".functions.parse]
-signature = "parse(str: String, fmt: String) -> Result<DateTime, String>"
+[modules."std/time".functions.parse_datetime]
+signature = "parse_datetime(str: String, fmt: String) -> Result<DateTime, String>"
 description = "Parses a string into a datetime"
-examples = ["parse(\"2024-01-15\", \"%Y-%m-%d\")"]
+examples = ["parse_datetime(\"2024-01-15\", \"%Y-%m-%d\")"]
 
 [modules."std/time".functions.add_days]
 signature = "add_days(dt: DateTime, days: Int) -> DateTime"
@@ -860,6 +872,11 @@ examples = ["encode(\"hello world\") // \"hello%20world\""]
 signature = "decode(str: String) -> String"
 description = "URL-decodes a string"
 examples = ["decode(\"hello%20world\") // \"hello world\""]
+
+[modules."std/url".functions.parse_url]
+signature = "parse_url(url: String) -> Result<Map, String>"
+description = "Parses a URL into its components (scheme, host, port, path, query, fragment)"
+examples = ["parse_url(\"https://example.com/path?q=1\")"]
 
 [modules."std/url".functions.parse_query]
 signature = "parse_query(query: String) -> Map"
@@ -905,10 +922,10 @@ examples = ["extname(\"main.tnt\") // \".tnt\""]
 [modules."std/csv"]
 description = "CSV parsing and generation"
 
-[modules."std/csv".functions.parse]
-signature = "parse(csv: String) -> [[String]]"
+[modules."std/csv".functions.parse_csv]
+signature = "parse_csv(csv: String) -> [[String]]"
 description = "Parses CSV into array of rows (arrays of strings)"
-examples = ["parse(\"a,b\\n1,2\") // [[\"a\", \"b\"], [\"1\", \"2\"]]"]
+examples = ["parse_csv(\"a,b\\n1,2\") // [[\"a\", \"b\"], [\"1\", \"2\"]]"]
 
 [modules."std/csv".functions.parse_with_headers]
 signature = "parse_with_headers(csv: String) -> [Map]"

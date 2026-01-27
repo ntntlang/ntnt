@@ -1,0 +1,270 @@
+# NTNT Runtime & CLI Reference
+# Source of truth for runtime configuration and CLI documentation
+# Auto-generates: docs/RUNTIME_REFERENCE.md
+
+[meta]
+# Note: Version is read from Cargo.toml at compile time
+description = "Runtime configuration, environment variables, and CLI commands for NTNT"
+
+# =============================================================================
+# ENVIRONMENT VARIABLES
+# =============================================================================
+
+[env_vars]
+description = "Environment variables that control NTNT runtime behavior"
+
+[env_vars.NTNT_ENV]
+values = ["development", "production", "prod"]
+default = "development (when unset)"
+description = "Controls runtime mode. Production mode disables hot-reload for better performance."
+example = "NTNT_ENV=production ntnt run server.tnt"
+affects = ["hot-reload"]
+
+[env_vars.NTNT_TIMEOUT]
+type = "integer (seconds)"
+default = "30"
+description = "Request timeout for HTTP server in seconds."
+example = "NTNT_TIMEOUT=60 ntnt run server.tnt"
+cli_override = "--timeout"
+
+# =============================================================================
+# HOT-RELOAD
+# =============================================================================
+
+[hot_reload]
+description = "Automatic code reloading during development"
+default = "enabled"
+disable = "Set NTNT_ENV=production"
+
+[hot_reload.tracked_files]
+description = "Files monitored for changes"
+files = [
+    "Main server file (.tnt)",
+    "Imported local modules (import from \"./...\")",
+    "File-based route files (routes/*.tnt)",
+    "Route imported modules"
+]
+
+[hot_reload.behavior]
+trigger = "Changes detected on next HTTP request"
+action = "Full reload of main file and all imports"
+output = "[hot-reload] <file> changed, reloading..."
+
+# =============================================================================
+# HTTP SERVER
+# =============================================================================
+
+[http_server]
+description = "Built-in HTTP server runtime behavior"
+
+[http_server.request_object]
+description = "Properties available on the request object passed to handlers"
+
+[http_server.request_object.properties]
+method = "HTTP method (GET, POST, etc.)"
+path = "URL path without query string"
+params = "Route parameters map (e.g., req.params[\"id\"])"
+query_params = "Query string parameters map"
+headers = "Request headers map"
+body = "Raw request body string"
+ip = "Client IP address (supports X-Forwarded-For)"
+id = "Request ID (from X-Request-ID header or auto-generated)"
+
+[http_server.defaults]
+port = "8080 (convention, set in listen() call)"
+timeout = "30 seconds (override with NTNT_TIMEOUT or --timeout)"
+
+# =============================================================================
+# FILE-BASED ROUTING
+# =============================================================================
+
+[file_based_routing]
+description = "Convention-based routing from directory structure"
+
+[file_based_routing.conventions]
+routes_dir = "routes/"
+middleware_dir = "middleware/"
+index_file = "index.tnt maps to parent path (e.g., routes/index.tnt -> /)"
+dynamic_segment = "[param].tnt maps to {param} (e.g., [id].tnt -> /{id})"
+nested_dynamic = "Supports nested dynamics (e.g., users/[id]/posts/[postId].tnt)"
+
+[file_based_routing.handler_functions]
+description = "Export functions named after HTTP methods"
+methods = ["get", "post", "put", "delete", "patch", "head", "options"]
+example = "fn get(req) { ... } in routes/users.tnt handles GET /users"
+
+[file_based_routing.middleware]
+description = "Middleware files in middleware/ directory are auto-applied"
+naming = "Files are applied in alphabetical order (e.g., 01_auth.tnt, 02_logging.tnt)"
+function = "Export a function named 'middleware' that receives the request"
+
+# =============================================================================
+# PROJECT STRUCTURE
+# =============================================================================
+
+[project_structure]
+description = "Recommended project layout for NTNT applications"
+
+[project_structure.layout]
+example = """
+my-app/
+├── server.tnt          # Main server file
+├── server.intent       # Intent specification (matches server.tnt)
+├── routes/             # File-based routes
+│   ├── index.tnt       # GET /
+│   ├── about.tnt       # GET /about
+│   └── api/
+│       ├── users.tnt   # GET/POST /api/users
+│       └── [id].tnt    # GET /api/users/{id}
+├── middleware/         # Auto-applied middleware
+│   └── 01_logging.tnt
+├── lib/                # Shared library code
+│   └── utils.tnt
+├── views/              # HTML templates
+│   └── layout.html
+└── public/             # Static assets (serve_static)
+"""
+
+[project_structure.intent_files]
+description = "Intent files are linked by filename"
+convention = "server.tnt <-> server.intent"
+recommendation = "Use a single .intent file per application for full context"
+
+# =============================================================================
+# CLI COMMANDS
+# =============================================================================
+
+[cli]
+description = "NTNT command-line interface"
+
+# --- Run ---
+[cli.run]
+command = "ntnt run <FILE>"
+description = "Execute an NTNT source file"
+options = [
+    { name = "--timeout", short = "", type = "seconds", default = "30", description = "Request timeout for HTTP server (also: NTNT_TIMEOUT)" }
+]
+example = "ntnt run server.tnt"
+
+# --- Lint ---
+[cli.lint]
+command = "ntnt lint <PATH>"
+description = "Check source file(s) for syntax errors and common mistakes"
+options = [
+    { name = "--quiet", short = "-q", type = "flag", description = "Show only errors, not warnings or suggestions" },
+    { name = "--fix", short = "", type = "flag", description = "Output auto-fix suggestions as JSON patch" }
+]
+example = "ntnt lint server.tnt"
+
+# --- Validate ---
+[cli.validate]
+command = "ntnt validate <PATH>"
+description = "Validate source and output results as JSON (for tooling)"
+example = "ntnt validate server.tnt"
+
+# --- Inspect ---
+[cli.inspect]
+command = "ntnt inspect <PATH>"
+description = "Output project structure as JSON (for AI agents)"
+options = [
+    { name = "--pretty", short = "-p", type = "flag", description = "Pretty-print the JSON output" }
+]
+example = "ntnt inspect server.tnt --pretty"
+
+# --- Test ---
+[cli.test]
+command = "ntnt test <FILE>"
+description = "Run HTTP tests against a server file"
+options = [
+    { name = "--get", short = "", type = "PATH", description = "Make a GET request to the specified path" },
+    { name = "--post", short = "", type = "PATH", description = "Make a POST request to the specified path" },
+    { name = "--put", short = "", type = "PATH", description = "Make a PUT request to the specified path" },
+    { name = "--delete", short = "", type = "PATH", description = "Make a DELETE request to the specified path" },
+    { name = "--body", short = "", type = "JSON", description = "Request body for POST/PUT requests" },
+    { name = "--port", short = "", type = "number", default = "18080", description = "Port to run the test server on" },
+    { name = "--verbose", short = "-v", type = "flag", description = "Show verbose output including headers" }
+]
+example = "ntnt test server.tnt --get / --get /api/users"
+
+# --- Docs ---
+[cli.docs]
+command = "ntnt docs [QUERY]"
+description = "Look up documentation for stdlib modules or functions"
+options = [
+    { name = "--validate", short = "", type = "flag", description = "Validate that all stdlib functions are documented" },
+    { name = "--generate", short = "", type = "flag", description = "Regenerate docs/STDLIB_REFERENCE.md from stdlib.toml" },
+    { name = "--json", short = "", type = "flag", description = "Output as JSON (for tooling)" }
+]
+examples = [
+    "ntnt docs std/string",
+    "ntnt docs split",
+    "ntnt docs --generate"
+]
+
+# --- Completions ---
+[cli.completions]
+command = "ntnt completions <SHELL>"
+description = "Generate shell completions"
+shells = ["bash", "zsh", "fish", "powershell", "elvish"]
+example = "ntnt completions zsh >> ~/.zshrc"
+
+# --- Intent Check ---
+[cli.intent_check]
+command = "ntnt intent check <FILE>"
+description = "Run intent tests against implementation"
+options = [
+    { name = "--intent", short = "-i", type = "PATH", description = "Path to intent file (default: <name>.intent)" },
+    { name = "--port", short = "", type = "number", default = "18081", description = "Port to run the test server on" },
+    { name = "--verbose", short = "-v", type = "flag", description = "Show scenario pass/fail status" },
+    { name = "-vv", short = "", type = "flag", description = "Show all assertions and term resolution" },
+    { name = "--json", short = "", type = "flag", description = "Output results as JSON" }
+]
+examples = [
+    "ntnt intent check server.tnt",
+    "ntnt intent check server.tnt -v",
+    "ntnt intent check server.tnt -vv"
+]
+
+# --- Intent Coverage ---
+[cli.intent_coverage]
+command = "ntnt intent coverage <FILE>"
+description = "Show which features have implementations"
+options = [
+    { name = "--intent", short = "-i", type = "PATH", description = "Path to intent file (default: <name>.intent)" }
+]
+example = "ntnt intent coverage server.tnt"
+
+# --- Intent Init ---
+[cli.intent_init]
+command = "ntnt intent init <INTENT_FILE>"
+description = "Generate code scaffolding from intent file"
+options = [
+    { name = "--output", short = "-o", type = "PATH", description = "Output file (default: prints to stdout)" }
+]
+example = "ntnt intent init project.intent -o server.tnt"
+
+# --- Intent Studio ---
+[cli.intent_studio]
+command = "ntnt intent studio <INTENT_FILE>"
+description = "Visual preview with live test execution"
+options = [
+    { name = "--port", short = "-p", type = "number", default = "3001", description = "Port for the studio server" },
+    { name = "--app-port", short = "-a", type = "number", default = "8081", description = "Port where the application server is running" },
+    { name = "--no-open", short = "", type = "flag", description = "Don't automatically open the browser" }
+]
+example = "ntnt intent studio server.intent"
+
+# --- Parse (debug) ---
+[cli.parse]
+command = "ntnt parse <FILE>"
+description = "Parse file and show AST (for debugging)"
+options = [
+    { name = "--json", short = "", type = "flag", description = "Output AST as JSON" }
+]
+internal = true
+
+# --- Lex (debug) ---
+[cli.lex]
+command = "ntnt lex <FILE>"
+description = "Tokenize file and show tokens (for debugging)"
+internal = true

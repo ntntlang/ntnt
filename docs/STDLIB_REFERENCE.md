@@ -2,7 +2,7 @@
 
 > **Auto-generated from [stdlib.toml](stdlib.toml)** - Do not edit directly.
 >
-> Last updated: v0.3.5
+> Last updated: v0.3.6
 
 ## Table of Contents
 
@@ -34,6 +34,7 @@ These functions are available everywhere without importing.
 | `ceil(n: Float)` | Rounds a number up to the nearest integer |
 | `clamp(value: Number, min: Number, max: Number)` | Constrains a value between min and max |
 | `delete(pattern: String, handler: Fn)` | Registers a DELETE route handler |
+| `filter(arr: Array, predicate: Fn)` | Returns a new array containing only elements for which predicate returns true |
 | `float(x: Int | Float | String)` | Converts a value to a floating-point number |
 | `floor(n: Float)` | Rounds a number down to the nearest integer |
 | `get(pattern: String, handler: Fn)` | Registers a GET route handler |
@@ -49,13 +50,14 @@ These functions are available everywhere without importing.
 | `print(value: Any)` | Prints a value to stdout with a newline |
 | `push(arr: Array, item: Any)` | Returns a new array with the item appended |
 | `put(pattern: String, handler: Fn)` | Registers a PUT route handler |
-| `round(n: Float)` | Rounds a number to the nearest integer |
+| `round(n: Float, decimals?: Int)` | Rounds a number to the nearest integer, or to N decimal places if decimals is specified |
 | `routes(dir: String)` | Loads file-based routes from a directory |
 | `serve_static(prefix: String, dir: String)` | Serves static files from a directory |
 | `sign(n: Number)` | Returns -1, 0, or 1 based on the sign of the number |
 | `sqrt(n: Number)` | Returns the square root of a number |
 | `str(x: Any)` | Converts any value to its string representation |
 | `template(path: String, vars: Map)` | Renders an external template file with variable substitution |
+| `transform(arr: Array, fn: Fn)` | Returns a new array with fn applied to each element |
 | `trunc(n: Float)` | Truncates a number toward zero |
 | `type(x: Any)` | Returns the type name of a value as a string |
 | `use_middleware(handler: Fn)` | Registers middleware that runs before route handlers |
@@ -75,11 +77,11 @@ import { entries, first, get_key } from "std/collections"
 | Function | Description |
 |----------|-------------|
 | `entries(map: Map) -> [[String, Any]]` | Returns array of [key, value] pairs |
-| `first(arr: Array) -> Option<Any>` | Returns the first element or None |
-| `get_key(map: Map, key: String) -> Option<Any>` | Gets value by key or None |
+| `first(arr: Array, default?: Any) -> Option<Any> \| Any` | Returns the first element. Without default returns Option, with default returns value or default |
+| `get_key(map: Map, key: String, default?: Any) -> Option<Any> \| Any` | Gets value by key. Without default returns Option, with default returns value or default |
 | `has_key(map: Map, key: String) -> Bool` | Returns true if map contains key |
 | `keys(map: Map) -> [String]` | Returns array of map keys |
-| `last(arr: Array) -> Option<Any>` | Returns the last element or None |
+| `last(arr: Array, default?: Any) -> Option<Any> \| Any` | Returns the last element. Without default returns Option, with default returns value or default |
 | `pop(arr: Array) -> Array` | Returns new array with last item removed |
 | `push(arr: Array, item: Any) -> Array` | Returns new array with item appended |
 | `values(map: Map) -> [Any]` | Returns array of map values |
@@ -110,14 +112,14 @@ import { channel, recv, send } from "std/concurrent"
 CSV parsing and generation
 
 ```ntnt
-import { parse, parse_with_headers, stringify } from "std/csv"
+import { parse_csv, parse_with_headers, stringify } from "std/csv"
 ```
 
 ### Functions
 
 | Function | Description |
 |----------|-------------|
-| `parse(csv: String) -> [[String]]` | Parses CSV into array of rows (arrays of strings) |
+| `parse_csv(csv: String) -> [[String]]` | Parses CSV into array of rows (arrays of strings) |
 | `parse_with_headers(csv: String) -> [Map]` | Parses CSV into array of maps using first row as headers |
 | `stringify(rows: [[Any]]) -> String` | Converts array of rows to CSV string |
 | `stringify_with_headers(rows: [Map], headers: [String]) -> String` | Converts array of maps to CSV with header row |
@@ -211,14 +213,14 @@ import { html, json, parse_form } from "std/http/server"
 JSON parsing and serialization
 
 ```ntnt
-import { parse, stringify, stringify_pretty } from "std/json"
+import { parse_json, stringify, stringify_pretty } from "std/json"
 ```
 
 ### Functions
 
 | Function | Description |
 |----------|-------------|
-| `parse(json: String) -> Result<Any, String>` | Parses a JSON string into a value |
+| `parse_json(json: String) -> Result<Any, String>` | Parses a JSON string into a value |
 | `stringify(value: Any) -> String` | Converts a value to a JSON string |
 | `stringify_pretty(value: Any) -> String` | Converts a value to a pretty-printed JSON string |
 
@@ -376,7 +378,7 @@ import { add_days, add_months, format } from "std/time"
 | `add_months(dt: DateTime, months: Int) -> DateTime` | Adds months to a datetime |
 | `format(dt: DateTime, fmt: String) -> String` | Formats a datetime using strftime-style format |
 | `now() -> DateTime` | Returns the current date/time |
-| `parse(str: String, fmt: String) -> Result<DateTime, String>` | Parses a string into a datetime |
+| `parse_datetime(str: String, fmt: String) -> Result<DateTime, String>` | Parses a string into a datetime |
 
 ---
 
@@ -396,6 +398,7 @@ import { build_query, decode, encode } from "std/url"
 | `decode(str: String) -> String` | URL-decodes a string |
 | `encode(str: String) -> String` | URL-encodes a string |
 | `parse_query(query: String) -> Map` | Parses a query string into a map |
+| `parse_url(url: String) -> Result<Map, String>` | Parses a URL into its components (scheme, host, port, path, query, fragment) |
 
 ---
 

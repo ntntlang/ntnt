@@ -1,5 +1,5 @@
 // Test escape sequences and CSV parsing
-import { parse, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
+import { parse_csv, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
 
 // Test 1: Escape sequences in strings
 print("=== Escape Sequence Tests ===")
@@ -22,7 +22,7 @@ let csv_data = "name,age,city\nAlice,30,NYC\nBob,25,LA\nCharlie,35,Chicago"
 print("Input CSV:")
 print(csv_data)
 
-let rows = parse(csv_data)
+let rows = parse_csv(csv_data)
 print("\nParsed as array of arrays:")
 for row in rows {
     print(str(row))

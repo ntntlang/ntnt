@@ -19,7 +19,17 @@ use std::path::PathBuf;
 #[command(name = "ntnt")]
 #[command(author = "NTNT Language Team")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "NTNT (Intent) - A programming language for AI-driven development", long_about = None)]
+#[command(about = "NTNT (Intent) - A programming language for AI-driven development")]
+#[command(
+    long_about = "NTNT (Intent) - A programming language for AI-driven development\n\n\
+Environment variables:\n  \
+NTNT_ENV=production    Disable hot-reload for better performance\n  \
+NTNT_TIMEOUT=60        Request timeout in seconds (default: 30)\n\n\
+Quick start:\n  \
+ntnt run server.tnt    Run a file (hot-reload enabled by default)\n  \
+ntnt lint app.tnt      Check for errors and style issues\n  \
+ntnt docs              Browse stdlib documentation"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -91,7 +101,10 @@ enum Commands {
         #[arg(long = "verbose", short = 'v')]
         verbose: bool,
     },
-    /// Parse and display the AST
+    /// Parse and display the AST (for debugging)
+    ///
+    /// Internal command for compiler development. Shows the abstract syntax tree.
+    #[command(hide = true)]
     Parse {
         /// The source file to parse
         #[arg(value_name = "FILE")]
@@ -100,13 +113,22 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Tokenize and display tokens
+    /// Tokenize and display tokens (for debugging)
+    ///
+    /// Internal command for compiler development. Shows lexer output.
+    #[command(hide = true)]
     Lex {
         /// The source file to tokenize
         #[arg(value_name = "FILE")]
         file: PathBuf,
     },
-    /// Check source for errors without running
+    /// Quick syntax check (use 'lint' for comprehensive analysis)
+    ///
+    /// Parses the file and reports any syntax errors. For more thorough
+    /// analysis including style issues and common mistakes, use 'ntnt lint'.
+    ///
+    /// Examples:
+    ///   ntnt check app.tnt
     Check {
         /// The source file to check
         #[arg(value_name = "FILE")]
@@ -483,163 +505,85 @@ fn run_repl() -> anyhow::Result<()> {
 
 fn print_repl_help() {
     println!("{}", "\nREPL Commands:".yellow().bold());
-    println!("  {}    - Show this help message", ":help, :h".cyan());
-    println!("  {} - Exit the REPL", ":quit, :q, :exit".cyan());
-    println!("  {}   - Clear the environment", ":clear".cyan());
+    println!("  {}       Show this help", ":help, :h".cyan());
+    println!("  {}  Exit the REPL", ":quit, :q, :exit".cyan());
+    println!("  {}      Clear the environment", ":clear".cyan());
+    println!("  {}        Show current bindings", ":env".cyan());
+
+    println!("\n{}", "Standard Library:".yellow().bold());
     println!(
-        "  {}     - Show current environment bindings",
-        ":env".cyan()
-    );
-    println!();
-    println!("{}", "Module System:".yellow().bold());
-    println!(
-        "  {} - Import specific functions",
-        r#"import { split, join } from "std/string""#.cyan()
+        "  {}      split, join, trim, replace, contains, to_upper...",
+        "std/string".cyan()
     );
     println!(
-        "  {}    - Import module with alias",
-        r#"import "std/math" as math"#.cyan()
-    );
-    println!();
-    println!("{}", "Standard Library:".yellow().bold());
-    println!(
-        "  {} - std/string: split, join, trim, replace, to_upper, to_lower",
-        "String".cyan()
+        "  {}        sin, cos, log, exp, random, random_int, PI, E...",
+        "std/math".cyan()
     );
     println!(
-        "  {}   - std/math: sin, cos, tan, log, exp, PI, E",
-        "Math".cyan()
+        "  {} json, html, text, redirect, parse_form, parse_json",
+        "std/http/server".cyan()
+    );
+    println!("  {}        fetch, download", "std/http".cyan());
+    println!(
+        "  {} push, pop, keys, values, first, last, has_key...",
+        "std/collections".cyan()
     );
     println!(
-        "  {} - std/collections: push, pop, first, last, reverse, slice",
-        "Collections".cyan()
+        "  {}        parse_json, stringify, stringify_pretty",
+        "std/json".cyan()
     );
     println!(
-        "  {}    - std/env: get_env, args, cwd",
-        "Environment".cyan()
+        "  {}         parse_csv, parse_with_headers, stringify...",
+        "std/csv".cyan()
     );
     println!(
-        "  {}     - std/fs: read_file, write_file, exists, mkdir, remove",
-        "Files".cyan()
+        "  {}          read_file, write_file, exists, mkdir, readdir",
+        "std/fs".cyan()
     );
     println!(
-        "  {}     - std/path: join, dirname, basename, extension, resolve",
-        "Paths".cyan()
+        "  {}         get_env, set_env, load_env, args, cwd",
+        "std/env".cyan()
     );
     println!(
-        "  {}      - std/json: parse, stringify, stringify_pretty",
-        "JSON".cyan()
+        "  {}        join, dirname, basename, extname",
+        "std/path".cyan()
     );
     println!(
-        "  {}      - std/time: now, sleep, elapsed, format_timestamp",
-        "Time".cyan()
+        "  {}         encode, decode, parse_url, parse_query...",
+        "std/url".cyan()
     );
     println!(
-        "  {}    - std/crypto: sha256, hmac_sha256, uuid, random_bytes",
-        "Crypto".cyan()
+        "  {}        now, format, parse_datetime, add_days...",
+        "std/time".cyan()
     );
     println!(
-        "  {}       - std/url: parse, encode, decode, build_query, join",
-        "URL".cyan()
+        "  {}  channel, send, recv, sleep_ms",
+        "std/concurrent".cyan()
     );
+    println!("  Run {} for full documentation", "ntnt docs".green());
+
+    println!("\n{}", "Quick Reference:".yellow().bold());
+    println!("  {}           Variable binding", "let x = 42".cyan());
+    println!("  {}      Mutable variable", "let mut x = 0".cyan());
+    println!("  {} Function definition", "fn add(a, b) { a + b }".cyan());
+    println!("  {}   Map literal (not {{}})", r#"map { "a": 1 }"#.cyan());
+    println!("  {}    String interpolation", r#""Hello, {name}""#.cyan());
+    println!("  {}   Raw string (routes)", r#"r"/users/{id}""#.cyan());
+    println!("  {}     For loop", "for i in 0..10 { }".cyan());
+    println!("  {}    Pattern match", "match x { Some(v) => v }".cyan());
+
+    println!("\n{}", "Global Builtins:".yellow().bold());
+    println!("  len, str, int, float, type, print, push, assert, abs, min, max, round, floor");
+
     println!(
-        "  {}      - std/http: fetch, post, put, delete, request, get_json",
-        "HTTP".cyan()
+        "\n{}",
+        "HTTP Server (globals - no import needed):".yellow().bold()
     );
-    println!();
-    println!("{}", "Basic Examples:".yellow().bold());
-    println!("  {}           - Variable binding", "let x = 42;".cyan());
-    println!("  {}    - Arithmetic", "let y = x + 10;".cyan());
-    println!(
-        "  {} - Function definition",
-        "fn add(a, b) { a + b }".cyan()
-    );
-    println!("  {}       - Function call", "add(1, 2)".cyan());
-    println!();
-    println!("{}", "Traits:".yellow().bold());
-    println!(
-        "  {} - Define a trait",
-        "trait Display { fn show(self); }".cyan()
-    );
-    println!(
-        "  {} - Implement trait",
-        "impl Display for Point { ... }".cyan()
-    );
-    println!();
-    println!("{}", "Loops & Iteration:".yellow().bold());
-    println!(
-        "  {}  - For-in loop",
-        "for x in [1, 2, 3] { print(x); }".cyan()
-    );
-    println!(
-        "  {}    - Range (exclusive)",
-        "for i in 0..5 { print(i); }".cyan()
-    );
-    println!(
-        "  {}   - Range (inclusive)",
-        "for i in 0..=5 { print(i); }".cyan()
-    );
-    println!(
-        "  {} - Iterate strings",
-        r#"for c in "hello" { print(c); }"#.cyan()
-    );
-    println!();
-    println!("{}", "Defer:".yellow().bold());
-    println!(
-        "  {} - Runs on scope exit",
-        "defer print(\"cleanup\");".cyan()
-    );
-    println!();
-    println!("{}", "Maps:".yellow().bold());
-    println!(
-        "  {} - Map literal",
-        r#"let m = map { "a": 1, "b": 2 };"#.cyan()
-    );
-    println!();
-    println!("{}", "String Interpolation:".yellow().bold());
-    println!("  {} - Embed expressions", r#""Hello, {name}!""#.cyan());
-    println!("  {} - With math", r#""Sum: {a + b}""#.cyan());
-    println!();
-    println!("{}", "Raw Strings:".yellow().bold());
-    println!(
-        "  {}   - No escape processing",
-        r#"r"C:\path\to\file""#.cyan()
-    );
-    println!("  {} - With quotes inside", r##"r#"say "hi""#"##.cyan());
-    println!();
-    println!("{}", "Trait Bounds:".yellow().bold());
-    println!(
-        "  {} - Bounded generic",
-        "fn sort<T: Comparable>(arr: [T])".cyan()
-    );
-    println!("  {} - Multiple bounds", "fn f<T: A + B>(x: T)".cyan());
-    println!();
-    println!("{}", "Option & Result Types:".yellow().bold());
-    println!("  {}     - Create Some value", "let x = Some(42);".cyan());
-    println!("  {}          - Create None", "let y = None;".cyan());
-    println!("  {} - Unwrap with default", "unwrap_or(y, 0)".cyan());
-    println!("  {}  - Create Ok result", "let r = Ok(100);".cyan());
-    println!("  {} - Create Err result", r#"let e = Err("fail");"#.cyan());
-    println!();
-    println!("{}", "Pattern Matching:".yellow().bold());
-    println!("  {}", "match x { Some(v) => v * 2, None => 0 }".cyan());
-    println!();
-    println!("{}", "Enums & Generics:".yellow().bold());
-    println!("  {}", "enum Color { Red, Green, Blue }".cyan());
-    println!(
-        "  {} - Generic function",
-        "fn id<T>(x: T) -> T { x }".cyan()
-    );
-    println!();
-    println!("{}", "Contracts:".yellow().bold());
-    println!(
-        "  {} - Precondition",
-        "fn div(a, b) requires b != 0 { a / b }".cyan()
-    );
-    println!(
-        "  {} - Postcondition",
-        "fn abs(x) ensures result >= 0 { ... }".cyan()
-    );
+    println!("  get, post, put, delete, listen, serve_static, routes, template, use_middleware");
+
+    println!("\n{}", "Imports:".yellow().bold());
+    println!("  {}", r#"import { split, join } from "std/string""#.cyan());
+    println!("  {}", r#"import "std/math" as math"#.cyan());
     println!();
 }
 
@@ -3419,6 +3363,7 @@ fn run_docs_command(
         generate_stdlib_markdown(&stdlib, &docs_path)?;
         generate_syntax_markdown(&docs_path)?;
         generate_ial_markdown(&docs_path)?;
+        generate_runtime_markdown(&docs_path)?;
         return Ok(());
     }
 
@@ -3768,12 +3713,7 @@ fn show_function(
 /// Generate STDLIB_REFERENCE.md from stdlib.toml
 fn generate_stdlib_markdown(stdlib: &docs::StdlibDocs, toml_path: &PathBuf) -> anyhow::Result<()> {
     let mut md = String::new();
-    let version = stdlib
-        .meta
-        .as_ref()
-        .and_then(|m| m.version.as_ref())
-        .map(|v| v.as_str())
-        .unwrap_or("unknown");
+    let version = env!("CARGO_PKG_VERSION");
 
     // Header
     md.push_str("# NTNT Standard Library Reference\n\n");
@@ -3938,11 +3878,7 @@ fn generate_syntax_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
     let syntax: toml::Value = toml::from_str(&content)?;
 
     let mut md = String::new();
-    let version = syntax
-        .get("meta")
-        .and_then(|m| m.get("version"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    let version = env!("CARGO_PKG_VERSION");
 
     // Header
     md.push_str("# NTNT Syntax Reference\n\n");
@@ -4367,11 +4303,7 @@ fn generate_ial_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
     let ial: toml::Value = toml::from_str(&content)?;
 
     let mut md = String::new();
-    let version = ial
-        .get("meta")
-        .and_then(|m| m.get("version"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    let version = env!("CARGO_PKG_VERSION");
 
     // Header
     md.push_str("# Intent Assertion Language (IAL) Reference\n\n");
@@ -4568,6 +4500,51 @@ fn generate_ial_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
             }
         }
 
+        // Keyword Syntax for Unit Tests
+        if let Some(keywords) = glossary.get("keywords") {
+            md.push_str("### Keyword Syntax for Unit Tests\n\n");
+            if let Some(desc) = keywords.get("description").and_then(|v| v.as_str()) {
+                md.push_str(&format!("{}\n\n", desc));
+            }
+            if let Some(example) = keywords.get("example").and_then(|v| v.as_str()) {
+                md.push_str("```intent\n");
+                md.push_str(example);
+                md.push_str("```\n\n");
+            }
+
+            if let Some(table) = keywords.get("table").and_then(|v| v.as_table()) {
+                md.push_str("**Keywords:**\n\n");
+                md.push_str("| Keyword | Description | Example |\n");
+                md.push_str("|---------|-------------|---------|\n");
+                for (keyword, info) in table {
+                    if let Some(info_table) = info.as_table() {
+                        let desc = info_table
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let example = info_table
+                            .get("example")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        md.push_str(&format!("| `{}` | {} | `{}` |\n", keyword, desc, example));
+                    }
+                }
+                md.push_str("\n");
+            }
+
+            if let Some(usage) = keywords.get("usage") {
+                md.push_str("**Usage in Scenarios:**\n\n");
+                if let Some(example) = usage.get("example").and_then(|v| v.as_str()) {
+                    md.push_str("```intent\n");
+                    md.push_str(example);
+                    md.push_str("```\n\n");
+                }
+                if let Some(note) = usage.get("note").and_then(|v| v.as_str()) {
+                    md.push_str(&format!("{}\n\n", note));
+                }
+            }
+        }
+
         if let Some(resolution) = glossary.get("resolution") {
             md.push_str("### Resolution Order\n\n");
             if let Some(order) = resolution.get("order").and_then(|v| v.as_array()) {
@@ -4660,6 +4637,369 @@ fn generate_ial_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
 
     // Write to file
     let output_path = toml_path.parent().unwrap().join("IAL_REFERENCE.md");
+    fs::write(&output_path, &md)?;
+
+    println!(
+        "{} Generated {}",
+        "✓".green(),
+        output_path.display().to_string().cyan()
+    );
+
+    Ok(())
+}
+
+/// Generate RUNTIME_REFERENCE.md from runtime.toml
+fn generate_runtime_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
+    let runtime_path = toml_path.parent().unwrap().join("runtime.toml");
+    if !runtime_path.exists() {
+        println!(
+            "  {} runtime.toml not found, skipping RUNTIME_REFERENCE.md",
+            "!".yellow()
+        );
+        return Ok(());
+    }
+
+    let content = fs::read_to_string(&runtime_path)?;
+    let runtime: toml::Value = toml::from_str(&content)?;
+
+    let mut md = String::new();
+    let version = env!("CARGO_PKG_VERSION");
+
+    // Header
+    md.push_str("# NTNT Runtime & CLI Reference\n\n");
+    md.push_str("> **Auto-generated from [runtime.toml](runtime.toml)** - Do not edit directly.\n");
+    md.push_str(">\n");
+    md.push_str(&format!("> Last updated: v{}\n\n", version));
+
+    // Description
+    if let Some(desc) = runtime
+        .get("meta")
+        .and_then(|m| m.get("description"))
+        .and_then(|v| v.as_str())
+    {
+        md.push_str(&format!("{}\n\n", desc));
+    }
+
+    // Table of Contents
+    md.push_str("## Table of Contents\n\n");
+    md.push_str("- [Environment Variables](#environment-variables)\n");
+    md.push_str("- [Hot-Reload](#hot-reload)\n");
+    md.push_str("- [HTTP Server](#http-server)\n");
+    md.push_str("- [File-Based Routing](#file-based-routing)\n");
+    md.push_str("- [Project Structure](#project-structure)\n");
+    md.push_str("- [CLI Commands](#cli-commands)\n");
+    md.push_str("\n---\n\n");
+
+    // Environment Variables
+    if let Some(env_vars) = runtime.get("env_vars") {
+        md.push_str("## Environment Variables\n\n");
+        if let Some(desc) = env_vars.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Variable | Values | Default | Description |\n");
+        md.push_str("|----------|--------|---------|-------------|\n");
+
+        // NTNT_ENV
+        if let Some(env) = env_vars.get("NTNT_ENV") {
+            let values = env
+                .get("values")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| format!("`{}`", s))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
+            let desc = env
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            md.push_str(&format!(
+                "| `NTNT_ENV` | {} | {} | {} |\n",
+                values, default, desc
+            ));
+        }
+
+        // NTNT_TIMEOUT
+        if let Some(env) = env_vars.get("NTNT_TIMEOUT") {
+            let typ = env.get("type").and_then(|v| v.as_str()).unwrap_or("-");
+            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
+            let desc = env
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            md.push_str(&format!(
+                "| `NTNT_TIMEOUT` | {} | {} | {} |\n",
+                typ, default, desc
+            ));
+        }
+
+        md.push_str("\n### Examples\n\n```bash\n");
+        md.push_str("# Development (default) - hot-reload enabled\n");
+        md.push_str("ntnt run server.tnt\n\n");
+        md.push_str("# Production - hot-reload disabled\n");
+        md.push_str("NTNT_ENV=production ntnt run server.tnt\n\n");
+        md.push_str("# Custom timeout (60 seconds)\n");
+        md.push_str("NTNT_TIMEOUT=60 ntnt run server.tnt\n");
+        md.push_str("```\n\n");
+        md.push_str("---\n\n");
+    }
+
+    // Hot-Reload
+    if let Some(hot_reload) = runtime.get("hot_reload") {
+        md.push_str("## Hot-Reload\n\n");
+        if let Some(desc) = hot_reload.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+        if let Some(default) = hot_reload.get("default").and_then(|v| v.as_str()) {
+            md.push_str(&format!("**Default:** {}\n\n", default));
+        }
+        if let Some(disable) = hot_reload.get("disable").and_then(|v| v.as_str()) {
+            md.push_str(&format!("**Disable:** {}\n\n", disable));
+        }
+
+        if let Some(tracked) = hot_reload.get("tracked_files") {
+            md.push_str("### Tracked Files\n\n");
+            if let Some(files) = tracked.get("files").and_then(|v| v.as_array()) {
+                for file in files {
+                    if let Some(f) = file.as_str() {
+                        md.push_str(&format!("- {}\n", f));
+                    }
+                }
+                md.push_str("\n");
+            }
+        }
+
+        if let Some(behavior) = hot_reload.get("behavior") {
+            md.push_str("### Behavior\n\n");
+            if let Some(trigger) = behavior.get("trigger").and_then(|v| v.as_str()) {
+                md.push_str(&format!("- **Trigger:** {}\n", trigger));
+            }
+            if let Some(action) = behavior.get("action").and_then(|v| v.as_str()) {
+                md.push_str(&format!("- **Action:** {}\n", action));
+            }
+            if let Some(output) = behavior.get("output").and_then(|v| v.as_str()) {
+                md.push_str(&format!("- **Output:** `{}`\n", output));
+            }
+            md.push_str("\n");
+        }
+        md.push_str("---\n\n");
+    }
+
+    // HTTP Server
+    if let Some(http) = runtime.get("http_server") {
+        md.push_str("## HTTP Server\n\n");
+        if let Some(desc) = http.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        if let Some(req_obj) = http.get("request_object") {
+            md.push_str("### Request Object Properties\n\n");
+            if let Some(props) = req_obj.get("properties").and_then(|v| v.as_table()) {
+                md.push_str("| Property | Description |\n");
+                md.push_str("|----------|-------------|\n");
+                for (name, desc) in props {
+                    if let Some(d) = desc.as_str() {
+                        md.push_str(&format!("| `req.{}` | {} |\n", name, d));
+                    }
+                }
+                md.push_str("\n");
+            }
+        }
+
+        if let Some(defaults) = http.get("defaults").and_then(|v| v.as_table()) {
+            md.push_str("### Defaults\n\n");
+            for (name, value) in defaults {
+                if let Some(v) = value.as_str() {
+                    md.push_str(&format!("- **{}:** {}\n", name, v));
+                }
+            }
+            md.push_str("\n");
+        }
+        md.push_str("---\n\n");
+    }
+
+    // File-Based Routing
+    if let Some(fbr) = runtime.get("file_based_routing") {
+        md.push_str("## File-Based Routing\n\n");
+        if let Some(desc) = fbr.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        if let Some(conv) = fbr.get("conventions").and_then(|v| v.as_table()) {
+            md.push_str("### Conventions\n\n");
+            md.push_str("| Convention | Description |\n");
+            md.push_str("|------------|-------------|\n");
+            for (name, value) in conv {
+                if let Some(v) = value.as_str() {
+                    md.push_str(&format!("| `{}` | {} |\n", name, v));
+                }
+            }
+            md.push_str("\n");
+        }
+
+        if let Some(handlers) = fbr.get("handler_functions") {
+            md.push_str("### Handler Functions\n\n");
+            if let Some(desc) = handlers.get("description").and_then(|v| v.as_str()) {
+                md.push_str(&format!("{}\n\n", desc));
+            }
+            if let Some(methods) = handlers.get("methods").and_then(|v| v.as_array()) {
+                let method_list: Vec<_> = methods
+                    .iter()
+                    .filter_map(|m| m.as_str())
+                    .map(|m| format!("`{}`", m))
+                    .collect();
+                md.push_str(&format!(
+                    "**Supported methods:** {}\n\n",
+                    method_list.join(", ")
+                ));
+            }
+        }
+
+        if let Some(mw) = fbr.get("middleware") {
+            md.push_str("### Middleware\n\n");
+            if let Some(desc) = mw.get("description").and_then(|v| v.as_str()) {
+                md.push_str(&format!("{}\n\n", desc));
+            }
+            if let Some(naming) = mw.get("naming").and_then(|v| v.as_str()) {
+                md.push_str(&format!("- **Naming:** {}\n", naming));
+            }
+            if let Some(func) = mw.get("function").and_then(|v| v.as_str()) {
+                md.push_str(&format!("- **Function:** {}\n", func));
+            }
+            md.push_str("\n");
+        }
+        md.push_str("---\n\n");
+    }
+
+    // Project Structure
+    if let Some(ps) = runtime.get("project_structure") {
+        md.push_str("## Project Structure\n\n");
+        if let Some(desc) = ps.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        if let Some(layout) = ps.get("layout") {
+            if let Some(example) = layout.get("example").and_then(|v| v.as_str()) {
+                md.push_str("### Recommended Layout\n\n```\n");
+                md.push_str(example.trim());
+                md.push_str("\n```\n\n");
+            }
+        }
+
+        if let Some(intent) = ps.get("intent_files") {
+            md.push_str("### Intent Files\n\n");
+            if let Some(desc) = intent.get("description").and_then(|v| v.as_str()) {
+                md.push_str(&format!("{}\n\n", desc));
+            }
+            if let Some(conv) = intent.get("convention").and_then(|v| v.as_str()) {
+                md.push_str(&format!("- **Convention:** `{}`\n", conv));
+            }
+            if let Some(rec) = intent.get("recommendation").and_then(|v| v.as_str()) {
+                md.push_str(&format!("- **Recommendation:** {}\n", rec));
+            }
+            md.push_str("\n");
+        }
+        md.push_str("---\n\n");
+    }
+
+    // CLI Commands
+    if let Some(cli) = runtime.get("cli") {
+        md.push_str("## CLI Commands\n\n");
+        if let Some(desc) = cli.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        // List of command keys in order
+        let commands = [
+            ("run", "Run"),
+            ("lint", "Lint"),
+            ("validate", "Validate"),
+            ("inspect", "Inspect"),
+            ("test", "Test"),
+            ("docs", "Docs"),
+            ("completions", "Completions"),
+            ("intent_check", "Intent Check"),
+            ("intent_coverage", "Intent Coverage"),
+            ("intent_init", "Intent Init"),
+            ("intent_studio", "Intent Studio"),
+        ];
+
+        for (key, title) in &commands {
+            if let Some(cmd) = cli.get(*key) {
+                // Skip internal commands
+                if cmd
+                    .get("internal")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                md.push_str(&format!("### {}\n\n", title));
+
+                if let Some(command) = cmd.get("command").and_then(|v| v.as_str()) {
+                    md.push_str(&format!("```\n{}\n```\n\n", command));
+                }
+
+                if let Some(desc) = cmd.get("description").and_then(|v| v.as_str()) {
+                    md.push_str(&format!("{}\n\n", desc));
+                }
+
+                if let Some(options) = cmd.get("options").and_then(|v| v.as_array()) {
+                    if !options.is_empty() {
+                        md.push_str("**Options:**\n\n");
+                        md.push_str("| Option | Type | Default | Description |\n");
+                        md.push_str("|--------|------|---------|-------------|\n");
+                        for opt in options {
+                            let name = opt.get("name").and_then(|v| v.as_str()).unwrap_or("-");
+                            let short = opt.get("short").and_then(|v| v.as_str()).unwrap_or("");
+                            let typ = opt.get("type").and_then(|v| v.as_str()).unwrap_or("-");
+                            let default =
+                                opt.get("default").and_then(|v| v.as_str()).unwrap_or("-");
+                            let desc = opt
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("-");
+                            let opt_str = if short.is_empty() {
+                                format!("`{}`", name)
+                            } else {
+                                format!("`{}`, `{}`", name, short)
+                            };
+                            md.push_str(&format!(
+                                "| {} | {} | {} | {} |\n",
+                                opt_str, typ, default, desc
+                            ));
+                        }
+                        md.push_str("\n");
+                    }
+                }
+
+                // Handle single example
+                if let Some(example) = cmd.get("example").and_then(|v| v.as_str()) {
+                    md.push_str(&format!("**Example:**\n```bash\n{}\n```\n\n", example));
+                }
+
+                // Handle multiple examples
+                if let Some(examples) = cmd.get("examples").and_then(|v| v.as_array()) {
+                    md.push_str("**Examples:**\n```bash\n");
+                    for ex in examples {
+                        if let Some(e) = ex.as_str() {
+                            md.push_str(&format!("{}\n", e));
+                        }
+                    }
+                    md.push_str("```\n\n");
+                }
+            }
+        }
+    }
+
+    // Write to file
+    let output_path = toml_path.parent().unwrap().join("RUNTIME_REFERENCE.md");
     fs::write(&output_path, &md)?;
 
     println!(

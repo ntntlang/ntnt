@@ -29,6 +29,20 @@ Auto-generated references:
 - [SYNTAX_REFERENCE.md](docs/SYNTAX_REFERENCE.md) - Language syntax
 - [IAL_REFERENCE.md](docs/IAL_REFERENCE.md) - Intent Assertion Language
 
+## Environment Variables
+
+| Variable | Values | Description |
+|----------|--------|-------------|
+| `NTNT_ENV` | `production`, `prod` | Disables hot-reload for better performance |
+
+```bash
+# Development (default) - hot-reload enabled
+ntnt run server.tnt
+
+# Production - hot-reload disabled
+NTNT_ENV=production ntnt run server.tnt
+```
+
 ## Critical Syntax Rules (Most Common Mistakes)
 
 ### Map literals require `map` keyword

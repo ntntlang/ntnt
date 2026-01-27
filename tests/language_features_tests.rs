@@ -386,11 +386,11 @@ print(data)
 #[test]
 fn test_csv_parse_basic() {
     let code = r#"
-import { parse } from "std/csv"
+import { parse_csv } from "std/csv"
 let csv_data = "name,age,city
 Alice,30,NYC
 Bob,25,LA"
-let rows = parse(csv_data)
+let rows = parse_csv(csv_data)
 print(len(rows))
 print(rows[0][0])
 print(rows[2][1])
@@ -1043,4 +1043,289 @@ for p in parts {
     assert!(stdout.contains("[hello]"), "Should contain hello");
     assert!(stdout.contains("[world]"), "Should contain world");
     assert!(stdout.contains("[test]"), "Should contain test");
+}
+
+// ============================================================================
+// Higher-Order Functions: filter, transform
+// ============================================================================
+
+#[test]
+fn test_filter_basic() {
+    let code = r#"
+fn is_even(x) {
+    return x % 2 == 0
+}
+
+let nums = [1, 2, 3, 4, 5, 6]
+let evens = filter(nums, is_even)
+print(len(evens))
+for n in evens {
+    print(n)
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "filter should work");
+    assert!(stdout.contains("3"), "Should have 3 even numbers");
+    assert!(stdout.contains("2"), "Should contain 2");
+    assert!(stdout.contains("4"), "Should contain 4");
+    assert!(stdout.contains("6"), "Should contain 6");
+}
+
+#[test]
+fn test_filter_empty_result() {
+    let code = r#"
+fn is_negative(x) {
+    return x < 0
+}
+
+let nums = [1, 2, 3]
+let negatives = filter(nums, is_negative)
+print(len(negatives))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "filter with no matches should work");
+    assert!(stdout.contains("0"), "Should have 0 elements");
+}
+
+#[test]
+fn test_filter_all_match() {
+    let code = r#"
+fn is_positive(x) {
+    return x > 0
+}
+
+let nums = [1, 2, 3]
+let positives = filter(nums, is_positive)
+print(len(positives))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "filter with all matches should work");
+    assert!(stdout.contains("3"), "Should have 3 elements");
+}
+
+#[test]
+fn test_transform_basic() {
+    let code = r#"
+fn double(x) {
+    return x * 2
+}
+
+let nums = [1, 2, 3]
+let doubled = transform(nums, double)
+for n in doubled {
+    print(n)
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "transform should work");
+    assert!(stdout.contains("2"), "Should contain 2");
+    assert!(stdout.contains("4"), "Should contain 4");
+    assert!(stdout.contains("6"), "Should contain 6");
+}
+
+#[test]
+fn test_transform_to_string() {
+    let code = r#"
+fn to_greeting(name) {
+    return "Hello, " + name + "!"
+}
+
+let names = ["Alice", "Bob"]
+let greetings = transform(names, to_greeting)
+for g in greetings {
+    print(g)
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "transform with strings should work");
+    assert!(
+        stdout.contains("Hello, Alice!"),
+        "Should contain Alice greeting"
+    );
+    assert!(
+        stdout.contains("Hello, Bob!"),
+        "Should contain Bob greeting"
+    );
+}
+
+#[test]
+fn test_transform_empty_array() {
+    let code = r#"
+fn double(x) {
+    return x * 2
+}
+
+let nums = []
+let doubled = transform(nums, double)
+print(len(doubled))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "transform on empty array should work");
+    assert!(stdout.contains("0"), "Should have 0 elements");
+}
+
+#[test]
+fn test_filter_and_transform_chained() {
+    let code = r#"
+fn is_even(x) {
+    return x % 2 == 0
+}
+
+fn double(x) {
+    return x * 2
+}
+
+let nums = [1, 2, 3, 4, 5]
+let evens = filter(nums, is_even)
+let doubled = transform(evens, double)
+for n in doubled {
+    print(n)
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "filter then transform should work");
+    assert!(stdout.contains("4"), "Should contain 4 (2*2)");
+    assert!(stdout.contains("8"), "Should contain 8 (4*2)");
+}
+
+// ============================================================================
+// Round with Decimals
+// ============================================================================
+
+#[test]
+fn test_round_without_decimals() {
+    let code = r#"
+print(round(3.7))
+print(round(3.2))
+print(round(-2.5))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "round without decimals should work");
+    assert!(stdout.contains("4"), "Should round 3.7 to 4");
+    assert!(stdout.contains("3"), "Should round 3.2 to 3");
+    assert!(
+        stdout.contains("-2") || stdout.contains("-3"),
+        "Should round -2.5"
+    );
+}
+
+#[test]
+fn test_round_with_decimals() {
+    let code = r#"
+print(round(3.14159, 2))
+print(round(3.14159, 4))
+print(round(2.5, 0))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "round with decimals should work");
+    assert!(stdout.contains("3.14"), "Should round to 3.14");
+    assert!(stdout.contains("3.1416"), "Should round to 3.1416");
+}
+
+#[test]
+fn test_round_with_zero_decimals() {
+    let code = r#"
+let result = round(3.7, 0)
+print(result)
+// Verify it's a float by doing float math
+let check = result + 0.5
+print(check)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "round with 0 decimals should work");
+    assert!(stdout.contains("4"), "Should round to 4");
+    assert!(
+        stdout.contains("4.5"),
+        "Should be able to do float math (4 + 0.5 = 4.5)"
+    );
+}
+
+// ============================================================================
+// First/Last with Default
+// ============================================================================
+
+#[test]
+fn test_first_without_default() {
+    let code = r#"
+import { first } from "std/collections"
+let nums = [10, 20, 30]
+let result = first(nums)
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "first without default should work");
+    assert!(stdout.contains("Some(10)"), "Should return Some(10)");
+}
+
+#[test]
+fn test_first_with_default_value_exists() {
+    let code = r#"
+import { first } from "std/collections"
+let nums = [10, 20, 30]
+let result = first(nums, -1)
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "first with default should return value");
+    assert!(stdout.contains("10"), "Should return 10 directly");
+    assert!(!stdout.contains("Some"), "Should not return Option");
+}
+
+#[test]
+fn test_first_with_default_empty_array() {
+    let code = r#"
+import { first } from "std/collections"
+let nums = []
+let result = first(nums, -1)
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "first with default on empty array should return default"
+    );
+    assert!(stdout.contains("-1"), "Should return default -1");
+}
+
+#[test]
+fn test_last_without_default() {
+    let code = r#"
+import { last } from "std/collections"
+let nums = [10, 20, 30]
+let result = last(nums)
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "last without default should work");
+    assert!(stdout.contains("Some(30)"), "Should return Some(30)");
+}
+
+#[test]
+fn test_last_with_default_value_exists() {
+    let code = r#"
+import { last } from "std/collections"
+let nums = [10, 20, 30]
+let result = last(nums, -1)
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "last with default should return value");
+    assert!(stdout.contains("30"), "Should return 30 directly");
+    assert!(!stdout.contains("Some"), "Should not return Option");
+}
+
+#[test]
+fn test_last_with_default_empty_array() {
+    let code = r#"
+import { last } from "std/collections"
+let nums = []
+let result = last(nums, -1)
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "last with default on empty array should return default"
+    );
+    assert!(stdout.contains("-1"), "Should return default -1");
 }

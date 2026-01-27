@@ -61,14 +61,35 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // first(arr) -> Option<Value>
+    // first(arr) -> Option<Value> or first(arr, default) -> Value
     module.insert(
         "first".to_string(),
         Value::NativeFunction {
             name: "first".to_string(),
-            arity: 1,
-            func: |args| match &args[0] {
-                Value::Array(arr) => match arr.first() {
+            arity: 0, // Variable: 1 or 2 args
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::TypeError(
+                        "first() requires 1 or 2 arguments".to_string(),
+                    ));
+                }
+
+                let arr = match &args[0] {
+                    Value::Array(arr) => arr,
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "first() requires an array as first argument".to_string(),
+                        ))
+                    }
+                };
+
+                // If default provided, return value or default directly
+                if args.len() == 2 {
+                    return Ok(arr.first().cloned().unwrap_or_else(|| args[1].clone()));
+                }
+
+                // No default: return Option
+                match arr.first() {
                     Some(v) => Ok(Value::EnumValue {
                         enum_name: "Option".to_string(),
                         variant: "Some".to_string(),
@@ -79,22 +100,40 @@ pub fn init() -> HashMap<String, Value> {
                         variant: "None".to_string(),
                         values: vec![],
                     }),
-                },
-                _ => Err(IntentError::TypeError(
-                    "first() requires an array".to_string(),
-                )),
+                }
             },
         },
     );
 
-    // last(arr) -> Option<Value>
+    // last(arr) -> Option<Value> or last(arr, default) -> Value
     module.insert(
         "last".to_string(),
         Value::NativeFunction {
             name: "last".to_string(),
-            arity: 1,
-            func: |args| match &args[0] {
-                Value::Array(arr) => match arr.last() {
+            arity: 0, // Variable: 1 or 2 args
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::TypeError(
+                        "last() requires 1 or 2 arguments".to_string(),
+                    ));
+                }
+
+                let arr = match &args[0] {
+                    Value::Array(arr) => arr,
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "last() requires an array as first argument".to_string(),
+                        ))
+                    }
+                };
+
+                // If default provided, return value or default directly
+                if args.len() == 2 {
+                    return Ok(arr.last().cloned().unwrap_or_else(|| args[1].clone()));
+                }
+
+                // No default: return Option
+                match arr.last() {
                     Some(v) => Ok(Value::EnumValue {
                         enum_name: "Option".to_string(),
                         variant: "Some".to_string(),
@@ -105,10 +144,7 @@ pub fn init() -> HashMap<String, Value> {
                         variant: "None".to_string(),
                         values: vec![],
                     }),
-                },
-                _ => Err(IntentError::TypeError(
-                    "last() requires an array".to_string(),
-                )),
+                }
             },
         },
     );

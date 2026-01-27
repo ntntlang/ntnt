@@ -1182,6 +1182,10 @@ impl Glossary {
                     (ial::CheckOp::Exists, p) if p.contains("json") || p.contains("id") => {
                         return Some(Assertion::JsonPathExists(expected_str));
                     }
+                    // Unit test result assertions
+                    (ial::CheckOp::Equals, "result") => {
+                        return Some(Assertion::ResultEquals(expected_str));
+                    }
                     _ => {}
                 }
             }
@@ -4258,7 +4262,9 @@ fn run_function_call_test(test: &TestCase, base_dir: Option<&Path>) -> TestResul
     };
 
     // Create interpreter and eval the AST
+    // Use unit test mode to skip server-related calls (listen, get, post, etc.)
     let mut interpreter = Interpreter::new();
+    interpreter.set_execution_mode(crate::interpreter::ExecutionMode::UnitTest);
     if let Err(e) = interpreter.eval(&ast) {
         return make_error(format!("Failed to load source: {}", e));
     }
@@ -5297,8 +5303,8 @@ pub fn run_tests_against_server(
                             scenario_name: Some(scenario.name.clone()),
                         };
 
-                        // Add to test_results for backward compatibility
-                        test_results.push(live_test_result.clone());
+                        // Note: Scenarios are tracked in scenario_results, not test_results
+                        // test_results is for legacy test: blocks only
 
                         // Determine status: warning if there are unresolved outcomes
                         let status = if !unresolved_outcomes.is_empty() {

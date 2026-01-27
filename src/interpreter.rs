@@ -278,6 +278,18 @@ impl Default for Environment {
     }
 }
 
+/// Execution mode controls how server-related functions behave
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ExecutionMode {
+    /// Normal execution - all functions run normally
+    #[default]
+    Normal,
+    /// Hot-reload mode - skip listen(), re-register routes
+    HotReload,
+    /// Unit test mode - skip all server-related calls
+    UnitTest,
+}
+
 /// The Intent interpreter
 pub struct Interpreter {
     environment: Rc<RefCell<Environment>>,
@@ -312,10 +324,14 @@ pub struct Interpreter {
     main_source_file: Option<String>,
     /// Main source file last modification time
     main_source_mtime: Option<std::time::SystemTime>,
-    /// Flag to track if we're currently in a hot-reload evaluation
-    is_hot_reloading: bool,
+    /// Tracked imported files for hot-reload (path -> mtime)
+    imported_files: HashMap<String, std::time::SystemTime>,
     /// Request timeout in seconds for HTTP server
     request_timeout_secs: u64,
+    /// Execution mode controls how server-related functions behave
+    execution_mode: ExecutionMode,
+    /// Lib modules for file-based routing (stored for hot-reload)
+    lib_modules: HashMap<String, HashMap<String, Value>>,
 }
 
 /// Information about a trait definition
@@ -356,8 +372,10 @@ impl Interpreter {
             test_mode: None,
             main_source_file: None,
             main_source_mtime: None,
-            is_hot_reloading: false,
+            imported_files: HashMap::new(),
             request_timeout_secs: 30,
+            execution_mode: ExecutionMode::Normal,
+            lib_modules: HashMap::new(),
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
@@ -378,6 +396,34 @@ impl Interpreter {
     /// Set the request timeout for the HTTP server (in seconds)
     pub fn set_request_timeout(&mut self, seconds: u64) {
         self.request_timeout_secs = seconds;
+    }
+
+    /// Set the execution mode for the interpreter
+    pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
+        self.execution_mode = mode;
+    }
+
+    /// Check if a server-related function should be skipped entirely
+    fn should_skip_server_call(&self, name: &str) -> bool {
+        match self.execution_mode {
+            ExecutionMode::Normal => false,
+            ExecutionMode::HotReload => {
+                // In hot-reload, only skip listen() and on_shutdown()
+                matches!(name, "listen" | "on_shutdown")
+            }
+            ExecutionMode::UnitTest => {
+                // In unit test mode, skip all server-related functions
+                matches!(
+                    name,
+                    "listen" | "serve_static" | "routes" | "use_middleware" | "on_shutdown"
+                )
+            }
+        }
+    }
+
+    /// Check if route registration should be skipped (for HTTP methods used as routes)
+    fn should_skip_route_registration(&self) -> bool {
+        self.execution_mode == ExecutionMode::UnitTest
     }
 
     /// Set the current file path for relative imports
@@ -447,7 +493,8 @@ impl Interpreter {
         self.main_source_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
     }
 
-    /// Check if the main source file needs reloading and reload if necessary
+    /// Check if any tracked source file needs reloading and reload if necessary
+    /// Checks the main source file AND all imported files
     /// Returns true if reload happened, false otherwise
     fn check_and_reload_main_source(&mut self) -> bool {
         // Check if hot-reload is enabled
@@ -461,7 +508,8 @@ impl Interpreter {
             _ => return false,
         };
 
-        // Check current mtime
+        // Check if main file changed
+        let mut changed_file: Option<String> = None;
         let current_mtime = match std::fs::metadata(&file_path) {
             Ok(m) => match m.modified() {
                 Ok(mt) => mt,
@@ -470,15 +518,34 @@ impl Interpreter {
             Err(_) => return false,
         };
 
-        // No change
-        if current_mtime <= cached_mtime {
-            return false;
+        if current_mtime > cached_mtime {
+            changed_file = Some(file_path.clone());
         }
 
-        // File changed - reload!
-        println!("\n[hot-reload] {} changed, reloading...", file_path);
+        // Check all imported files for changes
+        if changed_file.is_none() {
+            for (import_path, import_mtime) in &self.imported_files {
+                if let Ok(metadata) = std::fs::metadata(import_path) {
+                    if let Ok(current) = metadata.modified() {
+                        if current > *import_mtime {
+                            changed_file = Some(import_path.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
-        // Read the new source
+        // No changes detected
+        let changed_file = match changed_file {
+            Some(f) => f,
+            None => return false,
+        };
+
+        // File changed - reload!
+        println!("\n[hot-reload] {} changed, reloading...", changed_file);
+
+        // Read the main source (we always reload from the main file)
         let source_code = match std::fs::read_to_string(&file_path) {
             Ok(s) => s,
             Err(e) => {
@@ -506,8 +573,9 @@ impl Interpreter {
         // Clear current state (routes, middleware, etc.) but keep server running
         self.server_state.clear();
 
-        // Clear loaded modules FIRST to force reimport (before redefining stdlib)
+        // Clear loaded modules and imported file tracking to force reimport
         self.loaded_modules.clear();
+        self.imported_files.clear();
 
         // Reset environment but keep builtins
         self.environment = std::rc::Rc::new(std::cell::RefCell::new(Environment::new()));
@@ -518,17 +586,23 @@ impl Interpreter {
         // Re-set the current file for imports
         self.current_file = Some(file_path.clone());
 
-        // Set hot-reload flag so listen() knows to skip re-binding
-        self.is_hot_reloading = true;
+        // Set hot-reload mode so listen() knows to skip re-binding
+        self.execution_mode = ExecutionMode::HotReload;
 
         // Re-evaluate the AST
         let result = match self.eval(&ast) {
             Ok(_) => {
-                // Update mtime
-                self.main_source_mtime = Some(current_mtime);
+                // Update main file mtime
+                self.main_source_mtime = Some(
+                    std::fs::metadata(&file_path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(current_mtime),
+                );
+                let import_count = self.imported_files.len();
                 println!(
-                    "[hot-reload] Reload complete. {} routes registered.",
-                    self.server_state.route_count()
+                    "[hot-reload] Reload complete. {} routes, {} imports tracked.",
+                    self.server_state.route_count(),
+                    import_count
                 );
                 true
             }
@@ -538,8 +612,8 @@ impl Interpreter {
             }
         };
 
-        // Clear hot-reload flag
-        self.is_hot_reloading = false;
+        // Reset to normal mode
+        self.execution_mode = ExecutionMode::Normal;
         result
     }
 
@@ -723,18 +797,53 @@ impl Interpreter {
             },
         );
 
-        // Round to nearest integer
+        // Round to nearest integer, or to N decimal places: round(value) or round(value, decimals)
         self.environment.borrow_mut().define(
             "round".to_string(),
             Value::NativeFunction {
                 name: "round".to_string(),
-                arity: 1,
-                func: |args| match &args[0] {
-                    Value::Int(n) => Ok(Value::Int(*n)),
-                    Value::Float(f) => Ok(Value::Int(f.round() as i64)),
-                    _ => Err(IntentError::TypeError(
-                        "round() requires a number".to_string(),
-                    )),
+                arity: 0, // Variable arity: 1 or 2 args
+                func: |args| {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(IntentError::TypeError(
+                            "round() requires 1 or 2 arguments".to_string(),
+                        ));
+                    }
+
+                    let value = match &args[0] {
+                        Value::Int(n) => *n as f64,
+                        Value::Float(f) => *f,
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "round() requires a number as first argument".to_string(),
+                            ))
+                        }
+                    };
+
+                    // If no decimals specified, round to integer (original behavior)
+                    if args.len() == 1 {
+                        return Ok(Value::Int(value.round() as i64));
+                    }
+
+                    // Round to N decimal places
+                    let decimals = match &args[1] {
+                        Value::Int(n) => *n,
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "round() requires an integer for decimal places".to_string(),
+                            ))
+                        }
+                    };
+
+                    if decimals < 0 {
+                        return Err(IntentError::TypeError(
+                            "round() decimal places must be non-negative".to_string(),
+                        ));
+                    }
+
+                    let multiplier = 10_f64.powi(decimals as i32);
+                    let rounded = (value * multiplier).round() / multiplier;
+                    Ok(Value::Float(rounded))
                 },
             },
         );
@@ -1326,6 +1435,13 @@ impl Interpreter {
         self.loaded_modules
             .insert(source_key.clone(), module_exports.clone());
 
+        // Track for hot-reload (record mtime)
+        if let Ok(metadata) = std::fs::metadata(&file_path) {
+            if let Ok(mtime) = metadata.modified() {
+                self.imported_files.insert(source_key.clone(), mtime);
+            }
+        }
+
         // Bind imports
         self.bind_imports(items, &module_exports, &source_key, alias)
     }
@@ -1389,6 +1505,9 @@ impl Interpreter {
             }
         }
 
+        // Store lib_modules for hot-reload
+        self.lib_modules = lib_modules.clone();
+
         // Check for middleware/ directory and load middleware in order
         let middleware_dir = base_dir
             .parent()
@@ -1433,14 +1552,23 @@ impl Interpreter {
         let routes = self.discover_routes(&base_dir, &base_dir, &lib_modules)?;
 
         // Register all discovered routes with source info for hot-reload
-        for (method, pattern, handler, file) in &routes {
+        for (method, pattern, handler, file, imports) in &routes {
             self.server_state.add_route_with_source(
                 method,
                 pattern,
                 handler.clone(),
                 Some(file.clone()),
+                imports.clone(),
             );
-            println!("  {} {} -> {}", method, pattern, file);
+            let import_count = imports.len();
+            if import_count > 0 {
+                println!(
+                    "  {} {} -> {} ({} imports)",
+                    method, pattern, file, import_count
+                );
+            } else {
+                println!("  {} {} -> {}", method, pattern, file);
+            }
         }
 
         Ok(Value::Int(routes.len() as i64))
@@ -1502,7 +1630,15 @@ impl Interpreter {
         dir: &std::path::Path,
         base_dir: &std::path::Path,
         lib_modules: &HashMap<String, HashMap<String, Value>>,
-    ) -> Result<Vec<(String, String, Value, String)>> {
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            Value,
+            String,
+            HashMap<String, std::time::SystemTime>,
+        )>,
+    > {
         use std::fs;
 
         let mut routes = Vec::new();
@@ -1540,12 +1676,21 @@ impl Interpreter {
     }
 
     /// Process a single route file and extract HTTP method handlers
+    /// Returns: Vec<(method, pattern, handler, file_path, imported_files)>
     fn process_route_file(
         &mut self,
         file_path: &std::path::Path,
         base_dir: &std::path::Path,
         lib_modules: &HashMap<String, HashMap<String, Value>>,
-    ) -> Result<Vec<(String, String, Value, String)>> {
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            Value,
+            String,
+            HashMap<String, std::time::SystemTime>,
+        )>,
+    > {
         use crate::lexer::Lexer;
         use crate::parser::Parser;
         use std::fs;
@@ -1572,6 +1717,7 @@ impl Interpreter {
         // Create a fresh environment for the route module
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
+        let previous_imports = std::mem::take(&mut self.imported_files);
 
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
@@ -1598,6 +1744,9 @@ impl Interpreter {
         // Evaluate the module
         self.eval(&ast)?;
 
+        // Capture imports made by this route file
+        let route_imports = std::mem::take(&mut self.imported_files);
+
         // Find exported HTTP method handlers
         let http_methods = ["get", "post", "put", "delete", "patch", "head", "options"];
 
@@ -1612,21 +1761,28 @@ impl Interpreter {
                         url_pattern.clone(),
                         handler.clone(),
                         file_path.to_string_lossy().to_string(),
+                        route_imports.clone(),
                     ));
                 }
             }
         }
         drop(env);
 
-        // Restore environment
+        // Restore environment and imports
         self.environment = previous_env;
         self.current_file = previous_file;
+        self.imported_files = previous_imports;
 
         Ok(routes)
     }
 
     /// Reload a single route handler from a file (for hot-reload)
-    fn reload_route_handler(&mut self, file_path: &str, method: &str) -> Result<Value> {
+    /// Returns: (handler, imported_files)
+    fn reload_route_handler(
+        &mut self,
+        file_path: &str,
+        method: &str,
+    ) -> Result<(Value, HashMap<String, std::time::SystemTime>)> {
         use crate::lexer::Lexer;
         use crate::parser::Parser;
         use std::fs;
@@ -1643,9 +1799,10 @@ impl Interpreter {
         let mut parser = Parser::new(tokens);
         let ast = parser.parse()?;
 
-        // Create a fresh environment
+        // Create a fresh environment and save import state
         let previous_env = Rc::clone(&self.environment);
         let previous_file = self.current_file.clone();
+        let previous_imports = std::mem::take(&mut self.imported_files);
 
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string());
@@ -1654,8 +1811,26 @@ impl Interpreter {
         self.define_builtins();
         self.define_builtin_types();
 
+        // Inject lib modules (same as initial route processing)
+        for (name, exports) in &self.lib_modules {
+            let mut fields = HashMap::new();
+            for (fn_name, value) in exports {
+                fields.insert(fn_name.clone(), value.clone());
+            }
+            self.environment.borrow_mut().define(
+                name.clone(),
+                Value::Struct {
+                    name: format!("lib:{}", name),
+                    fields,
+                },
+            );
+        }
+
         // Evaluate the module
         self.eval(&ast)?;
+
+        // Capture imports made by this route file
+        let route_imports = std::mem::take(&mut self.imported_files);
 
         // Find the handler for the specified method
         let method_name = method.to_lowercase();
@@ -1663,16 +1838,19 @@ impl Interpreter {
         let handler = env.values.get(&method_name).cloned();
         drop(env);
 
-        // Restore environment
+        // Restore environment and imports
         self.environment = previous_env;
         self.current_file = previous_file;
+        self.imported_files = previous_imports;
 
-        handler.ok_or_else(|| {
+        let handler = handler.ok_or_else(|| {
             IntentError::RuntimeError(format!(
                 "Handler '{}' not found in {}",
                 method_name, file_path
             ))
-        })
+        })?;
+
+        Ok((handler, route_imports))
     }
 
     /// Convert a file path to a URL pattern
@@ -2201,8 +2379,8 @@ impl Interpreter {
 
                     // Special handling for listen() - starts HTTP server
                     if name == "listen" && arguments.len() == 1 {
-                        // During hot-reload, skip listen() since server is already running
-                        if self.is_hot_reloading {
+                        // Skip in hot-reload (server already running) and unit-test mode
+                        if self.should_skip_server_call("listen") {
                             return Ok(Value::Unit);
                         }
                         let port = self.eval_expression(&arguments[0])?;
@@ -2230,6 +2408,9 @@ impl Interpreter {
 
                     // Special handling for serve_static(url_prefix, directory)
                     if name == "serve_static" && arguments.len() == 2 {
+                        if self.should_skip_server_call("serve_static") {
+                            return Ok(Value::Unit);
+                        }
                         let prefix = self.eval_expression(&arguments[0])?;
                         let directory = self.eval_expression(&arguments[1])?;
 
@@ -2266,6 +2447,9 @@ impl Interpreter {
 
                     // Special handling for routes(directory) - file-based routing
                     if name == "routes" && arguments.len() == 1 {
+                        if self.should_skip_server_call("routes") {
+                            return Ok(Value::Unit);
+                        }
                         let directory = self.eval_expression(&arguments[0])?;
                         if let Value::String(dir_str) = directory {
                             return self.load_file_based_routes(&dir_str);
@@ -2278,6 +2462,9 @@ impl Interpreter {
 
                     // Special handling for use_middleware(handler_fn)
                     if name == "use_middleware" && arguments.len() == 1 {
+                        if self.should_skip_server_call("use_middleware") {
+                            return Ok(Value::Unit);
+                        }
                         let handler = self.eval_expression(&arguments[0])?;
                         self.server_state.add_middleware(handler);
                         return Ok(Value::Unit);
@@ -2285,6 +2472,9 @@ impl Interpreter {
 
                     // Special handling for on_shutdown(handler_fn)
                     if name == "on_shutdown" && arguments.len() == 1 {
+                        if self.should_skip_server_call("on_shutdown") {
+                            return Ok(Value::Unit);
+                        }
                         let handler = self.eval_expression(&arguments[0])?;
                         self.server_state.add_shutdown_handler(handler);
                         return Ok(Value::Unit);
@@ -2462,6 +2652,48 @@ impl Interpreter {
                         }
                     }
 
+                    // Special handling for filter(arr, fn) - higher-order function
+                    if name == "filter" && arguments.len() == 2 {
+                        let arr = self.eval_expression(&arguments[0])?;
+                        let predicate = self.eval_expression(&arguments[1])?;
+
+                        if let Value::Array(items) = arr {
+                            let mut result = Vec::new();
+                            for item in items {
+                                let should_include =
+                                    self.call_function(predicate.clone(), vec![item.clone()])?;
+                                if should_include.is_truthy() {
+                                    result.push(item);
+                                }
+                            }
+                            return Ok(Value::Array(result));
+                        } else {
+                            return Err(IntentError::TypeError(
+                                "filter() requires an array as first argument".to_string(),
+                            ));
+                        }
+                    }
+
+                    // Special handling for transform(arr, fn) - higher-order function
+                    if name == "transform" && arguments.len() == 2 {
+                        let arr = self.eval_expression(&arguments[0])?;
+                        let transform_fn = self.eval_expression(&arguments[1])?;
+
+                        if let Value::Array(items) = arr {
+                            let mut result = Vec::new();
+                            for item in items {
+                                let transformed =
+                                    self.call_function(transform_fn.clone(), vec![item])?;
+                                result.push(transformed);
+                            }
+                            return Ok(Value::Array(result));
+                        } else {
+                            return Err(IntentError::TypeError(
+                                "transform() requires an array as first argument".to_string(),
+                            ));
+                        }
+                    }
+
                     // Special handling for HTTP route registration
                     // Only intercept if first arg is a route pattern (starts with /)
                     // NOT if it's a URL (starts with http:// or https://) - those are HTTP client calls
@@ -2473,6 +2705,10 @@ impl Interpreter {
                         if let Value::String(pattern_str) = &pattern {
                             // Route patterns start with /, URLs start with http
                             if pattern_str.starts_with('/') {
+                                // Skip route registration in unit test mode
+                                if self.should_skip_route_registration() {
+                                    return Ok(Value::Unit);
+                                }
                                 let handler = self.eval_expression(&arguments[1])?;
                                 let method = name.to_uppercase();
                                 self.server_state.add_route(&method, pattern_str, handler);
@@ -3836,15 +4072,18 @@ impl Interpreter {
             if let Some((mut handler, route_params, route_index)) =
                 self.server_state.find_route(&method, &path)
             {
-                // Hot-reload check: if file changed, reload the handler
+                // Hot-reload check: if file or its imports changed, reload the handler
                 if self.server_state.needs_reload(route_index) {
                     if let Some(source) = self.server_state.get_route_source(route_index).cloned() {
                         if let Some(file_path) = &source.file_path {
                             // Re-parse and reload the handler
                             match self.reload_route_handler(file_path, &method) {
-                                Ok(new_handler) => {
-                                    self.server_state
-                                        .update_route_handler(route_index, new_handler.clone());
+                                Ok((new_handler, new_imports)) => {
+                                    self.server_state.update_route_handler(
+                                        route_index,
+                                        new_handler.clone(),
+                                        new_imports,
+                                    );
                                     handler = new_handler;
                                     println!("[hot-reload] Reloaded: {}", file_path);
                                 }
@@ -4007,8 +4246,15 @@ impl Interpreter {
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(port);
 
-        // Enable hot-reload by default for the async server
-        self.server_state.hot_reload = true;
+        // Enable hot-reload unless in production mode
+        let is_production = std::env::var("NTNT_ENV")
+            .map(|v| v == "production" || v == "prod")
+            .unwrap_or(false);
+        self.server_state.hot_reload = !is_production;
+
+        if is_production {
+            println!("Running in production mode (hot-reload disabled)");
+        }
 
         // Create the channel for interpreter communication
         let config = BridgeConfig::default();
@@ -4095,9 +4341,42 @@ impl Interpreter {
                     let method = &request.method;
                     let path = &request.path;
 
-                    if let Some((handler, route_params, _route_index)) =
+                    if let Some((mut handler, route_params, route_index)) =
                         self.server_state.find_route(method, path)
                     {
+                        // Hot-reload check: if route file or its imports changed, reload the handler
+                        if self.server_state.needs_reload(route_index) {
+                            if let Some(source) =
+                                self.server_state.get_route_source(route_index).cloned()
+                            {
+                                if let Some(file_path) = &source.file_path {
+                                    match self.reload_route_handler(file_path, method) {
+                                        Ok((new_handler, new_imports)) => {
+                                            self.server_state.update_route_handler(
+                                                route_index,
+                                                new_handler.clone(),
+                                                new_imports,
+                                            );
+                                            handler = new_handler;
+                                            println!("[hot-reload] Reloaded: {}", file_path);
+                                            // Sync updated routes to async state
+                                            sync_routes_to_async(
+                                                &self.server_state,
+                                                &async_routes,
+                                                &sync_rt,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[hot-reload] Error reloading {}: {}",
+                                                file_path, e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Merge route params with request params
                         let mut full_request = request.clone();
                         for (k, v) in route_params {
@@ -6590,9 +6869,9 @@ c")
         // Test JSON parsing - use raw string for JSON
         let result = eval(
             r##"
-            import { parse } from "std/json"
+            import { parse_json } from "std/json"
             let json_str = r#"{"name": "Alice", "age": 30}"#
-            match parse(json_str) {
+            match parse_json(json_str) {
                 Ok(obj) => obj.name,
                 Err(e) => e,
             }
@@ -6610,8 +6889,8 @@ c")
     fn test_std_json_parse_array() {
         let result = eval(
             r#"
-            import { parse } from "std/json"
-            match parse("[1, 2, 3]") {
+            import { parse_json } from "std/json"
+            match parse_json("[1, 2, 3]") {
                 Ok(arr) => len(arr),
                 Err(e) => 0,
             }
@@ -6642,10 +6921,10 @@ c")
     fn test_std_json_roundtrip() {
         let result = eval(
             r#"
-            import { parse, stringify } from "std/json"
+            import { parse_json, stringify } from "std/json"
             let original = map { "x": 1, "y": 2 }
             let json_str = stringify(original)
-            match parse(json_str) {
+            match parse_json(json_str) {
                 Ok(parsed) => parsed.x,
                 Err(_) => -1,
             }
@@ -6849,8 +7128,8 @@ c")
     fn test_std_url_parse() {
         let result = eval(
             r#"
-            import { parse } from "std/url"
-            match parse("https://example.com:8080/path?foo=bar#section") {
+            import { parse_url } from "std/url"
+            match parse_url("https://example.com:8080/path?foo=bar#section") {
                 Ok(url) => url.host,
                 Err(_) => "error",
             }
@@ -6868,8 +7147,8 @@ c")
     fn test_std_url_parse_port() {
         let result = eval(
             r#"
-            import { parse } from "std/url"
-            match parse("https://example.com:8080/path") {
+            import { parse_url } from "std/url"
+            match parse_url("https://example.com:8080/path") {
                 Ok(url) => url.port,
                 Err(_) => -1,
             }
@@ -6883,8 +7162,8 @@ c")
     fn test_std_url_parse_query_params() {
         let result = eval(
             r#"
-            import { parse } from "std/url"
-            match parse("https://example.com?name=alice&age=30") {
+            import { parse_url } from "std/url"
+            match parse_url("https://example.com?name=alice&age=30") {
                 Ok(url) => url.params.name,
                 Err(_) => "error",
             }
@@ -7107,7 +7386,7 @@ c")
         let result = eval(
             r#"
             import { fetch } from "std/http"
-            
+
             let cookies = map { "session": "abc123" }
             let opts = map {
                 "url": "invalid://test",
@@ -7123,5 +7402,106 @@ c")
         )
         .unwrap();
         assert!(matches!(result, Value::String(_)));
+    }
+
+    // === ExecutionMode Tests ===
+
+    #[test]
+    fn test_execution_mode_default() {
+        let interpreter = Interpreter::new();
+        assert_eq!(interpreter.execution_mode, ExecutionMode::Normal);
+    }
+
+    #[test]
+    fn test_execution_mode_set() {
+        let mut interpreter = Interpreter::new();
+        interpreter.set_execution_mode(ExecutionMode::UnitTest);
+        assert_eq!(interpreter.execution_mode, ExecutionMode::UnitTest);
+
+        interpreter.set_execution_mode(ExecutionMode::HotReload);
+        assert_eq!(interpreter.execution_mode, ExecutionMode::HotReload);
+
+        interpreter.set_execution_mode(ExecutionMode::Normal);
+        assert_eq!(interpreter.execution_mode, ExecutionMode::Normal);
+    }
+
+    #[test]
+    fn test_should_skip_server_call_normal_mode() {
+        let interpreter = Interpreter::new();
+        // Normal mode should never skip
+        assert!(!interpreter.should_skip_server_call("listen"));
+        assert!(!interpreter.should_skip_server_call("serve_static"));
+        assert!(!interpreter.should_skip_server_call("routes"));
+        assert!(!interpreter.should_skip_server_call("use_middleware"));
+        assert!(!interpreter.should_skip_server_call("on_shutdown"));
+        assert!(!interpreter.should_skip_server_call("other_function"));
+    }
+
+    #[test]
+    fn test_should_skip_server_call_unit_test_mode() {
+        let mut interpreter = Interpreter::new();
+        interpreter.set_execution_mode(ExecutionMode::UnitTest);
+
+        // Unit test mode should skip all server-related functions
+        assert!(interpreter.should_skip_server_call("listen"));
+        assert!(interpreter.should_skip_server_call("serve_static"));
+        assert!(interpreter.should_skip_server_call("routes"));
+        assert!(interpreter.should_skip_server_call("use_middleware"));
+        assert!(interpreter.should_skip_server_call("on_shutdown"));
+
+        // But not other functions
+        assert!(!interpreter.should_skip_server_call("print"));
+        assert!(!interpreter.should_skip_server_call("other_function"));
+    }
+
+    #[test]
+    fn test_should_skip_server_call_hot_reload_mode() {
+        let mut interpreter = Interpreter::new();
+        interpreter.set_execution_mode(ExecutionMode::HotReload);
+
+        // Hot-reload mode should only skip listen and on_shutdown
+        assert!(interpreter.should_skip_server_call("listen"));
+        assert!(interpreter.should_skip_server_call("on_shutdown"));
+
+        // But NOT these - they need to re-register
+        assert!(!interpreter.should_skip_server_call("serve_static"));
+        assert!(!interpreter.should_skip_server_call("routes"));
+        assert!(!interpreter.should_skip_server_call("use_middleware"));
+    }
+
+    #[test]
+    fn test_should_skip_route_registration() {
+        let mut interpreter = Interpreter::new();
+
+        // Normal mode - don't skip
+        assert!(!interpreter.should_skip_route_registration());
+
+        // Hot-reload mode - don't skip (need to re-register routes)
+        interpreter.set_execution_mode(ExecutionMode::HotReload);
+        assert!(!interpreter.should_skip_route_registration());
+
+        // Unit test mode - skip route registration
+        interpreter.set_execution_mode(ExecutionMode::UnitTest);
+        assert!(interpreter.should_skip_route_registration());
+    }
+
+    #[test]
+    fn test_imported_files_tracking() {
+        let mut interpreter = Interpreter::new();
+
+        // Initially empty
+        assert!(interpreter.imported_files.is_empty());
+
+        // Add some imports
+        let now = std::time::SystemTime::now();
+        interpreter
+            .imported_files
+            .insert("/path/to/file.tnt".to_string(), now);
+        interpreter
+            .imported_files
+            .insert("/path/to/other.tnt".to_string(), now);
+
+        assert_eq!(interpreter.imported_files.len(), 2);
+        assert!(interpreter.imported_files.contains_key("/path/to/file.tnt"));
     }
 }

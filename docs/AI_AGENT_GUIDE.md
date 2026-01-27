@@ -208,6 +208,92 @@ ntnt intent init server.intent    # Generate code scaffolding from intent
 
 **Use Intent Studio during development** - it shows live pass/fail indicators as you code!
 
+### Unit Testing Functions with IAL
+
+IAL supports unit testing individual functions using the `call:` keyword in glossary terms.
+
+#### Glossary Syntax for Function Calls
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+# Unit test terms - MUST include source: to specify the .tnt file
+| rounding {value} to 1dp | call: round_1dp({value}), source: myfile.tnt |
+| extracting name from {data} | call: extract_name({data}), source: myfile.tnt |
+| checking if {line} is valid | call: is_valid_line({line}), source: myfile.tnt |
+```
+
+**Key requirements:**
+- `call: function_name({params})` - specifies the function to call with parameter placeholders
+- `source: filename.tnt` - **REQUIRED** - specifies which .tnt file contains the function
+- Parameters in `{braces}` are captured from the When clause and substituted
+
+#### Writing Unit Test Scenarios
+
+```yaml
+Feature: Decimal Rounding
+  id: feature.unit_round_1dp
+  description: "Round values to one decimal place for display"
+
+  Scenario: Rounds down correctly
+    When rounding 45.24 to 1dp
+    → result is "45.2"
+
+  Scenario: Rounds up correctly
+    When rounding 45.25 to 1dp
+    → result is "45.3"
+
+  Scenario: Handles negative values
+    When rounding -5.67 to 1dp
+    → result is "-5.7"
+```
+
+#### Result Assertions
+
+| Assertion | Description |
+|-----------|-------------|
+| `result is {value}` | Exact equality check |
+| `result equals {value}` | Exact equality check (alias) |
+| `result.field is {value}` | Check a field on a map result |
+| `result is true` / `result is false` | Boolean checks |
+
+#### Complete Unit Test Example
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+| validating email {email} | call: is_valid_email({email}), source: validators.tnt |
+| formatting date {date} | call: format_date({date}), source: utils.tnt |
+
+---
+
+Feature: Email Validation
+  id: feature.unit_email_validation
+  description: "Validate email address format"
+
+  Scenario: Accepts valid email
+    When validating email "user@example.com"
+    → result is true
+
+  Scenario: Rejects email without @
+    When validating email "userexample.com"
+    → result is false
+
+  Scenario: Rejects empty string
+    When validating email ""
+    → result is false
+```
+
+#### Current Limitations
+
+- **Array parameters**: Complex types like `[1, 2, 3]` may not parse correctly as function arguments
+- **Nested results**: Deep field access like `result.nested.field` may have issues
+- Keep unit test parameters simple (strings, numbers, booleans)
+
 ---
 
 ## Critical Syntax Rules (Common Mistakes)
@@ -359,6 +445,22 @@ req.json       // Use parse_json(req)
 req.form       // Use parse_form(req)
 req.params.id  // Use req.params["id"]
 ```
+
+### Environment Variables
+
+| Variable | Values | Description |
+|----------|--------|-------------|
+| `NTNT_ENV` | `production`, `prod` | Disables hot-reload for better performance |
+
+```bash
+# Development (default) - hot-reload enabled
+ntnt run server.tnt
+
+# Production - hot-reload disabled
+NTNT_ENV=production ntnt run server.tnt
+```
+
+**Hot-reload** watches your `.tnt` files and imported modules for changes, automatically reloading on the next request. Disable in production for zero filesystem overhead per request.
 
 ### Response Builder Functions
 
@@ -581,9 +683,11 @@ NTNT doesn't have a debugger. Use these strategies:
 | `float(x)` | Convert to float |
 | `type(x)` | Get type name |
 | `push(arr, item)` | Add to array |
+| `filter(arr, fn)` | Filter array with predicate |
+| `transform(arr, fn)` | Transform array elements |
 | `assert(cond)` | Assert condition |
 | `abs(n)`, `min(a,b)`, `max(a,b)` | Math functions |
-| `round(n)`, `floor(n)` | Rounding |
+| `round(n)`, `round(n, decimals)`, `floor(n)` | Rounding |
 | `get/post/put/patch/delete(pattern, handler)` | HTTP routes |
 | `listen(port)` | Start server |
 | `serve_static(prefix, dir)` | Static files |
@@ -600,10 +704,11 @@ import { json, html, text, redirect, status, not_found, error, response, parse_f
 import { connect, query, execute, close } from "std/db/postgres"
 import { fetch, download } from "std/http"
 import { read_file, write_file, exists } from "std/fs"
-import { parse, stringify } from "std/json"
+import { parse_json, stringify } from "std/json"
 import { get_env, load_env } from "std/env"
 import { now, format } from "std/time"
 import { sha256, uuid } from "std/crypto"
+import { first, last, keys, values, entries, has_key, get_key } from "std/collections"
 ```
 
 ### CLI Commands

@@ -6,7 +6,7 @@ import {
     year, month, month_name, day, hour, minute, second,
     weekday, weekday_name, day_of_year, is_leap_year,
     to_timezone, to_utc,
-    make_date, make_time, parse, parse_iso,
+    make_date, make_time, parse_datetime, parse_iso,
     add_days, add_weeks, add_months, add_years, add_hours, add_seconds,
     diff, before, after,
     list_timezones,
@@ -114,7 +114,7 @@ print("Difference: " + str(d["days"]) + " days, " + str(d["hours"]) + " hours")
 
 // Parsing
 print("\n--- Parsing Dates ---")
-match parse("2024-06-15 14:30:00", "%Y-%m-%d %H:%M:%S") {
+match parse_datetime("2024-06-15 14:30:00", "%Y-%m-%d %H:%M:%S") {
     Ok(parsed) => print("Parsed '2024-06-15 14:30:00': " + to_iso(parsed)),
     Err(e) => print("Parse error: " + e)
 }

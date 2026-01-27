@@ -2,7 +2,7 @@
 
 > **Auto-generated from [ial.toml](ial.toml)** - Do not edit directly.
 >
-> Last updated: v0.3.3
+> Last updated: v0.3.6
 
 IAL is a term rewriting engine that translates natural language assertions into executable tests
 
@@ -278,6 +278,45 @@ Define domain-specific terms in your .intent file
 Use {param} syntax for dynamic values in terms
 
 Example: `| they see {text} | body contains {text} |`
+
+### Keyword Syntax for Unit Tests
+
+Glossary terms can use special keywords to invoke function calls for unit testing
+
+```intent
+## Glossary
+
+| Term | Means |
+|------|-------|
+| rounding {value} | call: round_1dp({value}), source: utils.tnt |
+| validating {email} | call: is_valid_email({email}), source: validators.tnt |
+```
+
+**Keywords:**
+
+| Keyword | Description | Example |
+|---------|-------------|---------|
+| `call:` | Function to invoke | `call: my_function({param})` |
+| `input:` | Test data reference for expansion | `input: test_data.examples` |
+| `property:` | Property to verify | `property: deterministic` |
+| `source:` | Source file containing the function (required) | `source: myfile.tnt` |
+
+**Usage in Scenarios:**
+
+```intent
+Feature: Email Validation
+  id: feature.unit_email
+
+  Scenario: Valid email accepted
+    When validating "user@example.com"
+    → result is true
+
+  Scenario: Invalid email rejected
+    When validating "not-an-email"
+    → result is false
+```
+
+The `source:` keyword is **required** - it tells IAL which .tnt file contains the function to call.
 
 ### Resolution Order
 

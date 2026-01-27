@@ -3,7 +3,7 @@
 # Auto-generates: docs/SYNTAX_REFERENCE.md
 
 [meta]
-version = "0.3.3"
+# Note: Version is read from Cargo.toml at compile time
 description = "NTNT language syntax specification"
 
 # =============================================================================

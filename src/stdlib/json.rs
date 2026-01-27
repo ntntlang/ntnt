@@ -68,11 +68,11 @@ pub fn intent_value_to_json(value: &Value) -> serde_json::Value {
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // parse(json_str) -> Result<Value, Error>
+    // parse_json(json_str) -> Result<Value, Error>
     module.insert(
-        "parse".to_string(),
+        "parse_json".to_string(),
         Value::NativeFunction {
-            name: "parse".to_string(),
+            name: "parse_json".to_string(),
             arity: 1,
             func: |args| match &args[0] {
                 Value::String(json_str) => {
@@ -93,7 +93,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 }
                 _ => Err(IntentError::TypeError(
-                    "parse() requires a JSON string".to_string(),
+                    "parse_json() requires a JSON string".to_string(),
                 )),
             },
         },

@@ -5,7 +5,7 @@
 
 import { html } from "std/http/server"
 import { fetch } from "std/http"
-import { parse, stringify } from "std/json"
+import { parse_json, stringify } from "std/json"
 import { has_key } from "std/collections"
 
 // =============================================================================
@@ -69,7 +69,7 @@ fn crypto_chart(req) {
             }
 
             // Parse JSON response
-            match parse(res.body) {
+            match parse_json(res.body) {
                 Ok(data) => {
                     // Check if response has prices data
                     if !has_key(data, "prices") {

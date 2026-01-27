@@ -96,11 +96,11 @@ pub fn url_decode(s: &str) -> std::result::Result<String, String> {
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // parse(url) -> Result<Map, Error> - Parse URL into components
+    // parse_url(url) -> Result<Map, Error> - Parse URL into components
     module.insert(
-        "parse".to_string(),
+        "parse_url".to_string(),
         Value::NativeFunction {
-            name: "parse".to_string(),
+            name: "parse_url".to_string(),
             arity: 1,
             func: |args| {
                 match &args[0] {

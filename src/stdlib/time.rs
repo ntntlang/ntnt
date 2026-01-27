@@ -196,11 +196,11 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Parsing ==========
 
-    // parse(date_str, format_str) -> Result<Int, String> - Parse string to timestamp
+    // parse_datetime(date_str, format_str) -> Result<Int, String> - Parse string to timestamp
     module.insert(
-        "parse".to_string(),
+        "parse_datetime".to_string(),
         Value::NativeFunction {
-            name: "parse".to_string(),
+            name: "parse_datetime".to_string(),
             arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(date_str), Value::String(fmt)) => {
@@ -221,7 +221,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 }
                 _ => Err(IntentError::TypeError(
-                    "parse() requires (date_str: String, format: String)".to_string(),
+                    "parse_datetime() requires (date_str: String, format: String)".to_string(),
                 )),
             },
         },
