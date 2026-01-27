@@ -8,10 +8,15 @@ use std::process::Command;
 fn run_ntnt(args: &[&str]) -> (String, String, i32) {
     // Prefer debug binary (matches cargo test profile), fall back to release
     // This ensures we test the freshly built binary, not a cached release build
-    let binary = if std::path::Path::new("./target/debug/ntnt").exists() {
-        "./target/debug/ntnt"
-    } else if std::path::Path::new("./target/release/ntnt").exists() {
-        "./target/release/ntnt"
+    // Account for .exe extension on Windows
+    let exe = std::env::consts::EXE_SUFFIX;
+    let debug_path = format!("./target/debug/ntnt{}", exe);
+    let release_path = format!("./target/release/ntnt{}", exe);
+
+    let binary = if std::path::Path::new(&debug_path).exists() {
+        debug_path
+    } else if std::path::Path::new(&release_path).exists() {
+        release_path
     } else {
         panic!("No ntnt binary found. Run 'cargo build' first.");
     };
