@@ -1,21 +1,37 @@
 # Test with some failing assertions
 # Run: ntnt intent check server.tnt --intent failing.intent
 
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| they see {text} | body contains {text} |
+| they don't see {text} | body not contains {text} |
+| success response | status 200 |
+| not found response | status 404 |
+
+---
+
 Feature: Home Page
   id: feature.home
   description: "Testing failure reporting"
-  test:
-    - request: GET /
-      assert:
-        - status: 200
-        - body contains "Welcome"
-        - body contains "NONEXISTENT TEXT"
-        - body not contains "Test Server"
+
+  Scenario: Home page with intentional failures
+    description: "Some assertions pass, some fail to test error reporting"
+    When a user visits /
+    → success response
+    → they see "Welcome"
+    → they see "NONEXISTENT TEXT"
+    → they don't see "Test Server"
+
+---
 
 Feature: Nonexistent Page
   id: feature.nonexistent
   description: "This should return 404"
-  test:
-    - request: GET /nonexistent
-      assert:
-        - status: 404
+
+  Scenario: Missing page returns 404
+    description: "Accessing a non-existent path returns not found"
+    When a user visits /nonexistent
+    → not found response

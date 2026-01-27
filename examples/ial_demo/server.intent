@@ -10,6 +10,8 @@ Shows how glossary terms create readable scenarios that map to technical asserti
 
 | Term | Means |
 |------|-------|
+| a user visits {path} | GET {path} |
+| a user posts to {path} | POST {path} |
 | they see {text} | body contains {text} |
 | returns JSON | header "Content-Type" contains "application/json" |
 | success response | status 200 |
@@ -23,15 +25,9 @@ Feature: Homepage
   Scenario: View homepage
     description: "Users can see the homepage with navigation"
     When a user visits /
+    → success response
     → they see "Task Manager"
     → they see "API Status"
-
-  test:
-    - request: GET /
-      assert:
-        - status: 200
-        - body contains "Task Manager"
-        - body contains "API Status"
 
 ---
 
@@ -47,13 +43,6 @@ Feature: API Status
     → they see "ok"
     → they see "version"
 
-  test:
-    - request: GET /api/status
-      assert:
-        - status: 200
-        - body contains "ok"
-        - body contains "version"
-
 ---
 
 Feature: Task List
@@ -66,24 +55,14 @@ Feature: Task List
     → success response
     → returns JSON
     → they see "tasks"
+    → they see "Tasks retrieved"
 
   Scenario: View task details
     description: "Individual tasks have title and completed status"
     When a user visits /api/tasks/1
+    → success response
     → they see "title"
     → they see "completed"
-
-  test:
-    - request: GET /api/tasks
-      assert:
-        - status: 200
-        - body contains "tasks"
-        - body contains "Tasks retrieved"
-    - request: GET /api/tasks/1
-      assert:
-        - status: 200
-        - body contains "title"
-        - body contains "completed"
 
 ---
 
@@ -91,9 +70,9 @@ Feature: Task Validation
   id: feature.task_validation
   description: "API validates task creation requests"
 
-  test:
-    - request: POST /api/tasks
-      assert:
-        - status: 200
-        - body contains "Title required"
-        - body contains "error"
+  Scenario: Empty task rejected
+    description: "POST without title returns validation error"
+    When a user posts to /api/tasks
+    → success response
+    → they see "Title required"
+    → they see "error"

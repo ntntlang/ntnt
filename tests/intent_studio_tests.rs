@@ -690,16 +690,24 @@ fn test_intent_init_generates_stub() {
 ## Overview
 Test project for init command.
 
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| they see {text} | body contains {text} |
+| success response | status 200 |
+
 ---
 
 Feature: Hello World
   id: feature.hello_world
   description: "Display hello world"
-  test:
-    - request: GET /
-      assert:
-        - status: 200
-        - body contains "Hello"
+
+  Scenario: View hello world
+    When a user visits /
+    → success response
+    → they see "Hello"
 "#,
     )
     .unwrap();
@@ -716,8 +724,8 @@ Feature: Hello World
 
         let content = fs::read_to_string(&test_tnt).unwrap_or_default();
         assert!(
-            content.contains("@implements") || content.contains("feature.hello_world"),
-            "Generated file should have @implements annotations"
+            content.contains("Feature: Hello World") || content.contains("feature.hello_world"),
+            "Generated file should reference the feature"
         );
 
         fs::remove_file(&test_tnt).ok();

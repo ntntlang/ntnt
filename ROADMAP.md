@@ -27,7 +27,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Basic type system (Int, Float, String, Bool, Array, Object, Function, Unit)
 - [x] Full contract system (`requires`, `ensures`, `old()`, `result`)
 - [x] Struct invariants with automatic checking
-- [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, etc.)
+- [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, `round` with optional decimals, etc.)
 - [x] CLI with REPL, run, parse, lex, check commands
 - [x] VS Code extension with syntax highlighting
 - [x] Comprehensive test suite
@@ -63,7 +63,10 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Auto-generated documentation (STDLIB_REFERENCE.md, SYNTAX_REFERENCE.md, IAL_REFERENCE.md)
 - [x] External templates with `template()` function (Mustache-style syntax)
 - [x] Async HTTP server (Axum + Tokio) with bridge to sync interpreter
-- [ ] Hot reload for new files (currently only detects changes to existing files)
+- [x] Hot-reload for file-based routes (routes/*.tnt) in async server
+- [x] Hot-reload tracks imported files (lib modules, local imports)
+- [x] NTNT_ENV=production disables hot-reload for better performance
+- [x] Runtime documentation (RUNTIME_REFERENCE.md)
 
 ---
 
@@ -136,7 +139,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 
 - [x] `std/string`: 35+ string functions including split, join, trim, replace, regex (replace_pattern, matches_pattern, find_pattern), regex functions (replace_pattern, matches_pattern, find_pattern, find_all_pattern, split_pattern)
 - [x] `std/math`: sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E
-- [x] `std/collections`: push, pop, first, last, reverse, slice, concat, is_empty
+- [x] `std/collections`: push, pop, first, last (with optional defaults), reverse, slice, concat, is_empty, filter, transform
 - [x] `std/env`: get_env, args, cwd
 
 ---
@@ -440,50 +443,12 @@ fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), D
 
 ### 5.7 Supporting Libraries ✅ COMPLETE
 
-- [x] `std/json`: parse, stringify, stringify_pretty
-- [x] `std/time`: now, now_millis, now_nanos, sleep, elapsed, format_timestamp, duration_secs, duration_millis
+- [x] `std/json`: parse_json, stringify, stringify_pretty
+- [x] `std/time`: now, now_millis, now_nanos, sleep, elapsed, format_timestamp, parse_datetime, duration_secs, duration_millis
 - [x] `std/crypto`: sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode
-- [x] `std/url`: parse, encode, encode_component, decode, build_query, parse_query, join
+- [x] `std/url`: parse_url, encode, encode_component, decode, build_query, parse_query, join
 - [x] `std/http`: fetch (unified API), download, Cache
-- [x] `std/csv`: parse, parse_with_headers, stringify, stringify_with_headers
-
-### 5.9 Response Caching
-
-**Goal:** Simple in-memory caching for HTTP handlers and expensive operations.
-
-- [ ] `std/cache` module with TTL-based caching
-- [ ] `cache()` middleware for route handlers
-- [ ] Cache key generation from request (path, query params)
-- [ ] `vary` option to cache different responses per parameter
-- [ ] Manual cache API: `create_cache`, `get_cached`, `set_cached`, `invalidate`
-
-```ntnt
-import { cache } from "std/cache"
-
-// Cache response for 30 minutes (1800 seconds)
-get("/api/weather", cache(1800, get_weather))
-
-// With options - vary by query param
-get("/api/weather", cache(map {
-    "ttl": 1800,
-    "vary": ["location"]
-}, get_weather))
-
-// Manual cache control
-import { create_cache, get_cached, set_cached } from "std/cache"
-
-let api_cache = create_cache()
-
-fn fetch_data(key) {
-    let cached = get_cached(api_cache, key, 1800)
-    if is_some(cached) {
-        return unwrap(cached)
-    }
-    let data = fetch("https://api.example.com/" + key)
-    set_cached(api_cache, key, data)
-    return data
-}
-```
+- [x] `std/csv`: parse_csv, parse_with_headers, stringify, stringify_with_headers
 
 ### 5.8 CLI & Testing Tools ✅ COMPLETE
 
@@ -536,15 +501,26 @@ Intent-Driven Development creates a **contract layer between human requirements 
 
 ```yaml
 # snowgauge.intent
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a visitor goes to {path} | GET {path} |
+| the home page | / |
+| the page loads | status 200 |
+| they see {text} | body contains {text} |
+
+---
+
 Feature: Site Selection
   id: feature.site_selection
-  description: "Users can select from available monitoring sites"
-  test:
-    - request: GET /
-      assert:
-        - status: 200
-        - body contains "Bear Lake"
-        - body contains "Wild Basin"
+
+  Scenario: Visitor sees available sites
+    When a visitor goes to the home page
+    → the page loads
+    → they see "Bear Lake"
+    → they see "Wild Basin"
 ```
 
 ### 6.1 POC Validation (Go/No-Go Checkpoint) ✅
@@ -1473,6 +1449,15 @@ let result = data
 - `x |> f(a, b)` desugars to `f(x, a, b)` (first argument insertion)
 - Low implementation effort (parser change + AST node)
 
+### Response Caching (Server-Side)
+
+In-memory caching for HTTP handler responses. Note: For most use cases, CDN caching via HTTP headers (e.g., `Cache-Control: s-maxage=N` for Cloudflare) is sufficient and preferred. Server-side response caching is only needed for expensive computations that can't be cached at the edge.
+
+- [ ] `std/cache` module with TTL-based caching
+- [ ] `cache()` middleware for route handlers
+- [ ] Cache key generation from request (path, query params)
+- [ ] Manual cache API: `create_cache`, `get_cached`, `set_cached`, `invalidate`
+
 ### Session Types
 
 - Protocol definitions for typed communication
@@ -1650,4 +1635,4 @@ pub fn main() {
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: January 2026 (v0.3.3)_
+_Last updated: January 2026 (v0.3.6)_

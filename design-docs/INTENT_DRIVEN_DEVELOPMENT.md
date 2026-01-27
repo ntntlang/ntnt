@@ -107,22 +107,30 @@ def test_invalid_location_falls_back():
 
 **IDD Intent (human and agent write together):**
 
-```yaml
+```intent
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| they see {text} | body contains {text} |
+| success response | status 200 |
+
+---
+
 Feature: Location Selection
   id: feature.location_selection
   description: "Users can select which location to view via URL parameter"
 
   Scenario: Select valid location
-    When: GET /?location=denver
-    Then:
-      - status 200
-      - body contains "Denver"
+    When a user visits /?location=denver
+    → success response
+    → they see "Denver"
 
   Scenario: Invalid location falls back to default
-    When: GET /?location=invalid
-    Then:
-      - status 200
-      - body contains "Denver"
+    When a user visits /?location=invalid
+    → success response
+    → they see "Denver"
 ```
 
 ### What IDD Solves That TDD Doesn't
@@ -214,16 +222,12 @@ IDD doesn't replace TDD—it operates at a different level:
 
 Intent files use a hybrid format balancing human readability with machine parseability:
 
-```yaml
+```intent
 # snowgauge.intent
 # Intent specification for SnowGauge - Rocky Mountain snow monitoring
+# Run: ntnt intent check snowgauge.tnt
 
-Meta:
-  name: SnowGauge
-  version: 1.0.0
-  description: "Real-time snow depth monitoring for Rocky Mountain sites"
-
-## Purpose
+## Overview
 
 This application helps backcountry skiers and snowboarders check current
 snow conditions at key Rocky Mountain locations. Users select a site and
@@ -231,138 +235,95 @@ see current snow depth with historical trends.
 
 ## Glossary
 
-- site: A physical location with a snow monitoring station
-- snow depth: Measured depth of snow in inches at a site
-- chart: Visual representation of snow depth over time
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| they see {text} | body contains {text} |
+| they don't see {text} | body not contains {text} |
+| success response | status 200 |
+| the home page | / |
+| the bear lake page | /?site=bear_lake |
+| fast response | response time < 2000ms |
 
-## Data
+---
 
-### Sites
-id: data.sites
-type: map
-description: "Monitoring locations with their data feed URLs"
-schema:
-  key: string (site_id)
-  value:
-    name: string
-    url: string (SNOTEL data feed URL)
-required_entries:
-  - bear_lake
-  - wild_basin
-  - copeland_lake
+Feature: Site Selection
+  id: feature.site_selection
+  description: "Users can select from available monitoring sites"
+  priority: must-have
 
-## Features
+  Scenario: View available sites
+    When a user visits the home page
+    → success response
+    → they see "Bear Lake"
+    → they see "Wild Basin"
+    → they see "Copeland Lake"
 
-### Site Selection
-id: feature.site_selection
-description: "Users can select from available monitoring sites"
-priority: must-have
-test:
-  - request: GET /
-    assert:
-      - status: 200
-      - body contains "Bear Lake"
-      - body contains "Wild Basin"
-      - body contains "Copeland Lake"
+---
 
-### Snow Display
-id: feature.snow_display
-description: "Users see current snow depth for selected site"
-priority: must-have
-test:
-  - request: GET /?site=bear_lake
-    assert:
-      - status: 200
-      - body contains "Snow Depth"
-      - body matches r"\d+(\.\d+)?\s*inches"
+Feature: Snow Display
+  id: feature.snow_display
+  description: "Users see current snow depth for selected site"
+  priority: must-have
 
-### Snow Chart
-id: feature.snow_chart
-description: "30-day historical snow depth chart"
-priority: should-have
-test:
-  - request: GET /?site=bear_lake
-    assert:
-      - body contains "<canvas"
-      - body matches r"chart.*30.*day|30.*day.*chart"
-  - browser:
-      - navigate: /?site=bear_lake
-      - assert: element "canvas" is visible
-      - assert: element ".chart-legend" contains "30 days"
+  Scenario: View snow depth
+    When a user visits the bear lake page
+    → success response
+    → they see "Snow Depth"
+    → body matches r"\d+(\.\d+)?\s*inches"
 
-## Constraints
+---
 
-### Response Time
-id: constraint.response_time
-description: "Pages load within 2 seconds"
-test:
-  - request: GET /
-    assert:
-      - response_time < 2000ms
+Feature: Snow Chart
+  id: feature.snow_chart
+  description: "30-day historical snow depth chart"
+  priority: should-have
 
-### Data Freshness
-id: constraint.data_freshness
-description: "Snow data is no more than 1 hour old"
-test:
-  - request: GET /?site=bear_lake
-    assert:
-      - body matches r"Updated:.*ago"
-      - body not matches r"Updated: [2-9]\d* hours ago"
+  Scenario: Chart renders
+    When a user visits the bear lake page
+    → body contains "<canvas"
+    → body matches r"chart.*30.*day|30.*day.*chart"
 
-### Mobile Responsive
-id: constraint.mobile_responsive
-description: "Usable on mobile devices"
-test:
-  - browser:
-      - viewport: 375x667
-      - navigate: /
-      - assert: no horizontal scroll
-      - assert: element ".site-selector" is visible
-      - assert: tap target ".site-button" >= 44px
+---
 
-## UI/UX Constraints
+Constraint: Response Time
+  id: constraint.response_time
+  description: "Pages load within 2 seconds"
 
-### Visual Hierarchy
-id: ux.visual_hierarchy
-description: "Content is clearly organized with obvious primary action"
-test:
-  - browser:
-      - navigate: /
-      - dom:
-          - content_area_ratio: ">70%"
-          - largest_element_is: ".snow-depth-display" or "canvas"
-          - above_fold_contains: ["site selector", "current depth"]
+  Scenario: Fast load
+    When a user visits the home page
+    → fast response
 
-### Accessibility
-id: ux.accessibility
-description: "WCAG 2.1 AA compliant"
-test:
-  - browser:
-      - navigate: /
-      - accessibility:
-          - color_contrast: ">=4.5:1"
-          - all images have alt text
-          - all form inputs have labels
-          - keyboard navigable
+---
 
-## Security
+Constraint: Data Freshness
+  id: constraint.data_freshness
+  description: "Snow data is no more than 1 hour old"
 
-### Input Validation
-id: security.input_validation
-description: "User input is sanitized"
-test:
-  - request: GET /?site=<script>alert('xss')</script>
-    assert:
-      - body not contains "<script>alert"
-      - status: 400 or body contains "Invalid site"
+  Scenario: Recent data
+    When a user visits the bear lake page
+    → body matches r"Updated:.*ago"
+    → body not matches r"Updated: [2-9]\d* hours ago"
 
-### No Sensitive Data Exposure
-id: security.no_exposure
-description: "API keys and credentials never appear in responses"
-test:
-  - request: GET /
-    assert:
-      - body not matches r"(api[_-]?key|password|secret|token)\s*[:=]\s*['\"][^'\"]+['\"]"
+---
+
+Constraint: Input Validation
+  id: security.input_validation
+  description: "User input is sanitized"
+
+  Scenario: XSS prevented
+    When a user visits /?site=<script>alert('xss')</script>
+    → they don't see "<script>alert"
+
+---
+
+Constraint: No Sensitive Data Exposure
+  id: security.no_exposure
+  description: "API keys and credentials never appear in responses"
+
+  Scenario: No secrets leaked
+    When a user visits the home page
+    → body not matches r"(api[_-]?key|password|secret|token)\s*[:=]\s*['\"][^'\"]+['\"]"
 
 ## Non-Requirements
 
@@ -717,88 +678,58 @@ IDD supports verification for all program types, not just HTTP servers:
 
 ### HTTP Servers
 
-```yaml
-test:
-  - request: GET /api/users
-    headers:
-      Authorization: "Bearer {test_token}"
-    assert:
-      - status: 200
-      - body.json.users is array
-      - body.json.users[0].name exists
+```intent
+Scenario: List users with auth
+  When GET /api/users with auth token
+  → status 200
+  → body has field "users"
+  → response is valid JSON
 ```
 
 ### CLI Applications
 
-```yaml
-test "successful conversion":
-  run: convert input.csv --format json
-  assert:
-    - exit_code: 0
-    - stdout is valid json
-    - stdout.rows is array
+```intent
+Scenario: Successful conversion
+  When run: convert input.csv --format json
+  → exits successfully
+  → stdout contains "rows"
 
-test "missing file error":
-  run: convert nonexistent.csv
-  assert:
-    - exit_code: 1
-    - stderr contains "File not found"
+Scenario: Missing file error
+  When run: convert nonexistent.csv
+  → exit code is 1
+  → stderr contains "File not found"
 ```
 
 ### Library Modules
 
-```yaml
-test "string splitting":
-  eval: |
-    import { split } from "std/string"
-    split("a,b,c", ",")
-  assert:
-    - result == ["a", "b", "c"]
+```intent
+Scenario: String splitting
+  When calling split("a,b,c", ",")
+  → result equals ["a", "b", "c"]
 
-test "handles empty string":
-  eval: split("", ",")
-  assert:
-    - result == [""]
+Scenario: Handles empty string
+  When calling split("", ",")
+  → result equals [""]
 ```
 
 ### Database Operations
 
-```yaml
-setup:
-  - execute: "DELETE FROM users WHERE email LIKE '%@test.example%'"
-
-test "user creation":
-  eval: |
-    let user = create_user("test@test.example", "Test User")
-    user
-  assert:
-    - result.id > 0
-    - result.email == "test@test.example"
-
-  verify_db:
-    - query: "SELECT * FROM users WHERE email = 'test@test.example'"
-    - assert: row_count == 1
-
-teardown:
-  - execute: "DELETE FROM users WHERE email LIKE '%@test.example%'"
+```intent
+Scenario: User creation
+  Given clean test database
+  When calling create_user("test@test.example", "Test User")
+  → result.id > 0
+  → result.email equals "test@test.example"
 ```
 
 ### Background Workers
 
-```yaml
-test "job processing":
-  setup:
-    - enqueue: { type: "email", to: "test@example.com" }
-
-  run: worker.tnt --once
-  timeout: 10s
-
-  assert:
-    - exit_code: 0
-    - stdout contains "Processed 1 job"
-
-  verify:
-    - queue "email" is empty
+```intent
+Scenario: Job processing
+  Given email job enqueued
+  When run: worker.tnt --once
+  → exits successfully
+  → stdout contains "Processed 1 job"
 ```
 
 ---
@@ -827,62 +758,45 @@ IDD uses progressive layers, each catching what the previous cannot:
 
 Fast, reliable, catches functional bugs:
 
-```yaml
+```intent
 Scenario: Welcome page loads
-  When: GET /
-  Then:
-    - status 200
-    - body contains "Welcome"
+  When GET /
+  → status 200
+  → body contains "Welcome"
 ```
 
 ### Layer 2: DOM Assertions
 
 Verify page structure without full browser:
 
-```yaml
-test:
-  - request: GET /
-    dom:
-      - element "nav" exists
-      - element "h1" text == "SnowGauge"
-      - element ".site-list" has >= 3 children
-      - element "#chart" has attribute "data-days"
+```intent
+Scenario: Page structure
+  When GET /
+  → element "nav" exists
+  → element "h1" contains "SnowGauge"
+  → element ".site-list" has children
 ```
 
-### Layer 3: Browser Automation
+### Layer 3: Browser Automation (Future)
 
 Test real user interactions:
 
-```yaml
-test "site selection flow":
-  browser:
-    - navigate: /
-    - click: ".site-button[data-site='bear_lake']"
-    - wait_for: ".loading" to disappear
-    - assert: url contains "site=bear_lake"
-    - assert: element ".snow-depth" is visible
-    - screenshot: "site_selected.png"
+```intent
+Scenario: Site selection flow
+  When user clicks ".site-button[data-site='bear_lake']"
+  → url contains "site=bear_lake"
+  → element ".snow-depth" is visible
 ```
 
-### Layer 4: LLM Visual Verification
+### Layer 4: LLM Visual Verification (Future)
 
 For subjective qualities that resist mechanical testing:
 
-```yaml
-test "professional appearance":
-  browser:
-    - navigate: /
-    - screenshot: full_page
-    - llm:
-        prompt: |
-          Evaluate this dashboard screenshot:
-          1. Is the visual hierarchy clear? (primary data prominent)
-          2. Is the color scheme consistent and accessible?
-          3. Does it look like a professional data visualization tool?
-          4. Are there any obvious visual bugs or misalignments?
-        expect: all yes
-        model: gpt-4-vision
-        confidence: 0.8
+```intent
+Scenario: Professional appearance
+  When screenshot of /
+  → llm says "visual hierarchy is clear"
+  → llm says "looks professional"
 ```
 
 #### LLM Verification Reliability
@@ -963,32 +877,22 @@ Visual Constraints:
     - loading_indicator: "for >200ms ops" # Feedback
 ```
 
-### Information Hierarchy Tests
+### Information Hierarchy Tests (Future)
 
-```yaml
-test "clear visual hierarchy":
-  browser:
-    - navigate: /
-    - assert:
-        # Most important element is most prominent
-        - largest_text_element is "h1" or ".primary-data"
-        # Primary action is visually distinct
-        - element ".cta-button" has highest contrast in viewport
-        # Related items are grouped
-        - elements ".site-option" are visually grouped
+```intent
+Scenario: Clear visual hierarchy
+  When GET /
+  → largest element is "h1" or ".primary-data"
+  → element ".cta-button" is visually prominent
 ```
 
-### Progressive Disclosure
+### Progressive Disclosure (Future)
 
-```yaml
-test "appropriate information density":
-  browser:
-    - navigate: /
-    - above_fold:
-        - contains: primary_data, primary_action
-        - not_contains: settings, advanced_options
-    - click: "Show Advanced"
-    - assert: element ".advanced-panel" is visible
+```intent
+Scenario: Appropriate information density
+  When GET /
+  → above fold contains primary data
+  → advanced options are hidden initially
 ```
 
 ### The Taste Problem
@@ -1325,16 +1229,15 @@ Customize with `--port` and `--app-port` flags.
 
 Instead of reading this:
 
-```yaml
+```intent
 Feature: User Login
   id: feature.user_login
   description: "Allows users to authenticate with email/password"
 
   Scenario: Successful login
-    When: POST /login {"email": "test@example.com", "password": "secret"}
-    Then:
-      - status 200
-      - body contains "token"
+    When POST /login with {"email": "test@example.com", "password": "secret"}
+    → status 200
+    → body contains "token"
 ```
 
 You see a beautifully rendered card:
@@ -1688,16 +1591,20 @@ But the POC in 1-2 weeks tells you if it's worth it.
 
 ### Intent Composability
 
-```yaml
+```intent
 # auth_patterns.intent - reusable patterns
 Pattern: authenticated_endpoint
-  test:
-    - request: {endpoint} (no auth)
-      assert: status 401
-    - request: {endpoint} (invalid token)
-      assert: status 403
-    - request: {endpoint} (valid token)
-      assert: status 200
+  Scenario: No auth rejected
+    When {endpoint} without auth
+    → status 401
+
+  Scenario: Invalid token rejected
+    When {endpoint} with invalid token
+    → status 403
+
+  Scenario: Valid token accepted
+    When {endpoint} with valid token
+    → status 200
 
 # myapp.intent - uses the pattern
 Feature: User Profile

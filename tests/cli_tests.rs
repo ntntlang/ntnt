@@ -6,11 +6,14 @@ use std::process::Command;
 
 /// Helper to run ntnt command and capture output
 fn run_ntnt(args: &[&str]) -> (String, String, i32) {
-    // Try release binary first, fall back to debug
-    let binary = if std::path::Path::new("./target/release/ntnt").exists() {
+    // Prefer debug binary (matches cargo test profile), fall back to release
+    // This ensures we test the freshly built binary, not a cached release build
+    let binary = if std::path::Path::new("./target/debug/ntnt").exists() {
+        "./target/debug/ntnt"
+    } else if std::path::Path::new("./target/release/ntnt").exists() {
         "./target/release/ntnt"
     } else {
-        "./target/debug/ntnt"
+        panic!("No ntnt binary found. Run 'cargo build' first.");
     };
 
     let output = Command::new(binary)

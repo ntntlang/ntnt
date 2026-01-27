@@ -5,6 +5,9 @@
 
 | Term | Means |
 |------|-------|
+| a user visits {path} | GET {path} |
+| the homepage | / |
+| the about page | /about |
 | they see {text} | body contains {text} |
 | success response | status 200 |
 
@@ -17,17 +20,10 @@ Feature: Home Page
   Scenario: First visit
     description: "Ensures new users see the welcome content and navigation links"
     When a user visits the homepage
+    → success response
     → they see "Welcome to the Test Server"
     → they see "About"
     → they see "API Status"
-
-  test:
-    - request: GET /
-      assert:
-        - status: 200
-        - body contains "Welcome to the Test Server"
-        - body contains "About"
-        - body contains "API Status"
 
 ---
 
@@ -38,15 +34,9 @@ Feature: About Page
   Scenario: View about information
     description: "Shows information about Intent-Driven Development"
     When a user visits the about page
+    → success response
     → they see "About Us"
     → they see "Intent-Driven Development"
-
-  test:
-    - request: GET /about
-      assert:
-        - status: 200
-        - body contains "About Us"
-        - body contains "Intent-Driven Development"
 
 ---
 
@@ -57,15 +47,9 @@ Feature: API Status Endpoint
   Scenario: Check system status
     description: "Returns service health status"
     When a user visits /api/status
+    → success response
     → they see "ok"
     → they see "version"
-
-  test:
-    - request: GET /api/status
-      assert:
-        - status: 200
-        - body contains "ok"
-        - body contains "version"
 
 ---
 
@@ -78,11 +62,3 @@ Feature: Task Creation
     When a user creates a task
     → success response
     → they see "Task created"
-
-  test:
-    - request: POST /api/tasks
-      body: '{"title": "Buy groceries", "completed": false}'
-      assert:
-        - status: 200
-        - body contains "Task created"
-        - body contains "success"

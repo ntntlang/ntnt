@@ -1,56 +1,81 @@
 # Cryptocurrency Price Chart - Intent Document
+# Run: ntnt intent check crypto.tnt
 
-## Features
+## Overview
+Display an interactive line chart showing Bitcoin price over the last 7 days,
+fetching data from the CoinGecko public API.
+
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits the chart | GET / |
+| they see {text} | body contains {text} |
+| the chart renders | body contains "chart", body contains "type: 'line'" |
+| success response | status 200 |
+
+---
 
 Feature: Crypto Price Chart
   id: feature.crypto_chart
   description: "Display an interactive line chart showing Bitcoin price over the last 7 days"
-  test:
-    - request: GET /
-      assert:
-        - status: 200
-        - body contains "Bitcoin Price"
-        - body contains "chart"
-        - body contains "Last 7 Days"
+
+  Scenario: View the chart page
+    description: "Users see the Bitcoin price chart with proper title"
+    When a user visits the chart
+    → success response
+    → they see "Bitcoin Price"
+    → the chart renders
+    → they see "Last 7 Days"
+
+---
 
 Feature: CoinGecko API Integration
   id: feature.api_integration
   description: "Fetch cryptocurrency price data from CoinGecko public API"
-  test:
-    - request: GET /
-      assert:
-        - status: 200
-        - body contains "const prices"
-        - body matches r"\[\[17\d{11},\d+\.?\d*\]"
+
+  Scenario: Price data is fetched and displayed
+    description: "Chart contains real price data from CoinGecko"
+    When a user visits the chart
+    → success response
+    → they see "const prices"
+    → body matches r"\[\[17\d{11},\d+\.?\d*\]"
+
+---
 
 Feature: Chart Rendering
   id: feature.chart_render
   description: "Transform API data into Chart.js format and render interactive chart"
-  test:
-    - request: GET /
-      assert:
-        - status: 200
-        - body contains "Chart.js"
-        - body contains "#ff8c00"
-        - body contains "type: 'line'"
-        - body contains "tension:"
-        - body contains "BTC/USD"
+
+  Scenario: Chart.js configuration
+    description: "Page includes Chart.js with proper styling"
+    When a user visits the chart
+    → success response
+    → they see "Chart.js"
+    → they see "#ff8c00"
+    → they see "tension:"
+    → they see "BTC/USD"
+
+---
 
 Feature: Error Handling
   id: feature.error_handling
   description: "Display user-friendly error messages when API fails"
   notes: "This is tested by the match/Result handling in code, but hard to test via HTTP without mocking"
 
-## Constraints
+---
 
 Constraint: No API Key Required
   id: constraint.no_api_key
   description: "Use only public APIs that don't require authentication"
   rationale: "Simplifies deployment and demo setup"
-  test:
-    - request: GET /
-      assert:
-        - status: 200
+
+  Scenario: Page loads without auth
+    description: "The chart loads successfully with public API"
+    When a user visits the chart
+    → success response
+
+---
 
 Constraint: Single File App
   id: constraint.single_file
