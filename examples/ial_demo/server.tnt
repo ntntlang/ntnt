@@ -136,7 +136,7 @@ get("/", home_handler)
 get("/api/status", status_handler)
 get("/api/tasks", list_tasks_handler)
 post("/api/tasks", create_task_handler)
-get(r"/api/tasks/{id}", get_task_handler)
+get("/api/tasks/{id}", get_task_handler)
 
 // Start server
 listen(8080)

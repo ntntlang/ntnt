@@ -271,7 +271,7 @@ fn crypto_chart(req) {
     }
 }
 
-get(r"/", crypto_chart)
+get("/", crypto_chart)
 
 listen(8080)
 

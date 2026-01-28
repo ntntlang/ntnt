@@ -1,0 +1,60 @@
+// SQLite Demo - NTNT Database Example
+// Run: ntnt run examples/sqlite_demo.tnt
+
+import { connect, query, query_one, execute, close, begin, commit } from "std/db/sqlite"
+
+// Connect to in-memory database
+let db = unwrap(connect(":memory:"))
+print("Connected to SQLite (in-memory)")
+
+// Create table
+execute(db, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT, active INTEGER)", [])
+print("Created users table")
+
+// Insert some data
+execute(db, "INSERT INTO users (name, email, active) VALUES (?, ?, ?)", ["Alice", "alice@example.com", true])
+execute(db, "INSERT INTO users (name, email, active) VALUES (?, ?, ?)", ["Bob", "bob@example.com", true])
+execute(db, "INSERT INTO users (name, email, active) VALUES (?, ?, ?)", ["Charlie", "charlie@example.com", false])
+print("Inserted 3 users")
+
+// Query all active users
+match query(db, "SELECT * FROM users WHERE active = ?", [true]) {
+    Ok(rows) => {
+        print("Active users: " + str(len(rows)))
+        for user in rows {
+            let name = user["name"]
+            let email = user["email"]
+            print("  - " + name + " (" + email + ")")
+        }
+    },
+    Err(e) => print("Query error: " + e)
+}
+
+// Query a single user
+match query_one(db, "SELECT * FROM users WHERE name = ?", ["Alice"]) {
+    Ok(user) => {
+        let name = user["name"]
+        let email = user["email"]
+        print("Found: " + name + " - " + email)
+    },
+    Err(e) => print("Error: " + e)
+}
+
+// Transaction example
+match begin(db) {
+    Ok(tx) => {
+        execute(tx, "UPDATE users SET active = ? WHERE name = ?", [false, "Bob"])
+        commit(tx)
+        print("Transaction committed: Bob deactivated")
+    },
+    Err(e) => print("Transaction error: " + e)
+}
+
+// Verify the update
+match query(db, "SELECT name FROM users WHERE active = ?", [true]) {
+    Ok(rows) => print("Active users after update: " + str(len(rows))),
+    Err(e) => print("Error: " + e)
+}
+
+close(db)
+print("Done!")

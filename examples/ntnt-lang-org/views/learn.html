@@ -65,7 +65,7 @@ fn get_user(req) \{
 \}
 
 get("/", home)
-get(r"/users/\{id\}", get_user)
+get("/users/\{id\}", get_user)
 
 listen(3000)</code></pre>
   <pre><code>ntnt run api.tnt

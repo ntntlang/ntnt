@@ -6,7 +6,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::*;
 use ntnt::{
-    intent, intent_studio_server, interpreter::Interpreter, lexer::Lexer,
+    error::IntentError, intent, intent_studio_server, interpreter::Interpreter, lexer::Lexer,
     parser::Parser as IntentParser,
 };
 use rustyline::error::ReadlineError;
@@ -359,8 +359,103 @@ enum IntentCommands {
     },
 }
 
+/// Format and display an error with rich context (error codes, source snippets, suggestions).
+fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
+    // Try to downcast to IntentError for rich formatting
+    if let Some(intent_err) = error.downcast_ref::<IntentError>() {
+        let code = intent_err.error_code();
+        let line_info = intent_err.line();
+        let col_info = intent_err.column();
+
+        // Error header: error[E006]: Undefined variable: usres
+        eprintln!(
+            "{}{}{}{}",
+            "error".red().bold(),
+            "[".dimmed(),
+            code.red().bold(),
+            "]".dimmed(),
+        );
+        eprintln!("  {} {}", "-->".blue().bold(), intent_err);
+
+        // Source code snippet (for errors with line numbers and a known file)
+        if let (Some(line), Some(path)) = (line_info, file_path) {
+            if let Ok(source) = fs::read_to_string(path) {
+                let lines: Vec<&str> = source.lines().collect();
+                let line_idx = line.saturating_sub(1); // 0-indexed
+
+                eprintln!("   {}", "|".blue().bold());
+
+                // Show 1 line before for context
+                if line_idx > 0 {
+                    let prev_num = line;
+                    if let Some(prev_line) = lines.get(line_idx - 1) {
+                        eprintln!(
+                            " {} {} {}",
+                            format!("{:>3}", prev_num - 1).blue(),
+                            "|".blue().bold(),
+                            prev_line
+                        );
+                    }
+                }
+
+                // Show the error line
+                if let Some(error_line) = lines.get(line_idx) {
+                    eprintln!(
+                        " {} {} {}",
+                        format!("{:>3}", line).blue(),
+                        "|".blue().bold(),
+                        error_line
+                    );
+
+                    // Column pointer
+                    if let Some(col) = col_info {
+                        if col > 0 {
+                            let padding = " ".repeat(col.saturating_sub(1));
+                            eprintln!("     {} {}{}", "|".blue().bold(), padding, "^".red().bold());
+                        }
+                    }
+                }
+
+                // Show 1 line after for context
+                if let Some(next_line) = lines.get(line_idx + 1) {
+                    eprintln!(
+                        " {} {} {}",
+                        format!("{:>3}", line + 1).blue(),
+                        "|".blue().bold(),
+                        next_line
+                    );
+                }
+
+                eprintln!("   {}", "|".blue().bold());
+            }
+        }
+
+        // Suggestion ("Did you mean?")
+        if let Some(suggestion) = intent_err.suggestion() {
+            eprintln!(
+                "  {} Did you mean '{}'?",
+                "help:".cyan().bold(),
+                suggestion.green()
+            );
+        }
+    } else {
+        // Non-IntentError: fall back to simple display
+        eprintln!("{}: {}", "Error".red().bold(), error);
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
+
+    // Extract the file path for error context (used in format_error for source snippets)
+    let file_hint: Option<PathBuf> = match &cli.command {
+        Some(Commands::Run { file, .. }) => Some(file.clone()),
+        Some(Commands::Check { file }) => Some(file.clone()),
+        Some(Commands::Parse { file, .. }) => Some(file.clone()),
+        Some(Commands::Lex { file }) => Some(file.clone()),
+        None => cli.file.clone(),
+        _ => None,
+    };
 
     let result = match cli.command {
         Some(Commands::Repl) => run_repl(),
@@ -411,7 +506,7 @@ fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("{}: {}", "Error".red().bold(), e);
+        format_error(&e, file_hint.as_ref());
         std::process::exit(1);
     }
 }
@@ -1075,7 +1170,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
         "syntax_reference": {
             "critical_rules": {
                 "map_literals": "Use `map { \"key\": value }` NOT `{ \"key\": value }` - bare {} creates blocks",
-                "route_patterns": "Use raw strings for routes: `get(r\"/users/{id}\", handler)` - regular strings interpret {} as interpolation",
+                "route_patterns": "Route builtins auto-detect {param} patterns: `get(\"/users/{id}\", handler)` - raw strings optional",
                 "string_interpolation": "Use `\"{variable}\"` for interpolation, NOT `${variable}` or backticks",
                 "ranges": "Use `0..10` (exclusive) or `0..=10` (inclusive), NOT range()",
                 "imports": "Use `import { x } from \"std/module\"` with `/` separator",
@@ -1193,6 +1288,28 @@ fn extract_route_with_line(
             if http_methods.contains(&method.as_str()) && arguments.len() >= 2 {
                 let path = match &arguments[0] {
                     Expression::String(s) => s.clone(),
+                    // Route auto-detection: reconstruct {param} patterns from
+                    // InterpolatedString (same logic as interpreter's eval_route_pattern)
+                    Expression::InterpolatedString(parts) => {
+                        use ntnt::ast::StringPart;
+                        let mut result = String::new();
+                        for part in parts {
+                            match part {
+                                StringPart::Literal(s) => result.push_str(s),
+                                StringPart::Expr(inner) => {
+                                    if let Expression::Identifier(name) = inner {
+                                        result.push('{');
+                                        result.push_str(name);
+                                        result.push('}');
+                                    } else {
+                                        // Complex expression — can't resolve statically
+                                        return None;
+                                    }
+                                }
+                            }
+                        }
+                        result
+                    }
                     _ => return None,
                 };
                 let handler = match &arguments[1] {
@@ -1594,7 +1711,7 @@ fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result
     if show_fixes && (error_count > 0 || warning_count > 0) {
         output["syntax_hints"] = json!({
             "map_literals": "Use `map { \"key\": value }` not `{ \"key\": value }`",
-            "route_patterns": "Use raw strings `r\"/path/{id}\"` for routes with parameters",
+            "route_patterns": "Route builtins auto-detect {param} patterns - raw strings are optional",
             "string_interpolation": "Use `\"{variable}\"` not `\"${variable}\"`",
             "ranges": "Use `0..10` (exclusive) or `0..=10` (inclusive), not `range()`",
             "imports": "Use `import { x } from \"std/module\"` with `/` path separator",
@@ -1613,7 +1730,7 @@ fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result
 
 /// Comprehensive lint checks for NTNT code
 fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serde_json::Value> {
-    use ntnt::ast::{Expression, Statement, StringPart};
+    use ntnt::ast::{Expression, Statement};
     use serde_json::json;
 
     let mut issues = Vec::new();
@@ -1655,48 +1772,15 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                         // First argument should be a route pattern
                         if let Some(first_arg) = arguments.first() {
                             match first_arg {
-                                Expression::String(s) if s.contains('{') && s.contains('}') => {
-                                    // Check if source already uses raw string
-                                    let line = find_line_number(source_lines, s);
-                                    let is_already_raw = line.map_or(false, |ln| {
-                                        if let Some(source_line) = source_lines.get(ln - 1) {
-                                            // Check for r"..." or r#"..."# pattern before the string content
-                                            source_line.contains(&format!("r\"{}\"", s))
-                                                || source_line.contains(&format!("r#\"{}\"#", s))
-                                        } else {
-                                            false
-                                        }
-                                    });
-
-                                    if !is_already_raw {
-                                        issues.push(json!({
-                                            "severity": "warning",
-                                            "rule": "route_pattern_needs_raw_string",
-                                            "message": format!("Route pattern '{}' contains {{}} but is not a raw string. Use r\"{}\" to prevent interpolation.", s, s),
-                                            "line": line,
-                                            "fix": {
-                                                "replacement": format!("r\"{}\"", s),
-                                                "description": "Wrap route pattern in raw string"
-                                            }
-                                        }));
-                                    }
+                                Expression::String(_s) => {
+                                    // Route builtins auto-detect {param} patterns at runtime,
+                                    // so raw strings are optional. No warning needed.
                                 }
-                                Expression::InterpolatedString(parts) => {
-                                    // Interpolated string used as route - check if it has expression parts
-                                    // which likely means they used {param} expecting route params but got interpolation
-                                    let has_expression_parts =
-                                        parts.iter().any(|p| matches!(p, StringPart::Expr(_)));
-                                    if has_expression_parts {
-                                        issues.push(json!({
-                                            "severity": "warning",
-                                            "rule": "route_pattern_interpolation",
-                                            "message": "Route pattern uses string interpolation. If you intended route parameters like {id}, use a raw string: r\"/path/{param}\"",
-                                            "line": null,
-                                            "fix": {
-                                                "description": "Convert to raw string with route parameters"
-                                            }
-                                        }));
-                                    }
+                                Expression::InterpolatedString(_parts) => {
+                                    // Route builtins auto-detect {param} patterns at runtime.
+                                    // InterpolatedString in route calls is handled by
+                                    // eval_route_pattern() which preserves {name} as literal
+                                    // route parameters. No warning needed.
                                 }
                                 _ => {}
                             }

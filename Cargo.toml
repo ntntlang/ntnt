@@ -1,6 +1,6 @@
 [package]
 name = "ntnt"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 authors = ["NTNT Language Team"]
 description = "NTNT (Intent) - A programming language designed for AI-driven development"
@@ -65,6 +65,7 @@ ctrlc = "3.4"
 
 # Database
 postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 rust_decimal = { version = "1.36", features = ["db-postgres"] }
 chrono = "0.4"
 chrono-tz = "0.10.4"

@@ -2,7 +2,7 @@
 
 > **Auto-generated from [stdlib.toml](stdlib.toml)** - Do not edit directly.
 >
-> Last updated: v0.3.6
+> Last updated: v0.3.7
 
 ## Table of Contents
 
@@ -10,6 +10,7 @@
 - [std/collections](#stdcollections)
 - [std/concurrent](#stdconcurrent)
 - [std/csv](#stdcsv)
+- [std/db/sqlite](#stddbsqlite)
 - [std/env](#stdenv)
 - [std/fs](#stdfs)
 - [std/http](#stdhttp)
@@ -123,6 +124,29 @@ import { parse_csv, parse_with_headers, stringify } from "std/csv"
 | `parse_with_headers(csv: String) -> [Map]` | Parses CSV into array of maps using first row as headers |
 | `stringify(rows: [[Any]]) -> String` | Converts array of rows to CSV string |
 | `stringify_with_headers(rows: [Map], headers: [String]) -> String` | Converts array of maps to CSV with header row |
+
+---
+
+## std/db/sqlite
+
+SQLite database driver. SQLite is bundled — no external server needed.
+
+```ntnt
+import { begin, close, commit } from "std/db/sqlite"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| `begin(conn: Connection) -> Result<Connection, String>` | Begin a transaction. Returns the same connection handle. |
+| `close(conn: Connection) -> Bool` | Close the database connection and release resources. |
+| `commit(conn: Connection) -> Result<Bool, String>` | Commit the current transaction. |
+| `connect(path: String) -> Result<Connection, String>` | Opens or creates a SQLite database. Use ':memory:' for in-memory databases. |
+| `execute(conn: Connection, sql: String, params: Array) -> Result<Int, String>` | Execute an INSERT, UPDATE, or DELETE statement. Returns the number of affected rows. |
+| `query(conn: Connection, sql: String, params: Array) -> Result<Array<Map>, String>` | Execute a SELECT query with parameterized placeholders (?). Returns array of maps. |
+| `query_one(conn: Connection, sql: String, params: Array) -> Result<Map \| Unit, String>` | Execute a query returning a single row, or Unit if no rows match. |
+| `rollback(conn: Connection) -> Result<Bool, String>` | Rollback the current transaction. |
 
 ---
 

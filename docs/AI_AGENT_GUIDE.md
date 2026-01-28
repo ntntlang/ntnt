@@ -325,14 +325,15 @@ let msg = "Hello, ${name}!"
 let msg = `Hello, ${name}!`
 ```
 
-### 3. Route Patterns Require Raw Strings
+### 3. Route Patterns Auto-Detect `{param}`
 
 ```ntnt
-// CORRECT - Raw strings for route patterns
-get(r"/users/{id}", handler)
-
-// WRONG - {id} becomes interpolation
+// Route builtins auto-detect {param} as route parameters — no raw strings needed
 get("/users/{id}", handler)
+post("/api/{category}/items/{id}", handler)
+
+// Raw strings still work (backward compatible)
+get(r"/users/{id}", handler)
 ```
 
 ### 4. Contracts Go AFTER Return Type, BEFORE Body
@@ -363,7 +364,7 @@ for i in 0..=10 { }    // 0-10 inclusive
 for i in range(10) { }  // range() doesn't exist
 ```
 
-### 6. Functions Not Methods
+### 6. Functions Not Methods (Use Pipe for Chaining)
 
 ```ntnt
 // CORRECT - Standalone functions
@@ -375,6 +376,23 @@ split(text, ",")
 // WRONG - Method style
 "hello".len()
 arr.push(item)
+```
+
+Use the pipe operator `|>` for readable left-to-right data transformations:
+
+```ntnt
+import { split, join, trim, to_lower } from "std/string"
+
+// Pipe passes left side as FIRST argument to right side
+let result = "  Hello World  " |> trim |> to_lower |> split(" ") |> join("-")
+// Equivalent to: join(split(to_lower(trim("  Hello World  ")), " "), "-")
+
+// Works with any function (builtin or user-defined)
+fn double(x) { return x * 2 }
+let n = 5 |> double  // 10
+
+// Extra arguments: x |> f(a, b) becomes f(x, a, b)
+let parts = "a,b,c" |> split(",")  // split("a,b,c", ",")
 ```
 
 ### 7. Mutable Variables Need `mut`
@@ -405,8 +423,8 @@ fn get_user(req) {
     return json(map { "id": id })
 }
 
-// Routes - global builtins, raw strings for patterns
-get(r"/users/{id}", get_user)
+// Routes - global builtins, {param} auto-detected
+get("/users/{id}", get_user)
 post("/users", create_user)
 
 // Static files
@@ -438,7 +456,7 @@ req.id            // Request ID (from X-Request-ID or auto-generated)
 import { listen, get, post } from "std/http/server"
 
 // WRONG - No inline lambdas
-get(r"/users/{id}", |req| { ... })
+get("/users/{id}", |req| { ... })
 
 // WRONG - These don't exist
 req.json       // Use parse_json(req)
@@ -548,18 +566,40 @@ let users = unwrap(query(db, "SELECT * FROM users", []))
 
 ## Database Pattern
 
+### SQLite (bundled, no server needed)
+
+```ntnt
+import { connect, query, execute, close } from "std/db/sqlite"
+
+let db = unwrap(connect("app.db"))        // File-based
+let db = unwrap(connect(":memory:"))      // In-memory
+
+// Create tables
+execute(db, "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)", [])
+
+// Parameterized queries (? placeholders)
+execute(db, "INSERT INTO users (name, age) VALUES (?, ?)", ["Alice", 30])
+let users = unwrap(query(db, "SELECT * FROM users WHERE age > ?", [18]))
+for user in users {
+    print("Name: {user[\"name\"]}")
+}
+
+close(db)
+```
+
+### PostgreSQL
+
 ```ntnt
 import { connect, query, execute, close } from "std/db/postgres"
 
-let db = unwrap(connect("postgres://..."))
+let db = unwrap(connect("postgres://user:pass@localhost/mydb"))
 
-// Query returns array of maps
+// Parameterized queries ($1, $2 placeholders)
 let users = unwrap(query(db, "SELECT * FROM users WHERE active = $1", [true]))
 for user in users {
     print("Name: {user[\"name\"]}")
 }
 
-// Execute for INSERT/UPDATE/DELETE
 execute(db, "INSERT INTO users (name, age) VALUES ($1, $2)", [name, int(age_str)])
 
 close(db)
@@ -728,6 +768,25 @@ ntnt test <file> --get /     # Quick HTTP endpoint testing
 ---
 
 ## Troubleshooting
+
+### Error Message Format
+
+NTNT provides context-rich error messages with error codes, source snippets, and suggestions:
+
+- **Error codes (E001-E012):** Every error type has a unique code (e.g., `E001` for undefined variables, `E003` for arity mismatches). These are color-coded red in terminal output.
+- **"Did you mean?" suggestions:** Typos in variable or function names trigger Levenshtein-distance-based suggestions (shown in green). For example, writing `usr` when `user` is defined will suggest the correct name.
+- **Source code snippets:** Parser errors display 3 lines of context around the error location with line and column numbers (line numbers shown in blue).
+- **Function names in arity errors:** When calling a function with the wrong number of arguments, the error message includes the function name for easier debugging.
+
+Example error output:
+```
+Error[E001]: Undefined variable `usr`
+  --> server.tnt:45:12
+   |
+45 |     return json(usr)
+   |
+   help: did you mean `user`?
+```
 
 ### Common Parse Errors
 

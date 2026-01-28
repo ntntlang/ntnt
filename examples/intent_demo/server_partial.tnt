@@ -23,7 +23,7 @@ fn about(req) {
 
 // NOTE: feature.api_status is NOT implemented
 
-get(r"/", home)
-get(r"/about", about)
+get("/", home)
+get("/about", about)
 
 listen(8080)

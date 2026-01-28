@@ -2,7 +2,7 @@
 
 > **Auto-generated from [syntax.toml](syntax.toml)** - Do not edit directly.
 >
-> Last updated: v0.3.6
+> Last updated: v0.3.7
 
 ## Table of Contents
 
@@ -95,7 +95,7 @@ Value literal syntax
 | integers | `42, -17, 0` | Integer literals (arbitrary precision) |
 | floats | `3.14, 1.0e-10, -0.5` | Floating-point literals (IEEE 754) |
 | strings | `"hello", "with {interpolation}"` | Double-quoted strings with escape sequences and interpolation |
-| raw_strings | `r"no escapes", r#"with "quotes""#` | Raw strings - no escape processing, useful for regex and routes |
+| raw_strings | `r"no escapes", r#"with "quotes""#` | Raw strings - no escape processing, useful for regex patterns |
 | template_strings | `"""...{{expr}}..."""` | Triple-quoted template strings with {{}} interpolation, loops, conditionals |
 | booleans | `true, false` | Boolean literals |
 | arrays | `[1, 2, 3], []` | Array literals |

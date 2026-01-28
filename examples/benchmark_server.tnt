@@ -34,6 +34,6 @@ fn api_echo(req) {
 get("/", hello_text)
 get("/json", api_hello)
 get("/compute", api_compute)
-get(r"/echo/{id}", api_echo)
+get("/echo/{id}", api_echo)
 
 listen(8080)

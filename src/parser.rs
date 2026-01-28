@@ -92,8 +92,10 @@ impl Parser {
             Ok(self.advance().unwrap().clone())
         } else {
             let line = self.peek().map(|t| t.line).unwrap_or(0);
+            let column = self.peek().map(|t| t.column).unwrap_or(0);
             Err(IntentError::ParserError {
                 line,
+                column,
                 message: message.to_string(),
             })
         }
@@ -101,6 +103,10 @@ impl Parser {
 
     fn current_line(&self) -> usize {
         self.peek().map(|t| t.line).unwrap_or(0)
+    }
+
+    fn current_column(&self) -> usize {
+        self.peek().map(|t| t.column).unwrap_or(0)
     }
 
     // Parsing methods
@@ -683,6 +689,7 @@ impl Parser {
         } else {
             Err(IntentError::ParserError {
                 line: self.current_line(),
+                column: self.current_column(),
                 message: "Expected import specifier".to_string(),
             })
         }
@@ -707,6 +714,7 @@ impl Parser {
         }
         Err(IntentError::ParserError {
             line: self.current_line(),
+            column: self.current_column(),
             message: "Expected module path string".to_string(),
         })
     }
@@ -744,6 +752,7 @@ impl Parser {
         } else {
             return Err(IntentError::ParserError {
                 line: self.current_line(),
+                column: self.current_column(),
                 message: "Expected declaration after 'export'".to_string(),
             });
         };
@@ -896,7 +905,7 @@ impl Parser {
     }
 
     fn assignment(&mut self) -> Result<Expression> {
-        let expr = self.null_coalesce()?;
+        let expr = self.pipe()?;
 
         if self.match_token(&[TokenKind::Assign]) {
             let value = self.assignment()?;
@@ -904,6 +913,46 @@ impl Parser {
                 target: Box::new(expr),
                 value: Box::new(value),
             });
+        }
+
+        Ok(expr)
+    }
+
+    /// Pipe operator: expr |> func or expr |> func(args...)
+    /// Desugars at parse time into function calls:
+    ///   x |> f        => f(x)
+    ///   x |> f(a, b)  => f(x, a, b)
+    fn pipe(&mut self) -> Result<Expression> {
+        let mut expr = self.null_coalesce()?;
+
+        while self.match_token(&[TokenKind::PipeArrow]) {
+            let right = self.null_coalesce()?;
+
+            expr = match right {
+                // x |> f(a, b) => f(x, a, b) — insert LHS as first argument
+                Expression::Call {
+                    function,
+                    mut arguments,
+                } => {
+                    arguments.insert(0, expr);
+                    Expression::Call {
+                        function,
+                        arguments,
+                    }
+                }
+                // x |> f => f(x) — bare identifier becomes a call
+                Expression::Identifier(_) => Expression::Call {
+                    function: Box::new(right),
+                    arguments: vec![expr],
+                },
+                _ => {
+                    return Err(IntentError::ParserError {
+                        line: self.current_line(),
+                        column: self.current_column(),
+                        message: "Expected function name or function call after |>".to_string(),
+                    });
+                }
+            };
         }
 
         Ok(expr)
@@ -1409,6 +1458,7 @@ impl Parser {
                     }
                     return Err(IntentError::ParserError {
                         line: self.current_line(),
+                        column: self.current_column(),
                         message: "Expected variant name after '::'".to_string(),
                     });
                 }
@@ -1480,6 +1530,7 @@ impl Parser {
 
         Err(IntentError::ParserError {
             line: self.current_line(),
+            column: self.current_column(),
             message: found_desc,
         })
     }
@@ -1517,6 +1568,7 @@ impl Parser {
                             };
                             return Err(IntentError::ParserError {
                                 line,
+                                column: 0,
                                 message: format!(
                                     "Error in string interpolation '{{{}}}': {}. \
                                     (Hint: if you meant literal braces, escape them with \\{{ and \\}})",
@@ -1574,6 +1626,7 @@ impl Parser {
                             };
                             return Err(IntentError::ParserError {
                                 line,
+                                column: 0,
                                 message: format!(
                                     "Error in template interpolation '{{{{{}}}}}': {}. \
                                     (Hint: if you meant literal braces, escape them with \\{{{{ and \\}}}})",
@@ -1597,6 +1650,7 @@ impl Parser {
                             };
                             return Err(IntentError::ParserError {
                                 line,
+                                column: 0,
                                 message: format!(
                                     "Error in template filtered expression '{}': {}",
                                     expr, original_msg
@@ -1622,6 +1676,7 @@ impl Parser {
                                     };
                                     return Err(IntentError::ParserError {
                                         line,
+                                        column: 0,
                                         message: format!(
                                             "Error in filter '{}' argument '{}': {}",
                                             filter.name, arg_str, original_msg
@@ -1660,6 +1715,7 @@ impl Parser {
                             };
                             return Err(IntentError::ParserError {
                                 line,
+                                column: 0,
                                 message: format!(
                                     "Error in template for-loop iterable '{}': {}",
                                     iterable, original_msg
@@ -1698,6 +1754,7 @@ impl Parser {
                             };
                             return Err(IntentError::ParserError {
                                 line,
+                                column: 0,
                                 message: format!(
                                     "Error in template if-block condition '{}': {}",
                                     condition, original_msg
@@ -1721,6 +1778,7 @@ impl Parser {
                                 };
                                 return Err(IntentError::ParserError {
                                     line,
+                                    column: 0,
                                     message: format!(
                                         "Error in template elif condition '{}': {}",
                                         elif_condition, original_msg
@@ -1961,6 +2019,7 @@ impl Parser {
 
         Err(IntentError::ParserError {
             line: self.current_line(),
+            column: self.current_column(),
             message: "Expected pattern".to_string(),
         })
     }
@@ -2028,6 +2087,7 @@ impl Parser {
         }
         Err(IntentError::ParserError {
             line: self.current_line(),
+            column: self.current_column(),
             message: message.to_string(),
         })
     }

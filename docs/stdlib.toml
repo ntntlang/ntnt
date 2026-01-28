@@ -968,3 +968,51 @@ examples = ["let msg = recv(rx)"]
 signature = "sleep_ms(ms: Int) -> Unit"
 description = "Pauses execution for specified milliseconds"
 examples = ["sleep_ms(1000) // sleep 1 second"]
+
+# ============================================================================
+# std/db/sqlite - SQLite Database
+# ============================================================================
+
+[modules."std/db/sqlite"]
+description = "SQLite database driver. SQLite is bundled — no external server needed."
+note = "Uses `?` for parameter placeholders. Booleans are stored as INTEGER 0/1."
+
+[modules."std/db/sqlite".functions.connect]
+signature = "connect(path: String) -> Result<Connection, String>"
+description = "Opens or creates a SQLite database. Use ':memory:' for in-memory databases."
+examples = ['let db = connect("app.db")', 'let db = connect(":memory:")']
+
+[modules."std/db/sqlite".functions.query]
+signature = "query(conn: Connection, sql: String, params: Array) -> Result<Array<Map>, String>"
+description = "Execute a SELECT query with parameterized placeholders (?). Returns array of maps."
+examples = ['let rows = query(db, "SELECT * FROM users WHERE age > ?", [18])']
+
+[modules."std/db/sqlite".functions.query_one]
+signature = "query_one(conn: Connection, sql: String, params: Array) -> Result<Map | Unit, String>"
+description = "Execute a query returning a single row, or Unit if no rows match."
+examples = ['let user = query_one(db, "SELECT * FROM users WHERE id = ?", [1])']
+
+[modules."std/db/sqlite".functions.execute]
+signature = "execute(conn: Connection, sql: String, params: Array) -> Result<Int, String>"
+description = "Execute an INSERT, UPDATE, or DELETE statement. Returns the number of affected rows."
+examples = ['let count = execute(db, "DELETE FROM users WHERE active = ?", [false])']
+
+[modules."std/db/sqlite".functions.close]
+signature = "close(conn: Connection) -> Bool"
+description = "Close the database connection and release resources."
+examples = ['close(db)']
+
+[modules."std/db/sqlite".functions.begin]
+signature = "begin(conn: Connection) -> Result<Connection, String>"
+description = "Begin a transaction. Returns the same connection handle."
+examples = ['let tx = begin(db)']
+
+[modules."std/db/sqlite".functions.commit]
+signature = "commit(conn: Connection) -> Result<Bool, String>"
+description = "Commit the current transaction."
+examples = ['commit(db)']
+
+[modules."std/db/sqlite".functions.rollback]
+signature = "rollback(conn: Connection) -> Result<Bool, String>"
+description = "Rollback the current transaction."
+examples = ['rollback(db)']

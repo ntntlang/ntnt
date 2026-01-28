@@ -15,12 +15,13 @@ A practical guide to learning NTNT with examples. For complete reference documen
 3. [Types](#types)
 4. [Contracts](#contracts)
 5. [Traits](#traits)
-6. [Control Flow](#control-flow)
-7. [Concurrency](#concurrency)
-8. [HTTP Client](#http-client)
-9. [HTTP Server](#http-server)
-10. [Database](#database)
-11. [Time](#time)
+6. [Pipe Operator](#pipe-operator)
+7. [Control Flow](#control-flow)
+8. [Concurrency](#concurrency)
+9. [HTTP Client](#http-client)
+10. [HTTP Server](#http-server)
+11. [Database](#database)
+12. [Time](#time)
 
 ---
 
@@ -339,6 +340,35 @@ fn sort<T: Comparable>(arr: [T]) -> [T] {
 
 ---
 
+## Pipe Operator
+
+The pipe operator `|>` passes the left-hand value as the first argument to the right-hand function, enabling readable left-to-right data transformations:
+
+```ntnt
+import { split, join, trim, to_lower } from "std/string"
+
+// Without pipe: nested, reads inside-out
+let result = join(split(to_lower(trim("  Hello World  ")), " "), "-")
+
+// With pipe: linear, reads left-to-right
+let result = "  Hello World  " |> trim |> to_lower |> split(" ") |> join("-")
+```
+
+The rule is simple: `x |> f(a, b)` becomes `f(x, a, b)`. If no extra arguments, `x |> f` becomes `f(x)`.
+
+```ntnt
+// Works with builtins
+let length = "hello" |> len  // 5
+let text = 42 |> str         // "42"
+
+// Works with user-defined functions
+fn double(x) { return x * 2 }
+fn add(x, y) { return x + y }
+let n = 5 |> double |> add(3)  // 13
+```
+
+---
+
 ## Control Flow
 
 ### Defer Statement
@@ -505,7 +535,7 @@ fn create_user(req)
 
 // Routes (global builtins - no import needed)
 get("/", home)
-get(r"/users/{id}", get_user)  // Raw string for route params
+get("/users/{id}", get_user)  // {id} auto-detected as route param
 post("/users", create_user)
 
 // Static files

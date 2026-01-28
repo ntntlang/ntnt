@@ -58,9 +58,9 @@ fn create_task(req) {
     })
 }
 
-get(r"/", home)
-get(r"/about", about)
-get(r"/api/status", api_status)
-post(r"/api/tasks", create_task)
+get("/", home)
+get("/about", about)
+get("/api/status", api_status)
+post("/api/tasks", create_task)
 
 listen(8080)

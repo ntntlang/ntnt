@@ -57,10 +57,17 @@ let msg = "Hello, {name}!"  // CORRECT
 let msg = "Hello, ${name}!" // WRONG
 ```
 
-### Route patterns require raw strings
+### Route patterns auto-detect `{param}` — raw strings optional
 ```ntnt
-get(r"/users/{id}", handler)  // CORRECT
-get("/users/{id}", handler)   // WRONG
+get("/users/{id}", handler)    // CORRECT — auto-detected as route param
+get(r"/users/{id}", handler)   // Also works (backward compatible)
+```
+
+### Use pipe operator for data transformation chains
+```ntnt
+// Pipe passes left side as first argument to right side
+let result = "  Hello  " |> trim |> to_lower  // "hello"
+let parts = "a,b,c" |> split(",") |> join("-")  // "a-b-c"
 ```
 
 ### HTTP routing functions are global builtins
@@ -74,6 +81,10 @@ fn handler(req) { return json(map { "ok": true }) }
 get("/api", handler)
 listen(8080)
 ```
+
+## Error Messages
+
+Error messages include error codes (E001-E012) and color-coded output. Typos in variable or function names trigger "Did you mean?" suggestions using Levenshtein distance. Parser errors show source code snippets with line/column context.
 
 ## Template Strings
 
@@ -99,3 +110,9 @@ ntnt intent check server.tnt      # Verify implementation
 ```
 
 See [docs/AI_AGENT_GUIDE.md](docs/AI_AGENT_GUIDE.md#intent-driven-development-idd) for full IDD workflow.
+
+## Documentation Maintenance (MANDATORY)
+
+**After implementing any language feature, follow the checklist in [.plans/doc-maintenance-guide.md](.plans/doc-maintenance-guide.md).**
+
+This includes: integration tests, example files, TOML doc sources, AI_AGENT_GUIDE.md, LANGUAGE_GUIDE.md, ARCHITECTURE.md, ROADMAP.md, and this file. Run `ntnt docs --generate` after editing any TOML file. Do not wait for the user to ask — update docs as part of every implementation task.

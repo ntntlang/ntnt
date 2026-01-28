@@ -117,8 +117,8 @@ examples = ["let msg = \"Hello, {name}!\"", "let escaped = \"line1\\nline2\""]
 
 [literals.raw_strings]
 syntax = "r\"no escapes\", r#\"with \"quotes\"\"#"
-description = "Raw strings - no escape processing, useful for regex and routes"
-examples = ["let pattern = r\"\\d+\"", "get(r\"/users/{id}\", handler)"]
+description = "Raw strings - no escape processing, useful for regex patterns"
+examples = ["let pattern = r\"\\d+\"", "let html = r#\"<div class=\"main\">text</div>\"#"]
 
 [literals.template_strings]
 syntax = "\"\"\"...{{expr}}...\"\"\""

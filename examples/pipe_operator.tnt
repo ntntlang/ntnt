@@ -1,0 +1,40 @@
+// Pipe Operator (|>) Examples
+// The pipe operator passes the left-hand value as the first argument
+// to the right-hand function, enabling fluent data transformation pipelines.
+
+import { split, join, trim, to_lower, to_upper, replace } from "std/string"
+
+// Basic: value |> function
+let greeting = "hello" |> to_upper
+print(greeting)  // HELLO
+
+// With extra arguments: value |> function(arg2, arg3, ...)
+// Equivalent to: function(value, arg2, arg3, ...)
+let parts = "a,b,c" |> split(",")
+print(parts)  // [a, b, c]
+
+// Chained pipes read left-to-right instead of inside-out
+let result = "  Hello, World  " |> trim |> to_lower |> split(",") |> join(" and")
+print(result)  // hello and  world
+
+// Compare with nested calls (equivalent but harder to read):
+let same = join(split(to_lower(trim("  Hello, World  ")), ","), " and")
+print(same)  // hello and  world
+
+// Works with any function, including user-defined ones
+fn double(x) { return x * 2 }
+fn add(x, y) { return x + y }
+
+let num = 5 |> double |> add(3)
+print(num)  // 13  (double(5) = 10, add(10, 3) = 13)
+
+// Works with builtins
+let length = "hello world" |> len
+print(length)  // 11
+
+// Practical example: URL slug generation
+fn slugify(text) {
+    return text |> trim |> to_lower |> replace(" ", "-")
+}
+let slug = "  My Blog Post Title  " |> slugify
+print(slug)  // my-blog-post-title

@@ -465,11 +465,14 @@ impl Interpreter {
     /// to invoke NTNT functions after loading a module.
     pub fn call_function_by_name(&mut self, name: &str, args: Vec<Value>) -> Result<Value> {
         // Look up the function in the environment
-        let func = self
-            .environment
-            .borrow()
-            .get(name)
-            .ok_or_else(|| IntentError::UndefinedVariable(name.to_string()))?;
+        let func = self.environment.borrow().get(name).ok_or_else(|| {
+            let candidates = self.environment.borrow().keys();
+            let suggestion = crate::error::find_suggestion(name, &candidates);
+            IntentError::UndefinedVariable {
+                name: name.to_string(),
+                suggestion,
+            }
+        })?;
 
         // Verify it's a function
         match &func {
@@ -2289,11 +2292,14 @@ impl Interpreter {
             Expression::Bool(b) => Ok(Value::Bool(*b)),
             Expression::Unit => Ok(Value::Unit),
 
-            Expression::Identifier(name) => self
-                .environment
-                .borrow()
-                .get(name)
-                .ok_or_else(|| IntentError::UndefinedVariable(name.clone())),
+            Expression::Identifier(name) => self.environment.borrow().get(name).ok_or_else(|| {
+                let candidates = self.environment.borrow().keys();
+                let suggestion = crate::error::find_suggestion(name, &candidates);
+                IntentError::UndefinedVariable {
+                    name: name.clone(),
+                    suggestion,
+                }
+            }),
 
             Expression::Binary {
                 left,
@@ -2699,7 +2705,9 @@ impl Interpreter {
                     // NOT if it's a URL (starts with http:// or https://) - those are HTTP client calls
                     let http_methods = ["get", "post", "put", "delete", "patch"];
                     if http_methods.contains(&name.as_str()) && arguments.len() == 2 {
-                        let pattern = self.eval_expression(&arguments[0])?;
+                        // Use eval_route_pattern to auto-detect route parameters:
+                        // "/users/{id}" preserves {id} as a route param instead of interpolating
+                        let pattern = self.eval_route_pattern(&arguments[0])?;
 
                         // Check if this is a route pattern vs a URL
                         if let Value::String(pattern_str) = &pattern {
@@ -2851,7 +2859,12 @@ impl Interpreter {
                             }
                             Ok(val)
                         } else {
-                            Err(IntentError::UndefinedVariable(name.clone()))
+                            let candidates = self.environment.borrow().keys();
+                            let suggestion = crate::error::find_suggestion(name, &candidates);
+                            Err(IntentError::UndefinedVariable {
+                                name: name.clone(),
+                                suggestion,
+                            })
                         }
                     }
                     Expression::FieldAccess { object, field } => {
@@ -2860,7 +2873,13 @@ impl Interpreter {
                             // Get the current struct
                             let current =
                                 self.environment.borrow().get(var_name).ok_or_else(|| {
-                                    IntentError::UndefinedVariable(var_name.clone())
+                                    let candidates = self.environment.borrow().keys();
+                                    let suggestion =
+                                        crate::error::find_suggestion(var_name, &candidates);
+                                    IntentError::UndefinedVariable {
+                                        name: var_name.clone(),
+                                        suggestion,
+                                    }
                                 })?;
 
                             if let Value::Struct {
@@ -2996,7 +3015,10 @@ impl Interpreter {
 
                     Ok(result)
                 } else {
-                    Err(IntentError::UndefinedFunction(method.clone()))
+                    Err(IntentError::UndefinedFunction {
+                        name: method.clone(),
+                        suggestion: None,
+                    })
                 }
             }
 
@@ -3129,6 +3151,44 @@ impl Interpreter {
         }
     }
 
+    /// Evaluate an expression as a route pattern.
+    ///
+    /// Route builtins (get, post, put, delete, patch) call this instead of
+    /// eval_expression() for their path argument. It preserves `{name}` as
+    /// literal route parameter placeholders instead of interpolating them.
+    ///
+    /// - InterpolatedString with simple identifiers: `"/users/{id}"` → `/users/{id}`
+    /// - InterpolatedString with complex expressions: evaluated normally
+    /// - All other expressions (String, variable, concatenation): evaluated normally
+    fn eval_route_pattern(&mut self, expr: &Expression) -> Result<Value> {
+        match expr {
+            Expression::InterpolatedString(parts) => {
+                use crate::ast::StringPart;
+                let mut result = String::new();
+                for part in parts {
+                    match part {
+                        StringPart::Literal(s) => result.push_str(s),
+                        StringPart::Expr(inner) => {
+                            if let Expression::Identifier(name) = inner {
+                                // Route parameter: preserve {name} as literal
+                                result.push('{');
+                                result.push_str(name);
+                                result.push('}');
+                            } else {
+                                // Complex expression: evaluate it (intentional interpolation)
+                                let value = self.eval_expression(inner)?;
+                                result.push_str(&value.to_string());
+                            }
+                        }
+                    }
+                }
+                Ok(Value::String(result))
+            }
+            // For non-interpolated strings, variables, etc. — evaluate normally
+            _ => self.eval_expression(expr),
+        }
+    }
+
     /// Render a template string with the given data
     fn render_template_with_data(
         &mut self,
@@ -3190,7 +3250,7 @@ impl Interpreter {
                         Err(e) => {
                             // If there's a default filter and we got an undefined variable error,
                             // use Unit as the value so the default filter can provide a fallback
-                            if has_default && matches!(&e, IntentError::UndefinedVariable(_)) {
+                            if has_default && matches!(&e, IntentError::UndefinedVariable { .. }) {
                                 Value::Unit
                             } else {
                                 return Err(e);
@@ -3824,6 +3884,7 @@ impl Interpreter {
             } => {
                 if args.len() != params.len() {
                     return Err(IntentError::ArityMismatch {
+                        name: name.clone(),
                         expected: params.len(),
                         got: args.len(),
                     });
@@ -3927,12 +3988,13 @@ impl Interpreter {
             }
 
             Value::NativeFunction {
-                name: _,
+                name: fn_name,
                 arity,
                 func,
             } => {
                 if args.len() != arity && arity != 0 {
                     return Err(IntentError::ArityMismatch {
+                        name: fn_name.clone(),
                         expected: arity,
                         got: args.len(),
                     });
@@ -3947,6 +4009,7 @@ impl Interpreter {
             } => {
                 if args.len() != arity {
                     return Err(IntentError::ArityMismatch {
+                        name: format!("{}::{}", enum_name, variant),
                         expected: arity,
                         got: args.len(),
                     });

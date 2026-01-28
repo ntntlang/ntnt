@@ -432,3 +432,63 @@ fn test_inspect_file_based_routes_have_line_numbers() {
         );
     }
 }
+
+// ============================================================================
+// Route pattern auto-detection tests (inspect)
+// ============================================================================
+
+#[test]
+fn test_inspect_detects_auto_detected_route_params() {
+    use std::fs;
+    use std::io::Write;
+
+    // Create a file with routes using regular strings (no raw strings)
+    let temp_dir = std::env::temp_dir();
+    let test_file = temp_dir.join("ntnt_test_route_autodetect.tnt");
+    let mut file = fs::File::create(&test_file).unwrap();
+    writeln!(
+        file,
+        r#"import {{ json }} from "std/http/server"
+fn get_user(req) {{ return json(map {{ "ok": true }}) }}
+fn list_items(req) {{ return json(map {{ "ok": true }}) }}
+
+get("/users/{{id}}", get_user)
+post("/api/{{category}}/items/{{id}}", list_items)
+get("/", get_user)
+listen(8080)"#
+    )
+    .unwrap();
+
+    let test_path = test_file.to_str().unwrap();
+    let (stdout, _, code) = run_ntnt(&["inspect", test_path]);
+
+    // Clean up
+    fs::remove_file(&test_file).ok();
+
+    assert_eq!(code, 0, "inspect should succeed");
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("inspect should output valid JSON");
+    let routes = json["routes"].as_array().expect("Should have routes array");
+
+    // Should detect all 3 routes including those with auto-detected params
+    assert!(
+        routes.len() >= 3,
+        "Should detect at least 3 routes, found {}",
+        routes.len()
+    );
+
+    let route_paths: Vec<&str> = routes.iter().filter_map(|r| r["path"].as_str()).collect();
+
+    assert!(
+        route_paths.contains(&"/users/{id}"),
+        "Should detect /users/{{id}} route from regular string. Found: {:?}",
+        route_paths
+    );
+    assert!(
+        route_paths.contains(&"/api/{category}/items/{id}"),
+        "Should detect /api/{{category}}/items/{{id}} route. Found: {:?}",
+        route_paths
+    );
+    assert!(route_paths.contains(&"/"), "Should detect / route");
+}

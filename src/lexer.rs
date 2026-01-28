@@ -162,6 +162,7 @@ pub enum TokenKind {
     Hash,             // #
     Ampersand,        // &
     Pipe,             // |
+    PipeArrow,        // |>
     DotDot,           // ..
     DotDotEqual,      // ..=
 
@@ -1277,7 +1278,9 @@ impl<'a> Lexer<'a> {
                 }
             }
             '|' => {
-                if self.match_char('|') {
+                if self.match_char('>') {
+                    Token::new(TokenKind::PipeArrow, start_line, start_column, "|>".into())
+                } else if self.match_char('|') {
                     Token::new(TokenKind::Or, start_line, start_column, "||".into())
                 } else {
                     Token::new(TokenKind::Pipe, start_line, start_column, "|".into())

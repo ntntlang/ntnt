@@ -157,18 +157,18 @@ get("/redirect", custom_redirect)
 get("/api/status", api_status)
 get("/not-implemented", not_implemented_handler)
 
-// Routes with path parameters (use raw strings)
-get(r"/users/{id}", get_user)
-get(r"/users/{user_id}/posts/{post_id}", get_user_post)
+// Routes with path parameters (auto-detected)
+get("/users/{id}", get_user)
+get("/users/{user_id}/posts/{post_id}", get_user_post)
 
 // Query parameter handling
 get("/search", search)
 
 // CRUD routes
 post("/users", create_user)
-put(r"/users/{id}", update_user)
-delete(r"/users/{id}", delete_user)
-patch(r"/users/{id}", patch_user)
+put("/users/{id}", update_user)
+delete("/users/{id}", delete_user)
+patch("/users/{id}", patch_user)
 
 // Contract-verified endpoint
 get("/calc/divide", calc_divide)

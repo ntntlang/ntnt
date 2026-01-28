@@ -1345,3 +1345,500 @@ print(result)
     );
     assert!(stdout.contains("-1"), "Should return default -1");
 }
+
+// ============================================================================
+// Pipe Operator (|>) Tests
+// ============================================================================
+
+#[test]
+fn test_pipe_basic_builtin() {
+    let code = r#"
+let x = 5 |> str
+print(x)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "pipe with builtin should succeed");
+    assert!(stdout.contains("5"), "Should convert 5 to string");
+}
+
+#[test]
+fn test_pipe_with_args() {
+    let code = r#"
+import { split } from "std/string"
+let parts = "a,b,c" |> split(",")
+print(parts)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "pipe with extra args should succeed");
+    assert!(
+        stdout.contains("a") && stdout.contains("b") && stdout.contains("c"),
+        "Should split into parts: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_pipe_chained() {
+    let code = r#"
+import { trim, to_lower } from "std/string"
+let result = "  Hello World  " |> trim |> to_lower
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "chained pipes should succeed");
+    assert!(
+        stdout.contains("hello world"),
+        "Should trim and lowercase: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_pipe_multi_arg_chain() {
+    let code = r#"
+import { split, join } from "std/string"
+let result = "a,b,c" |> split(",") |> join("-")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "multi-arg chain should succeed");
+    assert!(
+        stdout.contains("a-b-c"),
+        "Should split then rejoin: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_pipe_user_defined_function() {
+    let code = r#"
+fn double(x) { return x * 2 }
+let result = 5 |> double
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "pipe with user function should succeed");
+    assert!(stdout.contains("10"), "Should double 5 to 10: {}", stdout);
+}
+
+#[test]
+fn test_pipe_long_chain() {
+    let code = r#"
+import { split, join, trim, to_lower } from "std/string"
+let result = "  Hello, World  " |> trim |> to_lower |> split(",") |> join(" and")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "long pipe chain should succeed");
+    assert!(
+        stdout.contains("hello") && stdout.contains("and"),
+        "Should process through full chain: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_pipe_with_len() {
+    let code = r#"
+let result = "hello" |> len
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "pipe with len should succeed");
+    assert!(stdout.contains("5"), "Should get length 5: {}", stdout);
+}
+
+#[test]
+fn test_pipe_error_invalid_rhs() {
+    let code = r#"
+let result = 5 |> 3
+"#;
+    let (_, _, exit_code) = run_ntnt_code(code);
+    assert_ne!(
+        exit_code, 0,
+        "pipe with non-function RHS should produce a parse error"
+    );
+}
+
+// ============================================================================
+// Route Pattern Auto-Detection Tests
+// ============================================================================
+
+#[test]
+fn test_route_auto_detect_single_param() {
+    let code = r#"
+import { json } from "std/http/server"
+fn get_user(req) { return json(map { "ok": true }) }
+
+// {id} should be auto-detected as a route parameter, not interpolated
+get("/users/{id}", get_user)
+print("registered")
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "route auto-detection should handle {{id}} without raw string.\nstderr: {}",
+        stderr
+    );
+    assert!(
+        stdout.contains("registered"),
+        "Should register route successfully: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_route_auto_detect_multiple_params() {
+    let code = r#"
+import { json } from "std/http/server"
+fn handler(req) { return json(map { "ok": true }) }
+
+// Multiple {param} placeholders in one route
+post("/api/{category}/items/{id}", handler)
+print("registered")
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "route auto-detection should handle multiple params.\nstderr: {}",
+        stderr
+    );
+    assert!(stdout.contains("registered"));
+}
+
+#[test]
+fn test_route_auto_detect_all_http_methods() {
+    let code = r#"
+import { json } from "std/http/server"
+fn handler(req) { return json(map { "ok": true }) }
+
+get("/items/{id}", handler)
+post("/items/{id}", handler)
+put("/items/{id}", handler)
+delete("/items/{id}", handler)
+patch("/items/{id}", handler)
+print("all methods registered")
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "all HTTP methods should support auto-detection.\nstderr: {}",
+        stderr
+    );
+    assert!(stdout.contains("all methods registered"));
+}
+
+#[test]
+fn test_route_auto_detect_with_raw_string_still_works() {
+    let code = r#"
+import { json } from "std/http/server"
+fn handler(req) { return json(map { "ok": true }) }
+
+// Raw strings should still work (backward compatibility)
+get(r"/users/{id}", handler)
+print("raw string route registered")
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "raw string routes should still work");
+    assert!(stdout.contains("raw string route registered"));
+}
+
+#[test]
+fn test_route_auto_detect_plain_string_no_params() {
+    let code = r#"
+import { json } from "std/http/server"
+fn handler(req) { return json(map { "ok": true }) }
+
+// Plain strings without params should work as before
+get("/", handler)
+get("/about", handler)
+print("plain routes registered")
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "plain string routes should work");
+    assert!(stdout.contains("plain routes registered"));
+}
+
+#[test]
+fn test_route_auto_detect_no_false_positive_outside_route() {
+    // {name} outside a route call should still be interpolation
+    let code = r#"
+let name = "world"
+let greeting = "hello {name}"
+print(greeting)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "interpolation outside routes should work normally"
+    );
+    assert!(
+        stdout.contains("hello world"),
+        "String interpolation should still work outside route calls: {}",
+        stdout
+    );
+}
+
+// ============================================================================
+// SQLite integration tests
+// ============================================================================
+
+#[test]
+fn test_sqlite_connect_and_query() {
+    let code = r#"
+import { connect, query, execute, close } from "std/db/sqlite"
+
+match connect(":memory:") {
+    Ok(db) => {
+        execute(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)", [])
+        execute(db, "INSERT INTO test (name) VALUES (?)", ["Alice"])
+        execute(db, "INSERT INTO test (name) VALUES (?)", ["Bob"])
+        match query(db, "SELECT * FROM test ORDER BY id", []) {
+            Ok(rows) => {
+                print(len(rows))
+                print(rows[0]["name"])
+                print(rows[1]["name"])
+            },
+            Err(e) => print("ERROR: " + e)
+        }
+        close(db)
+    },
+    Err(e) => print("CONNECT ERROR: " + e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("2"), "Should have 2 rows: {}", stdout);
+    assert!(stdout.contains("Alice"), "Should contain Alice: {}", stdout);
+    assert!(stdout.contains("Bob"), "Should contain Bob: {}", stdout);
+}
+
+#[test]
+fn test_sqlite_query_one() {
+    let code = r#"
+import { connect, query_one, execute, close } from "std/db/sqlite"
+
+match connect(":memory:") {
+    Ok(db) => {
+        execute(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)", [])
+        execute(db, "INSERT INTO test (name) VALUES (?)", ["Alice"])
+
+        match query_one(db, "SELECT * FROM test WHERE id = ?", [1]) {
+            Ok(row) => print(row["name"]),
+            Err(e) => print("ERROR: " + e)
+        }
+
+        match query_one(db, "SELECT * FROM test WHERE id = ?", [999]) {
+            Ok(row) => print("missing:" + str(row)),
+            Err(e) => print("ERROR: " + e)
+        }
+
+        close(db)
+    },
+    Err(e) => print("CONNECT ERROR: " + e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("Alice"), "Should find Alice: {}", stdout);
+    assert!(
+        stdout.contains("missing:"),
+        "Missing row should return value: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_sqlite_transaction() {
+    let code = r#"
+import { connect, query, execute, close, begin, commit, rollback } from "std/db/sqlite"
+
+match connect(":memory:") {
+    Ok(db) => {
+        execute(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)", [])
+
+        // Insert and rollback
+        begin(db)
+        execute(db, "INSERT INTO test (name) VALUES (?)", ["Rolled Back"])
+        rollback(db)
+
+        match query(db, "SELECT * FROM test", []) {
+            Ok(rows) => print("after_rollback:" + str(len(rows))),
+            Err(e) => print("ERROR: " + e)
+        }
+
+        // Insert and commit
+        begin(db)
+        execute(db, "INSERT INTO test (name) VALUES (?)", ["Committed"])
+        commit(db)
+
+        match query(db, "SELECT * FROM test", []) {
+            Ok(rows) => print("after_commit:" + str(len(rows))),
+            Err(e) => print("ERROR: " + e)
+        }
+
+        close(db)
+    },
+    Err(e) => print("CONNECT ERROR: " + e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "stderr: {}", stderr);
+    assert!(
+        stdout.contains("after_rollback:0"),
+        "Rollback should remove row: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("after_commit:1"),
+        "Commit should keep row: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_sqlite_parameterized_types() {
+    let code = r#"
+import { connect, query, execute, close } from "std/db/sqlite"
+
+match connect(":memory:") {
+    Ok(db) => {
+        execute(db, "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT, score REAL, active INTEGER)", [])
+        execute(db, "INSERT INTO test (name, score, active) VALUES (?, ?, ?)", ["Alice", 95.5, true])
+
+        match query(db, "SELECT * FROM test", []) {
+            Ok(rows) => {
+                let row = rows[0]
+                print(row["name"])
+                print(row["score"])
+            },
+            Err(e) => print("ERROR: " + e)
+        }
+
+        close(db)
+    },
+    Err(e) => print("CONNECT ERROR: " + e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("Alice"), "name should be Alice: {}", stdout);
+    assert!(stdout.contains("95.5"), "score should be 95.5: {}", stdout);
+}
+
+// ============================================================================
+// Error Message Tests (Phase 7.6)
+// ============================================================================
+
+#[test]
+fn test_undefined_variable_suggestion() {
+    let code = r#"
+let users = [1, 2, 3]
+print(usres)
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail with undefined variable");
+    assert!(
+        stderr.contains("E006"),
+        "Should contain error code E006: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("usres"),
+        "Should mention the misspelled name: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("users"),
+        "Should suggest 'users': {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_undefined_function_suggestion() {
+    let code = r#"
+prnt("hello")
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail with undefined variable");
+    assert!(
+        stderr.contains("E006") || stderr.contains("E007"),
+        "Should contain error code: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("prnt"),
+        "Should mention the misspelled name: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("print"),
+        "Should suggest 'print': {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_arity_mismatch_shows_function_name() {
+    let code = r#"
+fn add(a, b) {
+    return a + b
+}
+print(add(1, 2, 3))
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail with arity mismatch");
+    assert!(
+        stderr.contains("E008"),
+        "Should contain error code E008: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("add"),
+        "Should mention function name 'add': {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("expected 2"),
+        "Should show expected count: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("got 3"),
+        "Should show actual count: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_parser_error_has_error_code() {
+    let code = r#"
+let x = 10
+if x > 5 {
+    print("hello"
+}
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail with parser error");
+    assert!(
+        stderr.contains("E002"),
+        "Should contain error code E002: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_no_suggestion_for_distant_name() {
+    let code = r#"
+let users = [1, 2, 3]
+print(completely_wrong_name)
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail with undefined variable");
+    assert!(
+        !stderr.contains("Did you mean"),
+        "Should NOT suggest anything for distant names: {}",
+        stderr
+    );
+}

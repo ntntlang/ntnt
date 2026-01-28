@@ -24,7 +24,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Recursive descent parser
 - [x] Complete AST definitions
 - [x] Tree-walking interpreter
-- [x] Basic type system (Int, Float, String, Bool, Array, Object, Function, Unit)
+- [x] Basic type system (Int, Float, String, Bool, Array, Object, Function, Unit) — parsed, not yet enforced (→ Phase 7.1)
 - [x] Full contract system (`requires`, `ensures`, `old()`, `result`)
 - [x] Struct invariants with automatic checking
 - [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, `round` with optional decimals, etc.)
@@ -116,10 +116,11 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Nullable types: `String?` (sugar for `Option<String>`)
 - [x] Never type for functions that don't return
 
-### 2.4 Effects System (Foundation) ✅
+### 2.4 Effects System (Foundation) ✅ → Removed in Phase 7.1
 
 - [x] Effect annotations: `fn read_file(path: String) -> String with io`
 - [x] Pure function marking
+- **Removed:** The Effect enum, `with` keyword parsing, and `pure` keyword parsing are removed in Phase 7.1. The syntax was parsed but never enforced — no runtime or static checking existed. A real effect system requires the static analysis infrastructure from Phase 13+ and is tracked in Future Considerations.
 
 ---
 
@@ -663,31 +664,30 @@ The `.intent` format is optimized for machine parsing and testing, but humans de
 - [x] **Native hot-reload** - edit .tnt file, changes apply on next request (no restart!)
 - [x] **Auto-start app** - Studio automatically starts the matching .tnt file
 
-**Phase 2: Intent Studio V2** (In Progress)
+**Phase 2: Intent Studio V2** (Mostly Complete)
 
 Design: [design-docs/studio-mockup-v2.html](design-docs/studio-mockup-v2.html)
 
-- [ ] Health bar visualization (pass/fail/warning/skip percentages)
-- [ ] Filter chips (All, Failing, Warnings, Skipped, Unlinked, Unit Tests)
-- [ ] Search across features, scenarios, and assertions
-- [ ] Expanded feature cards with scenarios and assertions
-- [ ] Resolution chain visualization (glossary → terms → primitives)
-- [ ] Unit test section with test data, corpus testing, property checks
-- [ ] Invariant bundles display
-- [ ] Warning states for not-implemented features
-- [ ] Skip states with precondition failure reasons
-- [ ] WebSocket-based instant live reload (no polling)
+- [x] Health bar visualization (pass/fail/warning/skip percentages)
+- [x] Filter chips (All, Failing, Warnings, Skipped, Unlinked, Unit Tests)
+- [x] Search across features, scenarios, and assertions
+- [x] Expanded feature cards with scenarios and assertions
+- [x] Unit test section with test data, corpus testing, property checks
+- [x] Invariant bundles display
+- [x] Warning states for not-implemented features
+- [x] Skip states with precondition failure reasons
+- [ ] WebSocket-based instant live reload (currently polling at 10s interval)
 
-**Phase 3: IAL Explorer** (In Progress)
+**Phase 3: IAL Explorer** ✅ COMPLETE
 
 Design: [design-docs/ial_explorer.html](design-docs/ial_explorer.html)
 
-- [ ] Intent file viewer with syntax highlighting
-- [ ] Interactive glossary term highlighting
-- [ ] Hover popover showing full resolution chain
-- [ ] Resolution depth visualization (Level 0 → 1 → 2 → primitive)
-- [ ] Sidebar glossary reference panel
-- [ ] Link between Studio and Explorer views
+- [x] Intent file viewer with syntax highlighting
+- [x] Interactive glossary term highlighting
+- [x] Hover popover showing full resolution chain
+- [x] Resolution depth visualization (Level 0 → 1 → 2 → primitive)
+- [x] Sidebar glossary reference panel
+- [x] Link between Studio and Explorer views
 
 **Phase 4: Enhanced Studio (Later)**
 
@@ -748,8 +748,10 @@ $ ntnt intent studio server.intent --port 4000 --app-port 9000
 
 **Behavioral Properties**
 
-- [ ] Idempotency: `repeat: N` with result comparison
-- [ ] Purity: `pure: true` (same input = same output, no side effects)
+- [x] Idempotency: `property: idempotent` — verifies f(f(x)) == f(x)
+- [x] Determinism: `property: deterministic` — verifies f(x) == f(x) across calls
+- [x] Round-trip: `property: round_trips` — verifies g(f(x)) == x
+- [ ] Purity: `pure: true` (same input = same output, no side effects — requires side-effect tracking)
 - [ ] Thread safety: `parallel:` concurrent request testing
 - [ ] Sequencing: `sequence:` state machine transitions
 - [ ] No unintended mutations: `no_db_writes: true`
@@ -820,13 +822,1015 @@ Constraint: Global Rate Limiting
 
 ---
 
-## Phase 7: Testing Framework
+## Phase 7: Language Ergonomics ← UP NEXT
+
+**Status:** Not Started
+
+**Goal:** Address the biggest daily friction points for AI agents and human developers writing NTNT code. The type system comes first because it's a foundation that makes every subsequent feature stronger.
+
+> These features were identified through real-world usage as the highest-impact improvements to the language. The type system is sequenced first because error propagation (`?`) needs to know return types, closures benefit from type inference, and SQLite needs type mapping. Together, these features transform a typical web handler from ~22 lines of match pyramids to ~6 lines of linear, readable code.
+
+### 7.1 Type System Enforcement
+
+**Priority:** Foundation — everything else in this phase builds on real types.
+
+Currently, type annotations are parsed but not enforced. This is the worst of both worlds: syntax noise without safety guarantees. NTNT needs to commit to real types.
+
+**Design: Enforced types with aggressive inference.**
+
+```ntnt
+// Function signatures require types (the contract boundary)
+fn add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+// Local variables are inferred — no annotation needed
+let x = 5              // inferred: Int
+let name = "Alice"     // inferred: String
+let nums = [1, 2, 3]  // inferred: [Int]
+
+// Explicit annotation optional, useful for documentation
+let threshold: Float = 3.14
+
+// Type errors caught at lint/validate time, not runtime
+fn greet(name: String) -> String {
+    return "Hello, " + name
+}
+greet(42)  // ✗ Type error: expected String, got Int
+```
+
+**Two layers of safety — types + contracts:**
+
+```ntnt
+// Types catch STRUCTURAL errors (wrong kind of data)
+// Contracts catch SEMANTIC errors (right kind, wrong value)
+fn divide(a: Int, b: Int) -> Int
+    requires b != 0                    // contract: semantic check
+    ensures result * b == a            // contract: behavioral check
+{
+    return a / b    // types guarantee a and b are Int
+}
+
+// The contract checker can now verify:
+// "ensures result > 0" — result is Int, comparison to Int is valid ✓
+// "ensures len(result)" — result is Int, len() expects String/Array ✗
+```
+
+**Implementation plan:**
+
+- [ ] Type inference engine for local variables (`let x = 5` → `Int`)
+- [ ] Type checking at function call boundaries (argument types match parameter types)
+- [ ] Return type verification (function body returns declared type)
+- [ ] Type inference for expressions (arithmetic, string concat, comparisons)
+- [ ] Generic type resolution (`Option<Int>`, `Result<String, Error>`)
+- [ ] Union type checking (`String | Int` accepts either)
+- [ ] Array element type inference (`[1, 2, 3]` → `[Int]`)
+- [ ] Map value type inference (`map { "a": 1 }` → `Map<String, Int>`)
+- [ ] Type errors in `ntnt lint` and `ntnt validate` output (not just runtime)
+- [ ] Helpful error messages: "expected String, got Int" with line/column
+- [ ] Contract expression type-checking (`ensures len(result) > 0` — verify `result` is a type `len()` accepts)
+- [ ] Gradual typing: untyped parameters default to `Any` (backward compatible)
+- [ ] Remove the `Effect` enum from `src/types.rs` (7 variants, never checked at runtime)
+- [ ] Remove `with` keyword effect parsing from `src/parser.rs` (lines 244-258)
+- [ ] Remove `pure` keyword parsing from function signatures
+- [ ] Remove `TypeExpr::WithEffect` variant from AST
+- [ ] Remove the two effect-related tests from `src/interpreter.rs` (test_effects_annotation, test_pure_function)
+- [ ] Keep `TokenKind::With` and `TokenKind::Pure` as reserved keywords (forward compatibility)
+
+**Backward compatibility:** Existing NTNT code continues to work. Untyped function parameters are treated as `Any`. Adding types is opt-in but encouraged. Over time, `ntnt lint` can warn about untyped public function signatures.
+
+### 7.2 Error Propagation (`?` Operator)
+
+**Priority:** Highest friction point — depends on 7.1 to verify return types are `Result`/`Option`.
+
+Currently, every fallible operation requires an explicit `match`:
+
+```ntnt
+// Current: verbose error handling
+fn handle_request(req) {
+    match parse_json(req) {
+        Ok(data) => {
+            match validate(data) {
+                Ok(valid) => {
+                    match save_to_db(valid) {
+                        Ok(result) => return json(result),
+                        Err(e) => return status(500, "DB error: " + str(e))
+                    }
+                },
+                Err(e) => return status(400, "Invalid: " + str(e))
+            }
+        },
+        Err(e) => return status(400, "Parse error: " + str(e))
+    }
+}
+```
+
+With `?` operator:
+
+```ntnt
+// Target: concise error propagation
+fn handle_request(req: Request) -> Result<Response, Error> {
+    let data = parse_json(req)?
+    let valid = validate(data)?
+    let result = save_to_db(valid)?
+    return Ok(json(result))
+}
+```
+
+**Implementation plan:**
+
+- [ ] `?` operator on `Result<T, E>` values — unwrap `Ok` or early-return `Err`
+- [ ] `?` operator on `Option<T>` values — unwrap `Some` or early-return `None`
+- [ ] Error type coercion (auto-convert between compatible error types)
+- [ ] Type system verifies `?` is used in functions that return `Result` or `Option`
+- [ ] Clear error message when `?` is used in a function with wrong return type
+
+### 7.3 Anonymous Functions / Closures
+
+**Priority:** High — needed for idiomatic use of `filter`, `transform`, and higher-order functions.
+
+Currently, every callback requires a named function:
+
+```ntnt
+// Current: must define named functions for simple transformations
+fn double(x) { return x * 2 }
+fn is_even(x) { return x % 2 == 0 }
+
+let doubled = transform(nums, double)
+let evens = filter(nums, is_even)
+```
+
+With closures:
+
+```ntnt
+// Target: inline anonymous functions
+let doubled = transform(nums, fn(x: Int) -> Int { x * 2 })
+let evens = filter(nums, fn(x: Int) -> Bool { x % 2 == 0 })
+
+// Type inference from context — when transform() expects fn(Int) -> T,
+// parameter types can be inferred:
+let doubled = transform(nums, fn(x) { x * 2 })
+
+// Closures capture surrounding variables
+let threshold = 10
+let above = filter(nums, fn(x) { x > threshold })
+```
+
+**Implementation plan:**
+
+- [ ] Anonymous function expression: `fn(params) { body }`
+- [ ] Implicit return (last expression is return value) for single-expression closures
+- [ ] Variable capture from enclosing scope (closure semantics)
+- [ ] Closures as function arguments (higher-order functions)
+- [ ] Type inference from call context (parameter types inferred from expected signature)
+- [ ] Named function handlers still required for HTTP routes (readability rule)
+
+### 7.4 SQLite Support (`std/db/sqlite`)
+
+**Priority:** High — the most common database for small web apps, requires no external server.
+
+SQLite is the natural database for NTNT's sweet spot: AI-generated web prototypes and small applications. Unlike PostgreSQL, it requires zero setup — just a file path.
+
+```ntnt
+import { connect, query, execute } from "std/db/sqlite"
+
+let db = connect("app.db")
+
+// Create tables
+execute(db, "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)")
+
+// Parameterized queries (safe from injection)
+execute(db, "INSERT INTO users (name, email) VALUES (?, ?)", ["Alice", "alice@example.com"])
+
+// Query returns array of maps
+let users = query(db, "SELECT * FROM users WHERE name = ?", ["Alice"])
+for user in users {
+    print("User: " + user["name"])
+}
+```
+
+**Implementation plan:**
+
+- [x] `std/db/sqlite` module (Rust `rusqlite` crate with `bundled` feature)
+- [x] `connect(path)` — open or create SQLite database file
+- [x] `query(db, sql, params?)` — parameterized SELECT queries
+- [x] `execute(db, sql, params?)` — INSERT/UPDATE/DELETE with param binding
+- [x] `close(db)` — close database connection
+- [x] Transaction support (`begin`, `commit`, `rollback`)
+- [x] In-memory databases: `connect(":memory:")`
+- [x] Type mapping: INTEGER↔Int, REAL↔Float, TEXT↔String, BLOB↔Array<Int>, NULL↔Unit
+
+### 7.5 Pipe Operator (`|>`)
+
+**Priority:** Moderate — low implementation effort, eliminates daily friction with nested function calls.
+
+> Moved from Future Considerations. The assessment identified nested function calls as a concrete pain point: "the nested function call style gets ugly." With closures (7.3) now in the same phase, pipelines become especially powerful.
+
+```ntnt
+// Current: nested, reads inside-out
+let result = join(split(trim(to_lower(input)), " "), "-")
+
+// With pipe operator: linear, reads left-to-right
+let result = input
+    |> to_lower
+    |> trim
+    |> split(" ")
+    |> join("-")
+
+// Powerful with closures (7.3):
+let active_emails = users
+    |> filter(fn(u) { u.active })
+    |> transform(fn(u) { u.email })
+    |> join(", ")
+```
+
+**Implementation plan:**
+
+- [x] `|>` operator in lexer (`PipeArrow` token) and parser (desugars to `Expression::Call` at parse time — no new AST node needed)
+- [x] `x |> f` desugars to `f(x)` — simple rewrite
+- [x] `x |> f(a, b)` desugars to `f(x, a, b)` — first-argument insertion
+- [ ] Type checking flows through the pipe chain (output type of left = input type of right)
+- [ ] Error messages show the failing step in the pipeline, not just the final result
+
+### 7.6 Better Error Messages
+
+**Priority:** High — the assessment rated NTNT's error messages as "Basic" and "notably behind languages like Rust or Elm." For an AI-first language, rich errors are essential for self-correction loops.
+
+Currently, errors are terse:
+
+```
+Undefined variable: usr
+Type error: expected Int, got String
+```
+
+Target: context-rich, actionable errors:
+
+```
+Error[E001]: Undefined variable `usr`
+  --> server.tnt:45:12
+   |
+45 |     return json(usr)
+   |                 ^^^ not found in this scope
+   |
+   help: did you mean `user`? (defined at line 42)
+```
+
+```
+Error[E012]: Type mismatch in function call
+  --> server.tnt:23:18
+   |
+23 |     let result = add("hello", 5)
+   |                      ^^^^^^^ expected Int, got String
+   |
+   note: function `add` defined at server.tnt:10
+         fn add(a: Int, b: Int) -> Int
+```
+
+**Implementation plan:**
+
+- [x] Error codes (E001-E012) on all error variants for machine-parseable errors
+- [x] "Did you mean?" suggestions for undefined variables (Levenshtein distance)
+- [x] "Did you mean?" suggestions for undefined functions (Levenshtein distance)
+- [x] Function name included in arity mismatch errors
+- [x] Column info added to ParserError
+- [x] Source code snippets in error output (3-line context for parser errors)
+- [x] Color-coded CLI output (error codes in red, line numbers in blue, suggestions in green, help text in cyan)
+- [ ] Full AST span tracking on all nodes (line, column, span) — deferred
+- [ ] Runtime error line numbers via AST span tracking — deferred
+- [ ] "Did you mean?" suggestions for wrong imports (scan stdlib for similar names)
+- [ ] Contract violation messages show the contract expression and actual values
+- [ ] `ntnt lint --format=json` structured error output for agent consumption
+
+### 7.7 Route Pattern Auto-Detection
+
+**Priority:** Moderate — eliminates the most common "gotcha" in NTNT web development.
+
+Currently, route parameters use `{id}` syntax, which collides with string interpolation. Forgetting to use raw strings (`r""`) is a recurring friction point:
+
+```ntnt
+// Current: must remember r"" for every route
+get(r"/users/{id}", get_user)        // ✅ works
+get("/users/{id}", get_user)         // ❌ tries to interpolate {id}
+
+// Target: route functions auto-detect patterns, no r"" needed
+get("/users/{id}", get_user)         // ✅ just works
+post("/api/orders/{id}/items", add_item)  // ✅ just works
+```
+
+Route registration functions (`get`, `post`, `put`, `patch`, `delete`) are already builtins — the compiler knows what they are. Their first argument should automatically suppress string interpolation and treat `{...}` as route parameter placeholders.
+
+**Implementation plan:**
+
+- [x] Route builtin functions treat their path argument as a route pattern (no interpolation)
+- [x] `{param}` in route patterns is always a route parameter, never interpolation
+- [x] Raw strings (`r""`) still work for backward compatibility
+- [ ] `ntnt lint` warns if a raw string is used unnecessarily in a route (style hint)
+- [x] Dynamic route registration (rare) uses an explicit API if needed
+
+### 7.8 Destructuring Assignment
+
+**Priority:** High — every POST handler parses form data or JSON into individual variables. This is the most repetitive boilerplate in NTNT web code.
+
+```ntnt
+// Current: 4 lines to extract fields
+let form = parse_form(req)
+let name = form["name"]
+let email = form["email"]
+let age = form["age"]
+
+// With destructuring: 1 line
+let { name, email, age } = parse_form(req)
+
+// Works with type annotations
+let { name: String, email: String, age: Int } = parse_form(req)
+
+// Nested destructuring
+let { user: { name, email }, role } = parse_json(req)?
+
+// Array destructuring
+let [first, second, ...rest] = split(line, ",")
+
+// In function parameters
+fn create_user({ name, email }: Map) -> User {
+    return User { name: name, email: email }
+}
+```
+
+**Implementation plan:**
+
+- [ ] Map destructuring in `let` bindings: `let { key1, key2 } = expr`
+- [ ] Array destructuring: `let [first, second] = expr`
+- [ ] Rest patterns: `let [head, ...tail] = arr`
+- [ ] Nested destructuring: `let { user: { name } } = data`
+- [ ] Destructuring with type annotations
+- [ ] Destructuring in function parameters
+- [ ] Destructuring in `for` loops: `for { name, email } in users { ... }`
+- [ ] Type checking: destructured fields are type-inferred from the source expression
+
+### 7.9 Default Parameter Values
+
+**Priority:** Moderate — reduces boilerplate in utility functions and makes APIs more ergonomic.
+
+```ntnt
+// Current: caller must always pass all arguments
+fn paginate(items, page, per_page) {
+    let start = (page - 1) * per_page
+    return slice(items, start, start + per_page)
+}
+paginate(users, 1, 25)  // almost always 1 and 25
+
+// With defaults: optional arguments have sensible fallbacks
+fn paginate(items: [Any], page: Int = 1, per_page: Int = 25) -> [Any] {
+    let start = (page - 1) * per_page
+    return slice(items, start, start + per_page)
+}
+paginate(users)           // page=1, per_page=25
+paginate(users, 3)        // page=3, per_page=25
+paginate(users, 2, 50)    // page=2, per_page=50
+
+// Works with web handler helpers
+fn respond(data: Map, status_code: Int = 200, content_type: String = "application/json") -> Response {
+    return status(status_code, stringify(data))
+}
+```
+
+**Implementation plan:**
+
+- [ ] Default value expressions in function parameter lists: `param: Type = expr`
+- [ ] Default parameters must come after required parameters
+- [ ] Default expressions evaluated at call time (not definition time)
+- [ ] Type inference: default value provides type if annotation is missing
+- [ ] `ntnt inspect` includes default values in function signatures
+- [ ] Works with contracts: `requires` can reference defaulted parameters
+
+### 7.10 Guard Clauses (`let-else`)
+
+**Priority:** High — eliminates a level of nesting for every validation check. Pairs with `?` (7.2) to flatten web handlers from match pyramids to linear sequences.
+
+The `?` operator handles `Result` propagation, but web handlers also bail out for non-Result conditions — "if the user doesn't exist, return 404." Today this requires a full `match` block that pushes the happy path one indent level deeper:
+
+```ntnt
+// Current: match pyramid for every check
+match find_user(id) {
+    Some(user) => {
+        match find_order(user, order_id) {
+            Some(order) => {
+                // ... handler at indent level 2
+            },
+            None => return status(404, "Order not found")
+        }
+    },
+    None => return status(404, "User not found")
+}
+
+// With guard clauses: flat, linear, reads top-to-bottom
+let user = find_user(id) else return status(404, "User not found")
+let order = find_order(user, order_id) else return status(404, "Order not found")
+// ... handler at indent level 0
+```
+
+**Implementation plan:**
+
+- [ ] `let x = expr else { diverging_expr }` syntax (like Rust's let-else)
+- [ ] The `else` block must diverge (return, break, continue, or panic)
+- [ ] Works with `Option`: unwraps `Some(v)` or runs else block on `None`
+- [ ] Works with `Result`: unwraps `Ok(v)` or runs else block on `Err(e)`
+- [ ] The error value is accessible in the else block: `let x = expr else |e| return status(500, str(e))`
+- [ ] Type system verifies the else block diverges (doesn't fall through)
+
+### 7.11 Intent File Cleanup
+
+**Priority:** Low — small hygiene task, same spirit as the Effect enum removal.
+
+- [ ] Remove unused `Meta:` section parsing from intent files (the `## Overview` section serves the same purpose)
+- [ ] Clean up any other dead parsing paths identified during Phase 7 work
+
+**Deliverables:**
+
+- Type system with inference and enforcement
+- Effect enum removed (dead code cleanup)
+- `?` operator for Result and Option types
+- Anonymous functions with closure semantics
+- `std/db/sqlite` module with full CRUD support
+- Pipe operator for linear data transformations
+- Context-rich error messages with suggestions and source snippets
+- Route pattern auto-detection (no more `r""` for route paths)
+- Destructuring assignment (maps, arrays, nested, in parameters and loops)
+- Default parameter values
+- Guard clauses (`let-else`) for flat validation sequences
+- Intent file Meta section cleanup
+- Updated examples using new features
+
+---
+
+## Phase 8: Intent System Maturity
+
+**Status:** Not Started
+
+**Goal:** Make Intent-Driven Development a tool that AI agents and humans genuinely rely on — not just for testing, but as the shared plane of understanding and accountability between human and agent.
+
+> Phase 6 proved the concept: intent files, the IAL engine, and `ntnt intent check` work. This phase makes the system something an agent *wants* to use by fixing the friction points discovered through real-world usage: opaque failures, offline validation, glossary debugging, and the lack of shared decision history.
+
+### 8.1 Resolution Chain in Failure Output
+
+**Priority:** Highest — when a test fails, the agent currently has to play detective.
+
+Today, a failure looks like:
+
+```
+FAIL: they see "Welcome"
+```
+
+The agent doesn't know: was the response a 500? Was the body empty? Was "Welcome" misspelled? The IAL engine already has the full resolution chain internally — it just doesn't surface it.
+
+**Target output:**
+
+```
+FAIL: they see "Welcome"
+  Resolved: body contains "Welcome"
+  Primitive: Check(Contains, response.body, "Welcome")
+
+  Actual status: 200
+  Actual body: "<h1>Welcom to the site</h1>"
+  ─────────────────────────
+  Closest match: "Welcom" (missing 'e')
+```
+
+**Implementation plan:**
+
+- [ ] Surface the resolution chain in `ntnt intent check` failure output (glossary term → standard term → primitive)
+- [ ] Show actual HTTP response data on failure (status, body excerpt, headers)
+- [ ] Fuzzy match suggestions when `body contains` fails ("did you mean 'Welcom'?")
+- [ ] JSON output mode (`--json`) for agent consumption of failure details
+- [ ] Show resolution chain in Intent Studio failure cards
+
+### 8.2 Offline Intent Validation (`ntnt intent validate`)
+
+**Priority:** High — the collaborative design phase needs fast feedback without starting a server.
+
+During the design phase (drafting features, refining scenarios with the human), there's no way to check if the intent file is well-formed without starting the full server. This makes iteration slow.
+
+```bash
+$ ntnt intent validate server.intent
+
+✓ 12 features parsed
+✓ 8 glossary terms defined
+✓ All terms resolve to primitives
+⚠ Feature "user.profile" has no scenarios
+⚠ Glossary term "admin user" is defined but never used
+✗ Scenario "Edit profile" uses undefined term "they are redirected"
+  hint: did you mean "redirects to"? (standard term)
+
+11 features valid, 1 error, 2 warnings
+```
+
+**Implementation plan:**
+
+- [ ] `ntnt intent validate <file.intent>` — parse and validate without server
+- [ ] Check all glossary terms resolve to primitives (no dangling references)
+- [ ] Warn on unused glossary terms
+- [ ] Warn on features with no scenarios
+- [ ] Warn on duplicate feature IDs
+- [ ] Validate `@implements` annotations reference existing feature IDs (cross-check with `.tnt` file)
+- [ ] Suggest corrections for unresolved terms (Levenshtein distance against glossary + standard terms)
+- [ ] JSON output mode for agent consumption
+
+### 8.3 Glossary Inspector (`ntnt intent glossary`)
+
+**Priority:** Moderate — the glossary is powerful but opaque. Agents and humans need to see what terms are available and how they resolve.
+
+```bash
+$ ntnt intent glossary server.intent
+
+Custom Terms (8):
+  "they see {text}"          → body contains {text}
+  "success response"         → status 200
+  "the home page"            → /
+  "a logged in user"         → component.authenticated_user
+  "a user posts to {path}"   → POST {path}
+  ...
+
+Standard Terms (24):
+  "status {code}"            → Check(Equals, response.status, {code})
+  "body contains {text}"     → Check(Contains, response.body, {text})
+  "redirects to {path}"      → Check(Equals, response.headers.location, {path})
+  ...
+
+Resolution Trace:
+  "they see success response"
+    → "they see {text}" where text = "success response"
+    → body contains "success response"
+    → Check(Contains, response.body, "success response")
+    ⚠ Note: "success response" is a glossary term, not literal text.
+       The assertion checks for the literal string "success response" in the body.
+       If you meant status 200, use "→ success response" as its own line.
+```
+
+**Implementation plan:**
+
+- [ ] `ntnt intent glossary <file.intent>` — list all custom and standard terms
+- [ ] `ntnt intent glossary <file.intent> --trace "<term>"` — show full resolution chain for a specific term
+- [ ] Detect semantic misuse (glossary term used as literal text inside another term)
+- [ ] Show which scenarios use each glossary term (reverse lookup)
+- [ ] `--json` output for agent consumption
+- [ ] Integration with Intent Studio (glossary panel)
+
+### 8.4 Feature Status Tracking
+
+**Priority:** Moderate — makes the intent file a living project document, not just a static test spec.
+
+```intent
+Feature: User Login
+  id: feature.user_login
+  status: implemented
+  since: v0.3.0
+
+Feature: Password Reset
+  id: feature.password_reset
+  status: planned
+
+Feature: OAuth Integration
+  id: feature.oauth
+  status: deprecated
+  reason: "Replaced by SAML in v0.4.0"
+```
+
+**Behavior:**
+
+- `status: planned` — scenarios are **skipped** during `intent check` (not failed), shown as "planned" in Studio
+- `status: implemented` — scenarios run normally (default if no status specified)
+- `status: deprecated` — scenarios still run but shown with deprecation warning in Studio
+- `since:` — tracks when a feature was introduced (informational, used in changelog generation)
+
+**Implementation plan:**
+
+- [ ] Parse `status:` field on Feature blocks (planned | implemented | deprecated)
+- [ ] Parse `since:` field (version string, informational)
+- [ ] Parse `reason:` field for deprecated features
+- [ ] `ntnt intent check` skips planned features with clear "SKIP (planned)" output
+- [ ] `ntnt intent check` shows deprecated warnings
+- [ ] Intent Studio renders status badges on feature cards
+- [ ] `ntnt intent check --include-planned` flag to run planned features (expect failures)
+
+### 8.5 Decision Records
+
+**Priority:** Moderate — the highest-leverage accountability feature. Records *why* choices were made, not just *what* was built.
+
+The intent file currently records what the human and agent agreed to build. But it doesn't record the decisions that shaped those features — why session tokens instead of JWTs, why PostgreSQL instead of SQLite, why this API shape and not another. When an agent returns to a project in a new session, that context is lost.
+
+```intent
+Feature: User Authentication
+  id: feature.user_auth
+
+  Decision: Session tokens over JWTs
+    date: 2026-01-15
+    context: "MVP needs simple auth. JWTs add complexity (refresh tokens,
+             signing keys) without clear benefit at this scale."
+    decided_by: human
+    alternatives_considered:
+      - "JWT with refresh tokens"
+      - "OAuth2 with external provider"
+
+  Decision: Bcrypt for password hashing
+    date: 2026-01-15
+    context: "Industry standard, built into std/crypto."
+    decided_by: agent
+
+  Scenario: Successful login
+    When a user posts valid credentials to /login
+    → success response
+    → they see "session_token"
+```
+
+**Why this matters for human-agent collaboration:**
+
+- **Agent context recovery** — when I start a new session, I can read decisions to understand why the code looks the way it does, without asking questions the human already answered
+- **Human accountability** — decisions have an author. If something breaks because of a design choice, the history shows who made it and why
+- **Design archaeology** — `ntnt intent decisions` lists all decisions across features, creating a lightweight Architecture Decision Record (ADR) system built into the workflow
+
+**Implementation plan:**
+
+- [ ] Parse `Decision:` blocks inside Feature sections
+- [ ] Fields: `date:`, `context:`, `decided_by:` (human | agent), `alternatives_considered:` (optional list)
+- [ ] `ntnt intent decisions <file.intent>` — list all decisions across features
+- [ ] `ntnt intent decisions <file.intent> --by human` — filter by decision maker
+- [ ] Intent Studio renders decisions as expandable sections on feature cards
+- [ ] Decision records are informational — they don't affect test execution
+
+**Deliverables:**
+
+- Resolution chain visibility in all failure output
+- `ntnt intent validate` for offline structural checking
+- `ntnt intent glossary` for term inspection and resolution tracing
+- Feature status tracking with skip behavior for planned features
+- Decision records for shared human-agent accountability
+- All new commands support `--json` output for agent consumption
+
+---
+
+## Phase 9: Package & Module Ecosystem
+
+**Status:** Not Started
+
+**Goal:** Let NTNT be extended beyond the standard library. This is the single biggest barrier to adoption — every project eventually needs something the stdlib doesn't have.
+
+> This phase delivers the foundation: local packages, git dependencies, and a project manifest. The full registry and publishing infrastructure comes later in Phase 12.2 (Tooling & DX). This is the single feature the assessment identified as "the biggest barrier to adoption."
+
+### 9.1 Project Manifest (`ntnt.toml`)
+
+Every NTNT project gets a manifest file that declares metadata and dependencies:
+
+```toml
+[project]
+name = "my-app"
+version = "0.1.0"
+entry = "server.tnt"
+
+[dependencies]
+markdown = { path = "../ntnt-markdown" }        # Local path
+email = { git = "https://github.com/user/ntnt-email.git" }  # Git URL
+```
+
+**Implementation plan:**
+
+- [ ] `ntnt.toml` parser (TOML format, Rust `toml` crate)
+- [ ] `ntnt new <name>` — scaffold a new project with `ntnt.toml`, `server.tnt`, and directory structure
+- [ ] Project metadata: name, version, description, author, license, entry point
+- [ ] `ntnt run` auto-detects `ntnt.toml` and resolves dependencies before execution
+- [ ] `ntnt.lock` lockfile for reproducible builds
+
+### 9.2 NTNT-Native Packages
+
+Packages are directories of NTNT code with a `ntnt.toml` manifest that other projects can import:
+
+```
+ntnt-markdown/
+├── ntnt.toml
+├── lib.tnt          # Package entry point (exports public API)
+├── src/
+│   ├── parser.tnt
+│   ├── renderer.tnt
+│   └── extensions.tnt
+└── tests/
+    └── markdown_tests.tnt
+```
+
+**lib.tnt (package entry point):**
+```ntnt
+// Re-export public API
+import { parse } from "./src/parser"
+import { render_html, render_text } from "./src/renderer"
+
+export { parse, render_html, render_text }
+```
+
+**Consumer usage:**
+```ntnt
+import { parse, render_html } from "markdown"
+
+fn blog_handler(req: Request) -> Response {
+    let content = read_file("posts/" + req.params["slug"] + ".md")
+    let html_content = render_html(parse(content))
+    return html(html_content)
+}
+```
+
+**Implementation plan:**
+
+- [ ] Package resolution: name in `ntnt.toml` [dependencies] → path or git URL → directory with `ntnt.toml`
+- [ ] Package imports: `import { x } from "package-name"` resolves to the package's `lib.tnt` exports
+- [ ] Local path dependencies: `{ path = "../my-package" }`
+- [ ] Git dependencies: `{ git = "https://..." }` — clone to a cache directory
+- [ ] Git ref pinning: `{ git = "...", tag = "v1.0.0" }` or `{ git = "...", rev = "abc123" }`
+- [ ] Dependency caching: packages cached in `~/.ntnt/packages/`
+- [ ] `ntnt add <name> --path <path>` — add a local dependency
+- [ ] `ntnt add <name> --git <url>` — add a git dependency
+- [ ] Circular dependency detection
+
+### 9.3 Rust Extension Packages (FFI)
+
+For capabilities that can't be written in pure NTNT (system libraries, performance-critical code, bindings to existing ecosystems):
+
+```toml
+# ntnt-redis/ntnt.toml
+[project]
+name = "redis"
+version = "0.1.0"
+type = "native"          # Indicates Rust extension
+
+[native]
+crate = "ntnt-redis"     # Rust crate name
+```
+
+**Implementation plan:**
+
+- [ ] Extension API: Rust trait that native packages implement to expose functions to NTNT
+- [ ] Dynamic loading: `.so`/`.dylib`/`.dll` loaded at runtime
+- [ ] Type marshaling: Rust types ↔ NTNT `Value` conversion
+- [ ] Standard extension trait with `register_functions()` method
+- [ ] Pre-built extensions for common needs (Redis, email, image processing)
+- [ ] `ntnt build-ext` command for compiling Rust extensions
+
+### 9.4 Stdlib as Packages
+
+Refactor parts of the standard library to use the same package infrastructure, proving the system works:
+
+- [ ] Extract `std/csv` as a standalone package (simple, good test case)
+- [ ] Extract `std/crypto` as a standalone package
+- [ ] Built-in packages resolve from the interpreter binary (no download needed)
+- [ ] Stdlib packages serve as reference implementations for package authors
+
+**Deliverables:**
+
+- `ntnt.toml` project manifest with dependency declaration
+- `ntnt new` project scaffolding
+- Local path and git URL dependency resolution
+- Package import system (`import { x } from "package-name"`)
+- Rust FFI extension API for native packages
+- Dependency caching and lockfile
+- At least two stdlib modules extracted as proof-of-concept packages
+
+---
+
+## Phase 10: Background Jobs, WebSockets & Real-Time
+
+**Status:** Not Started
+
+**Goal:** Production-ready background job system with a declarative Job DSL, pluggable backends, and deep IDD integration — plus WebSocket and SSE support for pushing data to clients. Jobs are first-class language constructs — the `Job` keyword is syntax, not a library import — with the runtime and queue management provided by `std/jobs`.
+
+> Background jobs are essential for any non-trivial web application: sending emails, processing payments, syncing with external APIs, generating reports. NTNT's job system treats jobs as **intentional units of work** rather than just functions to execute, aligning with the IDD philosophy. The `Job` DSL is language-level syntax (like `fn` or `struct`), while the Queue runtime lives in `std/jobs` (like `json()` lives in `std/http/server`). See `design-docs/background_jobs.md` for the full design.
+
+### 10.1 Job DSL & Core Runtime
+
+**Priority:** Foundation — the `Job` declaration syntax and in-memory backend.
+
+```ntnt
+/// Sends personalized welcome email to newly registered users
+Job SendWelcomeEmail on emails {
+    perform(user_id: String) {
+        let user = db.find_user(user_id)
+        email.send(user.email, "Welcome!", "...")
+    }
+}
+
+/// Charges customer credit card for completed orders
+Job ProcessPayment on payments (retry: 5, timeout: 120s) {
+    perform(order_id: String, amount: Float) {
+        let order = db.find(order_id)
+        stripe.charge(order.customer_id, amount)
+    }
+
+    on_failure(error, attempt) {
+        alert.notify("Payment failed: {error}")
+    }
+}
+
+// Enqueue jobs
+SendWelcomeEmail.enqueue(map { "user_id": "123" })
+ProcessPayment.enqueue_in(3600, map { "order_id": "456", "amount": 29.99 })
+```
+
+**Implementation plan:**
+
+- [ ] `Job` declaration syntax in parser (new AST node: `JobDeclaration`)
+- [ ] `perform()` handler with typed arguments
+- [ ] `on_failure()` hook
+- [ ] `Job.enqueue()`, `Job.enqueue_at()`, `Job.enqueue_in()` methods
+- [ ] Queue configuration: `Queue.configure(map { "backend": "memory" })`
+- [ ] In-memory backend (zero dependencies, default)
+- [ ] Worker loop with retry logic and exponential backoff
+- [ ] Priority queues (`low`, `normal`, `high`)
+- [ ] Dead letter queue for exhausted retries
+- [ ] Job cancellation: `Queue.cancel(job_id)`
+- [ ] Graceful shutdown (drain in-progress jobs on SIGTERM)
+- [ ] Job options: `retry`, `timeout`, `backoff`, `priority`, `rate`, `concurrency`, `unique`, `expires`, `idempotent`
+- [ ] Doc comment metadata parsing (`/// Triggers:`, `/// Affects:`, `/// Side effects:`)
+
+### 10.2 Resilience & Production Features
+
+**Priority:** High — required for any production deployment.
+
+- [ ] Worker heartbeats (detect crashed workers)
+- [ ] Visibility timeout (re-enqueue stale jobs after no heartbeat)
+- [ ] Rate limiting per job type (e.g., `rate: 100/minute`)
+- [ ] Concurrency limits per job type
+- [ ] Job TTL/expiration (`expires: 5m` — discard stale jobs)
+- [ ] Automatic pruning of completed/cancelled jobs
+- [ ] Weighted queue processing (prevent starvation of low-priority queues)
+- [ ] `Queue.work_async()` for combined HTTP server + worker mode
+
+### 10.3 Persistent Backends
+
+**Priority:** High — in-memory jobs are lost on restart.
+
+```ntnt
+import { Queue } from "std/jobs"
+
+// PostgreSQL backend (reliable, ACID, multi-worker)
+Queue.configure(map {
+    "backend": "postgres",
+    "postgres_url": env("DATABASE_URL")
+})
+
+// Redis/Valkey backend (high throughput, 10k+ jobs/sec)
+Queue.configure(map {
+    "backend": "redis",
+    "redis_url": env("REDIS_URL")
+})
+```
+
+- [ ] PostgreSQL backend with auto-migration (`ntnt_jobs` table)
+- [ ] Distributed locking via `SELECT FOR UPDATE SKIP LOCKED`
+- [ ] Redis/Valkey backend for high-throughput workloads
+- [ ] Feature flags to avoid bloating the binary (`jobs-postgres`, `jobs-redis`)
+- [ ] Separate worker processes for production: `Queue.work(map { "queues": ["emails", "payments"], "concurrency": 10 })`
+
+### 10.4 Composition (Chains, Workflows, Batches)
+
+**Priority:** Moderate — needed for multi-step business processes.
+
+```ntnt
+// Sequential chain — each job receives the previous job's result
+Chain ProcessOrder {
+    ValidateOrder -> ReserveInventory -> ChargePayment -> SendConfirmation
+}
+ProcessOrder.start(map { "order_id": "123" })
+
+// DAG workflow — fan-out and fan-in
+Workflow UserOnboarding {
+    CreateAccount -> SendWelcomeEmail
+    CreateAccount -> SetupBilling
+    [SendWelcomeEmail, SetupBilling] -> ActivateAccount
+}
+
+// Batch — parallel with completion callback
+let batch = Batch.create(map {
+    "on_complete": fn(results) { db.update_total(sum(results)) },
+    "on_failure": fn(errors) { alert("Batch failed") }
+})
+for chunk in data_chunks { batch.add(ProcessChunk, map { "chunk": chunk }) }
+batch.run()
+```
+
+- [ ] `Chain` declaration syntax (sequential job pipelines)
+- [ ] `Workflow` declaration syntax (DAG dependencies with fan-out/fan-in)
+- [ ] `Batch.create()` / `batch.add()` / `batch.run()` API
+- [ ] Unique jobs / deduplication (`unique: args for 1h`)
+- [ ] Workflow status tracking: `Workflow.status(workflow_id)`
+
+### 10.5 WebSocket Support
+
+**Priority:** High — essential for modern web apps. Live dashboards, chat, notifications, and real-time job status updates all require pushing data to clients.
+
+The assessment identified this as a key missing feature: "there's no way to push data to clients. This limits NTNT to traditional page-based web apps."
+
+```ntnt
+import { broadcast, send_to } from "std/ws"
+
+// WebSocket route — handler called per connection
+ws("/chat", fn(conn) {
+    // Called when a message arrives
+    conn.on_message(fn(msg) {
+        // Broadcast to all connected clients
+        broadcast("/chat", msg)
+    })
+
+    conn.on_close(fn() {
+        print("Client disconnected")
+    })
+})
+
+// Send to specific client from anywhere (e.g., from a job)
+ws("/jobs/status", fn(conn) {
+    // Client subscribes to job updates
+    let job_id = conn.params["job_id"]
+    conn.on_open(fn() {
+        send_to(conn, json(Queue.status(job_id)))
+    })
+})
+
+// Push from background jobs
+Job ProcessPayment on payments {
+    perform(order_id: String) {
+        // ... process payment ...
+        broadcast("/orders/{order_id}", json(map { "status": "paid" }))
+    }
+}
+
+listen(8080)
+```
+
+**Implementation plan:**
+
+- [ ] `ws(pattern, handler)` global builtin for WebSocket routes (mirrors `get`/`post` pattern)
+- [ ] Connection object: `conn.on_message()`, `conn.on_open()`, `conn.on_close()`
+- [ ] `send_to(conn, msg)` — send to a specific connection
+- [ ] `broadcast(channel, msg)` — send to all connections on a channel
+- [ ] `std/ws` module for additional utilities (rooms, connection tracking)
+- [ ] Integration with background jobs — push job status updates to clients
+- [ ] Server-Sent Events (SSE) as a simpler alternative: `sse(pattern, handler)`
+- [ ] Connection state management (track connected clients, rooms/channels)
+- [ ] Graceful connection cleanup on server shutdown
+
+### 10.6 IDD Integration & CLI
+
+**Priority:** Moderate — testable jobs are NTNT's differentiator over Sidekiq/Bull/Oban.
+
+```intent
+Feature: Welcome Email Job
+  id: feature.welcome_email_job
+  test:
+    - job: SendWelcomeEmail
+      args: { "user_id": "123" }
+      given:
+        - mock db.find_user returns { "id": "123", "email": "test@example.com" }
+      assert:
+        - status: completed
+        - email.send was called with "test@example.com"
+```
+
+- [ ] Job testing in `.intent` files (`job:` assertion type)
+- [ ] Mock support for job dependencies in IDD scenarios
+- [ ] `ntnt jobs status` — summary of all queues
+- [ ] `ntnt jobs list [--pending|--failed|--dead]` — filter jobs by status
+- [ ] `ntnt jobs inspect <job-id>` — full job details
+- [ ] `ntnt jobs retry <job-id>` — retry a failed/dead job
+- [ ] `ntnt jobs cancel <job-id>` — cancel a pending job
+- [ ] `ntnt jobs simulate <JobName> --args='...'` — dry-run without side effects
+- [ ] `ntnt jobs replay <job-id>` — re-run with exact same inputs for debugging
+- [ ] `--format=json` for agent-consumable output on all commands
+
+### 10.7 Advanced Features (Future)
+
+- [ ] `effect` blocks for explicit side-effect declaration (skipped in simulation mode)
+- [ ] Job contracts (`requires(args) { ... }`, `ensures(args, result) { ... }`)
+- [ ] Intent verification (`verify()` hook — did the job achieve its purpose, not just run?)
+- [ ] Idempotency static analysis in `ntnt lint`
+- [ ] Natural language queries: `ntnt jobs ask "why are emails failing?"`
+- [ ] AI-powered diagnosis: `ntnt jobs diagnose <job-id>`
+- [ ] Request tracing across job chains: `ntnt jobs trace <request-id>`
+
+**Deliverables:**
+
+- `Job`, `Chain`, `Workflow` language-level declaration syntax
+- `std/jobs` module with Queue API and worker model
+- In-memory, PostgreSQL, and Redis/Valkey backends
+- Resilience: heartbeats, retries, dead letter queue, rate limiting, graceful shutdown
+- Job composition: chains (sequential), workflows (DAG), batches (parallel)
+- WebSocket and SSE support (`ws()` builtin, `broadcast()`, `send_to()`)
+- IDD integration for testing jobs in `.intent` files
+- `ntnt jobs` CLI commands for monitoring and management
+- Simulation mode for dry-run execution
+
+---
+
+## Phase 11: Testing Framework
 
 **Goal:** Comprehensive testing infrastructure complementing Intent-Driven Development.
 
 > IDD tests behavior at the feature level. This phase adds unit testing, mocking, and contract-based test generation for fine-grained code verification.
 
-### 7.1 Unit Test Framework
+### 11.1 Unit Test Framework
 
 - [ ] `#[test]` attribute for test functions
 - [ ] Test discovery and runner
@@ -850,7 +1854,7 @@ fn test_invalid_email() {
 }
 ```
 
-### 7.2 Contract-Based Test Generation
+### 11.2 Contract-Based Test Generation
 
 - [ ] Auto-generate test cases from contracts
 - [ ] Property-based testing with contracts
@@ -872,7 +1876,7 @@ fn divide(a: Int, b: Int) -> Int
 // - divide(-10, -2) → 5 ✓ (negative handling)
 ```
 
-### 7.3 Mocking & Test Utilities
+### 11.3 Mocking & Test Utilities
 
 - [ ] Mock trait implementations
 - [ ] HTTP test client (complements IDD HTTP testing)
@@ -891,7 +1895,7 @@ fn test_with_mock_db() {
 }
 ```
 
-### 7.4 Test Integration
+### 11.4 Test Integration
 
 - [ ] `ntnt test` command (runs all tests)
 - [ ] `ntnt test --unit` (unit tests only)
@@ -923,11 +1927,11 @@ ntnt test --coverage
 
 ---
 
-## Phase 8: Tooling & Developer Experience
+## Phase 12: Tooling & Developer Experience
 
 **Goal:** World-class developer experience with AI collaboration support.
 
-### 8.1 Language Server (LSP)
+### 12.1 Language Server (LSP)
 
 - [ ] Go to definition
 - [ ] Find references
@@ -937,13 +1941,16 @@ ntnt test --coverage
 - [ ] Code actions (quick fixes)
 - [ ] Contract visualization
 
-### 8.2 Package Manager
+### 12.2 Package Registry & Publishing
 
-- [ ] `ntnt.toml` project configuration
-- [ ] Package registry
-- [ ] Dependency resolution with lock files
+> **Note:** The package foundation (manifest, local/git dependencies, imports) is built in Phase 9 (Package Ecosystem). This section adds the public registry and publishing infrastructure.
+
+- [ ] Central package registry (hosted service)
+- [ ] `ntnt publish` — publish packages to the registry
 - [ ] Semantic versioning enforcement
-- [ ] `ntnt new`, `ntnt add`, `ntnt publish`
+- [ ] Dependency resolution with version ranges (`^1.0`, `~2.3`)
+- [ ] `ntnt add <name>` — install from registry (in addition to Phase 9's path/git support)
+- [ ] Package search: `ntnt search <query>`
 
 ```bash
 ntnt new my-app
@@ -953,7 +1960,7 @@ ntnt test
 ntnt build --release
 ```
 
-### 8.3 Documentation Generator
+### 12.3 Documentation Generator
 
 - [ ] Doc comments (`///`)
 - [x] Automatic API documentation from TOML source files
@@ -964,7 +1971,7 @@ ntnt build --release
 - [x] Auto-generated references: STDLIB_REFERENCE.md, SYNTAX_REFERENCE.md, IAL_REFERENCE.md
 - [x] CI/CD validation for documentation drift
 
-### 8.4 Human Approval Mechanisms (From Whitepaper)
+### 12.4 Human Approval Mechanisms (From Whitepaper)
 
 - [ ] `@requires_approval` annotations
 - [ ] Approval workflows in IDE
@@ -983,7 +1990,7 @@ pub fn get_user(id: String) -> User {
 }
 ```
 
-### 8.5 Debugger
+### 12.5 Debugger
 
 - [ ] Breakpoints
 - [ ] Step debugging
@@ -1002,7 +2009,7 @@ pub fn get_user(id: String) -> User {
 
 ---
 
-## Phase 9: Performance & Compilation
+## Phase 13: Performance & Compilation
 
 **Goal:** Production-ready performance through progressive compilation strategies.
 
@@ -1024,11 +2031,11 @@ NTNT Source (.tnt)
 
 ### Compilation Roadmap
 
-| Approach                            | Effort     | Speedup   | When      |
-| ----------------------------------- | ---------- | --------- | --------- |
-| Tree-walking Interpreter            | ✅ Done    | Baseline  | Current   |
-| Bytecode VM                         | 2-4 weeks  | 10-50x    | Phase 8.1 |
-| Native Compilation (Cranelift/LLVM) | 2-3 months | 100-1000x | Phase 8.4 |
+| Approach                            | Effort     | Speedup   | When       |
+| ----------------------------------- | ---------- | --------- | ---------- |
+| Tree-walking Interpreter            | ✅ Done    | Baseline  | Current    |
+| Bytecode VM                         | 2-4 weeks  | 10-50x    | Phase 13.1 |
+| Native Compilation (Cranelift/LLVM) | 2-3 months | 100-1000x | Phase 13.4 |
 
 ### What Can Be Reused
 
@@ -1041,7 +2048,7 @@ NTNT Source (.tnt)
 | Interpreter | ❌ Replaced | Becomes compiler/codegen    |
 | Stdlib      | ⚠️ Partial  | Need native implementations |
 
-### 9.1 Bytecode VM (First Target)
+### 13.1 Bytecode VM (First Target)
 
 **Goal:** 10-50x performance improvement with moderate effort.
 
@@ -1079,7 +2086,7 @@ ntnt run app.tnc            # Run bytecode directly
 ntnt run app.tnt            # Auto-compile and run (caches .tnc)
 ```
 
-### 9.2 VM Optimizations
+### 13.2 VM Optimizations
 
 - [ ] Constant folding at compile time
 - [ ] Dead code elimination
@@ -1088,7 +2095,7 @@ ntnt run app.tnt            # Auto-compile and run (caches .tnc)
 - [ ] Contract elision in release builds (configurable)
 - [ ] Hot path detection and optimization
 
-### 9.3 Memory Management
+### 13.3 Memory Management
 
 - [ ] Reference counting with cycle detection
 - [ ] Memory pools for hot paths
@@ -1096,7 +2103,7 @@ ntnt run app.tnt            # Auto-compile and run (caches .tnc)
 - [ ] Small string optimization
 - [ ] Arena allocators for request handling
 
-### 9.4 Native Compilation (Future)
+### 13.4 Native Compilation (Future)
 
 **Goal:** Native machine code for maximum performance (100-1000x faster than interpreter).
 
@@ -1178,15 +2185,45 @@ ntnt build app.tnt --release    # Optimized build
 ./app                           # Run native binary directly
 ```
 
-### 9.5 Static Type Checking
+### 13.5 Advanced Static Analysis & Contract Inference
 
-- [ ] Full type inference
-- [ ] Flow-sensitive typing
-- [ ] Exhaustive type checking at compile time
-- [ ] Helpful error messages with suggestions
-- [ ] Type narrowing in conditionals and match
+> **Note:** Basic type inference and enforcement are in Phase 7.1 (including contract expression type-checking). This section covers deep analysis that builds on the bytecode compiler, including the full contract inference system.
 
-### 9.6 Advanced Type System Features
+**Contract Inference:**
+
+Contract inference warns when you call a function with contracts without satisfying them. Contracts remain completely optional — inference only activates for contracts that someone chose to write. No contracts on your function? No warnings, no obligations.
+
+```ntnt
+fn divide(a: Int, b: Int) -> Int
+    requires b != 0
+{
+    return a / b
+}
+
+fn compute(x: Int, y: Int) -> Int {
+    return divide(x, y)
+    //              ^ Warning: `divide` requires `b != 0` but `y` has no such guarantee.
+    //                hint: add `requires y != 0` to `compute`, or check before calling.
+}
+```
+
+- [ ] **Single-level propagation** — warn when calling a `requires` function with an unchecked argument
+- [ ] Suggest adding a matching `requires` clause to the caller
+- [ ] Recognize common patterns: `if x != 0 { divide(a, x) }` satisfies `requires x != 0`
+- [ ] Recognize `match` arms: `Some(v) => use(v)` satisfies `requires v != None`
+- [ ] **Transitive propagation** — propagate contracts through entire call chains (A→B→C)
+- [ ] Contract static verification (prove contracts hold using SMT solvers or abstract interpretation)
+- [ ] Auto-generate `requires` clauses from analysis of function body
+- [ ] Contract inference across module boundaries
+
+**Type Analysis:**
+
+- [ ] Flow-sensitive typing (type narrows after null checks)
+- [ ] Exhaustive type checking at compile time (full coverage)
+- [ ] Type narrowing in conditionals and match arms
+- [ ] Escape analysis for optimization hints
+
+### 13.6 Advanced Type System Features
 
 - [ ] Associated types in traits
 - [ ] Where clauses for complex constraints
@@ -1195,7 +2232,7 @@ ntnt build app.tnt --release    # Optimized build
 - [ ] Contravariant preconditions, covariant postconditions
 - [ ] Error context/wrapping: `result.context("message")?`
 
-### 9.7 Runtime Library (for Native Compilation)
+### 13.7 Runtime Library (for Native Compilation)
 
 Native compilation requires re-implementing stdlib in the target:
 
@@ -1204,7 +2241,7 @@ Native compilation requires re-implementing stdlib in the target:
 - [ ] Database drivers (PostgreSQL bindings)
 - [ ] Concurrency primitives (threads, channels)
 
-### 9.8 Advanced Concurrency
+### 13.8 Advanced Concurrency
 
 Building on Phase 5's channel-based concurrency:
 
@@ -1223,11 +2260,11 @@ Building on Phase 5's channel-based concurrency:
 
 ---
 
-## Phase 10: AI Integration & Structured Edits
+## Phase 14: AI Integration & Structured Edits
 
 **Goal:** First-class AI development support—NTNT's key differentiator.
 
-### 10.1 Structured Edits (From Whitepaper)
+### 14.1 Structured Edits (From Whitepaper)
 
 - [ ] AST-based diff format
 - [ ] Semantic-preserving transformations
@@ -1244,14 +2281,14 @@ Edit {
 }
 ```
 
-### 10.2 AI Agent SDK
+### 14.2 AI Agent SDK
 
 - [ ] Agent communication protocol
 - [ ] Context provision API (give AI relevant code context)
 - [ ] Suggestion acceptance/rejection tracking
 - [ ] Learning from corrections
 
-### 10.3 Semantic Versioning Enforcement
+### 14.3 Semantic Versioning Enforcement
 
 - [ ] API signature tracking across versions
 - [ ] Automatic breaking change detection
@@ -1264,18 +2301,18 @@ Edit {
 fn get_user(id: String) -> User { }
 ```
 
-### 10.4 Commit Rationale Generation
+### 14.4 Commit Rationale Generation
 
 - [ ] Structured commit metadata
 - [ ] Link commits to intents and requirements
 - [ ] Auto-generate changelog entries
 - [ ] AI-friendly commit format
 
-### 10.5 AI Agent Optimization
+### 14.5 AI Agent Optimization
 
 Targeting the specific weaknesses of LLMs: context limits, hallucinations, and safety.
 
-#### 10.5.1 Machine-Readable Diagnostics (`--json` output)
+#### 14.5.1 Machine-Readable Diagnostics (`--json` output)
 
 Enable reliable "Self-Correction Loops" for agents.
 
@@ -1301,7 +2338,7 @@ Enable reliable "Self-Correction Loops" for agents.
 }
 ```
 
-#### 10.5.2 Token-Optimized Context (`ntnt describe`)
+#### 14.5.2 Token-Optimized Context (`ntnt describe`)
 
 Provide compressed summaries of the codebase to save tokens and reduce distraction.
 
@@ -1310,7 +2347,7 @@ Provide compressed summaries of the codebase to save tokens and reduce distracti
 - [ ] Strips: Function bodies, comments (unless doc comments)
 - [ ] "Searchable Index" for agents to find correct imports
 
-#### 10.5.3 Native "Simulation Mode" (Safety Nets)
+#### 14.5.3 Native "Simulation Mode" (Safety Nets)
 
 Allow agents to execute code safely without side effects on production data.
 
@@ -1329,7 +2366,7 @@ pub fn execute(query, params) {
 }
 ```
 
-#### 10.5.4 First-Class `todo` Keyword (Hole-Driven Development)
+#### 14.5.4 First-Class `todo` Keyword (Hole-Driven Development)
 
 Allow agents to partially implement features without blocking compilation.
 
@@ -1345,7 +2382,7 @@ fn complex_logic(user) {
 }
 ```
 
-#### 10.5.5 "Smart Import" Resolution
+#### 14.5.5 "Smart Import" Resolution
 
 reduce hallucinated imports by suggesting correct paths.
 
@@ -1362,25 +2399,25 @@ reduce hallucinated imports by suggesting correct paths.
 
 ---
 
-## Phase 11: Deployment & Operations
+## Phase 15: Deployment & Operations
 
 **Goal:** Production deployment support.
 
-### 11.1 Build & Distribution
+### 15.1 Build & Distribution
 
 - [ ] Single binary compilation
 - [ ] Cross-compilation support
 - [ ] Minimal Docker image generation
 - [ ] Build profiles (dev, release, test)
 
-### 11.2 Configuration
+### 15.2 Configuration
 
 - [ ] Environment-based config
 - [ ] Config file support (TOML, JSON)
 - [ ] Secrets management patterns
 - [ ] Validation with contracts
 
-### 11.3 Observability
+### 15.3 Observability
 
 - [ ] Structured logging (`std/log`)
 - [ ] Metrics collection (Prometheus format)
@@ -1401,7 +2438,7 @@ fn handle_request(req: Request) -> Response {
 }
 ```
 
-### 11.4 Graceful Lifecycle
+### 15.4 Graceful Lifecycle
 
 - [ ] Signal handling (SIGTERM, SIGINT)
 - [ ] Connection draining
@@ -1421,33 +2458,7 @@ fn handle_request(req: Request) -> Response {
 
 These features are valuable but not essential for the initial release:
 
-### Pipeline Operator (`|>`)
-
-Functional-style data transformation chaining (like Elixir, F#, OCaml):
-
-```ntnt
-// Current (nested, reads inside-out)
-let result = filter(map(split(data, "\n"), trim), fn(x) { len(x) > 0 })
-
-// With pipeline (linear, reads left-to-right)
-let result = data
-    |> split("\n")
-    |> map(trim)
-    |> filter(fn(x) { len(x) > 0 })
-```
-
-**Why it helps:**
-
-- Linear data flow (reads like English)
-- Easier to insert/remove transformation steps
-- Self-documenting for agents and humans
-- Ideal for CSV/JSON processing, HTTP request chains
-
-**Implementation notes:**
-
-- `x |> f` desugars to `f(x)`
-- `x |> f(a, b)` desugars to `f(x, a, b)` (first argument insertion)
-- Low implementation effort (parser change + AST node)
+### Pipeline Operator (`|>`) → Moved to Phase 7.5
 
 ### Response Caching (Server-Side)
 
@@ -1457,6 +2468,41 @@ In-memory caching for HTTP handler responses. Note: For most use cases, CDN cach
 - [ ] `cache()` middleware for route handlers
 - [ ] Cache key generation from request (path, query params)
 - [ ] Manual cache API: `create_cache`, `get_cached`, `set_cached`, `invalidate`
+
+### Effect System (Rebuilt)
+
+> **History:** An effect system was partially implemented in Phase 2.4 (syntax parsing only, no enforcement) and removed in Phase 7.1 as dead code. This section describes a proper rebuild that depends on the static analysis infrastructure from Phase 13.
+
+Effect tracking lets the compiler verify that functions only perform the side effects they declare. A `pure` function can't call an `IO` function. A function that deletes data requires `approval("security")`. The compiler enforces this statically — no runtime cost.
+
+```ntnt
+fn read_config(path: String) -> String with io {
+    return read_file(path)
+}
+
+fn add(a: Int, b: Int) -> Int pure {
+    return a + b  // compiler error if this called read_file()
+}
+
+@requires_approval("destructive")
+fn reset_database(db: Database) with io {
+    execute(db, "DROP ALL TABLES")
+}
+```
+
+**Prerequisites:**
+- Phase 7.1: Enforced type system (effect checking extends type checking)
+- Phase 13.1+: Bytecode compiler / static analysis passes (effect propagation through call chains)
+
+**Implementation:**
+- [ ] Effect inference (auto-detect effects from function body)
+- [ ] Effect propagation (if `f` calls `g with io`, then `f` has `io` too)
+- [ ] Static enforcement (`pure` functions cannot call `io` functions)
+- [ ] `Approval` effect integrated with Human Approval Mechanisms (Phase 12.4)
+- [ ] Effect polymorphism (generic functions that preserve caller's effects)
+- [ ] Contract interaction (contracts on `pure` functions can be statically verified)
+
+**Why wait:** A real effect system requires analyzing the full call graph statically. The tree-walking interpreter can't do this — it would need the bytecode compiler's static analysis passes to trace effect propagation across function calls, modules, and generics. Building it before that infrastructure exists would repeat the mistake of Phase 2.4: syntax without enforcement.
 
 ### Session Types
 
@@ -1481,7 +2527,7 @@ In-memory caching for HTTP handler responses. Note: For most use cases, CDN cach
 **Additional Drivers:**
 
 - MySQL/MariaDB
-- SQLite
+- SQLite (→ moved to Phase 7.4 as priority item)
 - Redis client
 
 ### High-Performance HTTP Server ✅ PARTIAL
@@ -1496,11 +2542,7 @@ The HTTP server now uses Axum + Tokio for async request handling:
 - [ ] Zero-copy response streaming
 - [ ] Performance target: 100k+ req/sec on commodity hardware
 
-### WebSocket Support
-
-- WebSocket server/client
-- Message framing
-- Connection state management
+### WebSocket Support → Moved to Phase 10.5
 
 ### Concurrency Primitives
 
@@ -1512,16 +2554,21 @@ The HTTP server now uses Axum + Tokio for async request handling:
 
 ## Implementation Priority Matrix
 
-| Phase  | Focus               | Business Value     | Effort   |
-| ------ | ------------------- | ------------------ | -------- |
-| 1-3 ✅ | Core Language       | Foundation         | Complete |
-| 4 ✅   | Traits + Essentials | High               | Complete |
-| 5 ✅   | Concurrency + Web   | **Critical**       | Complete |
-| 6      | Testing + Intents   | High               | Medium   |
-| 7      | Tooling             | Very High          | High     |
-| 8      | Performance         | High               | Medium   |
-| 9      | AI Integration      | **Differentiator** | Medium   |
-| 10     | Deployment          | High               | Medium   |
+| Phase  | Focus                      | Business Value     | Effort   |
+| ------ | -------------------------- | ------------------ | -------- |
+| 1-3 ✅ | Core Language              | Foundation         | Complete |
+| 4 ✅   | Traits + Essentials        | High               | Complete |
+| 5 ✅   | Concurrency + Web          | **Critical**       | Complete |
+| 6 ✅   | Intent-Driven Dev          | High               | Complete |
+| **7**  | **Language Ergonomics**        | **High (Up Next)** | **Medium** |
+| **8**  | **Intent System Maturity**     | **High**           | **Medium** |
+| **9**  | **Package Ecosystem**          | **Critical**       | **Medium** |
+| **10** | **Jobs, WebSockets & Real-Time** | **High**           | **Medium** |
+| 11     | Testing Framework          | High               | Medium   |
+| 12     | Tooling & DX               | Very High          | High     |
+| 13     | Performance                | High               | Medium   |
+| 14     | AI Integration             | **Differentiator** | Medium   |
+| 15     | Deployment                 | High               | Medium   |
 
 ---
 
@@ -1539,17 +2586,57 @@ The HTTP server now uses Axum + Tokio for async request handling:
 - Database connectivity
 - Can build real web apps
 
-### M3: Developer Ready (End of Phase 7)
+### M3: Ergonomic Language (End of Phase 7)
 
-- Full IDE support
-- Package ecosystem
-- Documentation
+- Enforced type system with inference
+- Error propagation (`?` operator)
+- Anonymous functions / closures
+- SQLite support
+- Pipe operator for linear data flow
+- Context-rich error messages with suggestions
+- Route pattern auto-detection (no `r""` needed)
+- Destructuring, default parameters, guard clauses
+- Two-layer safety: types (structural) + contracts (semantic)
+- A typical web handler drops from ~22 lines to ~6
+
+### M4: Mature Intent System (End of Phase 8)
+
+- Resolution chain visibility in failure output
+- Offline intent validation (`ntnt intent validate`)
+- Glossary inspector (`ntnt intent glossary`)
+- Feature status tracking (planned/implemented/deprecated)
+- Decision records for human-agent accountability
+- Intent system is a tool agents genuinely rely on
+
+### M5: Extensible Language (End of Phase 9)
+
+- Package manifest (`ntnt.toml`)
+- Local and git dependencies
+- NTNT-native packages with `lib.tnt` entry points
+- Rust FFI for native extensions
+- Ecosystem can grow beyond stdlib
+
+### M6: Real-Time & Background Processing (End of Phase 10)
+
+- `Job`, `Chain`, `Workflow` language-level declarations
+- `std/jobs` with in-memory, PostgreSQL, and Redis backends
+- Resilience: heartbeats, retries, dead letter queue, rate limiting
+- WebSocket and SSE support for real-time client communication
+- Job testing in `.intent` files
+- `ntnt jobs` CLI for monitoring and management
+
+### M7: Developer Ready (End of Phase 12)
+
+- Full IDE support (LSP)
+- Package registry and publishing
+- Documentation generator
 - Human approval workflows
+- Comprehensive testing framework (unit + IDD)
 
-### M4: Production Ready / 1.0 (End of Phase 10)
+### M8: Production Ready / 1.0 (End of Phase 15)
 
-- Performance optimized
-- AI integration complete
+- Performance optimized (bytecode VM, native compilation)
+- AI integration complete (structured edits, agent SDK)
 - Deployment tooling
 - Observability
 
@@ -1635,4 +2722,4 @@ pub fn main() {
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: January 2026 (v0.3.6)_
+_Last updated: January 2026 (v0.3.6 — Phases 7-10: Language Ergonomics, Intent System Maturity, Package Ecosystem, Background Jobs)_
