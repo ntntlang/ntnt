@@ -15,7 +15,8 @@ src/
 ├── ast.rs               # Abstract syntax tree definitions
 ├── interpreter.rs       # Tree-walking evaluator with contracts
 ├── contracts.rs         # Contract checking, old() value capture
-├── types.rs             # Type definitions and checking
+├── typechecker.rs       # Static type checker (gradual typing, strict lint)
+├── types.rs             # Type definitions and compatibility
 ├── error.rs             # Error types and formatting
 ├── intent.rs            # Intent-Driven Development module
 │

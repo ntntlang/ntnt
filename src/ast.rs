@@ -58,8 +58,6 @@ pub enum Statement {
         attributes: Vec<Attribute>,
         /// Generic type parameters: `fn foo<T, U>()` or `fn foo<T: Trait>()`
         type_params: Vec<TypeParam>,
-        /// Effect annotation: `fn foo() with io`
-        effects: Vec<String>,
     },
 
     /// Type alias declaration: `type Name = Type;`
@@ -457,12 +455,6 @@ pub enum TypeExpr {
 
     /// Union type `T | U`
     Union(Vec<TypeExpr>),
-
-    /// Result type with effect `T / E`
-    WithEffect {
-        value_type: Box<TypeExpr>,
-        effect: Box<TypeExpr>,
-    },
 }
 
 /// Contract specification

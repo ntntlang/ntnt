@@ -1,0 +1,72 @@
+// Typed Functions Example
+// Demonstrates NTNT's gradual type system.
+//
+// Run:      ntnt run examples/typed_functions.tnt
+// Lint:     ntnt lint examples/typed_functions.tnt
+// Strict:   ntnt lint --strict examples/typed_functions.tnt
+
+import { join, to_upper } from "std/string"
+
+// ── Fully typed functions ──────────────────────────────────────
+
+fn add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+fn greet(name: String) -> String {
+    return "Hello, " + name + "!"
+}
+
+fn is_even(n: Int) -> Bool {
+    return n % 2 == 0
+}
+
+fn celsius_to_fahrenheit(c: Float) -> Float {
+    return c * 1.8 + 32.0
+}
+
+// ── Using typed functions ──────────────────────────────────────
+
+print(add(10, 20))
+print(greet("NTNT"))
+print("Is 4 even? " + str(is_even(4)))
+print("100°C = " + str(celsius_to_fahrenheit(100.0)) + "°F")
+
+// ── Gradual typing: untyped functions still work ───────────────
+
+fn describe(thing) {
+    return "This is: " + str(thing)
+}
+
+print(describe(42))
+print(describe("a string"))
+print(describe(true))
+
+// ── Mixing typed and untyped ───────────────────────────────────
+
+fn format_name(first: String, last: String) -> String {
+    return to_upper(first) + " " + to_upper(last)
+}
+
+fn display(label, value) {
+    print(label + ": " + str(value))
+}
+
+display("Name", format_name("jane", "doe"))
+display("Sum", add(100, 200))
+
+// ── Arrays with type inference ─────────────────────────────────
+
+let numbers = [1, 2, 3, 4, 5]
+let names = ["Alice", "Bob", "Charlie"]
+
+fn sum_list(items: Array<Int>) -> Int {
+    let mut total = 0
+    for item in items {
+        total = total + item
+    }
+    return total
+}
+
+print("Sum: " + str(sum_list(numbers)))
+print("Names: " + join(names, ", "))

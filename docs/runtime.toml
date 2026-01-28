@@ -27,6 +27,13 @@ description = "Request timeout for HTTP server in seconds."
 example = "NTNT_TIMEOUT=60 ntnt run server.tnt"
 cli_override = "--timeout"
 
+[env_vars.NTNT_STRICT]
+values = ["1", "true"]
+default = "unset (disabled)"
+description = "Enable strict type checking. For `ntnt run`, blocks execution if type errors are found. For `ntnt lint`, warns about untyped function signatures. Also configurable via `ntnt lint --strict` or `ntnt.toml` config."
+example = "NTNT_STRICT=1 ntnt run server.tnt"
+affects = ["type-checking", "lint"]
+
 # =============================================================================
 # HOT-RELOAD
 # =============================================================================
@@ -152,7 +159,8 @@ command = "ntnt lint <PATH>"
 description = "Check source file(s) for syntax errors and common mistakes"
 options = [
     { name = "--quiet", short = "-q", type = "flag", description = "Show only errors, not warnings or suggestions" },
-    { name = "--fix", short = "", type = "flag", description = "Output auto-fix suggestions as JSON patch" }
+    { name = "--fix", short = "", type = "flag", description = "Output auto-fix suggestions as JSON patch" },
+    { name = "--strict", short = "", type = "flag", description = "Warn about untyped function parameters and missing return types (also: NTNT_STRICT=1 or ntnt.toml)" }
 ]
 example = "ntnt lint server.tnt"
 

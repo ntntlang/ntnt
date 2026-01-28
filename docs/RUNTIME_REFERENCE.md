@@ -2,7 +2,7 @@
 
 > **Auto-generated from [runtime.toml](runtime.toml)** - Do not edit directly.
 >
-> Last updated: v0.3.7
+> Last updated: v0.3.8
 
 Runtime configuration, environment variables, and CLI commands for NTNT
 
@@ -25,6 +25,7 @@ Environment variables that control NTNT runtime behavior
 |----------|--------|---------|-------------|
 | `NTNT_ENV` | `development`, `production`, `prod` | development (when unset) | Controls runtime mode. Production mode disables hot-reload for better performance. |
 | `NTNT_TIMEOUT` | integer (seconds) | 30 | Request timeout for HTTP server in seconds. |
+| `NTNT_STRICT` | `1`, `true` | unset (disabled) | Enable strict type checking. For `ntnt run`, blocks execution if type errors are found. For `ntnt lint`, warns about untyped function signatures. Also configurable via `ntnt lint --strict` or `ntnt.toml` config. |
 
 ### Examples
 
@@ -37,6 +38,9 @@ NTNT_ENV=production ntnt run server.tnt
 
 # Custom timeout (60 seconds)
 NTNT_TIMEOUT=60 ntnt run server.tnt
+
+# Strict type checking - blocks execution on type errors
+NTNT_STRICT=1 ntnt run server.tnt
 ```
 
 ---
@@ -188,6 +192,7 @@ Check source file(s) for syntax errors and common mistakes
 |--------|------|---------|-------------|
 | `--quiet`, `-q` | flag | - | Show only errors, not warnings or suggestions |
 | `--fix` | flag | - | Output auto-fix suggestions as JSON patch |
+| `--strict` | flag | - | Warn about untyped function parameters and missing return types (also: NTNT_STRICT=1 or ntnt.toml) |
 
 **Example:**
 ```bash

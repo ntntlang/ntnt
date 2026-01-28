@@ -194,6 +194,10 @@ enum Commands {
         /// Output auto-fix suggestions as JSON patch
         #[arg(long)]
         fix: bool,
+
+        /// Enable strict type checking (warn on untyped function signatures)
+        #[arg(long)]
+        strict: bool,
     },
     /// Intent-Driven Development commands
     ///
@@ -484,7 +488,12 @@ fn main() {
         Some(Commands::Check { file }) => check_file(&file),
         Some(Commands::Inspect { path, pretty }) => inspect_project(&path, pretty),
         Some(Commands::Validate { path }) => validate_project(&path),
-        Some(Commands::Lint { path, quiet, fix }) => lint_project(&path, quiet, fix),
+        Some(Commands::Lint {
+            path,
+            quiet,
+            fix,
+            strict,
+        }) => lint_project(&path, quiet, fix, strict),
         Some(Commands::Intent(intent_cmd)) => run_intent_command(intent_cmd),
         Some(Commands::Docs {
             query,
@@ -711,6 +720,33 @@ fn run_file(path: &PathBuf, timeout: u64) -> anyhow::Result<()> {
 
     let mut parser = IntentParser::new(tokens);
     let ast = parser.parse()?;
+
+    // Strict type checking: block execution if type errors found
+    if let Some(errors) = ntnt::typechecker::strict_check_with_file(&ast, &source, Some(&path_str))
+    {
+        for diag in &errors {
+            let location = if diag.line > 0 {
+                format!(" (line {})", diag.line)
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "{}: {}{}",
+                "type error".red().bold(),
+                diag.message,
+                location
+            );
+            if let Some(hint) = &diag.hint {
+                eprintln!("  {}: {}", "hint".cyan(), hint);
+            }
+        }
+        eprintln!(
+            "\n{}: {} type error(s) found. Fix them or unset NTNT_STRICT to run anyway.",
+            "blocked".red().bold(),
+            errors.len()
+        );
+        std::process::exit(1);
+    }
 
     interpreter.eval(&ast)?;
     Ok(())
@@ -1511,25 +1547,53 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
         match parser.parse() {
             Ok(ast) => {
                 // Check for potential issues
-                let warnings = analyze_ast_warnings(&ast, &source);
-                warning_count += warnings.len();
+                let mut warnings = analyze_ast_warnings(&ast, &source);
+
+                // Run type checker (with file path for cross-file import resolution)
+                let file_path_str = file_path.to_string_lossy();
+                let type_diagnostics =
+                    ntnt::typechecker::check_program_with_file(&ast, &source, &file_path_str);
+                let mut type_errors = Vec::new();
+                for diag in type_diagnostics {
+                    let entry = json!({
+                        "message": diag.message,
+                        "line": if diag.line > 0 { Some(diag.line) } else { None::<usize> },
+                        "hint": diag.hint,
+                        "rule": "type_check",
+                    });
+                    match diag.severity {
+                        ntnt::typechecker::Severity::Error => type_errors.push(entry),
+                        ntnt::typechecker::Severity::Warning => warnings.push(entry),
+                    }
+                }
+                let num_type_errors = type_errors.len();
+                let num_warnings = warnings.len();
+                error_count += num_type_errors;
+                warning_count += num_warnings;
 
                 results.push(json!({
                     "file": relative_path,
-                    "valid": true,
-                    "errors": [],
+                    "valid": num_type_errors == 0,
+                    "errors": type_errors,
                     "warnings": warnings,
                 }));
 
                 // Print success indicator
-                if warnings.is_empty() {
+                if num_type_errors == 0 && num_warnings == 0 {
                     eprintln!("{} {}", "✓".green(), relative_path);
+                } else if num_type_errors > 0 {
+                    eprintln!(
+                        "{} {} ({} type errors)",
+                        "✗".red(),
+                        relative_path,
+                        num_type_errors
+                    );
                 } else {
                     eprintln!(
                         "{} {} ({} warnings)",
                         "⚠".yellow(),
                         relative_path,
-                        warnings.len()
+                        num_warnings
                     );
                 }
             }
@@ -1584,8 +1648,17 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
 }
 
 /// Lint a project for common issues and style problems
-fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result<()> {
+fn lint_project(
+    path: &PathBuf,
+    quiet: bool,
+    show_fixes: bool,
+    strict_flag: bool,
+) -> anyhow::Result<()> {
     use serde_json::{json, Value as JsonValue};
+
+    // Strict lint mode: CLI flag OR env var OR project config
+    let strict =
+        strict_flag || ntnt::typechecker::is_strict_mode() || read_project_config_strict(path);
 
     let files = collect_tnt_files(path)?;
 
@@ -1620,7 +1693,32 @@ fn lint_project(path: &PathBuf, quiet: bool, show_fixes: bool) -> anyhow::Result
         match parser.parse() {
             Ok(ast) => {
                 // Run comprehensive lint checks
-                let issues = lint_ast(&ast, &source, &relative_path);
+                let mut issues = lint_ast(&ast, &source, &relative_path);
+
+                // Run type checker (strict mode adds warnings for untyped signatures)
+                let lint_file_path_str = file_path.to_string_lossy();
+                let type_diagnostics = if strict {
+                    ntnt::typechecker::check_program_strict_with_file(
+                        &ast,
+                        &source,
+                        &lint_file_path_str,
+                    )
+                } else {
+                    ntnt::typechecker::check_program_with_file(&ast, &source, &lint_file_path_str)
+                };
+                for diag in type_diagnostics {
+                    let severity = match diag.severity {
+                        ntnt::typechecker::Severity::Error => "error",
+                        ntnt::typechecker::Severity::Warning => "warning",
+                    };
+                    issues.push(json!({
+                        "severity": severity,
+                        "rule": "type_check",
+                        "message": diag.message,
+                        "line": if diag.line > 0 { Some(diag.line) } else { None::<usize> },
+                        "hint": diag.hint,
+                    }));
+                }
 
                 for issue in &issues {
                     let severity = issue["severity"].as_str().unwrap_or("warning");
@@ -2784,6 +2882,35 @@ fn run_intent_studio_command(
     server_result
 }
 /// Collect all .tnt files from a path (file or directory)
+/// Read project config from ntnt.toml (searches path's directory and ancestors)
+fn read_project_config_strict(path: &PathBuf) -> bool {
+    // Start from the path (or its parent if it's a file) and walk up
+    let start_dir = if path.is_file() {
+        path.parent().unwrap_or(path).to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+
+    let mut dir = Some(start_dir.as_path());
+    while let Some(d) = dir {
+        let config_path = d.join("ntnt.toml");
+        if config_path.exists() {
+            if let Ok(content) = fs::read_to_string(&config_path) {
+                if let Ok(config) = content.parse::<toml::Value>() {
+                    return config
+                        .get("lint")
+                        .and_then(|l| l.get("strict"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                }
+            }
+            return false;
+        }
+        dir = d.parent();
+    }
+    false
+}
+
 fn collect_tnt_files(path: &PathBuf) -> anyhow::Result<Vec<PathBuf>> {
     use std::ffi::OsStr;
 
@@ -2879,13 +3006,6 @@ fn type_to_string(t: &ntnt::ast::TypeExpr) -> String {
             .map(type_to_string)
             .collect::<Vec<_>>()
             .join(" | "),
-        TypeExpr::WithEffect { value_type, effect } => {
-            format!(
-                "{} / {}",
-                type_to_string(value_type),
-                type_to_string(effect)
-            )
-        }
     }
 }
 
@@ -4822,13 +4942,39 @@ fn generate_runtime_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
             ));
         }
 
+        // NTNT_STRICT
+        if let Some(env) = env_vars.get("NTNT_STRICT") {
+            let values = env
+                .get("values")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| format!("`{}`", s))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
+            let desc = env
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            md.push_str(&format!(
+                "| `NTNT_STRICT` | {} | {} | {} |\n",
+                values, default, desc
+            ));
+        }
+
         md.push_str("\n### Examples\n\n```bash\n");
         md.push_str("# Development (default) - hot-reload enabled\n");
         md.push_str("ntnt run server.tnt\n\n");
         md.push_str("# Production - hot-reload disabled\n");
         md.push_str("NTNT_ENV=production ntnt run server.tnt\n\n");
         md.push_str("# Custom timeout (60 seconds)\n");
-        md.push_str("NTNT_TIMEOUT=60 ntnt run server.tnt\n");
+        md.push_str("NTNT_TIMEOUT=60 ntnt run server.tnt\n\n");
+        md.push_str("# Strict type checking - blocks execution on type errors\n");
+        md.push_str("NTNT_STRICT=1 ntnt run server.tnt\n");
         md.push_str("```\n\n");
         md.push_str("---\n\n");
     }

@@ -204,6 +204,62 @@ See [SYNTAX_REFERENCE.md](docs/SYNTAX_REFERENCE.md#template-strings) for the com
 
 ## Types
 
+NTNT uses **gradual typing** — type annotations are optional and the type checker only flags errors where annotations exist. Untyped code defaults to `Any` and works as before.
+
+### Type Annotations
+
+```ntnt
+// Function parameters and return types
+fn add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+// Variable annotations (optional — type is inferred from the value)
+let name: String = "Alice"
+let scores: Array<Float> = [9.5, 8.2]
+
+// HTTP handlers can use Request/Response types
+fn handler(req: Request) -> Response {
+    return html("<h1>Hello</h1>")
+}
+
+// Untyped code still works fine
+fn greet(name) {
+    return "Hello, " + name
+}
+```
+
+### Built-in Types
+
+| Type | Description |
+|------|-------------|
+| `Int`, `Float`, `Bool`, `String`, `Unit` | Primitive types |
+| `Array<T>` | Array with element type T |
+| `Map<K, V>` | Map with key type K and value type V |
+| `Option<T>` | Optional value (`Some(T)` or `None`) |
+| `Result<T, E>` | Success or error (`Ok(T)` or `Err(E)`) |
+| `Request` | HTTP request — fields: `method`, `path`, `body` (String), `params`, `headers` (Map) |
+| `Response` | HTTP response — returned by `html()`, `json()`, `text()`, `redirect()` |
+| `T1 \| T2` | Union type |
+
+The type checker is generic-aware: `unwrap(Option<Int>)` returns `Int`, `filter(Array<String>, pred)` returns `Array<String>`.
+
+### Type Checking
+
+The type checker runs during `ntnt lint` and `ntnt validate`:
+
+```bash
+ntnt lint server.tnt            # Reports type errors alongside other lint issues
+ntnt lint --strict server.tnt   # Also warns about untyped function signatures
+```
+
+Strict mode can be activated three ways:
+- CLI flag: `ntnt lint --strict`
+- Environment variable: `NTNT_STRICT=1`
+- Project config file: `ntnt.toml` with `[lint] strict = true`
+
+For `ntnt run`, set `NTNT_STRICT=1` to block execution on type errors. This also blocks hot-reload, keeping the previous working version running.
+
 ### Union Types
 
 Allow a value to be one of several types:
@@ -294,6 +350,23 @@ struct Account {
 
 impl Account {
     invariant self.balance >= 0
+}
+```
+
+### Static Checking of Contracts
+
+`ntnt lint` type-checks contract expressions:
+- `requires` and `ensures` clauses must evaluate to `Bool`
+- In `ensures`, `result` is typed to the function's declared return type
+- `old(expr)` returns the same type as its argument
+- Struct invariants are type-checked with field types in scope
+
+```ntnt
+fn divide(a: Int, b: Int) -> Int
+    requires b != 0              // Bool ✓
+    ensures result * b == a      // result is Int (return type), Bool ✓
+{
+    return a / b
 }
 ```
 

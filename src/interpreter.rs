@@ -573,6 +573,24 @@ impl Interpreter {
             }
         };
 
+        // Strict type checking: block reload if type errors found
+        if let Some(errors) = crate::typechecker::strict_check(&ast, &source_code) {
+            eprintln!(
+                "[hot-reload] Blocked: {} type error(s) found:",
+                errors.len()
+            );
+            for diag in &errors {
+                let location = if diag.line > 0 {
+                    format!(" (line {})", diag.line)
+                } else {
+                    String::new()
+                };
+                eprintln!("  type error: {}{}", diag.message, location);
+            }
+            eprintln!("[hot-reload] Fix type errors to reload. Keeping previous version.");
+            return false;
+        }
+
         // Clear current state (routes, middleware, etc.) but keep server running
         self.server_state.clear();
 
@@ -1953,7 +1971,6 @@ impl Interpreter {
                 body,
                 attributes: _,
                 type_params,
-                effects: _, // Effects are tracked but not enforced at runtime yet
             } => {
                 // Convert AST Contract to FunctionContract with expressions
                 let func_contract = contract.as_ref().map(|c| FunctionContract {
@@ -5514,40 +5531,6 @@ mod tests {
         } else {
             panic!("Expected string");
         }
-    }
-
-    #[test]
-    fn test_effects_annotation() {
-        // Function with effects annotation (parses, not enforced)
-        let result = eval(
-            r#"
-            fn read_file(path: String) -> String with io {
-                return "file contents";
-            }
-            read_file("test.txt")
-        "#,
-        )
-        .unwrap();
-        if let Value::String(s) = result {
-            assert_eq!(s, "file contents");
-        } else {
-            panic!("Expected string");
-        }
-    }
-
-    #[test]
-    fn test_pure_function() {
-        // Pure function annotation
-        let result = eval(
-            r#"
-            fn add(a: Int, b: Int) -> Int pure {
-                return a + b;
-            }
-            add(3, 4)
-        "#,
-        )
-        .unwrap();
-        assert!(matches!(result, Value::Int(7)));
     }
 
     #[test]

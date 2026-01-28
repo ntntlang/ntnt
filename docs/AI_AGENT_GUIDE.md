@@ -418,7 +418,8 @@ counter = 1  // ERROR: immutable
 import { json, html, parse_form, parse_json } from "std/http/server"
 
 // Handler function (named - no inline lambdas)
-fn get_user(req) {
+// Use Request/Response types for fully typed handlers
+fn get_user(req: Request) -> Response {
     let id = req.params["id"]
     return json(map { "id": id })
 }
@@ -438,16 +439,16 @@ on_shutdown(fn() {
 listen(8080)  // Starts with hot reload enabled
 ```
 
-**Request object properties:**
+**Request object properties** (type `Request` — all fields typed):
 ```ntnt
-req.method        // "GET", "POST"
-req.path          // "/users/123"
-req.params        // Route params: req.params["id"]
-req.query_params  // Query string: req.query_params["name"]
-req.headers       // Headers map
-req.body          // Raw body string
-req.ip            // Client IP (supports X-Forwarded-For)
-req.id            // Request ID (from X-Request-ID or auto-generated)
+req.method        // String: "GET", "POST"
+req.path          // String: "/users/123"
+req.params        // Map<String, String>: route params, req.params["id"]
+req.query_params  // Map<String, String>: query string, req.query_params["name"]
+req.headers       // Map<String, String>: headers map
+req.body          // String: raw body
+req.ip            // String: client IP (supports X-Forwarded-For)
+req.id            // String: request ID (from X-Request-ID or auto-generated)
 ```
 
 **Common mistakes:**
@@ -469,6 +470,7 @@ req.params.id  // Use req.params["id"]
 | Variable | Values | Description |
 |----------|--------|-------------|
 | `NTNT_ENV` | `production`, `prod` | Disables hot-reload for better performance |
+| `NTNT_STRICT` | `1`, `true` | Blocks execution on type errors (runs type checker before `ntnt run`) |
 
 ```bash
 # Development (default) - hot-reload enabled
@@ -536,6 +538,12 @@ fn create_user(req)
 }
 ```
 
+**Type Checking:** Contract expressions are statically checked by `ntnt lint`:
+- `requires` and `ensures` clauses must evaluate to `Bool`
+- In `ensures`, `result` is typed to the function's return type
+- `old(expr)` returns the same type as `expr`
+- Struct invariants are checked with field types in scope
+
 ---
 
 ## Error Handling with Result/Option
@@ -561,6 +569,127 @@ match result {
 let db = unwrap(connect("postgres://..."))
 let users = unwrap(query(db, "SELECT * FROM users", []))
 ```
+
+---
+
+## Type System
+
+NTNT uses **gradual typing** — type annotations are optional, and untyped code continues to work as before. When annotations are present, the type checker catches errors at lint time.
+
+### Type Annotations
+
+```ntnt
+// Variable annotations
+let name: String = "Alice"
+let age: Int = 30
+let scores: Array<Float> = [9.5, 8.2, 7.8]
+
+// Function parameter and return types
+fn greet(name: String) -> String {
+    return "Hello, {name}!"
+}
+
+// No annotations required — these work fine
+let x = 42
+fn add(a, b) { return a + b }
+```
+
+### Available Types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| `Int` | Integer | `let x: Int = 42` |
+| `Float` | Floating-point | `let x: Float = 3.14` |
+| `Bool` | Boolean | `let x: Bool = true` |
+| `String` | String | `let x: String = "hi"` |
+| `Unit` | No value | Return type of `print()` |
+| `Array<T>` | Array of type T | `let x: Array<Int> = [1, 2, 3]` |
+| `Map<K, V>` | Map with typed keys/values | `let m: Map<String, Int>` |
+| `Option<T>` | Optional value | `Some(42)` or `None` |
+| `Result<T, E>` | Success or error | `Ok(value)` or `Err(msg)` |
+| `Request` | HTTP request object | `fn handler(req: Request)` |
+| `Response` | HTTP response object | `fn handler(req: Request) -> Response` |
+| `T1 \| T2` | Union type | `Int \| String` |
+
+### Generic-Aware Type Inference
+
+The type checker tracks types through common operations:
+
+- **`unwrap()`** — `unwrap(Optional<T>)` → `T`, `unwrap(Result<T, E>)` → `T`
+- **Collection functions preserve element types** — `filter()`, `sort()`, `reverse()`, `slice()`, `concat()`, `push()` return `Array<T>` when given `Array<T>`
+- **Element accessors return element type** — `first()`, `last()`, `pop()` on `Array<T>` return `T`
+- **`flatten()`** — `flatten(Array<Array<T>>)` → `Array<T>` (unwraps one level)
+- **Math functions preserve numeric type** — `abs()`, `min()`, `max()`, `clamp()` return `Int` or `Float` based on input
+- **Map accessors return typed results** — `keys(Map<K, V>)` → `Array<K>`, `values(Map<K, V>)` → `Array<V>`, `get_key(Map<K, V>, key)` → `V`
+- **Map index access** — `map["key"]` on `Map<K, V>` returns `V`
+- **`transform()` / `.map()` infer callback return** — `transform(Array<T>, fn(T)->R)` → `Array<R>` when callback is a typed named function
+- **`html()`, `json()`, `text()`, `redirect()`** — all return `Response`
+- **`parse_json()`** — returns `Result<Map<String, Any>, String>` (unwrap gives a map)
+- **`fetch()`** — returns `Result<Response, String>` (unwrap gives `Response`)
+- **`parse_datetime()`** — returns `Result<Int, String>`
+- **`parse_csv()`** — returns `Array<Array<String>>`
+- **Match arm narrowing** — `Ok(data)` on `Result<T, E>` binds `data` as `T`; `Some(x)` on `Option<T>` binds `x` as `T`; struct patterns bind field types
+- **Cross-file imports** — `import { foo } from "./lib/utils"` resolves function signatures from the imported `.tnt` file
+
+### What the Type Checker Catches
+
+The type checker runs during `ntnt lint` and `ntnt validate`, and reports:
+
+- **Argument type mismatches**: passing `Int` where `String` is expected
+- **Wrong argument count**: calling `f(a, b)` with one argument
+- **Return type mismatches**: returning `String` from a function declared `-> Int`
+- **Let binding mismatches**: `let x: Int = "hello"`
+
+```ntnt
+fn greet(name: String) -> String {
+    return "Hello, {name}!"
+}
+
+greet(42)  // Type error: expected String, got Int
+```
+
+### What It Does NOT Catch (Gradual Typing)
+
+- Untyped parameters default to `Any` — compatible with everything
+- Functions without return type annotations skip return checking
+- Cross-file types from imported `.tnt` modules use `Any`
+- No flow-sensitive narrowing (e.g., checking `None` before access)
+
+**This means existing untyped code produces zero type errors.**
+
+### Strict Mode
+
+Strict mode warns about untyped function signatures and blocks execution on type errors. Three ways to activate:
+
+1. **CLI flag:** `ntnt lint --strict`
+2. **Environment variable:** `NTNT_STRICT=1`
+3. **Project config:** Create `ntnt.toml` in project root:
+
+```toml
+[lint]
+strict = true
+```
+
+```bash
+# Lint with strict warnings (untyped params, missing return types)
+ntnt lint --strict server.tnt
+
+# Block execution on type errors
+NTNT_STRICT=1 ntnt run server.tnt
+
+# Also blocks hot-reload — keeps previous working version running
+NTNT_STRICT=1 ntnt run server.tnt
+```
+
+### Where Type Checking Runs
+
+| Command | Type Checker | Blocks? |
+|---------|-------------|---------|
+| `ntnt lint` | Always runs | Reports diagnostics (never blocks) |
+| `ntnt lint --strict` | Runs + warns on untyped signatures | Reports diagnostics (never blocks) |
+| `ntnt validate` | Always runs | Type errors count as validation failures |
+| `ntnt run` | Only with `NTNT_STRICT=1` | Blocks execution if type errors found |
+| Hot-reload | Only with `NTNT_STRICT=1` | Blocks reload, keeps previous version |
 
 ---
 
@@ -832,12 +961,24 @@ fn create_user(req)
 | `assertion failed` | Test didn't pass | Fix implementation to match expected behavior |
 | `status mismatch` | Wrong HTTP status | Check route returns correct status code |
 
+### Type Check Errors
+
+When using `ntnt lint` or `NTNT_STRICT=1`, you may see type diagnostics:
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `expected String, got Int` | Wrong argument type | Convert with `str(x)` or fix the call |
+| `expected 2 args, got 1` | Wrong argument count | Check function signature |
+| `returns Int, expected String` | Return type mismatch | Fix return value or annotation |
+| `expected Int, got String` | Let binding mismatch | Fix the assigned value or annotation |
+
 ### Debugging Tips
 
-1. **Always lint first**: `ntnt lint file.tnt` catches 90% of issues
+1. **Always lint first**: `ntnt lint file.tnt` catches 90% of issues (including type errors)
 2. **Use print statements**: `print("Debug: {variable}")`
 3. **Check types**: `print("Type: {type(variable)}")`
-4. **Add contracts**: They catch bugs at precise locations
-5. **Use Intent Studio**: Live feedback as you code
+4. **Add type annotations**: Helps the type checker catch more bugs
+5. **Add contracts**: They catch bugs at precise locations
+6. **Use Intent Studio**: Live feedback as you code
 
 See [STDLIB_REFERENCE.md](STDLIB_REFERENCE.md) for complete function documentation.

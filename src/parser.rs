@@ -247,22 +247,6 @@ impl Parser {
             None
         };
 
-        // Parse optional effect annotation: `with io, async`
-        let effects = if self.match_token(&[TokenKind::With]) {
-            let mut effs = Vec::new();
-            loop {
-                effs.push(self.consume_identifier("Expected effect name")?);
-                if !self.match_token(&[TokenKind::Comma]) {
-                    break;
-                }
-            }
-            effs
-        } else if self.match_token(&[TokenKind::Pure]) {
-            vec!["pure".to_string()]
-        } else {
-            Vec::new()
-        };
-
         // Parse contract (requires/ensures)
         let contract = self.parse_contract()?;
 
@@ -277,7 +261,6 @@ impl Parser {
             body,
             attributes,
             type_params,
-            effects,
         })
     }
 

@@ -44,36 +44,20 @@ pub enum Type {
     /// Optional type
     Optional(Box<Type>),
 
+    /// Map type
+    Map {
+        key_type: Box<Type>,
+        value_type: Box<Type>,
+    },
+
+    /// Union type
+    Union(Vec<Type>),
+
     /// Any type (for gradual typing)
     Any,
 
     /// Never type (for functions that don't return)
     Never,
-}
-
-/// Effect types for tracking side effects
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Effect {
-    /// Pure computation (no effects)
-    Pure,
-
-    /// I/O effect
-    IO,
-
-    /// Error effect with type
-    Error(Box<Type>),
-
-    /// State effect
-    State(Box<Type>),
-
-    /// Async effect
-    Async,
-
-    /// Requires human approval
-    Approval(String),
-
-    /// Combined effects
-    Combined(Vec<Effect>),
 }
 
 /// Type environment for type checking
@@ -132,6 +116,19 @@ impl Type {
             (Type::String, Type::String) => true,
             (Type::Array(a), Type::Array(b)) => a.is_compatible(b),
             (Type::Optional(a), Type::Optional(b)) => a.is_compatible(b),
+            (
+                Type::Map {
+                    key_type: k1,
+                    value_type: v1,
+                },
+                Type::Map {
+                    key_type: k2,
+                    value_type: v2,
+                },
+            ) => k1.is_compatible(k2) && v1.is_compatible(v2),
+            (Type::Union(types), other) | (other, Type::Union(types)) => {
+                types.iter().any(|t| t.is_compatible(other))
+            }
             (Type::Named(a), Type::Named(b)) => a == b,
             (Type::Tuple(a), Type::Tuple(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.is_compatible(y))
@@ -180,6 +177,16 @@ impl Type {
                 format!("{}<{}>", name, arg_names.join(", "))
             }
             Type::Optional(inner) => format!("{}?", inner.name()),
+            Type::Map {
+                key_type,
+                value_type,
+            } => {
+                format!("Map<{}, {}>", key_type.name(), value_type.name())
+            }
+            Type::Union(types) => {
+                let names: Vec<_> = types.iter().map(|t| t.name()).collect();
+                names.join(" | ")
+            }
             Type::Any => "Any".to_string(),
             Type::Never => "Never".to_string(),
         }
@@ -189,28 +196,5 @@ impl Type {
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.name())
-    }
-}
-
-impl Effect {
-    /// Check if effect is pure
-    pub fn is_pure(&self) -> bool {
-        matches!(self, Effect::Pure)
-    }
-
-    /// Combine two effects
-    pub fn combine(self, other: Effect) -> Effect {
-        match (self, other) {
-            (Effect::Pure, e) | (e, Effect::Pure) => e,
-            (Effect::Combined(mut v1), Effect::Combined(v2)) => {
-                v1.extend(v2);
-                Effect::Combined(v1)
-            }
-            (Effect::Combined(mut v), e) | (e, Effect::Combined(mut v)) => {
-                v.push(e);
-                Effect::Combined(v)
-            }
-            (e1, e2) => Effect::Combined(vec![e1, e2]),
-        }
     }
 }

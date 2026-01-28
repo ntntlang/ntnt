@@ -878,26 +878,59 @@ fn divide(a: Int, b: Int) -> Int
 
 **Implementation plan:**
 
-- [ ] Type inference engine for local variables (`let x = 5` → `Int`)
-- [ ] Type checking at function call boundaries (argument types match parameter types)
-- [ ] Return type verification (function body returns declared type)
-- [ ] Type inference for expressions (arithmetic, string concat, comparisons)
-- [ ] Generic type resolution (`Option<Int>`, `Result<String, Error>`)
-- [ ] Union type checking (`String | Int` accepts either)
-- [ ] Array element type inference (`[1, 2, 3]` → `[Int]`)
-- [ ] Map value type inference (`map { "a": 1 }` → `Map<String, Int>`)
-- [ ] Type errors in `ntnt lint` and `ntnt validate` output (not just runtime)
-- [ ] Helpful error messages: "expected String, got Int" with line/column
-- [ ] Contract expression type-checking (`ensures len(result) > 0` — verify `result` is a type `len()` accepts)
-- [ ] Gradual typing: untyped parameters default to `Any` (backward compatible)
-- [ ] Remove the `Effect` enum from `src/types.rs` (7 variants, never checked at runtime)
-- [ ] Remove `with` keyword effect parsing from `src/parser.rs` (lines 244-258)
-- [ ] Remove `pure` keyword parsing from function signatures
-- [ ] Remove `TypeExpr::WithEffect` variant from AST
-- [ ] Remove the two effect-related tests from `src/interpreter.rs` (test_effects_annotation, test_pure_function)
-- [ ] Keep `TokenKind::With` and `TokenKind::Pure` as reserved keywords (forward compatibility)
+- [x] Type inference engine for local variables (`let x = 5` → `Int`)
+- [x] Type checking at function call boundaries (argument types match parameter types)
+- [x] Return type verification (function body returns declared type)
+- [x] Type inference for expressions (arithmetic, string concat, comparisons)
+- [x] Generic type resolution (`Option<Int>`, `Result<String, Error>`)
+- [x] Union type checking (`String | Int` accepts either)
+- [x] Array element type inference (`[1, 2, 3]` → `[Int]`)
+- [x] Map value type inference (`map { "a": 1 }` → `Map<String, Int>`)
+- [x] Type errors in `ntnt lint` and `ntnt validate` output (not just runtime)
+- [x] Helpful error messages: "expected String, got Int" with line/column
+- [x] Contract expression type-checking (`ensures len(result) > 0` — verify `result` is a type `len()` accepts)
+- [x] Gradual typing: untyped parameters default to `Any` (backward compatible)
+- [x] Remove the `Effect` enum from `src/types.rs` (7 variants, never checked at runtime)
+- [x] Remove `with` keyword effect parsing from `src/parser.rs` (lines 244-258)
+- [x] Remove `pure` keyword parsing from function signatures
+- [x] Remove `TypeExpr::WithEffect` variant from AST
+- [x] Remove the two effect-related tests from `src/interpreter.rs` (test_effects_annotation, test_pure_function)
+- [x] Keep `TokenKind::With` and `TokenKind::Pure` as reserved keywords (forward compatibility)
+- [x] Builtin and stdlib function signature registry (~180 functions across 16 modules)
+- [x] Two-pass type checking (collect declarations, then check — enables forward references)
+- [x] Struct field type checking
+- [x] Option/Result pattern binding in match arms
 
-**Backward compatibility:** Existing NTNT code continues to work. Untyped function parameters are treated as `Any`. Adding types is opt-in but encouraged. Over time, `ntnt lint` can warn about untyped public function signatures.
+- [x] `ntnt lint --strict` warns about untyped function parameters and missing return types
+- [x] Strict lint mode activated by CLI flag, `NTNT_STRICT=1` env var, or `ntnt.toml` config
+- [x] Project config file (`ntnt.toml`) with `[lint] strict = true` support
+- [x] `Array<T>` and `Map<K, V>` generic annotation resolution (type compatibility with inferred types)
+- [x] Built-in `Request` and `Response` struct types for HTTP handlers (field access returns real types)
+- [x] Generic-aware `unwrap()`: `unwrap(Optional<T>)` → `T`, `unwrap(Result<T, E>)` → `T`
+- [x] `filter()` preserves array element type: `filter(Array<T>, pred)` → `Array<T>`
+- [x] Fixed missing stdlib signatures: `Cache`/`cache_fetch` (std/http), `parse_csv` (std/csv), `parse_datetime` (std/time)
+- [x] `html()`/`json()`/`text()`/`redirect()`/`status()` return `Response` instead of `Any`
+- [x] Collection functions preserve element types: `sort()`, `reverse()`, `slice()`, `concat()` return `Array<T>`
+- [x] `flatten()` unwraps one nesting level: `Array<Array<T>>` → `Array<T>`
+- [x] `push()` preserves array type: `push(Array<T>, T)` → `Array<T>`
+- [x] `first()`, `last()`, `pop()` return element type `T` from `Array<T>`
+- [x] Math builtins preserve numeric types: `abs(Int)` → `Int`, `abs(Float)` → `Float`
+- [x] `min()`/`max()` with float promotion: `min(Int, Float)` → `Float`
+- [x] `clamp()` preserves numeric type of first argument
+- [x] `keys(Map<K,V>)` → `Array<K>`, `values(Map<K,V>)` → `Array<V>` (type-aware map accessors)
+- [x] `get_key(Map<K,V>, key)` → `V` (returns map value type instead of `Any`)
+- [x] `entries(Map<K,V>)` → `Array<Array<Any>>` (structured return)
+- [x] `transform()`/`.map()` callback return type inference: `transform(Array<T>, fn(T)->R)` → `Array<R>`
+- [x] `parse_json()` returns `Result<Map<String, Any>, String>` instead of `Any`
+- [x] `fetch()` returns `Result<Response, String>` instead of `Any`
+- [x] Match arm struct pattern narrowing: fields bind with struct field types
+- [x] Cross-file import type propagation: `import { foo } from "./lib/utils"` resolves function signatures
+- [ ] Cross-file struct/enum propagation (extend import type resolution to include struct and enum definitions)
+- [ ] Closure parameter type inference from call context (depends on 7.3: `filter(arr, fn(x) { x > 0 })` infers `x: T` from `Array<T>`)
+- [ ] Flow-sensitive type narrowing after guards (e.g., `if x != None { x.unwrap() }` narrows `x`; tracked in Phase 13)
+- [ ] Heterogeneous map return types: functions returning `map { "name": str, "values": arr }` need user-defined structs for real types
+
+**Backward compatibility:** Existing NTNT code continues to work. Untyped function parameters are treated as `Any`. Adding types is opt-in but encouraged. `ntnt lint --strict` warns about untyped public function signatures.
 
 ### 7.2 Error Propagation (`?` Operator)
 
