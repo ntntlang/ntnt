@@ -632,7 +632,32 @@ fn http_download(url: &str, file_path: &str) -> Result<Value> {
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // fetch(url) or fetch(options) -> Result<Response, Error>
+    // @ntnt fetch
+    // @module std/http
+    // @module_description HTTP client for making requests to external services
+    // @signature fetch(url_or_options: String | Map) -> Result<Response, String>
+    // Make an HTTP request to a URL.
+    //
+    // Accepts either a URL string for a simple GET request, or an options map
+    // for full control over method, headers, body, authentication, cookies, and timeout.
+    // Options map keys: url (required), method, headers, body, json, form, auth, cookies, timeout.
+    // @param url_or_options A URL string for GET, or a Map with request options
+    // @returns Result<Response, String> where Response is a Map with status, status_text, headers, body, ok, url, redirected, and cookies fields
+    // @see_also download, cache_fetch
+    // @since v0.1.0
+    // @tags #network
+    // @example fetch("https://api.example.com/data") => Ok({status: 200, body: "...", ...}) ~ "Simple GET request"
+    // @example ~ "POST with JSON body"
+    //   let opts = map {
+    //     "url": "https://api.example.com",
+    //     "method": "POST",
+    //     "json": map { "key": "value" }
+    //   }
+    //   fetch(opts)
+    // @expected Ok({status: 201, ...})
+    // @error TypeError ~ "fetch() requires a URL string or options map" fix: "Pass a String URL or a Map with request options"
+    // @error TypeError ~ "fetch() requires 'url' option" fix: "Include 'url' key in the options map"
+    // @error RuntimeError ~ "Unsupported HTTP method: ..." fix: "Use GET, POST, PUT, DELETE, PATCH, or HEAD"
     module.insert(
         "fetch".to_string(),
         Value::NativeFunction {
@@ -648,7 +673,25 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // download(url, file_path) -> Result<{status, path, size}, Error>
+    // @ntnt download
+    // @module std/http
+    // @signature download(url: String, file_path: String) -> Result<Map, String>
+    // Download a file from a URL and save it to disk.
+    //
+    // Fetches the resource at the given URL and writes the response bytes to
+    // the specified file path. Parent directories are created automatically
+    // if they do not exist. Returns a map with status, path, and size on success.
+    // @param url The URL of the file to download
+    // @param file_path The local file path to save the downloaded content
+    // @returns Result<Map{status: Int, path: String, size: Int}, String> on success; Err with message on failure
+    // @see_also fetch
+    // @since v0.1.0
+    // @tags #network
+    // @example download("https://example.com/file.zip", "./file.zip") => Ok({status: 200, path: "./file.zip", size: 1024}) ~ "Download a file"
+    // @error TypeError ~ "download() requires URL string and file path string" fix: "Pass two String arguments: URL and file path"
+    // @error RuntimeError ~ "Failed to create directory: ..." fix: "Ensure the parent directory path is valid and writable"
+    // @error RuntimeError ~ "Failed to create file: ..." fix: "Ensure the file path is valid and writable"
+    // @error RuntimeError ~ "HTTP error: status ..." fix: "Check the URL and server availability"
     module.insert(
         "download".to_string(),
         Value::NativeFunction {
@@ -663,8 +706,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // Cache(ttl_seconds) -> Cache object
-    // Returns a map with cache_id and methods to call global cache functions
+    // @ntnt Cache
+    // @module std/http
+    // @signature Cache(ttl_seconds: Int) -> Map
+    // Create a response cache with a time-to-live (TTL) in seconds.
+    //
+    // Returns a cache object (Map) that can be used with cache_fetch, cache_delete,
+    // and cache_clear to cache HTTP responses. Cached entries automatically expire
+    // after the specified TTL. The cache object contains an internal _cache_id field.
+    // @param ttl_seconds The default time-to-live for cached entries, in seconds
+    // @returns Map containing a _cache_id field for use with cache helper functions
+    // @see_also cache_fetch, cache_delete, cache_clear
+    // @since v0.1.0
+    // @tags #network
+    // @example Cache(300) => {_cache_id: 1} ~ "Create a cache with 5-minute TTL"
+    // @error TypeError ~ "Cache() requires TTL in seconds (integer)" fix: "Pass an Int value for the TTL"
     module.insert(
         "Cache".to_string(),
         Value::NativeFunction {
@@ -693,7 +749,26 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // cache_fetch(cache_obj, url_or_options) - internal function for cache.fetch()
+    // @ntnt cache_fetch
+    // @module std/http
+    // @signature cache_fetch(cache_obj: Map, url_or_options: String | Map) -> Result<Response, String>
+    // Fetch a URL using a cache, returning a cached response if available.
+    //
+    // Checks the cache for a previously stored response matching the URL.
+    // On a cache miss, performs the HTTP request via fetch(), stores the
+    // successful response in the cache, and returns it. This is the internal
+    // function backing cache.fetch() method calls.
+    // @param cache_obj A cache object created by Cache()
+    // @param url_or_options A URL string or options Map (must include 'url' key)
+    // @returns Result<Response, String> with the HTTP response (from cache or network)
+    // @see_also Cache, cache_delete, cache_clear, fetch
+    // @since v0.1.0
+    // @tags #network
+    // @example cache_fetch(my_cache, "https://api.example.com/data") => Ok({status: 200, ...}) ~ "Fetch with caching"
+    // @error TypeError ~ "Invalid cache object" fix: "Pass a cache object created by Cache()"
+    // @error TypeError ~ "Expected cache object" fix: "First argument must be a Map with _cache_id"
+    // @error TypeError ~ "Options must include 'url'" fix: "Include 'url' key in the options map"
+    // @error TypeError ~ "cache.fetch() requires URL string or options map" fix: "Pass a String URL or a Map with request options"
     module.insert(
         "cache_fetch".to_string(),
         Value::NativeFunction {
@@ -731,7 +806,23 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // cache_delete(cache_obj, url) - internal function for cache.delete()
+    // @ntnt cache_delete
+    // @module std/http
+    // @signature cache_delete(cache_obj: Map, url: String) -> Unit
+    // Remove a cached response for a specific URL.
+    //
+    // Evicts the cached entry for the given URL from the cache, if present.
+    // This is the internal function backing cache.delete() method calls.
+    // @param cache_obj A cache object created by Cache()
+    // @param url The URL whose cached response should be removed
+    // @returns Unit
+    // @see_also Cache, cache_fetch, cache_clear
+    // @since v0.1.0
+    // @tags #network
+    // @example cache_delete(my_cache, "https://api.example.com/data") => () ~ "Invalidate a cached URL"
+    // @error TypeError ~ "Invalid cache object" fix: "Pass a cache object created by Cache()"
+    // @error TypeError ~ "Expected cache object" fix: "First argument must be a Map with _cache_id"
+    // @error TypeError ~ "cache.delete() requires URL string" fix: "Pass a String URL as the second argument"
     module.insert(
         "cache_delete".to_string(),
         Value::NativeFunction {
@@ -760,7 +851,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // cache_clear(cache_obj) - internal function for cache.clear()
+    // @ntnt cache_clear
+    // @module std/http
+    // @signature cache_clear(cache_obj: Map) -> Unit
+    // Remove all cached responses from a cache.
+    //
+    // Evicts every entry from the specified cache object, regardless of TTL.
+    // This is the internal function backing cache.clear() method calls.
+    // @param cache_obj A cache object created by Cache()
+    // @returns Unit
+    // @see_also Cache, cache_fetch, cache_delete
+    // @since v0.1.0
+    // @tags #network
+    // @example cache_clear(my_cache) => () ~ "Clear all cached responses"
+    // @error TypeError ~ "Invalid cache object" fix: "Pass a cache object created by Cache()"
+    // @error TypeError ~ "Expected cache object" fix: "First argument must be a Map with _cache_id"
     module.insert(
         "cache_clear".to_string(),
         Value::NativeFunction {

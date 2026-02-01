@@ -96,7 +96,21 @@ pub fn url_decode(s: &str) -> std::result::Result<String, String> {
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // parse_url(url) -> Result<Map, Error> - Parse URL into components
+    // @ntnt parse_url
+    // @module std/url
+    // @module_description URL parsing, encoding, and query string handling
+    // @signature parse_url(url: String) -> Result<Map, String>
+    // Parses a URL into its components: scheme, host, port, path, query, fragment.
+    //
+    // Also extracts username/password from auth URLs and parses query parameters
+    // into a nested params map. The original URL is preserved as href.
+    // @param url The URL string to parse
+    // @returns Result containing a map of URL components
+    // @see_also build_query, parse_query
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example parse_url("https://example.com/path?q=1") ~ "Parse URL into components map"
+    // @error TypeError ~ "parse() requires a URL string" fix: "Pass a string"
     module.insert(
         "parse_url".to_string(),
         Value::NativeFunction {
@@ -225,7 +239,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // encode(str) -> String - URL encode a string
+    // @ntnt encode
+    // @module std/url
+    // @signature encode(s: String) -> String
+    // URL-encodes a string, preserving URL-safe characters.
+    //
+    // Preserves characters that are safe in URLs (slashes, colons, etc.)
+    // while encoding spaces and other special characters. For encoding
+    // query parameter values, use encode_component instead.
+    // @param s The string to encode
+    // @returns URL-encoded string
+    // @see_also decode, encode_component
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example encode("hello world") => "hello%20world" ~ "Encode spaces"
     module.insert(
         "encode".to_string(),
         Value::NativeFunction {
@@ -243,7 +270,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // encode_component(str) -> String - URL encode a component (more aggressive encoding)
+    // @ntnt encode_component
+    // @module std/url
+    // @signature encode_component(s: String) -> String
+    // URL-encodes a string component aggressively, safe for query parameters.
+    //
+    // Unlike encode(), this encodes all non-alphanumeric characters except
+    // hyphens, underscores, periods, and tildes. Use this for query parameter
+    // keys and values.
+    // @param s The string to encode
+    // @returns Aggressively URL-encoded string
+    // @see_also encode, decode, build_query
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example encode_component("a=b&c=d") => "a%3Db%26c%3Dd" ~ "Encode special chars"
     module.insert(
         "encode_component".to_string(),
         Value::NativeFunction {
@@ -261,7 +301,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // decode(str) -> Result<String, Error> - URL decode a string
+    // @ntnt decode
+    // @module std/url
+    // @signature decode(s: String) -> Result<String, String>
+    // URL-decodes a percent-encoded string.
+    //
+    // Converts %XX hex sequences back to characters and + signs to spaces.
+    // Returns Err if the string contains invalid percent encoding.
+    // @param s The URL-encoded string to decode
+    // @returns Result containing the decoded string or an error
+    // @see_also encode, encode_component
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example decode("hello%20world") => Ok("hello world") ~ "Decode percent-encoded spaces"
     module.insert(
         "decode".to_string(),
         Value::NativeFunction {
@@ -287,7 +339,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // build_query(params) -> String - Build query string from map
+    // @ntnt build_query
+    // @module std/url
+    // @signature build_query(params: Map) -> String
+    // Builds a URL query string from a map of key-value pairs.
+    //
+    // Keys and values are URL-encoded using component encoding. Pairs are
+    // joined with & separators.
+    // @param params Map of query parameter names to values
+    // @returns Query string like "key1=value1&key2=value2"
+    // @see_also parse_query, encode_component
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example build_query(map { "a": "1", "b": "2" }) => "a=1&b=2" ~ "Map to query string"
     module.insert(
         "build_query".to_string(),
         Value::NativeFunction {
@@ -312,7 +376,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // parse_query(query_string) -> Map - Parse query/form string to map (inverse of build_query)
+    // @ntnt parse_query
+    // @module std/url
+    // @signature parse_query(query: String) -> Map<String, String>
+    // Parses a URL query string into a map of key-value pairs.
+    //
+    // Splits on & separators and = key-value delimiters. Both keys and values
+    // are URL-decoded. Keys without values get empty string values.
+    // @param query The query string to parse (without leading ?)
+    // @returns Map of decoded query parameters
+    // @see_also build_query, parse_url
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example parse_query("a=1&b=2") => map { "a": "1", "b": "2" } ~ "Query string to map"
     module.insert(
         "parse_query".to_string(),
         Value::NativeFunction {
@@ -351,7 +427,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // join(base, path) -> String - Join base URL with path
+    // @ntnt join
+    // @module std/url
+    // @signature join(base: String, path: String) -> String
+    // Joins a base URL with a path, handling trailing/leading slashes.
+    //
+    // Trims trailing slashes from the base and leading slashes from the path,
+    // then joins them with a single slash.
+    // @param base The base URL
+    // @param path The path to append
+    // @returns Combined URL string
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example join("https://example.com", "/api/v1") => "https://example.com/api/v1" ~ "Join base and path"
     module.insert(
         "join".to_string(),
         Value::NativeFunction {

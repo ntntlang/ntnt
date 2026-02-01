@@ -785,6 +785,8 @@ return html(page)
 
 Template paths are relative to the `.tnt` file.
 
+**Important:** External template files (`.html`) are rendered internally by wrapping their content in `"""..."""` triple quotes. This means template HTML **must not contain literal `"""`** anywhere in the content — the lexer will interpret it as the closing delimiter and truncate the output. If you need to display triple quotes (e.g., in code examples showing Elixir's `@doc """`), use HTML entities `&quot;&quot;&quot;` instead. They render identically in the browser.
+
 ---
 
 ## File-Based Routing
@@ -871,6 +873,7 @@ NTNT doesn't have a debugger. Use these strategies:
 import { split, join, trim, replace, contains } from "std/string"
 import { json, html, text, redirect, status, not_found, error, response, parse_form, parse_json } from "std/http/server"
 import { connect, query, execute, close } from "std/db/postgres"
+import { connect, query, execute, close } from "std/db/sqlite"
 import { fetch, download } from "std/http"
 import { read_file, write_file, exists } from "std/fs"
 import { parse_json, stringify } from "std/json"
@@ -885,12 +888,16 @@ import { first, last, keys, values, entries, has_key, get_key } from "std/collec
 ```bash
 ntnt run <file>              # Run a .tnt file
 ntnt lint <file>             # Check for errors
+ntnt lint --strict <file>    # Check with strict type warnings
 ntnt intent check <file>     # Verify code matches intent
 ntnt intent studio <intent>  # Visual studio with live tests
 ntnt intent coverage <file>  # Show feature coverage
 ntnt intent init <intent>    # Generate scaffolding
 ntnt inspect <file>          # Project structure as JSON
+ntnt validate <file>         # Validate with JSON output
 ntnt docs [query]            # Search stdlib documentation
+ntnt docs --generate         # Regenerate STDLIB_REFERENCE.md
+ntnt docs --validate         # Check documentation coverage
 ntnt test <file> --get /     # Quick HTTP endpoint testing
 ```
 

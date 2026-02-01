@@ -212,7 +212,7 @@ enum Commands {
 
     /// Browse and validate stdlib documentation
     ///
-    /// Documentation is auto-generated from docs/stdlib.toml.
+    /// Documentation is auto-generated from source code // @ntnt comments.
     /// Use --validate to check all functions are documented.
     ///
     /// Examples:
@@ -230,7 +230,7 @@ enum Commands {
         #[arg(long)]
         validate: bool,
 
-        /// Regenerate docs/STDLIB_REFERENCE.md from stdlib.toml
+        /// Regenerate docs/STDLIB_REFERENCE.md from source annotations
         #[arg(long)]
         generate: bool,
 
@@ -570,6 +570,99 @@ fn run_repl() -> anyhow::Result<()> {
                             interpreter.print_environment();
                             continue;
                         }
+                        _ if line.starts_with(":doc ") => {
+                            let query = line[5..].trim();
+                            if query.is_empty() {
+                                println!("{}: Usage: :doc <function_name>", "Error".red());
+                            } else if let Some(entry) = search_docs(query) {
+                                let _ = show_doc_entry(entry, false);
+                            } else {
+                                // Fuzzy search: find functions containing the query
+                                let matches: Vec<&docs::DocEntry> = get_docs()
+                                    .iter()
+                                    .filter(|d| {
+                                        d.name.to_lowercase().contains(&query.to_lowercase())
+                                    })
+                                    .collect();
+                                if matches.is_empty() {
+                                    // Try Levenshtein "Did you mean?" suggestion
+                                    let candidates: Vec<String> =
+                                        get_docs().iter().map(|d| d.name.clone()).collect();
+                                    if let Some(suggestion) =
+                                        ntnt::error::find_suggestion(query, &candidates)
+                                    {
+                                        println!(
+                                            "No documentation found for '{}'. Did you mean {}?",
+                                            query,
+                                            suggestion.green()
+                                        );
+                                    } else {
+                                        println!("No documentation found for '{}'", query);
+                                    }
+                                } else if matches.len() == 1 {
+                                    let _ = show_doc_entry(matches[0], false);
+                                } else {
+                                    println!(
+                                        "Found {} matches for '{}':\n",
+                                        matches.len().to_string().green(),
+                                        query
+                                    );
+                                    for entry in &matches {
+                                        let module = entry.module.as_deref().unwrap_or("builtin");
+                                        println!(
+                                            "  {} ({})",
+                                            entry.name.yellow().bold(),
+                                            module.dimmed()
+                                        );
+                                        if let Some(sig) = &entry.signature {
+                                            println!("    {}", sig.cyan());
+                                        }
+                                    }
+                                    println!("\nUse {} for full details", ":doc <name>".cyan());
+                                }
+                            }
+                            continue;
+                        }
+                        _ if line.starts_with(":search ") => {
+                            let query = line[8..].trim().trim_matches('"');
+                            if query.is_empty() {
+                                println!("{}: Usage: :search <query>", "Error".red());
+                            } else {
+                                let query_lower = query.to_lowercase();
+                                let matches: Vec<&docs::DocEntry> = get_docs()
+                                    .iter()
+                                    .filter(|d| {
+                                        d.name.to_lowercase().contains(&query_lower)
+                                            || d.summary.to_lowercase().contains(&query_lower)
+                                            || d.description
+                                                .as_ref()
+                                                .map(|desc| {
+                                                    desc.to_lowercase().contains(&query_lower)
+                                                })
+                                                .unwrap_or(false)
+                                    })
+                                    .collect();
+                                if matches.is_empty() {
+                                    println!("No results for '{}'", query);
+                                } else {
+                                    println!(
+                                        "Found {} results for '{}':\n",
+                                        matches.len().to_string().green(),
+                                        query
+                                    );
+                                    for entry in &matches {
+                                        let module = entry.module.as_deref().unwrap_or("builtin");
+                                        println!(
+                                            "  {} ({})",
+                                            entry.name.yellow().bold(),
+                                            module.dimmed()
+                                        );
+                                        println!("    {}", entry.summary);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         _ => {
                             println!("{}: Unknown command: {}", "Error".red(), line);
                             continue;
@@ -613,6 +706,14 @@ fn print_repl_help() {
     println!("  {}  Exit the REPL", ":quit, :q, :exit".cyan());
     println!("  {}      Clear the environment", ":clear".cyan());
     println!("  {}        Show current bindings", ":env".cyan());
+    println!(
+        "  {}   Look up function documentation",
+        ":doc <name>".cyan()
+    );
+    println!(
+        "  {}  Search docs by name or description",
+        ":search <q>".cyan()
+    );
 
     println!("\n{}", "Standard Library:".yellow().bold());
     println!(
@@ -2083,6 +2184,55 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
         check_stmt_for_issues(stmt, &source_lines, &mut issues, &http_route_functions);
     }
 
+    // Check for import name collisions (same name imported from different modules)
+    {
+        // Find line numbers for each import by searching for the module source string
+        fn find_import_line(source_lines: &[&str], module: &str, after_line: usize) -> usize {
+            for (i, line) in source_lines.iter().enumerate() {
+                if i + 1 <= after_line {
+                    continue;
+                }
+                if line.contains("import") && line.contains(module) {
+                    return i + 1;
+                }
+            }
+            0
+        }
+
+        let mut imported_names: std::collections::HashMap<String, (String, usize)> =
+            std::collections::HashMap::new();
+        let mut last_import_line: usize = 0;
+
+        for stmt in &ast.statements {
+            if let Statement::Import { items, source, .. } = stmt {
+                let current_line = find_import_line(&source_lines, source, last_import_line);
+                if current_line > 0 {
+                    last_import_line = current_line;
+                }
+
+                for item in items {
+                    let local_name = item.alias.as_ref().unwrap_or(&item.name);
+
+                    if let Some((prev_source, prev_line)) = imported_names.get(local_name) {
+                        if prev_source != source {
+                            issues.push(json!({
+                                "severity": "warning",
+                                "rule": "import_collision",
+                                "message": format!(
+                                    "'{}' imported from both \"{}\" (line {}) and \"{}\" (line {}). The second import shadows the first. Consider using an alias:\n    import {{ {} as {}_alias }} from \"{}\"",
+                                    local_name, prev_source, prev_line, source, current_line,
+                                    local_name, local_name, source
+                                ),
+                                "line": current_line,
+                            }));
+                        }
+                    }
+                    imported_names.insert(local_name.clone(), (source.clone(), current_line));
+                }
+            }
+        }
+    }
+
     // Also run the existing unused import analysis
     let ast_warnings = analyze_ast_warnings(ast, source);
     for w in ast_warnings {
@@ -3493,207 +3643,328 @@ fn generate_completions(shell: Shell) {
 // Documentation Command
 // ============================================================================
 
-/// TOML structures for stdlib documentation
+/// Structured doc types (generated by build.rs from // @ntnt source comments)
+///
+/// KEEP IN SYNC with build.rs DocEntry (Serialize side).
+/// If you add/remove/rename a field in build.rs, update this module too.
 mod docs {
     use serde::Deserialize;
-    use std::collections::HashMap;
 
     #[derive(Debug, Deserialize)]
-    pub struct StdlibDocs {
-        pub meta: Option<Meta>,
-        pub builtins: Option<HashMap<String, FunctionDoc>>,
-        pub modules: Option<HashMap<String, ModuleDoc>>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct Meta {
-        pub version: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct FunctionDoc {
-        pub signature: String,
-        pub description: String,
-        pub examples: Option<Vec<String>>,
-        pub errors: Option<Vec<String>>,
-        pub notes: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    pub struct ModuleDoc {
+    pub struct DocEntry {
+        pub name: String,
+        pub module: Option<String>,
+        pub signature: Option<String>,
+        pub summary: String,
         pub description: Option<String>,
-        pub functions: Option<HashMap<String, FunctionDoc>>,
-        pub constants: Option<HashMap<String, ConstantDoc>>,
+        #[serde(default)]
+        pub params: Vec<ParamDoc>,
+        pub returns: Option<String>,
+        #[serde(default)]
+        pub examples: Vec<ExampleDoc>,
+        #[serde(default)]
+        pub see_also: Vec<String>,
+        pub since: Option<String>,
+        #[serde(default)]
+        pub tags: Vec<String>,
+        #[serde(default)]
+        pub errors: Vec<ErrorDoc>,
+        #[serde(default)]
+        pub gotchas: Vec<String>,
+        pub module_description: Option<String>,
+        pub source_file: String,
+        pub source_line: usize,
     }
 
     #[derive(Debug, Deserialize)]
-    pub struct ConstantDoc {
-        pub value: String,
+    pub struct ExampleDoc {
+        pub code: String,
+        pub expected: Option<String>,
+        pub description: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct ParamDoc {
+        pub name: String,
         pub description: String,
     }
-}
 
-// Embed stdlib.toml at compile time (35KB - negligible size increase)
-const EMBEDDED_STDLIB_DOCS: &str = include_str!("../docs/stdlib.toml");
-
-/// Run the docs command
-fn run_docs_command(
-    query: Option<String>,
-    validate: bool,
-    generate_md: bool,
-    json_output: bool,
-) -> anyhow::Result<()> {
-    // For --generate and --validate, we need the actual file path
-    // For normal usage, use embedded docs so it works from anywhere
-    let (content, docs_path) = if generate_md || validate {
-        let path = find_stdlib_toml()?;
-        let content = fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
-        (content, Some(path))
-    } else {
-        (EMBEDDED_STDLIB_DOCS.to_string(), None)
-    };
-
-    let stdlib: docs::StdlibDocs = toml::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("Failed to parse stdlib.toml: {}", e))?;
-
-    if validate {
-        return validate_docs(&stdlib);
-    }
-
-    if generate_md {
-        // Generate all reference docs - docs_path is guaranteed Some here
-        let docs_path = docs_path.unwrap();
-        generate_stdlib_markdown(&stdlib, &docs_path)?;
-        generate_syntax_markdown(&docs_path)?;
-        generate_ial_markdown(&docs_path)?;
-        generate_runtime_markdown(&docs_path)?;
-        return Ok(());
-    }
-
-    match query {
-        None => list_modules(&stdlib, json_output),
-        Some(q) => search_docs(&stdlib, &q, json_output),
+    #[derive(Debug, Deserialize)]
+    pub struct ErrorDoc {
+        pub error_type: String,
+        pub message: String,
+        pub fix: Option<String>,
     }
 }
 
-/// Find the stdlib.toml file
-fn find_stdlib_toml() -> anyhow::Result<PathBuf> {
-    // Try relative to current directory
-    let paths = [
-        PathBuf::from("docs/stdlib.toml"),
-        PathBuf::from("../docs/stdlib.toml"),
-        PathBuf::from("ntnt/docs/stdlib.toml"), // Starter kit location
-    ];
+// Structured doc data generated by build.rs from // @ntnt source comments
+const EMBEDDED_DOC_DATA: &str = include_str!(concat!(env!("OUT_DIR"), "/doc_data.json"));
 
-    for path in &paths {
-        if path.exists() {
-            return Ok(path.clone());
-        }
-    }
-
-    // Try relative to executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let path = parent.join("docs/stdlib.toml");
-            if path.exists() {
-                return Ok(path);
-            }
-            // Try one more level up (for installed binaries)
-            if let Some(grandparent) = parent.parent() {
-                let path = grandparent.join("share/ntnt/docs/stdlib.toml");
-                if path.exists() {
-                    return Ok(path);
-                }
-            }
-        }
-    }
-
-    // Try home directory starter kit
-    if let Ok(home) = std::env::var("HOME") {
-        let path = PathBuf::from(home).join("ntnt/docs/stdlib.toml");
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "Could not find docs/stdlib.toml. Run --generate or --validate from the NTNT project directory."
-    ))
+/// Lazily parse the embedded doc data JSON (parsed once, cached)
+fn get_docs() -> &'static [docs::DocEntry] {
+    use std::sync::OnceLock;
+    static DOCS: OnceLock<Vec<docs::DocEntry>> = OnceLock::new();
+    DOCS.get_or_init(|| {
+        serde_json::from_str(EMBEDDED_DOC_DATA)
+            .expect("BUG: embedded doc_data.json is malformed — rebuild with `cargo build`")
+    })
 }
 
-/// List all available modules
-fn list_modules(stdlib: &docs::StdlibDocs, json_output: bool) -> anyhow::Result<()> {
+/// Search the new doc data for a function by name (exact match)
+fn search_docs(query: &str) -> Option<&'static docs::DocEntry> {
+    get_docs().iter().find(|d| d.name == query)
+}
+
+/// Display a new-format doc entry
+fn show_doc_entry(entry: &docs::DocEntry, json_output: bool) -> anyhow::Result<()> {
     if json_output {
-        let mut output = serde_json::Map::new();
-
-        // Add builtins count
-        let builtin_count = stdlib.builtins.as_ref().map(|b| b.len()).unwrap_or(0);
-        output.insert(
-            "builtins".to_string(),
-            serde_json::json!({ "count": builtin_count }),
-        );
-
-        // Add modules
-        if let Some(modules) = &stdlib.modules {
-            let mut mods = serde_json::Map::new();
-            for (name, module) in modules {
-                let func_count = module.functions.as_ref().map(|f| f.len()).unwrap_or(0);
-                let const_count = module.constants.as_ref().map(|c| c.len()).unwrap_or(0);
-                mods.insert(
-                    name.clone(),
-                    serde_json::json!({
-                        "functions": func_count,
-                        "constants": const_count,
-                        "description": module.description
-                    }),
-                );
-            }
-            output.insert("modules".to_string(), serde_json::Value::Object(mods));
-        }
-
+        let output = serde_json::json!({
+            "name": entry.name,
+            "module": entry.module,
+            "signature": entry.signature,
+            "summary": entry.summary,
+            "description": entry.description,
+            "params": entry.params.iter().map(|p| serde_json::json!({
+                "name": p.name, "description": p.description
+            })).collect::<Vec<_>>(),
+            "returns": entry.returns,
+            "examples": entry.examples.iter().map(|e| serde_json::json!({
+                "code": e.code, "expected": e.expected, "description": e.description
+            })).collect::<Vec<_>>(),
+            "see_also": entry.see_also,
+            "since": entry.since,
+            "tags": entry.tags,
+            "errors": entry.errors.iter().map(|e| serde_json::json!({
+                "error_type": e.error_type, "message": e.message, "fix": e.fix
+            })).collect::<Vec<_>>(),
+            "gotchas": entry.gotchas,
+            "source_file": entry.source_file,
+            "source_line": entry.source_line,
+        });
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
 
-    println!("{}", "NTNT Standard Library".green().bold());
-    if let Some(meta) = &stdlib.meta {
-        if let Some(version) = &meta.version {
-            println!("Version: {}", version);
+    // Signature (or name as fallback)
+    if let Some(sig) = &entry.signature {
+        println!("{}", sig.green().bold());
+    } else {
+        println!("{}", entry.name.green().bold());
+    }
+
+    // Module
+    if let Some(module) = &entry.module {
+        println!("Module: {}", module.cyan());
+    }
+
+    // Since version
+    if let Some(since) = &entry.since {
+        println!("Since: {}", since.dimmed());
+    }
+
+    println!();
+
+    // Summary
+    println!("{}", entry.summary);
+
+    // Extended description
+    if let Some(desc) = &entry.description {
+        println!();
+        println!("{}", desc);
+    }
+
+    // Parameters
+    if !entry.params.is_empty() {
+        println!();
+        println!("{}", "Parameters:".cyan().bold());
+        for param in &entry.params {
+            println!("  {} — {}", param.name.yellow(), param.description);
         }
     }
+
+    // Returns
+    if let Some(returns) = &entry.returns {
+        println!();
+        println!("{} {}", "Returns:".cyan().bold(), returns);
+    }
+
+    // Examples
+    if !entry.examples.is_empty() {
+        println!();
+        println!("{}", "Examples:".cyan().bold());
+        for ex in &entry.examples {
+            if ex.code.contains('\n') {
+                // Multi-line example
+                if let Some(desc) = &ex.description {
+                    println!("  {}", desc.dimmed());
+                }
+                for code_line in ex.code.lines() {
+                    println!("    {}", code_line);
+                }
+                if let Some(expected) = &ex.expected {
+                    println!("    => {}", expected);
+                }
+            } else {
+                // Single-line example
+                let mut line = format!("  {}", ex.code);
+                if let Some(expected) = &ex.expected {
+                    line.push_str(&format!(" => {}", expected));
+                }
+                if let Some(desc) = &ex.description {
+                    line.push_str(&format!("  {}", desc.dimmed()));
+                }
+                println!("{}", line);
+            }
+        }
+    }
+
+    // Errors
+    if !entry.errors.is_empty() {
+        println!();
+        println!("{}", "Errors:".yellow().bold());
+        for err in &entry.errors {
+            print!("  {} — {}", err.error_type.red(), err.message);
+            if let Some(fix) = &err.fix {
+                print!(" (fix: {})", fix);
+            }
+            println!();
+        }
+    }
+
+    // Gotchas
+    if !entry.gotchas.is_empty() {
+        println!();
+        println!("{}", "Gotchas:".yellow().bold());
+        for gotcha in &entry.gotchas {
+            println!("  - {}", gotcha);
+        }
+    }
+
+    // See also
+    if !entry.see_also.is_empty() {
+        println!();
+        println!(
+            "{} {}",
+            "See also:".dimmed(),
+            entry.see_also.join(", ").dimmed()
+        );
+    }
+
+    // Tags
+    if !entry.tags.is_empty() {
+        println!("{} {}", "Tags:".dimmed(), entry.tags.join(", ").dimmed());
+    }
+
+    Ok(())
+}
+
+/// Show a module's documentation from embedded JSON data
+fn show_module_from_json(module_name: &str, json_output: bool) -> anyhow::Result<()> {
+    let entries: Vec<&docs::DocEntry> = get_docs()
+        .iter()
+        .filter(|d| d.module.as_deref() == Some(module_name))
+        .collect();
+
+    if entries.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No documentation found for module '{}'",
+            module_name
+        ));
+    }
+
+    if json_output {
+        let func_names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        let output = serde_json::json!({
+            "name": module_name,
+            "functions": func_names,
+            "count": entries.len()
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("{}", module_name.green().bold());
+    println!();
+
+    // Show import example
+    println!("{}", "Import:".cyan().bold());
+    let import_list: Vec<&str> = entries.iter().take(3).map(|e| e.name.as_str()).collect();
+    println!(
+        "  import {{ {} }} from \"{}\"",
+        import_list.join(", "),
+        module_name
+    );
+    println!();
+
+    // Show functions
+    println!("{}", "Functions:".cyan().bold());
+    let mut sorted_entries: Vec<&&docs::DocEntry> = entries.iter().collect();
+    sorted_entries.sort_by_key(|e| &e.name);
+    for entry in sorted_entries {
+        if let Some(sig) = &entry.signature {
+            println!("  {}", sig.yellow());
+        } else {
+            println!("  {}", entry.name.yellow());
+        }
+        println!("    {}", entry.summary.dimmed());
+    }
+
+    Ok(())
+}
+
+/// List all modules and builtins from embedded JSON data
+fn list_modules_from_json(json_output: bool) -> anyhow::Result<()> {
+    let docs = get_docs();
+
+    // Group by module
+    let mut modules: std::collections::BTreeMap<String, Vec<&docs::DocEntry>> =
+        std::collections::BTreeMap::new();
+    let mut builtins: Vec<&docs::DocEntry> = Vec::new();
+
+    for entry in docs {
+        match &entry.module {
+            Some(m) => modules.entry(m.clone()).or_default().push(entry),
+            None => builtins.push(entry),
+        }
+    }
+
+    if json_output {
+        let mut output = serde_json::Map::new();
+        output.insert(
+            "builtins".to_string(),
+            serde_json::json!({ "count": builtins.len() }),
+        );
+        let mut mods = serde_json::Map::new();
+        for (name, entries) in &modules {
+            mods.insert(
+                name.clone(),
+                serde_json::json!({ "functions": entries.len() }),
+            );
+        }
+        output.insert("modules".to_string(), serde_json::Value::Object(mods));
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    let version = env!("CARGO_PKG_VERSION");
+    println!("{}", "NTNT Standard Library".green().bold());
+    println!("Version: {}", version);
     println!();
 
     // List builtins
-    if let Some(builtins) = &stdlib.builtins {
-        println!(
-            "{} ({} functions)",
-            "Global Builtins".cyan().bold(),
-            builtins.len()
-        );
-        println!("  Available everywhere without importing");
-        println!("  Run: ntnt docs <function_name>");
-        println!();
-    }
+    println!(
+        "{} ({} functions)",
+        "Global Builtins".cyan().bold(),
+        builtins.len()
+    );
+    println!("  Available everywhere without importing");
+    println!("  Run: ntnt docs <function_name>");
+    println!();
 
     // List modules
-    if let Some(modules) = &stdlib.modules {
-        println!("{}", "Modules".cyan().bold());
-        let mut names: Vec<_> = modules.keys().collect();
-        names.sort();
-        for name in names {
-            let module = &modules[name];
-            let func_count = module.functions.as_ref().map(|f| f.len()).unwrap_or(0);
-            let desc = module
-                .description
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            println!("  {} ({} functions)", name.yellow(), func_count);
-            if !desc.is_empty() {
-                println!("    {}", desc.dimmed());
-            }
-        }
+    println!("{}", "Modules".cyan().bold());
+    for (name, entries) in &modules {
+        println!("  {} ({} functions)", name.yellow(), entries.len());
     }
 
     println!();
@@ -3705,76 +3976,62 @@ fn list_modules(stdlib: &docs::StdlibDocs, json_output: bool) -> anyhow::Result<
     Ok(())
 }
 
-/// Search for a function or module
-fn search_docs(stdlib: &docs::StdlibDocs, query: &str, json_output: bool) -> anyhow::Result<()> {
+/// Search for a function or module using embedded JSON data
+fn search_docs_from_json(query: &str, json_output: bool) -> anyhow::Result<()> {
     let query_lower = query.to_lowercase();
 
-    // Check if it's a module name
-    if let Some(modules) = &stdlib.modules {
-        if let Some(module) = modules.get(query) {
-            return show_module(query, module, json_output);
-        }
+    // Try exact match first
+    if let Some(entry) = search_docs(query) {
+        return show_doc_entry(entry, json_output);
     }
 
-    // Check builtins
-    if let Some(builtins) = &stdlib.builtins {
-        if let Some(func) = builtins.get(query) {
-            return show_function(query, func, "builtin", json_output);
-        }
+    // Check if it's a module name (e.g., "std/string")
+    let module_entries: Vec<&docs::DocEntry> = get_docs()
+        .iter()
+        .filter(|d| d.module.as_deref() == Some(query))
+        .collect();
+    if !module_entries.is_empty() {
+        return show_module_from_json(query, json_output);
     }
 
-    // Search in modules
-    if let Some(modules) = &stdlib.modules {
-        for (mod_name, module) in modules {
-            if let Some(functions) = &module.functions {
-                if let Some(func) = functions.get(query) {
-                    return show_function(query, func, mod_name, json_output);
-                }
-            }
-        }
-    }
-
-    // Fuzzy search - find functions containing the query
-    let mut matches: Vec<(String, String, &docs::FunctionDoc)> = Vec::new();
-
-    if let Some(builtins) = &stdlib.builtins {
-        for (name, func) in builtins {
-            if name.to_lowercase().contains(&query_lower) {
-                matches.push((name.clone(), "builtin".to_string(), func));
-            }
-        }
-    }
-
-    if let Some(modules) = &stdlib.modules {
-        for (mod_name, module) in modules {
-            if let Some(functions) = &module.functions {
-                for (name, func) in functions {
-                    if name.to_lowercase().contains(&query_lower) {
-                        matches.push((name.clone(), mod_name.clone(), func));
-                    }
-                }
-            }
-        }
-    }
+    // Fuzzy search by name, summary, and description
+    let matches: Vec<&docs::DocEntry> = get_docs()
+        .iter()
+        .filter(|d| {
+            d.name.to_lowercase().contains(&query_lower)
+                || d.summary.to_lowercase().contains(&query_lower)
+        })
+        .collect();
 
     if matches.is_empty() {
-        println!(
-            "{}: No documentation found for '{}'",
-            "Not found".red(),
-            query
-        );
+        // Try Levenshtein "Did you mean?" suggestion
+        let candidates: Vec<String> = get_docs().iter().map(|d| d.name.clone()).collect();
+        if let Some(suggestion) = ntnt::error::find_suggestion(query, &candidates) {
+            println!(
+                "{}: No documentation found for '{}'. Did you mean {}?",
+                "Not found".red(),
+                query,
+                suggestion.green()
+            );
+        } else {
+            println!(
+                "{}: No documentation found for '{}'",
+                "Not found".red(),
+                query
+            );
+        }
         return Ok(());
     }
 
     if json_output {
-        let results: Vec<_> = matches
+        let results: Vec<serde_json::Value> = matches
             .iter()
-            .map(|(name, module, func)| {
+            .map(|entry| {
                 serde_json::json!({
-                    "name": name,
-                    "module": module,
-                    "signature": func.signature,
-                    "description": func.description
+                    "name": entry.name,
+                    "module": entry.module,
+                    "signature": entry.signature,
+                    "summary": entry.summary
                 })
             })
             .collect();
@@ -3788,288 +4045,350 @@ fn search_docs(stdlib: &docs::StdlibDocs, query: &str, json_output: bool) -> any
         query
     );
     println!();
-    for (name, module, func) in matches {
-        println!("{} ({})", name.yellow().bold(), module.dimmed());
-        println!("  {}", func.signature.cyan());
-        println!("  {}", func.description);
+    for entry in &matches {
+        let module = entry.module.as_deref().unwrap_or("builtin");
+        println!("{} ({})", entry.name.yellow().bold(), module.dimmed());
+        if let Some(sig) = &entry.signature {
+            println!("  {}", sig.cyan());
+        }
+        println!("  {}", entry.summary);
         println!();
     }
 
     Ok(())
 }
 
-/// Show a module's documentation
-fn show_module(name: &str, module: &docs::ModuleDoc, json_output: bool) -> anyhow::Result<()> {
-    if json_output {
-        let output = serde_json::json!({
-            "name": name,
-            "description": module.description,
-            "functions": module.functions.as_ref().map(|f| f.keys().collect::<Vec<_>>()),
-            "constants": module.constants.as_ref().map(|c| c.keys().collect::<Vec<_>>())
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(());
-    }
-
-    println!("{}", name.green().bold());
-    if let Some(desc) = &module.description {
-        println!("{}", desc);
-    }
-    println!();
-
-    // Show import example
-    println!("{}", "Import:".cyan().bold());
-    if let Some(functions) = &module.functions {
-        let func_names: Vec<_> = functions.keys().take(3).collect();
-        let import_list = func_names
-            .iter()
-            .map(|s| s.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        println!("  import {{ {} }} from \"{}\"", import_list, name);
-    }
-    println!();
-
-    // Show constants
-    if let Some(constants) = &module.constants {
-        println!("{}", "Constants:".cyan().bold());
-        for (const_name, constant) in constants {
-            println!(
-                "  {} = {} - {}",
-                const_name.yellow(),
-                constant.value,
-                constant.description.dimmed()
-            );
-        }
-        println!();
-    }
-
-    // Show functions
-    if let Some(functions) = &module.functions {
-        println!("{}", "Functions:".cyan().bold());
-        let mut names: Vec<_> = functions.keys().collect();
-        names.sort();
-        for func_name in names {
-            let func = &functions[func_name];
-            println!("  {}", func.signature.yellow());
-            println!("    {}", func.description.dimmed());
-        }
-    }
-
-    Ok(())
+/// Generate a GitHub-compatible anchor from a heading string.
+fn github_anchor(heading: &str) -> String {
+    heading
+        .to_lowercase()
+        .replace('/', "")
+        .replace(' ', "-")
+        .replace(|c: char| !c.is_alphanumeric() && c != '-', "")
 }
 
-/// Show a function's documentation
-fn show_function(
-    name: &str,
-    func: &docs::FunctionDoc,
-    module: &str,
-    json_output: bool,
-) -> anyhow::Result<()> {
-    if json_output {
-        let output = serde_json::json!({
-            "name": name,
-            "module": module,
-            "signature": func.signature,
-            "description": func.description,
-            "examples": func.examples,
-            "errors": func.errors,
-            "notes": func.notes
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(());
+/// Write a detailed doc section for a single function into `md`.
+fn write_function_detail(md: &mut String, entry: &docs::DocEntry) {
+    md.push_str(&format!("#### `{}`\n\n", entry.name));
+
+    // Signature
+    if let Some(sig) = &entry.signature {
+        md.push_str("```ntnt\n");
+        md.push_str(sig);
+        md.push('\n');
+        md.push_str("```\n\n");
     }
 
-    println!("{}", func.signature.green().bold());
-    if module != "builtin" {
-        println!("Module: {}", module.cyan());
-    } else {
-        println!("{}", "(global builtin - no import needed)".dimmed());
+    // Summary
+    if !entry.summary.is_empty() {
+        md.push_str(&entry.summary);
+        md.push_str("\n\n");
     }
-    println!();
-    println!("{}", func.description);
 
-    if let Some(examples) = &func.examples {
-        println!();
-        println!("{}", "Examples:".cyan().bold());
-        for example in examples {
-            println!("  {}", example);
+    // Extended description
+    if let Some(desc) = &entry.description {
+        md.push_str(desc);
+        md.push_str("\n\n");
+    }
+
+    // Parameters
+    if !entry.params.is_empty() {
+        md.push_str("**Parameters:**\n\n");
+        for p in &entry.params {
+            md.push_str(&format!("- `{}` — {}\n", p.name, p.description));
         }
+        md.push('\n');
     }
 
-    if let Some(errors) = &func.errors {
-        println!();
-        println!("{}", "Errors:".yellow().bold());
-        for error in errors {
-            println!("  - {}", error);
+    // Returns
+    if let Some(ret) = &entry.returns {
+        md.push_str(&format!("**Returns:** {}\n\n", ret));
+    }
+
+    // Examples
+    if !entry.examples.is_empty() {
+        md.push_str("**Examples:**\n\n");
+        md.push_str("```ntnt\n");
+        for ex in &entry.examples {
+            if ex.code.contains('\n') {
+                // Multi-line example
+                if let Some(desc) = &ex.description {
+                    md.push_str(&format!("// {}\n", desc));
+                }
+                md.push_str(&ex.code);
+                md.push('\n');
+                if let Some(exp) = &ex.expected {
+                    md.push_str(&format!("// => {}\n", exp));
+                }
+            } else {
+                // Single-line example
+                let mut line = ex.code.clone();
+                if let Some(exp) = &ex.expected {
+                    line.push_str(&format!("  // => {}", exp));
+                }
+                if let Some(desc) = &ex.description {
+                    line.push_str(&format!("  // {}", desc));
+                }
+                md.push_str(&line);
+                md.push('\n');
+            }
         }
+        md.push_str("```\n\n");
     }
 
-    if let Some(notes) = &func.notes {
-        println!();
-        println!("{}", "Notes:".cyan().bold());
-        println!("  {}", notes);
+    // Errors
+    if !entry.errors.is_empty() {
+        md.push_str("**Errors:**\n\n");
+        for err in &entry.errors {
+            let mut line = format!("- **{}**: {}", err.error_type, err.message);
+            if let Some(fix) = &err.fix {
+                line.push_str(&format!(" — *Fix: {}*", fix));
+            }
+            md.push_str(&line);
+            md.push('\n');
+        }
+        md.push('\n');
     }
 
-    Ok(())
+    // Gotchas
+    if !entry.gotchas.is_empty() {
+        md.push_str("**Gotchas:**\n\n");
+        for g in &entry.gotchas {
+            md.push_str(&format!("- {}\n", g));
+        }
+        md.push('\n');
+    }
+
+    // See also
+    if !entry.see_also.is_empty() {
+        let links: Vec<String> = entry.see_also.iter().map(|s| format!("`{}`", s)).collect();
+        md.push_str(&format!("**See also:** {}\n\n", links.join(", ")));
+    }
+
+    // Since
+    if let Some(since) = &entry.since {
+        md.push_str(&format!("*Since {}*\n\n", since));
+    }
+
+    md.push_str("---\n\n");
 }
 
-/// Generate STDLIB_REFERENCE.md from stdlib.toml
-fn generate_stdlib_markdown(stdlib: &docs::StdlibDocs, toml_path: &PathBuf) -> anyhow::Result<()> {
-    let mut md = String::new();
+/// Generate STDLIB_REFERENCE.md from embedded JSON doc data
+fn generate_stdlib_markdown_from_json(output_dir: &std::path::Path) -> anyhow::Result<()> {
+    let all_docs = get_docs();
     let version = env!("CARGO_PKG_VERSION");
+
+    // Group by module
+    let mut modules: std::collections::BTreeMap<String, Vec<&docs::DocEntry>> =
+        std::collections::BTreeMap::new();
+    let mut builtins: Vec<&docs::DocEntry> = Vec::new();
+
+    for entry in all_docs {
+        match &entry.module {
+            Some(m) => modules.entry(m.clone()).or_default().push(entry),
+            None => builtins.push(entry),
+        }
+    }
+
+    // Collect module descriptions (first entry per module that has one)
+    let mut module_descriptions: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for (name, entries) in &modules {
+        for entry in entries {
+            if let Some(desc) = &entry.module_description {
+                module_descriptions.insert(name.clone(), desc.clone());
+                break;
+            }
+        }
+    }
+
+    let mut md = String::new();
 
     // Header
     md.push_str("# NTNT Standard Library Reference\n\n");
-    md.push_str("> **Auto-generated from [stdlib.toml](stdlib.toml)** - Do not edit directly.\n");
+    md.push_str("> **Auto-generated from source code doc comments** - Do not edit directly.\n");
     md.push_str(">\n");
     md.push_str(&format!("> Last updated: v{}\n\n", version));
 
     // Table of Contents
     md.push_str("## Table of Contents\n\n");
     md.push_str("- [Global Builtins](#global-builtins)\n");
-
-    if let Some(modules) = &stdlib.modules {
-        let mut names: Vec<_> = modules.keys().collect();
-        names.sort();
-        for name in &names {
-            let anchor = name.replace("/", "").replace("std", "std");
-            md.push_str(&format!("- [{}](#{})\n", name, anchor));
-        }
+    for name in modules.keys() {
+        let anchor = github_anchor(name);
+        md.push_str(&format!("- [{}](#{})\n", name, anchor));
     }
     md.push_str("\n---\n\n");
 
-    // Global Builtins
+    // ---- Global Builtins ----
     md.push_str("## Global Builtins\n\n");
     md.push_str("These functions are available everywhere without importing.\n\n");
 
-    if let Some(builtins) = &stdlib.builtins {
+    builtins.sort_by_key(|e| &e.name);
+
+    // Summary table with links to detail sections
+    md.push_str("| Function | Description |\n");
+    md.push_str("|----------|-------------|\n");
+    for entry in &builtins {
+        let display_name = entry
+            .signature
+            .as_ref()
+            .map(|s| s.split("->").next().unwrap_or(s).trim().to_string())
+            .unwrap_or_else(|| entry.name.clone());
+        let anchor = github_anchor(&entry.name);
+        let desc = entry.summary.replace('|', "\\|");
+        md.push_str(&format!(
+            "| [`{}`](#{}) | {} |\n",
+            display_name, anchor, desc
+        ));
+    }
+    md.push('\n');
+
+    // Detail sections for each builtin
+    for entry in &builtins {
+        write_function_detail(&mut md, entry);
+    }
+
+    // ---- Modules ----
+    for (name, entries) in &modules {
+        md.push_str(&format!("## {}\n\n", name));
+
+        // Module description
+        if let Some(desc) = module_descriptions.get(name) {
+            md.push_str(desc);
+            md.push_str("\n\n");
+        }
+
+        // Import example
+        md.push_str("```ntnt\n");
+        let import_list: Vec<&str> = entries.iter().take(3).map(|e| e.name.as_str()).collect();
+        md.push_str(&format!(
+            "import {{ {} }} from \"{}\"\n",
+            import_list.join(", "),
+            name
+        ));
+        md.push_str("```\n\n");
+
+        // Summary table with links
+        let mut sorted: Vec<&&docs::DocEntry> = entries.iter().collect();
+        sorted.sort_by_key(|e| &e.name);
+
+        md.push_str("### Functions\n\n");
         md.push_str("| Function | Description |\n");
         md.push_str("|----------|-------------|\n");
-
-        let mut names: Vec<_> = builtins.keys().collect();
-        names.sort();
-        for name in names {
-            if let Some(func) = builtins.get(name) {
-                // Extract just the function call part from signature
-                let call = func
-                    .signature
-                    .split("->")
-                    .next()
-                    .unwrap_or(&func.signature)
-                    .trim();
-                let desc = func.description.replace("|", "\\|");
-                md.push_str(&format!("| `{}` | {} |\n", call, desc));
-            }
+        for entry in &sorted {
+            let anchor = github_anchor(&entry.name);
+            let desc = entry.summary.replace('|', "\\|");
+            md.push_str(&format!("| [`{}`](#{}) | {} |\n", entry.name, anchor, desc));
         }
-    }
-    md.push_str("\n---\n\n");
+        md.push('\n');
 
-    // Modules
-    if let Some(modules) = &stdlib.modules {
-        let mut names: Vec<_> = modules.keys().collect();
-        names.sort();
-
-        for name in names {
-            let module = &modules[name];
-
-            md.push_str(&format!("## {}\n\n", name));
-
-            if let Some(desc) = &module.description {
-                md.push_str(&format!("{}\n\n", desc));
-            }
-
-            md.push_str("```ntnt\n");
-            if let Some(functions) = &module.functions {
-                // Sort keys for deterministic output
-                let mut func_names: Vec<_> = functions.keys().collect();
-                func_names.sort();
-                let import_list = func_names
-                    .iter()
-                    .take(3)
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                md.push_str(&format!("import {{ {} }} from \"{}\"\n", import_list, name));
-            }
-            md.push_str("```\n\n");
-
-            // Constants
-            if let Some(constants) = &module.constants {
-                if !constants.is_empty() {
-                    md.push_str("### Constants\n\n");
-                    md.push_str("| Constant | Value | Description |\n");
-                    md.push_str("|----------|-------|-------------|\n");
-
-                    let mut const_names: Vec<_> = constants.keys().collect();
-                    const_names.sort();
-                    for const_name in const_names {
-                        let constant = &constants[const_name];
-                        md.push_str(&format!(
-                            "| `{}` | {} | {} |\n",
-                            const_name, constant.value, constant.description
-                        ));
-                    }
-                    md.push_str("\n");
-                }
-            }
-
-            // Functions
-            if let Some(functions) = &module.functions {
-                md.push_str("### Functions\n\n");
-                md.push_str("| Function | Description |\n");
-                md.push_str("|----------|-------------|\n");
-
-                let mut func_names: Vec<_> = functions.keys().collect();
-                func_names.sort();
-                for func_name in func_names {
-                    let func = &functions[func_name];
-                    let sig = func.signature.replace("|", "\\|");
-                    let desc = func.description.replace("|", "\\|");
-                    md.push_str(&format!("| `{}` | {} |\n", sig, desc));
-                }
-            }
-
-            md.push_str("\n---\n\n");
+        // Detail sections for each function
+        for entry in &sorted {
+            write_function_detail(&mut md, entry);
         }
     }
 
     // Write to file
-    let output_path = toml_path.parent().unwrap().join("STDLIB_REFERENCE.md");
+    let output_path = output_dir.join("STDLIB_REFERENCE.md");
     fs::write(&output_path, &md)?;
 
+    // Count totals
+    let total_funcs: usize = builtins.len() + modules.values().map(|v| v.len()).sum::<usize>();
     println!(
         "{} Generated {}",
         "✓".green(),
         output_path.display().to_string().cyan()
     );
-
-    // Count what we generated
-    let builtin_count = stdlib.builtins.as_ref().map(|b| b.len()).unwrap_or(0);
-    let mut func_count = 0;
-    let mut module_count = 0;
-    if let Some(modules) = &stdlib.modules {
-        module_count = modules.len();
-        for module in modules.values() {
-            if let Some(functions) = &module.functions {
-                func_count += functions.len();
-            }
-        }
-    }
-
     println!(
-        "  {} builtins, {} modules, {} functions",
-        builtin_count.to_string().cyan(),
-        module_count.to_string().cyan(),
-        func_count.to_string().cyan()
+        "  {} builtins, {} modules, {} total functions",
+        builtins.len().to_string().cyan(),
+        modules.len().to_string().cyan(),
+        total_funcs.to_string().cyan()
     );
 
     Ok(())
 }
 
+/// Run the docs command
+fn run_docs_command(
+    query: Option<String>,
+    validate: bool,
+    generate_md: bool,
+    json_output: bool,
+) -> anyhow::Result<()> {
+    if generate_md {
+        let docs_dir = find_docs_dir()?;
+        // Stdlib reference from embedded JSON — no TOML needed
+        generate_stdlib_markdown_from_json(&docs_dir)?;
+        // Syntax, IAL, runtime still generated from TOML
+        if docs_dir.join("syntax.toml").exists() {
+            generate_syntax_markdown(&docs_dir)?;
+            generate_ial_markdown(&docs_dir)?;
+            generate_runtime_markdown(&docs_dir)?;
+        } else {
+            println!(
+                "  {} TOML files not found, skipping syntax/IAL/runtime docs",
+                "!".yellow()
+            );
+        }
+        // Sync agent instruction files from AI_AGENT_GUIDE.md
+        sync_agent_files(&docs_dir)?;
+
+        return Ok(());
+    }
+
+    if validate {
+        return validate_docs_from_json();
+    }
+
+    match query {
+        None => list_modules_from_json(json_output),
+        Some(q) => search_docs_from_json(&q, json_output),
+    }
+}
+
+/// Find the docs/ directory
+fn find_docs_dir() -> anyhow::Result<PathBuf> {
+    let candidates = [
+        PathBuf::from("docs"),
+        PathBuf::from("../docs"),
+        PathBuf::from("ntnt/docs"),
+    ];
+    for path in &candidates {
+        if path.is_dir() {
+            return Ok(path.clone());
+        }
+    }
+    // Try relative to executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let path = parent.join("docs");
+            if path.is_dir() {
+                return Ok(path);
+            }
+            if let Some(grandparent) = parent.parent() {
+                let path = grandparent.join("share/ntnt/docs");
+                if path.is_dir() {
+                    return Ok(path);
+                }
+            }
+        }
+    }
+    // Try home directory starter kit
+    if let Ok(home) = std::env::var("HOME") {
+        let path = PathBuf::from(home).join("ntnt/docs");
+        if path.is_dir() {
+            return Ok(path);
+        }
+    }
+    Err(anyhow::anyhow!(
+        "Could not find docs/ directory. Run from the NTNT project directory."
+    ))
+}
+
 /// Generate SYNTAX_REFERENCE.md from syntax.toml
-fn generate_syntax_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
-    let syntax_path = toml_path.parent().unwrap().join("syntax.toml");
+fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
+    let syntax_path = docs_dir.join("syntax.toml");
     if !syntax_path.exists() {
         println!(
             "  {} syntax.toml not found, skipping SYNTAX_REFERENCE.md",
@@ -4480,7 +4799,7 @@ fn generate_syntax_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
     }
 
     // Write to file
-    let output_path = toml_path.parent().unwrap().join("SYNTAX_REFERENCE.md");
+    let output_path = docs_dir.join("SYNTAX_REFERENCE.md");
     fs::write(&output_path, &md)?;
 
     println!(
@@ -4493,8 +4812,8 @@ fn generate_syntax_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
 }
 
 /// Generate IAL_REFERENCE.md from ial.toml
-fn generate_ial_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
-    let ial_path = toml_path.parent().unwrap().join("ial.toml");
+fn generate_ial_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
+    let ial_path = docs_dir.join("ial.toml");
     if !ial_path.exists() {
         println!(
             "  {} ial.toml not found, skipping IAL_REFERENCE.md",
@@ -4840,7 +5159,7 @@ fn generate_ial_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
     }
 
     // Write to file
-    let output_path = toml_path.parent().unwrap().join("IAL_REFERENCE.md");
+    let output_path = docs_dir.join("IAL_REFERENCE.md");
     fs::write(&output_path, &md)?;
 
     println!(
@@ -4853,8 +5172,8 @@ fn generate_ial_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
 }
 
 /// Generate RUNTIME_REFERENCE.md from runtime.toml
-fn generate_runtime_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
-    let runtime_path = toml_path.parent().unwrap().join("runtime.toml");
+fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
+    let runtime_path = docs_dir.join("runtime.toml");
     if !runtime_path.exists() {
         println!(
             "  {} runtime.toml not found, skipping RUNTIME_REFERENCE.md",
@@ -5229,7 +5548,7 @@ fn generate_runtime_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
     }
 
     // Write to file
-    let output_path = toml_path.parent().unwrap().join("RUNTIME_REFERENCE.md");
+    let output_path = docs_dir.join("RUNTIME_REFERENCE.md");
     fs::write(&output_path, &md)?;
 
     println!(
@@ -5241,47 +5560,271 @@ fn generate_runtime_markdown(toml_path: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Validate that all stdlib functions are documented
-fn validate_docs(stdlib: &docs::StdlibDocs) -> anyhow::Result<()> {
-    // This would ideally cross-reference with the actual interpreter
-    // For now, just report what's documented
-    let mut total_functions = 0;
-    let mut total_modules = 0;
+/// Validate documentation coverage using embedded JSON data
+fn validate_docs_from_json() -> anyhow::Result<()> {
+    let all_docs = get_docs();
 
-    if let Some(builtins) = &stdlib.builtins {
-        total_functions += builtins.len();
-    }
+    // Count by category
+    let mut builtin_count = 0usize;
+    let mut by_module: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
 
-    if let Some(modules) = &stdlib.modules {
-        total_modules = modules.len();
-        for module in modules.values() {
-            if let Some(functions) = &module.functions {
-                total_functions += functions.len();
-            }
+    for entry in all_docs {
+        match &entry.module {
+            Some(m) => *by_module.entry(m.clone()).or_default() += 1,
+            None => builtin_count += 1,
         }
     }
+
+    let total = all_docs.len();
 
     println!("{}", "Documentation Validation".green().bold());
     println!();
     println!(
-        "  {} Documented functions: {}",
+        "  {} {} global builtins documented",
         "✓".green(),
-        total_functions.to_string().cyan()
+        builtin_count.to_string().cyan()
     );
+    for (module, count) in &by_module {
+        println!(
+            "  {} {} — {} functions",
+            "✓".green(),
+            module.cyan(),
+            count.to_string().cyan()
+        );
+    }
+    println!();
     println!(
-        "  {} Documented modules: {}",
-        "✓".green(),
-        total_modules.to_string().cyan()
+        "  Total: {} functions across {} modules + builtins",
+        total.to_string().cyan(),
+        by_module.len().to_string().cyan()
     );
+    println!();
+
+    // Quality checks
+    let missing_sig = all_docs.iter().filter(|d| d.signature.is_none()).count();
+    let missing_examples = all_docs.iter().filter(|d| d.examples.is_empty()).count();
+    let missing_params = all_docs
+        .iter()
+        .filter(|d| {
+            d.params.is_empty()
+                && d.signature
+                    .as_ref()
+                    .map(|s| {
+                        if let Some(start) = s.find('(') {
+                            if let Some(end) = s.find(')') {
+                                return !s[start + 1..end].trim().is_empty();
+                            }
+                        }
+                        false
+                    })
+                    .unwrap_or(false)
+        })
+        .count();
+
+    if missing_sig > 0 {
+        println!(
+            "  {} {} functions missing @signature",
+            "⚠".yellow(),
+            missing_sig.to_string().yellow()
+        );
+    }
+    if missing_examples > 0 {
+        println!(
+            "  {} {} functions missing @example",
+            "⚠".yellow(),
+            missing_examples.to_string().yellow()
+        );
+    }
+    if missing_params > 0 {
+        println!(
+            "  {} {} functions missing @param",
+            "⚠".yellow(),
+            missing_params.to_string().yellow()
+        );
+    }
+
     println!();
     println!(
         "{}",
-        "Note: Full validation against interpreter not yet implemented.".dimmed()
+        "  Note: Coverage enforcement happens at compile time via build.rs.".dimmed()
     );
     println!(
         "{}",
-        "This will compare docs/stdlib.toml against actual stdlib modules.".dimmed()
+        "  All NativeFunction inserts in annotated files must have @ntnt blocks.".dimmed()
     );
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Agent file synchronization
+// ---------------------------------------------------------------------------
+
+const AGENT_BEGIN_MARKER: &str =
+    "<!-- BEGIN NTNT CODING GUIDE (sourced from docs/AI_AGENT_GUIDE.md) -->";
+const AGENT_END_MARKER: &str = "<!-- END NTNT CODING GUIDE -->";
+const AGENT_SYNC_PREFIX: &str = "<!-- Last synced: ";
+
+/// Agent files to sync: (relative path from project root, link prefix for doc references)
+const AGENT_FILES: &[(&str, &str)] = &[
+    ("CLAUDE.md", "docs/"),
+    (".github/copilot-instructions.md", "../docs/"),
+];
+
+/// Doc filenames that need link rewriting per agent file location
+const DOC_LINK_FILES: &[&str] = &[
+    "STDLIB_REFERENCE.md",
+    "SYNTAX_REFERENCE.md",
+    "IAL_REFERENCE.md",
+    "RUNTIME_REFERENCE.md",
+    "AI_AGENT_GUIDE.md",
+];
+
+/// Sync agent instruction files (CLAUDE.md, copilot-instructions.md, etc.)
+/// by injecting the coding guide content from AI_AGENT_GUIDE.md.
+fn sync_agent_files(docs_dir: &std::path::Path) -> anyhow::Result<()> {
+    let guide_path = docs_dir.join("AI_AGENT_GUIDE.md");
+    if !guide_path.exists() {
+        println!(
+            "  {} AI_AGENT_GUIDE.md not found, skipping agent sync",
+            "!".yellow()
+        );
+        return Ok(());
+    }
+
+    let guide_content = fs::read_to_string(&guide_path)?;
+    let guide_body = match extract_guide_body(&guide_content) {
+        Some(body) => body,
+        None => {
+            println!(
+                "  {} AI_AGENT_GUIDE.md has no --- separator, skipping agent sync",
+                "!".yellow()
+            );
+            return Ok(());
+        }
+    };
+
+    let project_root = docs_dir.parent().unwrap_or(std::path::Path::new("."));
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    for (rel_path, link_prefix) in AGENT_FILES {
+        let file_path = project_root.join(rel_path);
+        if !file_path.exists() {
+            println!(
+                "  {} {} not found, skipping",
+                "!".yellow(),
+                rel_path.dimmed()
+            );
+            continue;
+        }
+
+        match update_agent_file(&file_path, &guide_body, link_prefix, &today) {
+            Ok(true) => {
+                println!("{} Synced {}", "  ✓".green(), rel_path);
+            }
+            Ok(false) => {
+                println!("  {} already up to date", rel_path.dimmed());
+            }
+            Err(e) => {
+                println!("  {} Failed to sync {}: {}", "✗".red(), rel_path, e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract the coding guide body from AI_AGENT_GUIDE.md.
+/// Returns everything after the first `---` line (the header separator).
+fn extract_guide_body(content: &str) -> Option<String> {
+    let mut lines = content.lines();
+    // Find the first --- separator
+    let mut found = false;
+    for line in &mut lines {
+        if line.trim() == "---" {
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        return None;
+    }
+    // Collect everything after the separator
+    let body: Vec<&str> = lines.collect();
+    Some(body.join("\n"))
+}
+
+/// Update a single agent file by replacing content between BEGIN/END markers.
+/// Returns Ok(true) if the file was written, Ok(false) if already up to date.
+fn update_agent_file(
+    path: &std::path::Path,
+    guide_body: &str,
+    link_prefix: &str,
+    today: &str,
+) -> anyhow::Result<bool> {
+    let content = fs::read_to_string(path)?;
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Find marker positions
+    let begin_idx = lines.iter().position(|l| l.trim() == AGENT_BEGIN_MARKER);
+    let end_idx = lines.iter().position(|l| l.trim() == AGENT_END_MARKER);
+
+    let (begin, end) = match (begin_idx, end_idx) {
+        (Some(b), Some(e)) if b < e => (b, e),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Missing or malformed BEGIN/END NTNT CODING GUIDE markers"
+            ));
+        }
+    };
+
+    // Rewrite doc links for this file's location
+    let rewritten_body = rewrite_doc_links(guide_body, link_prefix);
+
+    // Build new file: preamble + marker + guide + marker + postamble
+    let mut output = Vec::new();
+
+    // Preamble (lines before BEGIN marker), updating the Last synced date
+    for line in &lines[..begin] {
+        if line.starts_with(AGENT_SYNC_PREFIX) {
+            output.push(format!("{}{} -->", AGENT_SYNC_PREFIX, today));
+        } else {
+            output.push(line.to_string());
+        }
+    }
+
+    // BEGIN marker + guide body + END marker
+    output.push(AGENT_BEGIN_MARKER.to_string());
+    output.push(rewritten_body);
+    output.push(AGENT_END_MARKER.to_string());
+
+    // Postamble (lines after END marker)
+    if end + 1 < lines.len() {
+        for line in &lines[end + 1..] {
+            output.push(line.to_string());
+        }
+    }
+
+    let new_content = output.join("\n") + "\n";
+
+    // Only write if content actually changed
+    if new_content == content {
+        return Ok(false);
+    }
+
+    fs::write(path, &new_content)?;
+    Ok(true)
+}
+
+/// Rewrite bare doc links like `](STDLIB_REFERENCE.md)` to `](prefix/STDLIB_REFERENCE.md)`.
+/// The prefix accounts for the agent file's location relative to the docs/ directory.
+fn rewrite_doc_links(content: &str, prefix: &str) -> String {
+    let mut result = content.to_string();
+    for filename in DOC_LINK_FILES {
+        let bare = format!("]({})", filename);
+        let prefixed = format!("]({}{})", prefix, filename);
+        result = result.replace(&bare, &prefixed);
+    }
+    result
 }

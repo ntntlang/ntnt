@@ -332,6 +332,14 @@ pub struct Interpreter {
     execution_mode: ExecutionMode,
     /// Lib modules for file-based routing (stored for hot-reload)
     lib_modules: HashMap<String, HashMap<String, Value>>,
+    /// Tracked lib module files for hot-reload (file_path -> mtime)
+    lib_module_files: HashMap<String, std::time::SystemTime>,
+    /// Tracked middleware files for hot-reload (file_path -> mtime)
+    middleware_files: HashMap<String, std::time::SystemTime>,
+    /// Routes directory path for hot-reload directory watching
+    routes_dir: Option<String>,
+    /// Tracked routes directory mtimes for detecting new/deleted files (dir_path -> mtime)
+    routes_dir_mtimes: HashMap<String, std::time::SystemTime>,
 }
 
 /// Information about a trait definition
@@ -376,6 +384,10 @@ impl Interpreter {
             request_timeout_secs: 30,
             execution_mode: ExecutionMode::Normal,
             lib_modules: HashMap::new(),
+            lib_module_files: HashMap::new(),
+            middleware_files: HashMap::new(),
+            routes_dir: None,
+            routes_dir_mtimes: HashMap::new(),
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
@@ -638,8 +650,220 @@ impl Interpreter {
         result
     }
 
+    /// Check if any lib module file has changed, and reload if so.
+    /// Returns true if any lib modules were reloaded.
+    fn check_and_reload_lib_modules(&mut self) -> bool {
+        if !self.server_state.hot_reload || self.lib_module_files.is_empty() {
+            return false;
+        }
+
+        // Check if any lib module file has changed
+        let mut changed_file: Option<String> = None;
+        for (file_path, cached_mtime) in &self.lib_module_files {
+            if let Ok(metadata) = std::fs::metadata(file_path) {
+                if let Ok(current_mtime) = metadata.modified() {
+                    if current_mtime > *cached_mtime {
+                        changed_file = Some(file_path.clone());
+                        break;
+                    }
+                }
+            }
+        }
+
+        let changed_file = match changed_file {
+            Some(f) => f,
+            None => return false,
+        };
+
+        println!(
+            "\n[hot-reload] {} changed, reloading lib modules...",
+            changed_file
+        );
+
+        // Reload all lib modules from disk
+        let mut new_lib_modules: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        let mut new_lib_mtimes: HashMap<String, std::time::SystemTime> = HashMap::new();
+
+        // Collect file paths first to avoid borrow conflict with self
+        let lib_files: Vec<String> = self.lib_module_files.keys().cloned().collect();
+
+        // Re-read every tracked lib file
+        for file_path in &lib_files {
+            let path = std::path::Path::new(file_path);
+            let module_name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            match self.load_module_exports(path) {
+                Ok(exports) => {
+                    new_lib_modules.insert(module_name, exports);
+                    if let Ok(metadata) = std::fs::metadata(path) {
+                        if let Ok(mtime) = metadata.modified() {
+                            new_lib_mtimes.insert(file_path.clone(), mtime);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[hot-reload] Error reloading lib module {}: {}",
+                        file_path, e
+                    );
+                    return false;
+                }
+            }
+        }
+
+        self.lib_modules = new_lib_modules;
+        self.lib_module_files = new_lib_mtimes;
+
+        true
+    }
+
+    /// Check if any middleware file has changed, and reload if so.
+    /// Returns true if middleware was reloaded (triggers full route re-discovery).
+    fn check_and_reload_middleware(&mut self) -> bool {
+        if !self.server_state.hot_reload || self.middleware_files.is_empty() {
+            return false;
+        }
+
+        // Check if any middleware file has changed
+        let mut changed_file: Option<String> = None;
+        for (file_path, cached_mtime) in &self.middleware_files {
+            if let Ok(metadata) = std::fs::metadata(file_path) {
+                if let Ok(current_mtime) = metadata.modified() {
+                    if current_mtime > *cached_mtime {
+                        changed_file = Some(file_path.clone());
+                        break;
+                    }
+                }
+            }
+        }
+
+        let changed_file = match changed_file {
+            Some(f) => f,
+            None => return false,
+        };
+
+        println!(
+            "\n[hot-reload] {} changed, reloading middleware...",
+            changed_file
+        );
+
+        // Middleware change requires full route re-discovery
+        // (middleware is re-loaded during load_file_based_routes)
+        if let Some(dir_path) = self.routes_dir.clone() {
+            self.server_state.routes.clear();
+            self.server_state.middleware.clear();
+            self.middleware_files.clear();
+
+            match self.load_file_based_routes(&dir_path) {
+                Ok(_) => {
+                    println!("[hot-reload] Middleware and routes reloaded.");
+                    return true;
+                }
+                Err(e) => {
+                    eprintln!("[hot-reload] Error reloading: {}", e);
+                }
+            }
+        }
+        false
+    }
+
+    /// Recursively collect mtimes for a directory and all its subdirectories.
+    fn collect_dir_mtimes(dir: &std::path::Path) -> HashMap<String, std::time::SystemTime> {
+        let mut mtimes = HashMap::new();
+        if let Ok(metadata) = std::fs::metadata(dir) {
+            if let Ok(mtime) = metadata.modified() {
+                mtimes.insert(dir.to_string_lossy().to_string(), mtime);
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    mtimes.extend(Self::collect_dir_mtimes(&path));
+                }
+            }
+        }
+        mtimes
+    }
+
+    /// Check if the routes directory structure has changed (new/deleted files).
+    /// If so, clear routes and re-discover them.
+    /// Returns true if routes were reloaded.
+    fn check_and_reload_routes_dir(&mut self) -> bool {
+        if !self.server_state.hot_reload || self.routes_dir.is_none() {
+            return false;
+        }
+
+        // Check if any tracked directory has a new mtime
+        let mut changed = false;
+        for (dir_path, cached_mtime) in &self.routes_dir_mtimes {
+            if let Ok(metadata) = std::fs::metadata(dir_path) {
+                if let Ok(current_mtime) = metadata.modified() {
+                    if current_mtime > *cached_mtime {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Also check for new subdirectories by comparing current dir tree to tracked dirs
+        if !changed {
+            if let Some(routes_dir) = &self.routes_dir {
+                let current_mtimes = Self::collect_dir_mtimes(std::path::Path::new(routes_dir));
+                if current_mtimes.len() != self.routes_dir_mtimes.len() {
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            return false;
+        }
+
+        let dir_path = self.routes_dir.clone().unwrap();
+        println!("\n[hot-reload] Routes directory changed, re-discovering routes...");
+
+        // Clear routes and middleware (both are re-discovered by load_file_based_routes)
+        // Preserve static dirs and shutdown handlers
+        self.server_state.routes.clear();
+        self.server_state.middleware.clear();
+
+        // Re-discover routes from the directory
+        match self.load_file_based_routes(&dir_path) {
+            Ok(count) => {
+                println!(
+                    "[hot-reload] Re-discovered {} routes.",
+                    match count {
+                        Value::Int(n) => n.to_string(),
+                        _ => "?".to_string(),
+                    }
+                );
+                true
+            }
+            Err(e) => {
+                eprintln!("[hot-reload] Error re-discovering routes: {}", e);
+                false
+            }
+        }
+    }
+
     fn define_builtins(&mut self) {
-        // Print function
+        // @ntnt print
+        // @signature print(value: Any) -> Unit
+        // Prints values to stdout, one per line.
+        //
+        // Accepts any value type. Non-string values are automatically
+        // converted to their string representation.
+        // @param value The value to print
+        // @tags #io
+        // @see_also str, type
+        // @since v0.1.0
+        // @example print("hello") => Unit ~ "Prints hello to stdout"
+        // @example print(42) => Unit ~ "Prints 42 to stdout"
         self.environment.borrow_mut().define(
             "print".to_string(),
             Value::NativeFunction {
@@ -654,7 +878,20 @@ impl Interpreter {
             },
         );
 
-        // Length function
+        // @ntnt len
+        // @signature len(x: String | Array | Map) -> Int
+        // Returns the length of a string, array, or map.
+        //
+        // For strings, returns the number of bytes. For arrays, returns
+        // the number of elements. For maps, returns the number of key-value pairs.
+        // @param x The value to measure
+        // @returns The length as an integer
+        // @tags #pure, #deterministic
+        // @see_also type, is_empty
+        // @since v0.1.0
+        // @example len("hello") => 5 ~ "String length"
+        // @example len([1, 2, 3]) => 3 ~ "Array length"
+        // @error TypeError ~ "len() requires a string or array" fix: "Pass a String, Array, or Map"
         self.environment.borrow_mut().define(
             "len".to_string(),
             Value::NativeFunction {
@@ -670,7 +907,19 @@ impl Interpreter {
             },
         );
 
-        // Type function
+        // @ntnt type
+        // @signature type(x: Any) -> String
+        // Returns the type name of a value as a string.
+        //
+        // Returns one of: "Int", "Float", "String", "Bool", "Array",
+        // "Map", "Function", "Unit", or the enum/struct name.
+        // @param x The value to inspect
+        // @returns The type name as a string
+        // @tags #pure, #deterministic
+        // @see_also str, len
+        // @since v0.1.0
+        // @example type(42) => "Int" ~ "Integer type"
+        // @example type("hello") => "String" ~ "String type"
         self.environment.borrow_mut().define(
             "type".to_string(),
             Value::NativeFunction {
@@ -680,7 +929,19 @@ impl Interpreter {
             },
         );
 
-        // String conversion
+        // @ntnt str
+        // @signature str(x: Any) -> String
+        // Converts any value to its string representation.
+        //
+        // Produces a human-readable string for any value type.
+        // Arrays and maps are formatted with brackets/braces.
+        // @param x The value to convert
+        // @returns The string representation
+        // @tags #pure, #deterministic
+        // @see_also int, float, type
+        // @since v0.1.0
+        // @example str(42) => "42" ~ "Integer to string"
+        // @example str(true) => "true" ~ "Boolean to string"
         self.environment.borrow_mut().define(
             "str".to_string(),
             Value::NativeFunction {
@@ -690,7 +951,21 @@ impl Interpreter {
             },
         );
 
-        // Integer conversion
+        // @ntnt int
+        // @signature int(x: Int | Float | String | Bool) -> Int
+        // Converts a value to integer.
+        //
+        // Accepts Int (identity), Float (truncates toward zero),
+        // String (parses decimal), and Bool (true=1, false=0).
+        // @param x The value to convert
+        // @returns The integer value
+        // @tags #pure, #deterministic
+        // @see_also float, str
+        // @since v0.1.0
+        // @example int(3.7) => 3 ~ "Float truncated to int"
+        // @example int("42") => 42 ~ "String parsed to int"
+        // @error TypeError ~ "Cannot parse as int" fix: "Ensure the string contains a valid integer"
+        // @error TypeError ~ "Cannot convert to int" fix: "Pass an Int, Float, String, or Bool"
         self.environment.borrow_mut().define(
             "int".to_string(),
             Value::NativeFunction {
@@ -709,7 +984,20 @@ impl Interpreter {
             },
         );
 
-        // Float conversion
+        // @ntnt float
+        // @signature float(x: Int | Float | String) -> Float
+        // Converts a value to float.
+        //
+        // Accepts Int (widens), Float (identity), and String (parses decimal).
+        // @param x The value to convert
+        // @returns The float value
+        // @tags #pure, #deterministic
+        // @see_also int, str
+        // @since v0.1.0
+        // @example float(42) => 42.0 ~ "Integer widened to float"
+        // @example float("3.14") => 3.14 ~ "String parsed to float"
+        // @error TypeError ~ "Cannot parse as float" fix: "Ensure the string contains a valid number"
+        // @error TypeError ~ "Cannot convert to float" fix: "Pass an Int, Float, or String"
         self.environment.borrow_mut().define(
             "float".to_string(),
             Value::NativeFunction {
@@ -729,7 +1017,20 @@ impl Interpreter {
             },
         );
 
-        // Push to array
+        // @ntnt push
+        // @signature push(arr: Array, item: Any) -> Array
+        // Appends an item to an array, returns a new array.
+        //
+        // Does not mutate the original array. Returns a new array
+        // with the item appended at the end.
+        // @param arr The array to append to
+        // @param item The value to append
+        // @returns A new array with the item appended
+        // @tags #pure
+        // @see_also pop, concat
+        // @since v0.1.0
+        // @example push([1, 2], 3) => [1, 2, 3] ~ "Append to array"
+        // @error TypeError ~ "push() requires an array" fix: "Pass an array as the first argument"
         self.environment.borrow_mut().define(
             "push".to_string(),
             Value::NativeFunction {
@@ -748,7 +1049,16 @@ impl Interpreter {
             },
         );
 
-        // Assert function
+        // @ntnt assert
+        // @signature assert(condition: Bool) -> Unit
+        // Asserts a condition is truthy, throws ContractViolation if not.
+        //
+        // Used for runtime invariant checks. Any falsy value (false, 0, "",
+        // None, Unit) triggers the assertion failure.
+        // @param condition The condition to check
+        // @since v0.1.0
+        // @example assert(1 + 1 == 2) => Unit ~ "Passing assertion"
+        // @error ContractViolation ~ "Assertion failed" fix: "Ensure the condition evaluates to a truthy value"
         self.environment.borrow_mut().define(
             "assert".to_string(),
             Value::NativeFunction {
@@ -770,7 +1080,18 @@ impl Interpreter {
         // Math functions
         // ============================================
 
-        // Absolute value
+        // @ntnt abs
+        // @signature abs(x: Int | Float) -> Int | Float
+        // Returns the absolute value of a number.
+        //
+        // Preserves the input type: Int in, Int out; Float in, Float out.
+        // @param x The number to take the absolute value of
+        // @tags #pure, #deterministic
+        // @see_also sign, min, max, clamp
+        // @since v0.1.0
+        // @example abs(-5) => 5 ~ "Absolute value of negative integer"
+        // @example abs(-3.14) => 3.14 ~ "Absolute value of negative float"
+        // @error TypeError ~ "abs() requires a number" fix: "Pass an Int or Float"
         self.environment.borrow_mut().define(
             "abs".to_string(),
             Value::NativeFunction {
@@ -786,7 +1107,20 @@ impl Interpreter {
             },
         );
 
-        // Minimum of two values
+        // @ntnt min
+        // @signature min(a: Int | Float, b: Int | Float) -> Int | Float
+        // Returns the smaller of two numbers.
+        //
+        // When both arguments are Int, returns Int. If either is Float,
+        // returns Float.
+        // @param a First number
+        // @param b Second number
+        // @tags #pure, #deterministic
+        // @see_also max, clamp, abs
+        // @since v0.1.0
+        // @example min(3, 7) => 3 ~ "Minimum of two integers"
+        // @example min(2.5, 1.0) => 1.0 ~ "Minimum of two floats"
+        // @error TypeError ~ "min() requires numbers" fix: "Pass two numbers"
         self.environment.borrow_mut().define(
             "min".to_string(),
             Value::NativeFunction {
@@ -802,7 +1136,20 @@ impl Interpreter {
             },
         );
 
-        // Maximum of two values
+        // @ntnt max
+        // @signature max(a: Int | Float, b: Int | Float) -> Int | Float
+        // Returns the larger of two numbers.
+        //
+        // When both arguments are Int, returns Int. If either is Float,
+        // returns Float.
+        // @param a First number
+        // @param b Second number
+        // @tags #pure, #deterministic
+        // @see_also min, clamp, abs
+        // @since v0.1.0
+        // @example max(3, 7) => 7 ~ "Maximum of two integers"
+        // @example max(2.5, 1.0) => 2.5 ~ "Maximum of two floats"
+        // @error TypeError ~ "max() requires numbers" fix: "Pass two numbers"
         self.environment.borrow_mut().define(
             "max".to_string(),
             Value::NativeFunction {
@@ -818,7 +1165,23 @@ impl Interpreter {
             },
         );
 
-        // Round to nearest integer, or to N decimal places: round(value) or round(value, decimals)
+        // @ntnt round
+        // @signature round(x: Int | Float, decimals?: Int) -> Int | Float
+        // Rounds to the nearest integer, or to N decimal places.
+        //
+        // With one argument, rounds to the nearest integer and returns Int.
+        // With two arguments, rounds to the specified number of decimal
+        // places and returns Float.
+        // @param x The number to round
+        // @param decimals Optional number of decimal places (must be non-negative)
+        // @returns Int when called with 1 arg, Float when called with 2 args
+        // @tags #pure, #deterministic
+        // @see_also floor, ceil, trunc
+        // @since v0.1.0
+        // @example round(3.7) => 4 ~ "Round to nearest integer"
+        // @example round(3.14159, 2) => 3.14 ~ "Round to 2 decimal places"
+        // @error TypeError ~ "round() requires 1 or 2 arguments" fix: "Pass 1 or 2 arguments"
+        // @error TypeError ~ "round() decimal places must be non-negative" fix: "Use a non-negative integer for decimals"
         self.environment.borrow_mut().define(
             "round".to_string(),
             Value::NativeFunction {
@@ -869,7 +1232,19 @@ impl Interpreter {
             },
         );
 
-        // Floor (round down)
+        // @ntnt floor
+        // @signature floor(x: Int | Float) -> Int
+        // Rounds down to the nearest integer.
+        //
+        // Always rounds toward negative infinity. Int values pass through unchanged.
+        // @param x The number to round down
+        // @returns The floor value as Int
+        // @tags #pure, #deterministic
+        // @see_also ceil, round, trunc
+        // @since v0.1.0
+        // @example floor(3.7) => 3 ~ "Floor of positive float"
+        // @example floor(-2.1) => -3 ~ "Floor rounds toward negative infinity"
+        // @error TypeError ~ "floor() requires a number" fix: "Pass an Int or Float"
         self.environment.borrow_mut().define(
             "floor".to_string(),
             Value::NativeFunction {
@@ -885,7 +1260,19 @@ impl Interpreter {
             },
         );
 
-        // Ceil (round up)
+        // @ntnt ceil
+        // @signature ceil(x: Int | Float) -> Int
+        // Rounds up to the nearest integer.
+        //
+        // Always rounds toward positive infinity. Int values pass through unchanged.
+        // @param x The number to round up
+        // @returns The ceiling value as Int
+        // @tags #pure, #deterministic
+        // @see_also floor, round, trunc
+        // @since v0.1.0
+        // @example ceil(3.1) => 4 ~ "Ceil of positive float"
+        // @example ceil(-2.9) => -2 ~ "Ceil rounds toward positive infinity"
+        // @error TypeError ~ "ceil() requires a number" fix: "Pass an Int or Float"
         self.environment.borrow_mut().define(
             "ceil".to_string(),
             Value::NativeFunction {
@@ -901,7 +1288,21 @@ impl Interpreter {
             },
         );
 
-        // Trunc (truncate toward zero)
+        // @ntnt trunc
+        // @signature trunc(x: Int | Float) -> Int
+        // Truncates a number toward zero.
+        //
+        // Removes the fractional part, rounding toward zero.
+        // Unlike floor(), negative values round toward zero (up).
+        // Int values pass through unchanged.
+        // @param x The number to truncate
+        // @returns The truncated value as Int
+        // @tags #pure, #deterministic
+        // @see_also floor, ceil, round
+        // @since v0.1.0
+        // @example trunc(3.9) => 3 ~ "Truncate positive float"
+        // @example trunc(-2.9) => -2 ~ "Truncate toward zero (not negative infinity)"
+        // @error TypeError ~ "trunc() requires a number" fix: "Pass an Int or Float"
         self.environment.borrow_mut().define(
             "trunc".to_string(),
             Value::NativeFunction {
@@ -917,7 +1318,20 @@ impl Interpreter {
             },
         );
 
-        // Square root
+        // @ntnt sqrt
+        // @signature sqrt(x: Int | Float) -> Float
+        // Returns the square root of a number.
+        //
+        // Always returns Float. Negative numbers produce a RuntimeError.
+        // @param x The number to take the square root of (must be non-negative)
+        // @returns The square root as Float
+        // @tags #pure, #deterministic
+        // @see_also pow, abs
+        // @since v0.1.0
+        // @example sqrt(9) => 3.0 ~ "Square root of integer"
+        // @example sqrt(2.0) => 1.4142135623730951 ~ "Square root of float"
+        // @error RuntimeError ~ "sqrt() of negative number" fix: "Ensure the argument is non-negative"
+        // @error TypeError ~ "sqrt() requires a number" fix: "Pass an Int or Float"
         self.environment.borrow_mut().define(
             "sqrt".to_string(),
             Value::NativeFunction {
@@ -949,7 +1363,20 @@ impl Interpreter {
             },
         );
 
-        // Power (x^y)
+        // @ntnt pow
+        // @signature pow(base: Int | Float, exp: Int | Float) -> Int | Float
+        // Raises base to the power of exponent.
+        //
+        // Returns Int when both arguments are Int and the exponent is
+        // non-negative. Returns Float otherwise.
+        // @param base The base number
+        // @param exp The exponent
+        // @tags #pure, #deterministic
+        // @see_also sqrt, abs
+        // @since v0.1.0
+        // @example pow(2, 10) => 1024 ~ "Integer power"
+        // @example pow(2.0, 0.5) => 1.4142135623730951 ~ "Float power (square root)"
+        // @error TypeError ~ "pow() requires numbers" fix: "Pass two numbers"
         self.environment.borrow_mut().define(
             "pow".to_string(),
             Value::NativeFunction {
@@ -975,7 +1402,21 @@ impl Interpreter {
             },
         );
 
-        // Sign function (-1, 0, or 1)
+        // @ntnt sign
+        // @signature sign(x: Int | Float) -> Int
+        // Returns the sign of a number: -1, 0, or 1.
+        //
+        // Returns -1 for negative, 0 for zero, 1 for positive.
+        // Always returns Int regardless of input type.
+        // @param x The number to check
+        // @returns -1, 0, or 1
+        // @tags #pure, #deterministic
+        // @see_also abs, clamp
+        // @since v0.1.0
+        // @example sign(-42) => -1 ~ "Negative number"
+        // @example sign(0) => 0 ~ "Zero"
+        // @example sign(7) => 1 ~ "Positive number"
+        // @error TypeError ~ "sign() requires a number" fix: "Pass an Int or Float"
         self.environment.borrow_mut().define(
             "sign".to_string(),
             Value::NativeFunction {
@@ -999,7 +1440,23 @@ impl Interpreter {
             },
         );
 
-        // Clamp value between min and max
+        // @ntnt clamp
+        // @signature clamp(x: Int | Float, min_val: Int | Float, max_val: Int | Float) -> Int | Float
+        // Constrains a value between a minimum and maximum.
+        //
+        // Returns min_val if x < min_val, max_val if x > max_val,
+        // otherwise returns x. All three arguments must be the same numeric type.
+        // @param x The value to clamp
+        // @param min_val The minimum bound
+        // @param max_val The maximum bound
+        // @returns The clamped value
+        // @tags #pure, #deterministic
+        // @see_also min, max, abs
+        // @since v0.1.0
+        // @example clamp(15, 0, 10) => 10 ~ "Clamped to maximum"
+        // @example clamp(-5, 0, 10) => 0 ~ "Clamped to minimum"
+        // @example clamp(5, 0, 10) => 5 ~ "Value within range"
+        // @error TypeError ~ "clamp() requires numbers of same type" fix: "Pass three numbers of the same type (all Int or all Float)"
         self.environment.borrow_mut().define(
             "clamp".to_string(),
             Value::NativeFunction {
@@ -1052,7 +1509,19 @@ impl Interpreter {
             ],
         );
 
-        // Define constructors for Option
+        // @ntnt Some
+        // @signature Some(value: Any) -> Option<Any>
+        // Wraps a value in Option::Some.
+        //
+        // Creates an Option that contains a value. Use to represent
+        // the presence of a value in optional contexts.
+        // @param value The value to wrap
+        // @returns An Option containing the value
+        // @tags #pure, #deterministic
+        // @see_also is_some, is_none, unwrap, unwrap_or, Ok, Err
+        // @since v0.1.0
+        // @example Some(42) => Some(42) ~ "Wrap integer in Option"
+        // @example Some("hello") => Some("hello") ~ "Wrap string in Option"
         self.environment.borrow_mut().define(
             "Some".to_string(),
             Value::NativeFunction {
@@ -1077,7 +1546,19 @@ impl Interpreter {
             },
         );
 
-        // Define constructors for Result
+        // @ntnt Ok
+        // @signature Ok(value: Any) -> Result<Any, Any>
+        // Wraps a value in Result::Ok.
+        //
+        // Creates a Result representing a successful outcome. Use to
+        // return success values from operations that can fail.
+        // @param value The success value to wrap
+        // @returns A Result containing the success value
+        // @tags #pure, #deterministic
+        // @see_also Err, is_ok, is_err, unwrap, unwrap_or, Some
+        // @since v0.1.0
+        // @example Ok(42) => Ok(42) ~ "Wrap success value"
+        // @example Ok("data") => Ok("data") ~ "Wrap success string"
         self.environment.borrow_mut().define(
             "Ok".to_string(),
             Value::NativeFunction {
@@ -1093,6 +1574,19 @@ impl Interpreter {
             },
         );
 
+        // @ntnt Err
+        // @signature Err(error: Any) -> Result<Any, Any>
+        // Wraps a value in Result::Err.
+        //
+        // Creates a Result representing a failed outcome. Use to
+        // return error values from operations that can fail.
+        // @param error The error value to wrap
+        // @returns A Result containing the error value
+        // @tags #pure, #deterministic
+        // @see_also Ok, is_ok, is_err, unwrap, unwrap_or, Some
+        // @since v0.1.0
+        // @example Err("not found") => Err("not found") ~ "Wrap error message"
+        // @example Err(404) => Err(404) ~ "Wrap error code"
         self.environment.borrow_mut().define(
             "Err".to_string(),
             Value::NativeFunction {
@@ -1108,7 +1602,19 @@ impl Interpreter {
             },
         );
 
-        // is_some() helper for Option
+        // @ntnt is_some
+        // @signature is_some(opt: Option<Any>) -> Bool
+        // Checks if an Option is Some.
+        //
+        // Returns true if the Option contains a value, false if it is None.
+        // @param opt The Option to check
+        // @returns true if Some, false if None
+        // @tags #pure, #deterministic
+        // @see_also is_none, Some, unwrap, unwrap_or
+        // @since v0.1.0
+        // @example is_some(Some(42)) => true ~ "Some is some"
+        // @example is_some(None) => false ~ "None is not some"
+        // @error TypeError ~ "is_some() requires an Option" fix: "Pass an Option value"
         self.environment.borrow_mut().define(
             "is_some".to_string(),
             Value::NativeFunction {
@@ -1125,7 +1631,19 @@ impl Interpreter {
             },
         );
 
-        // is_none() helper for Option
+        // @ntnt is_none
+        // @signature is_none(opt: Option<Any>) -> Bool
+        // Checks if an Option is None.
+        //
+        // Returns true if the Option is None, false if it contains a value.
+        // @param opt The Option to check
+        // @returns true if None, false if Some
+        // @tags #pure, #deterministic
+        // @see_also is_some, Some, unwrap, unwrap_or
+        // @since v0.1.0
+        // @example is_none(None) => true ~ "None is none"
+        // @example is_none(Some(42)) => false ~ "Some is not none"
+        // @error TypeError ~ "is_none() requires an Option" fix: "Pass an Option value"
         self.environment.borrow_mut().define(
             "is_none".to_string(),
             Value::NativeFunction {
@@ -1142,7 +1660,19 @@ impl Interpreter {
             },
         );
 
-        // is_ok() helper for Result
+        // @ntnt is_ok
+        // @signature is_ok(res: Result<Any, Any>) -> Bool
+        // Checks if a Result is Ok.
+        //
+        // Returns true if the Result contains a success value, false if it is Err.
+        // @param res The Result to check
+        // @returns true if Ok, false if Err
+        // @tags #pure, #deterministic
+        // @see_also is_err, Ok, Err, unwrap, unwrap_or
+        // @since v0.1.0
+        // @example is_ok(Ok(42)) => true ~ "Ok is ok"
+        // @example is_ok(Err("fail")) => false ~ "Err is not ok"
+        // @error TypeError ~ "is_ok() requires a Result" fix: "Pass a Result value"
         self.environment.borrow_mut().define(
             "is_ok".to_string(),
             Value::NativeFunction {
@@ -1159,7 +1689,19 @@ impl Interpreter {
             },
         );
 
-        // is_err() helper for Result
+        // @ntnt is_err
+        // @signature is_err(res: Result<Any, Any>) -> Bool
+        // Checks if a Result is Err.
+        //
+        // Returns true if the Result contains an error, false if it is Ok.
+        // @param res The Result to check
+        // @returns true if Err, false if Ok
+        // @tags #pure, #deterministic
+        // @see_also is_ok, Ok, Err, unwrap, unwrap_or
+        // @since v0.1.0
+        // @example is_err(Err("fail")) => true ~ "Err is err"
+        // @example is_err(Ok(42)) => false ~ "Ok is not err"
+        // @error TypeError ~ "is_err() requires a Result" fix: "Pass a Result value"
         self.environment.borrow_mut().define(
             "is_err".to_string(),
             Value::NativeFunction {
@@ -1176,7 +1718,22 @@ impl Interpreter {
             },
         );
 
-        // unwrap() for Option and Result
+        // @ntnt unwrap
+        // @signature unwrap(x: Option<Any> | Result<Any, Any>) -> Any
+        // Extracts the value from Some or Ok, panics on None or Err.
+        //
+        // Use when you are certain the value is present. For safer
+        // alternatives, use unwrap_or() or pattern matching with match.
+        // @param x The Option or Result to unwrap
+        // @returns The contained value
+        // @tags #may-panic
+        // @see_also unwrap_or, is_some, is_ok, Some, Ok
+        // @since v0.1.0
+        // @example unwrap(Some(42)) => 42 ~ "Unwrap Some"
+        // @example unwrap(Ok("data")) => "data" ~ "Unwrap Ok"
+        // @error RuntimeError ~ "Called unwrap() on None" fix: "Check with is_some() first or use unwrap_or()"
+        // @error RuntimeError ~ "Called unwrap() on Err(*)" fix: "Check with is_ok() first or use unwrap_or()"
+        // @gotcha Panics at runtime on None or Err. Prefer unwrap_or() or match for safe handling.
         self.environment.borrow_mut().define(
             "unwrap".to_string(),
             Value::NativeFunction {
@@ -1213,7 +1770,21 @@ impl Interpreter {
             },
         );
 
-        // unwrap_or() for Option and Result
+        // @ntnt unwrap_or
+        // @signature unwrap_or(x: Option<Any> | Result<Any, Any>, default: Any) -> Any
+        // Extracts the value from Some or Ok, returns default on None or Err.
+        //
+        // A safe alternative to unwrap() that never panics. Returns the
+        // contained value for Some/Ok, or the provided default for None/Err.
+        // @param x The Option or Result to unwrap
+        // @param default The fallback value to use if None or Err
+        // @returns The contained value or the default
+        // @tags #pure, #deterministic
+        // @see_also unwrap, is_some, is_ok, Some, Ok
+        // @since v0.1.0
+        // @example unwrap_or(Some(42), 0) => 42 ~ "Unwrap Some with default"
+        // @example unwrap_or(None, 0) => 0 ~ "Default returned for None"
+        // @example unwrap_or(Err("fail"), "fallback") => "fallback" ~ "Default returned for Err"
         self.environment.borrow_mut().define(
             "unwrap_or".to_string(),
             Value::NativeFunction {
@@ -1241,8 +1812,18 @@ impl Interpreter {
             },
         );
 
-        // listen(port) - Start HTTP server on given port
-        // This is a special built-in because it needs to call Intent handler functions
+        // @ntnt listen
+        // @signature listen(port: Int) -> Unit
+        // Starts an HTTP server on the given port.
+        //
+        // This must be called after registering route handlers with
+        // get(), post(), put(), delete(), or patch(). The server blocks
+        // and serves requests until the process is terminated.
+        // @param port The port number to listen on (e.g. 8080)
+        // @tags #io, #server
+        // @see_also get, post, put, delete, patch, new_server
+        // @since v0.1.0
+        // @example listen(8080) => Unit ~ "Start server on port 8080"
         self.environment.borrow_mut().define(
             "listen".to_string(),
             Value::NativeFunction {
@@ -1258,25 +1839,141 @@ impl Interpreter {
             },
         );
 
-        // HTTP routing functions - these need special handling in eval_call
-        // because they need to store handlers in the interpreter's server_state
-        for method in &["get", "post", "put", "delete", "patch"] {
-            let method_name = method.to_string();
-            self.environment.borrow_mut().define(
-                method_name.clone(),
-                Value::NativeFunction {
-                    name: method_name,
-                    arity: 2,
-                    func: |_args| {
-                        Err(IntentError::RuntimeError(
-                            "HTTP route functions must be called directly".to_string(),
-                        ))
-                    },
+        // @ntnt get
+        // @signature get(pattern: String, handler: Function) -> Unit
+        // Registers a GET route handler.
+        //
+        // The pattern can include path parameters using {param} syntax.
+        // The handler function receives a Request and must return a Response.
+        // @param pattern The URL pattern to match (e.g. "/users/{id}")
+        // @param handler A function(req: Request) -> Response
+        // @tags #server
+        // @see_also post, put, delete, patch, listen
+        // @since v0.1.0
+        // @example get("/health", fn(req) { return json(map { "ok": true }) }) => Unit ~ "Register health check route"
+        self.environment.borrow_mut().define(
+            "get".to_string(),
+            Value::NativeFunction {
+                name: "get".to_string(),
+                arity: 2,
+                func: |_args| {
+                    Err(IntentError::RuntimeError(
+                        "HTTP route functions must be called directly".to_string(),
+                    ))
                 },
-            );
-        }
+            },
+        );
 
-        // new_server() - create a new server (resets routes)
+        // @ntnt post
+        // @signature post(pattern: String, handler: Function) -> Unit
+        // Registers a POST route handler.
+        //
+        // The pattern can include path parameters using {param} syntax.
+        // The handler function receives a Request and must return a Response.
+        // @param pattern The URL pattern to match (e.g. "/users")
+        // @param handler A function(req: Request) -> Response
+        // @tags #server
+        // @see_also get, put, delete, patch, listen
+        // @since v0.1.0
+        // @example post("/users", fn(req) { return json(map { "created": true }) }) => Unit ~ "Register user creation route"
+        self.environment.borrow_mut().define(
+            "post".to_string(),
+            Value::NativeFunction {
+                name: "post".to_string(),
+                arity: 2,
+                func: |_args| {
+                    Err(IntentError::RuntimeError(
+                        "HTTP route functions must be called directly".to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt put
+        // @signature put(pattern: String, handler: Function) -> Unit
+        // Registers a PUT route handler.
+        //
+        // The pattern can include path parameters using {param} syntax.
+        // The handler function receives a Request and must return a Response.
+        // @param pattern The URL pattern to match (e.g. "/users/{id}")
+        // @param handler A function(req: Request) -> Response
+        // @tags #server
+        // @see_also get, post, delete, patch, listen
+        // @since v0.1.0
+        // @example put("/users/{id}", fn(req) { return json(map { "updated": true }) }) => Unit ~ "Register user update route"
+        self.environment.borrow_mut().define(
+            "put".to_string(),
+            Value::NativeFunction {
+                name: "put".to_string(),
+                arity: 2,
+                func: |_args| {
+                    Err(IntentError::RuntimeError(
+                        "HTTP route functions must be called directly".to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt delete
+        // @signature delete(pattern: String, handler: Function) -> Unit
+        // Registers a DELETE route handler.
+        //
+        // The pattern can include path parameters using {param} syntax.
+        // The handler function receives a Request and must return a Response.
+        // @param pattern The URL pattern to match (e.g. "/users/{id}")
+        // @param handler A function(req: Request) -> Response
+        // @tags #server
+        // @see_also get, post, put, patch, listen
+        // @since v0.1.0
+        // @example delete("/users/{id}", fn(req) { return json(map { "deleted": true }) }) => Unit ~ "Register user deletion route"
+        self.environment.borrow_mut().define(
+            "delete".to_string(),
+            Value::NativeFunction {
+                name: "delete".to_string(),
+                arity: 2,
+                func: |_args| {
+                    Err(IntentError::RuntimeError(
+                        "HTTP route functions must be called directly".to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt patch
+        // @signature patch(pattern: String, handler: Function) -> Unit
+        // Registers a PATCH route handler.
+        //
+        // The pattern can include path parameters using {param} syntax.
+        // The handler function receives a Request and must return a Response.
+        // @param pattern The URL pattern to match (e.g. "/users/{id}")
+        // @param handler A function(req: Request) -> Response
+        // @tags #server
+        // @see_also get, post, put, delete, listen
+        // @since v0.1.0
+        // @example patch("/users/{id}", fn(req) { return json(map { "patched": true }) }) => Unit ~ "Register partial update route"
+        self.environment.borrow_mut().define(
+            "patch".to_string(),
+            Value::NativeFunction {
+                name: "patch".to_string(),
+                arity: 2,
+                func: |_args| {
+                    Err(IntentError::RuntimeError(
+                        "HTTP route functions must be called directly".to_string(),
+                    ))
+                },
+            },
+        );
+
+        // @ntnt new_server
+        // @signature new_server() -> Unit
+        // Resets the server, clearing all registered routes.
+        //
+        // Call this before re-registering routes if you need to rebuild
+        // the server configuration. Useful in hot-reload scenarios.
+        // @tags #server
+        // @see_also listen, get, post, put, delete, patch
+        // @since v0.2.0
+        // @example new_server() => Unit ~ "Clear all routes and start fresh"
         self.environment.borrow_mut().define(
             "new_server".to_string(),
             Value::NativeFunction {
@@ -1330,7 +2027,13 @@ impl Interpreter {
         alias: Option<&str>,
     ) -> Result<Value> {
         let module = self.loaded_modules.get(source).cloned().ok_or_else(|| {
-            IntentError::RuntimeError(format!("Unknown standard library module: {}", source))
+            let module_names: Vec<String> = self.loaded_modules.keys().cloned().collect();
+            let suggestion = crate::error::find_suggestion(source, &module_names);
+            let mut msg = format!("Unknown standard library module: {}", source);
+            if let Some(s) = suggestion {
+                msg.push_str(&format!("\n  Did you mean: {}?", s));
+            }
+            IntentError::RuntimeError(msg)
         })?;
 
         self.bind_imports(items, &module, source, alias)
@@ -1362,10 +2065,21 @@ impl Interpreter {
             // Import specific items
             for item in items {
                 let value = module.get(&item.name).ok_or_else(|| {
-                    IntentError::RuntimeError(format!(
-                        "'{}' is not exported from '{}'",
-                        item.name, source
-                    ))
+                    let export_names: Vec<String> = module.keys().cloned().collect();
+                    let suggestion = crate::error::find_suggestion(&item.name, &export_names);
+                    let mut msg = format!("'{}' is not exported from '{}'", item.name, source);
+                    if let Some(s) = suggestion {
+                        msg.push_str(&format!("\n  Did you mean: {}?", s));
+                    }
+                    let mut sorted_exports = export_names.clone();
+                    sorted_exports.sort();
+                    let preview: Vec<&str> =
+                        sorted_exports.iter().take(8).map(|s| s.as_str()).collect();
+                    msg.push_str(&format!("\n  Available exports: {}", preview.join(", ")));
+                    if sorted_exports.len() > 8 {
+                        msg.push_str(&format!(", ... ({} total)", sorted_exports.len()));
+                    }
+                    IntentError::RuntimeError(msg)
                 })?;
                 let bind_name = item.alias.as_ref().unwrap_or(&item.name);
                 self.environment
@@ -1520,6 +2234,13 @@ impl Interpreter {
 
                         if let Ok(exports) = self.load_module_exports(&path) {
                             lib_modules.insert(module_name, exports);
+                            // Track file mtime for hot-reload
+                            if let Ok(metadata) = std::fs::metadata(&path) {
+                                if let Ok(mtime) = metadata.modified() {
+                                    self.lib_module_files
+                                        .insert(path.to_string_lossy().to_string(), mtime);
+                                }
+                            }
                         }
                     }
                 }
@@ -1558,6 +2279,13 @@ impl Interpreter {
                             exports.get("middleware").or_else(|| exports.get("handler"))
                         {
                             self.server_state.add_middleware(handler.clone());
+                            // Track file mtime for hot-reload
+                            if let Ok(metadata) = std::fs::metadata(&path) {
+                                if let Ok(mtime) = metadata.modified() {
+                                    self.middleware_files
+                                        .insert(path.to_string_lossy().to_string(), mtime);
+                                }
+                            }
                             let name = path
                                 .file_stem()
                                 .map(|s| s.to_string_lossy().to_string())
@@ -1591,6 +2319,10 @@ impl Interpreter {
                 println!("  {} {} -> {}", method, pattern, file);
             }
         }
+
+        // Track routes directory for hot-reload (detect new/deleted files)
+        self.routes_dir = Some(base_dir.to_string_lossy().to_string());
+        self.routes_dir_mtimes = Self::collect_dir_mtimes(&base_dir);
 
         Ok(Value::Int(routes.len() as i64))
     }
@@ -2553,12 +3285,28 @@ impl Interpreter {
                         let content =
                             crate::stdlib::template::load_template_file(&path_str, base_path)?;
 
+                        // Resolve the full path for mtime tracking
+                        let resolved_path = if let Some(base) = base_path {
+                            let base_dir = std::path::Path::new(base)
+                                .parent()
+                                .unwrap_or(std::path::Path::new("."));
+                            base_dir.join(&path_str)
+                        } else {
+                            std::path::PathBuf::from(&path_str)
+                        };
+                        let resolved_str = resolved_path.to_string_lossy().to_string();
+                        let mtime = std::fs::metadata(&resolved_path)
+                            .ok()
+                            .and_then(|m| m.modified().ok());
+
                         // Create compiled template
                         let id = crate::stdlib::template::get_next_template_id();
                         let compiled = crate::stdlib::template::CompiledTemplate {
                             id,
                             path: path_str.clone(),
+                            resolved_path: resolved_str,
                             content,
+                            mtime,
                         };
 
                         // Store in cache
@@ -4144,6 +4892,15 @@ impl Interpreter {
             // This runs on each request to pick up changes without restart
             self.check_and_reload_main_source();
 
+            // Hot-reload check: if any lib module changed, reload them
+            let lib_modules_changed = self.check_and_reload_lib_modules();
+
+            // Hot-reload check: if routes directory changed (new/deleted files)
+            self.check_and_reload_routes_dir();
+
+            // Hot-reload check: if middleware file content changed
+            self.check_and_reload_middleware();
+
             let method = request.method().to_string();
             let url = request.url().to_string();
             let path = url.split('?').next().unwrap_or(&url).to_string();
@@ -4152,8 +4909,8 @@ impl Interpreter {
             if let Some((mut handler, route_params, route_index)) =
                 self.server_state.find_route(&method, &path)
             {
-                // Hot-reload check: if file or its imports changed, reload the handler
-                if self.server_state.needs_reload(route_index) {
+                // Hot-reload check: if file, its imports, or lib modules changed, reload the handler
+                if lib_modules_changed || self.server_state.needs_reload(route_index) {
                     if let Some(source) = self.server_state.get_route_source(route_index).cloned() {
                         if let Some(file_path) = &source.file_path {
                             // Re-parse and reload the handler
@@ -4417,6 +5174,19 @@ impl Interpreter {
                         sync_routes_to_async(&self.server_state, &async_routes, &sync_rt);
                     }
 
+                    // Hot-reload check: if any lib module changed, reload them
+                    let lib_modules_changed = self.check_and_reload_lib_modules();
+
+                    // Hot-reload check: if routes directory changed (new/deleted files)
+                    if self.check_and_reload_routes_dir() {
+                        sync_routes_to_async(&self.server_state, &async_routes, &sync_rt);
+                    }
+
+                    // Hot-reload check: if middleware file content changed
+                    if self.check_and_reload_middleware() {
+                        sync_routes_to_async(&self.server_state, &async_routes, &sync_rt);
+                    }
+
                     // Find the matching route handler
                     let method = &request.method;
                     let path = &request.path;
@@ -4424,8 +5194,8 @@ impl Interpreter {
                     if let Some((mut handler, route_params, route_index)) =
                         self.server_state.find_route(method, path)
                     {
-                        // Hot-reload check: if route file or its imports changed, reload the handler
-                        if self.server_state.needs_reload(route_index) {
+                        // Hot-reload check: if route file, its imports, or lib modules changed, reload the handler
+                        if lib_modules_changed || self.server_state.needs_reload(route_index) {
                             if let Some(source) =
                                 self.server_state.get_route_source(route_index).cloned()
                             {

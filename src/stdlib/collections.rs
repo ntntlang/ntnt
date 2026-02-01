@@ -8,7 +8,22 @@ use std::collections::HashMap;
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // push(arr, item) -> Array (returns new array with item added)
+    // @ntnt push
+    // @module std/collections
+    // @module_description Higher-order collection operations: transform, filter, reduce, sort, and group
+    // @signature push(arr: Array, item: Any) -> Array
+    // Returns a new array with the item appended.
+    //
+    // Does not mutate the original array. The new element is added
+    // at the end of the returned array.
+    // @param arr The source array
+    // @param item The element to append
+    // @returns A new array containing all original elements plus the new item
+    // @see_also pop, concat, first, last
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example push([1, 2], 3) => [1, 2, 3] ~ "Append element to array"
+    // @error TypeError ~ "push() requires an array" fix: "Ensure first argument is an array"
     module.insert(
         "push".to_string(),
         Value::NativeFunction {
@@ -27,7 +42,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // pop(arr) -> (Array, Option<Value>) - returns (new array without last, removed element)
+    // @ntnt pop
+    // @module std/collections
+    // @signature pop(arr: Array) -> Array<[Array, Option<Any>]>
+    // Returns a tuple of [new array without last element, popped element as Option].
+    //
+    // Does not mutate the original array. Returns a two-element array where the
+    // first element is the new array and the second is the popped value wrapped
+    // in an Option (Some(value) if the array was non-empty, None if empty).
+    // @param arr The source array
+    // @returns A two-element array: [remaining array, Option of popped element]
+    // @see_also push, first, last, slice
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example pop([1, 2, 3]) => [[1, 2], Some(3)] ~ "Pop last element from array"
+    // @error TypeError ~ "pop() requires an array" fix: "Ensure argument is an array"
     module.insert(
         "pop".to_string(),
         Value::NativeFunction {
@@ -61,7 +90,23 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // first(arr) -> Option<Value> or first(arr, default) -> Value
+    // @ntnt first
+    // @module std/collections
+    // @signature first(arr: Array, default?: Any) -> Option<Any> | Any
+    // Returns the first element of an array.
+    //
+    // Without a default, returns Option: Some(value) if the array is non-empty,
+    // None if empty. With a default, returns the first element directly or the
+    // default value if the array is empty.
+    // @param arr The source array
+    // @param default (optional) Value to return if the array is empty
+    // @returns The first element as Option, or the value/default directly
+    // @see_also last, push, pop, slice
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example first([1, 2, 3]) => Some(1) ~ "First element wrapped in Option"
+    // @example first([], 0) => 0 ~ "Default returned for empty array"
+    // @error TypeError ~ "first() requires an array as first argument" fix: "Ensure first argument is an array"
     module.insert(
         "first".to_string(),
         Value::NativeFunction {
@@ -105,7 +150,23 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // last(arr) -> Option<Value> or last(arr, default) -> Value
+    // @ntnt last
+    // @module std/collections
+    // @signature last(arr: Array, default?: Any) -> Option<Any> | Any
+    // Returns the last element of an array.
+    //
+    // Without a default, returns Option: Some(value) if the array is non-empty,
+    // None if empty. With a default, returns the last element directly or the
+    // default value if the array is empty.
+    // @param arr The source array
+    // @param default (optional) Value to return if the array is empty
+    // @returns The last element as Option, or the value/default directly
+    // @see_also first, push, pop, slice
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example last([1, 2, 3]) => Some(3) ~ "Last element wrapped in Option"
+    // @example last([], 0) => 0 ~ "Default returned for empty array"
+    // @error TypeError ~ "last() requires an array as first argument" fix: "Ensure first argument is an array"
     module.insert(
         "last".to_string(),
         Value::NativeFunction {
@@ -149,7 +210,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // reverse(arr) -> Array
+    // @ntnt reverse
+    // @module std/collections
+    // @signature reverse(arr: Array) -> Array
+    // Returns a new array with elements in reverse order.
+    //
+    // Does not mutate the original array.
+    // @param arr The source array
+    // @returns A new array with elements reversed
+    // @see_also slice, concat, push, first, last
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example reverse([1, 2, 3]) => [3, 2, 1] ~ "Reverse array order"
+    // @error TypeError ~ "reverse() requires an array" fix: "Ensure argument is an array"
     module.insert(
         "reverse".to_string(),
         Value::NativeFunction {
@@ -168,7 +241,23 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // slice(arr, start, end) -> Array
+    // @ntnt slice
+    // @module std/collections
+    // @signature slice(arr: Array, start: Int, end: Int) -> Array
+    // Extracts a section of an array from start to end (exclusive).
+    //
+    // Returns a new array containing elements from index start up to but not
+    // including index end. The end index is clamped to the array length.
+    // @param arr The source array
+    // @param start The starting index (inclusive)
+    // @param end The ending index (exclusive)
+    // @returns A new array containing the sliced elements
+    // @see_also concat, reverse, first, last
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example slice([1, 2, 3, 4], 1, 3) => [2, 3] ~ "Slice from index 1 to 3"
+    // @error RuntimeError ~ "Invalid slice range" fix: "Ensure start <= end and start <= array length"
+    // @error TypeError ~ "slice() requires array, int, int" fix: "Pass an array and two integer indices"
     module.insert(
         "slice".to_string(),
         Value::NativeFunction {
@@ -190,7 +279,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // concat(arr1, arr2) -> Array
+    // @ntnt concat
+    // @module std/collections
+    // @signature concat(arr1: Array, arr2: Array) -> Array
+    // Concatenates two arrays into a new array.
+    //
+    // Does not mutate either input array. Returns a new array containing
+    // all elements of arr1 followed by all elements of arr2.
+    // @param arr1 The first array
+    // @param arr2 The second array to append
+    // @returns A new array containing elements from both arrays
+    // @see_also push, slice, reverse
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example concat([1, 2], [3, 4]) => [1, 2, 3, 4] ~ "Concatenate two arrays"
+    // @error TypeError ~ "concat() requires two arrays" fix: "Ensure both arguments are arrays"
     module.insert(
         "concat".to_string(),
         Value::NativeFunction {
@@ -209,7 +312,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // is_empty(arr) -> Bool
+    // @ntnt is_empty
+    // @module std/collections
+    // @signature is_empty(x: Array | String) -> Bool
+    // Returns true if the array or string is empty.
+    //
+    // Works with both Array and String types. For arrays, checks if the
+    // length is zero. For strings, checks if the string has no characters.
+    // @param x An array or string to check
+    // @returns true if the collection has no elements/characters, false otherwise
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example is_empty([]) => true ~ "Empty array"
+    // @example is_empty([1]) => false ~ "Non-empty array"
+    // @example is_empty("") => true ~ "Empty string"
+    // @error TypeError ~ "is_empty() requires array or string" fix: "Pass an array or string"
     module.insert(
         "is_empty".to_string(),
         Value::NativeFunction {
@@ -227,7 +344,19 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Map Iteration Functions ==========
 
-    // keys(map) -> Array - Get all keys from a map as an array
+    // @ntnt keys
+    // @module std/collections
+    // @signature keys(m: Map) -> Array<String>
+    // Returns an array of all keys in the map.
+    //
+    // The order of keys is not guaranteed to be consistent.
+    // @param m The source map
+    // @returns An array of string keys
+    // @see_also values, entries, has_key, get_key
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example keys(map { "a": 1, "b": 2 }) => ["a", "b"] ~ "Get map keys"
+    // @error TypeError ~ "keys() requires a map" fix: "Ensure argument is a map"
     module.insert(
         "keys".to_string(),
         Value::NativeFunction {
@@ -243,7 +372,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // values(map) -> Array - Get all values from a map as an array
+    // @ntnt values
+    // @module std/collections
+    // @signature values(m: Map) -> Array<Any>
+    // Returns an array of all values in the map.
+    //
+    // The order of values corresponds to the order of keys, which is
+    // not guaranteed to be consistent.
+    // @param m The source map
+    // @returns An array of map values
+    // @see_also keys, entries, has_key, get_key
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example values(map { "a": 1, "b": 2 }) => [1, 2] ~ "Get map values"
+    // @error TypeError ~ "values() requires a map" fix: "Ensure argument is a map"
     module.insert(
         "values".to_string(),
         Value::NativeFunction {
@@ -261,7 +403,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // entries(map) -> Array - Get all key-value pairs as array of [key, value] arrays
+    // @ntnt entries
+    // @module std/collections
+    // @signature entries(m: Map) -> Array<Array>
+    // Returns an array of [key, value] pairs from the map.
+    //
+    // Each entry is a two-element array where the first element is the
+    // string key and the second is the corresponding value.
+    // @param m The source map
+    // @returns An array of two-element [key, value] arrays
+    // @see_also keys, values, has_key, get_key
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example entries(map { "a": 1 }) => [["a", 1]] ~ "Get map entries as pairs"
+    // @error TypeError ~ "entries() requires a map" fix: "Ensure argument is a map"
     module.insert(
         "entries".to_string(),
         Value::NativeFunction {
@@ -282,7 +437,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // has_key(map, key) -> Bool - Check if a map contains a key
+    // @ntnt has_key
+    // @module std/collections
+    // @signature has_key(m: Map, key: String) -> Bool
+    // Returns true if the map contains the specified key.
+    // @param m The map to search
+    // @param key The key to look for
+    // @returns true if the key exists in the map, false otherwise
+    // @see_also get_key, keys, values, entries
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example has_key(map { "a": 1 }, "a") => true ~ "Key exists"
+    // @example has_key(map { "a": 1 }, "b") => false ~ "Key does not exist"
+    // @error TypeError ~ "has_key() requires a map and string key" fix: "Pass a map and a string key"
     module.insert(
         "has_key".to_string(),
         Value::NativeFunction {
@@ -297,8 +464,24 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // get_key(map, key) -> Option<Value> - Safe map access, returns None if key missing
-    // get_key(map, key, default) -> Value - Returns default if key missing
+    // @ntnt get_key
+    // @module std/collections
+    // @signature get_key(m: Map, key: String, default?: Any) -> Option<Any> | Any
+    // Gets a value from a map by key with safe access.
+    //
+    // Without a default, returns Option: Some(value) if the key exists,
+    // None if missing. With a default, returns the value directly or the
+    // default value if the key is not found.
+    // @param m The source map
+    // @param key The key to look up
+    // @param default (optional) Value to return if the key is not found
+    // @returns The value as Option, or the value/default directly
+    // @see_also has_key, keys, values, entries
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example get_key(map { "a": 1 }, "a") => Some(1) ~ "Key found, wrapped in Option"
+    // @example get_key(map { "a": 1 }, "b", 0) => 0 ~ "Key missing, default returned"
+    // @error TypeError ~ "get_key() requires a map and string key" fix: "Pass a map and a string key"
     module.insert("get_key".to_string(), Value::NativeFunction {
         name: "get_key".to_string(),
         arity: 0, // Variable arity: 2 or 3 arguments

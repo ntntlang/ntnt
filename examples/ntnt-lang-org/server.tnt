@@ -26,6 +26,10 @@
 //     partials/         - Reusable partials
 //     blog/             - Blog post templates
 
+// Load environment variables from .env file
+import { load_env } from "std/env"
+load_env(".env")
+
 // Load routes from routes/ directory
 // Middleware from middleware/ is auto-loaded (sorted alphabetically)
 routes("routes")

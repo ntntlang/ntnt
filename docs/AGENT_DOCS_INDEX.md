@@ -18,7 +18,7 @@ Documentation specifically designed for AI agents (Claude, Copilot, etc.) workin
 | [SYNTAX_REFERENCE.md](SYNTAX_REFERENCE.md) | Keywords, operators, types, templates |
 | [IAL_REFERENCE.md](IAL_REFERENCE.md) | Intent Assertion Language primitives |
 
-Source files: [stdlib.toml](stdlib.toml), [syntax.toml](syntax.toml), [ial.toml](ial.toml)
+Source files: `// @ntnt` in `src/stdlib/*.rs` + `src/interpreter.rs`, [syntax.toml](syntax.toml), [ial.toml](ial.toml)
 
 Regenerate: `ntnt docs --generate`
 

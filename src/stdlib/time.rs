@@ -50,7 +50,19 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Current Time ==========
 
-    // now() -> Int - Current Unix timestamp in seconds (UTC)
+    // @ntnt now
+    // @module std/time
+    // @module_description Date, time, and duration operations
+    // @signature now() -> Int
+    // Returns the current Unix timestamp in seconds (UTC).
+    //
+    // Provides the current wall-clock time as a Unix epoch timestamp.
+    // Use now_millis() or now_nanos() for higher precision.
+    // @returns The current Unix timestamp in seconds
+    // @see_also now_millis, now_nanos, elapsed
+    // @since v0.1.0
+    // @tags #time
+    // @example now() => 1700000000 ~ "Returns current Unix timestamp (value varies)"
     module.insert(
         "now".to_string(),
         Value::NativeFunction {
@@ -60,7 +72,18 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // now_millis() -> Int - Current Unix timestamp in milliseconds
+    // @ntnt now_millis
+    // @module std/time
+    // @signature now_millis() -> Int
+    // Returns the current Unix timestamp in milliseconds.
+    //
+    // Higher precision variant of now(). Useful for measuring elapsed
+    // time or generating unique-ish identifiers.
+    // @returns The current Unix timestamp in milliseconds
+    // @see_also now, now_nanos, elapsed
+    // @since v0.1.0
+    // @tags #time
+    // @example now_millis() => 1700000000000 ~ "Returns current timestamp in ms (value varies)"
     module.insert(
         "now_millis".to_string(),
         Value::NativeFunction {
@@ -70,7 +93,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // now_nanos() -> Int - Current Unix timestamp in nanoseconds
+    // @ntnt now_nanos
+    // @module std/time
+    // @signature now_nanos() -> Int
+    // Returns the current Unix timestamp in nanoseconds.
+    //
+    // Highest precision variant of now(). May fail if the timestamp
+    // is out of range for nanosecond representation.
+    // @returns The current Unix timestamp in nanoseconds
+    // @see_also now, now_millis
+    // @since v0.1.0
+    // @tags #time
+    // @example now_nanos() => 1700000000000000000 ~ "Returns current timestamp in ns (value varies)"
+    // @error RuntimeError ~ "Timestamp out of range for nanoseconds" fix: "Use now() or now_millis() for timestamps outside nanosecond range"
     module.insert(
         "now_nanos".to_string(),
         Value::NativeFunction {
@@ -87,8 +122,23 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Timezone Conversion ==========
 
-    // to_timezone(timestamp, timezone) -> Map - Convert timestamp to timezone
-    // Returns { year, month, day, hour, minute, second, weekday, day_of_year, timestamp, timezone, offset }
+    // @ntnt to_timezone
+    // @module std/time
+    // @signature to_timezone(timestamp: Int, timezone: String) -> Map
+    // Converts a Unix timestamp to a datetime map in the specified timezone.
+    //
+    // Returns a map with keys: year, month, day, hour, minute, second,
+    // nanosecond, weekday, day_of_year, timestamp, timezone, offset.
+    // @param timestamp Unix timestamp in seconds
+    // @param timezone IANA timezone string (e.g., "America/New_York")
+    // @returns Map with datetime components in the given timezone
+    // @see_also to_utc, format_in, list_timezones
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example to_timezone(0, "UTC").year => 1970 ~ "Epoch in UTC is 1970"
+    // @error TypeError ~ "to_timezone() requires (timestamp: Int, timezone: String)" fix: "Pass an Int timestamp and a String timezone"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
+    // @error RuntimeError ~ "Invalid timezone" fix: "Use IANA format like 'America/New_York'"
     module.insert(
         "to_timezone".to_string(),
         Value::NativeFunction {
@@ -109,7 +159,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // to_utc(timestamp) -> Map - Get UTC datetime parts from timestamp
+    // @ntnt to_utc
+    // @module std/time
+    // @signature to_utc(timestamp: Int) -> Map
+    // Converts a Unix timestamp to a UTC datetime map.
+    //
+    // Returns a map with keys: year, month, day, hour, minute, second,
+    // nanosecond, weekday, day_of_year, timestamp, timezone, offset.
+    // @param timestamp Unix timestamp in seconds
+    // @returns Map with datetime components in UTC
+    // @see_also to_timezone, format, year, month, day
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example to_utc(0).year => 1970 ~ "Epoch is January 1, 1970"
+    // @error TypeError ~ "to_utc() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "to_utc".to_string(),
         Value::NativeFunction {
@@ -131,8 +195,22 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Formatting ==========
 
-    // format(timestamp, format_str) -> String - Format timestamp as UTC
-    // Supports: %Y %m %d %H %M %S %f %Z %z %a %A %b %B %j %U %W %w
+    // @ntnt format
+    // @module std/time
+    // @signature format(timestamp: Int, format_str: String) -> String
+    // Formats a Unix timestamp as a string using a strftime format pattern (UTC).
+    //
+    // Supports standard strftime directives: %Y %m %d %H %M %S %f %Z %z %a %A %b %B %j %U %W %w.
+    // To format in a specific timezone, use format_in() instead.
+    // @param timestamp Unix timestamp in seconds
+    // @param format_str strftime-compatible format string
+    // @returns Formatted date/time string
+    // @see_also format_in, to_iso, format_timestamp
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example format(0, "%Y-%m-%d") => "1970-01-01" ~ "Epoch date formatted"
+    // @error TypeError ~ "format() requires (timestamp: Int, format: String)" fix: "Pass an Int timestamp and a String format"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "format".to_string(),
         Value::NativeFunction {
@@ -152,7 +230,24 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // format_in(timestamp, timezone, format_str) -> String - Format with timezone
+    // @ntnt format_in
+    // @module std/time
+    // @signature format_in(timestamp: Int, timezone: String, format_str: String) -> String
+    // Formats a Unix timestamp as a string in the specified timezone.
+    //
+    // Combines timezone conversion and formatting in a single call.
+    // Uses strftime directives: %Y %m %d %H %M %S %f %Z %z %a %A %b %B %j %U %W %w.
+    // @param timestamp Unix timestamp in seconds
+    // @param timezone IANA timezone string (e.g., "America/New_York")
+    // @param format_str strftime-compatible format string
+    // @returns Formatted date/time string in the given timezone
+    // @see_also format, to_timezone, to_iso, list_timezones
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example format_in(0, "UTC", "%Y-%m-%d %H:%M:%S") => "1970-01-01 00:00:00" ~ "Epoch in UTC"
+    // @error TypeError ~ "format_in() requires (timestamp: Int, timezone: String, format: String)" fix: "Pass Int, String, String arguments"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
+    // @error RuntimeError ~ "Invalid timezone" fix: "Use IANA format like 'America/New_York'"
     module.insert(
         "format_in".to_string(),
         Value::NativeFunction {
@@ -174,7 +269,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // to_iso(timestamp) -> String - Format as ISO 8601 (RFC 3339)
+    // @ntnt to_iso
+    // @module std/time
+    // @signature to_iso(timestamp: Int) -> String
+    // Formats a Unix timestamp as an ISO 8601 (RFC 3339) string.
+    //
+    // Produces a standard ISO 8601 datetime string in UTC, suitable for
+    // APIs, JSON serialization, and interoperability.
+    // @param timestamp Unix timestamp in seconds
+    // @returns ISO 8601 formatted string (e.g., "1970-01-01T00:00:00+00:00")
+    // @see_also parse_iso, format, format_in
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example to_iso(0) => "1970-01-01T00:00:00+00:00" ~ "Epoch as ISO 8601"
+    // @error TypeError ~ "to_iso() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "to_iso".to_string(),
         Value::NativeFunction {
@@ -196,7 +305,22 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Parsing ==========
 
-    // parse_datetime(date_str, format_str) -> Result<Int, String> - Parse string to timestamp
+    // @ntnt parse_datetime
+    // @module std/time
+    // @signature parse_datetime(date_str: String, format_str: String) -> Result<Int, String>
+    // Parses a date/time string into a Unix timestamp using the given format.
+    //
+    // Uses strftime format directives to parse the input string. Returns a Result
+    // so parsing failures are handled gracefully without raising exceptions.
+    // The parsed datetime is treated as UTC.
+    // @param date_str The date/time string to parse
+    // @param format_str strftime-compatible format string
+    // @returns Result containing the Unix timestamp on success, or an error message on failure
+    // @see_also parse_iso, format, make_time
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example parse_datetime("2024-01-01 00:00:00", "%Y-%m-%d %H:%M:%S") => Result::Ok(1704067200) ~ "Parsed to timestamp"
+    // @error TypeError ~ "parse_datetime() requires (date_str: String, format: String)" fix: "Pass two String arguments"
     module.insert(
         "parse_datetime".to_string(),
         Value::NativeFunction {
@@ -227,7 +351,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // parse_iso(iso_str) -> Result<Int, String> - Parse ISO 8601 / RFC 3339 string
+    // @ntnt parse_iso
+    // @module std/time
+    // @signature parse_iso(iso_str: String) -> Result<Int, String>
+    // Parses an ISO 8601 (RFC 3339) string into a Unix timestamp.
+    //
+    // Accepts standard ISO 8601 datetime strings with timezone offset.
+    // Returns a Result so parsing failures are handled gracefully.
+    // @param iso_str An ISO 8601 / RFC 3339 formatted string
+    // @returns Result containing the Unix timestamp on success, or an error message on failure
+    // @see_also to_iso, parse_datetime
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example parse_iso("1970-01-01T00:00:00+00:00") => Result::Ok(0) ~ "Epoch parsed from ISO"
+    // @error TypeError ~ "parse_iso() requires a string" fix: "Pass a String argument"
     module.insert(
         "parse_iso".to_string(),
         Value::NativeFunction {
@@ -255,8 +392,25 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Date Creation ==========
 
-    // make_time(year, month, day, hour, minute, second) -> Result<Int, String>
-    // Create timestamp from components (assumes UTC)
+    // @ntnt make_time
+    // @module std/time
+    // @signature make_time(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int) -> Result<Int, String>
+    // Creates a Unix timestamp from individual date and time components (UTC).
+    //
+    // Validates the components and returns a Result. Invalid combinations
+    // (e.g., month 13 or day 32) produce an Err variant.
+    // @param year The year (e.g., 2024)
+    // @param month The month (1-12)
+    // @param day The day (1-31)
+    // @param hour The hour (0-23)
+    // @param minute The minute (0-59)
+    // @param second The second (0-59)
+    // @returns Result containing the Unix timestamp on success, or an error message on failure
+    // @see_also make_date, parse_datetime, to_utc
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example make_time(1970, 1, 1, 0, 0, 0) => Result::Ok(0) ~ "Epoch from components"
+    // @error TypeError ~ "make_time() requires 6 integers: (year, month, day, hour, minute, second)" fix: "Pass six Int arguments"
     module.insert(
         "make_time".to_string(),
         Value::NativeFunction {
@@ -299,8 +453,22 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // make_date(year, month, day) -> Result<Int, String>
-    // Create timestamp for midnight UTC
+    // @ntnt make_date
+    // @module std/time
+    // @signature make_date(year: Int, month: Int, day: Int) -> Result<Int, String>
+    // Creates a Unix timestamp for midnight UTC from date components.
+    //
+    // Shorthand for make_time(year, month, day, 0, 0, 0). Returns a Result
+    // so invalid dates are handled gracefully.
+    // @param year The year (e.g., 2024)
+    // @param month The month (1-12)
+    // @param day The day (1-31)
+    // @returns Result containing the Unix timestamp at midnight UTC, or an error message on failure
+    // @see_also make_time, parse_datetime, year, month, day
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example make_date(1970, 1, 1) => Result::Ok(0) ~ "Epoch date"
+    // @error TypeError ~ "make_date() requires 3 integers: (year, month, day)" fix: "Pass three Int arguments"
     module.insert(
         "make_date".to_string(),
         Value::NativeFunction {
@@ -330,7 +498,20 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Date Arithmetic ==========
 
-    // add_seconds(timestamp, seconds) -> Int
+    // @ntnt add_seconds
+    // @module std/time
+    // @signature add_seconds(timestamp: Int, seconds: Int) -> Int
+    // Adds seconds to a Unix timestamp.
+    //
+    // Simple arithmetic addition. Use negative values to subtract.
+    // @param timestamp Unix timestamp in seconds
+    // @param seconds Number of seconds to add (negative to subtract)
+    // @returns New Unix timestamp with seconds added
+    // @see_also add_minutes, add_hours, add_days, add_weeks, diff
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example add_seconds(0, 60) => 60 ~ "Add 60 seconds to epoch"
+    // @error TypeError ~ "add_seconds() requires (timestamp: Int, seconds: Int)" fix: "Pass two Int arguments"
     module.insert(
         "add_seconds".to_string(),
         Value::NativeFunction {
@@ -345,7 +526,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // add_minutes(timestamp, minutes) -> Int
+    // @ntnt add_minutes
+    // @module std/time
+    // @signature add_minutes(timestamp: Int, minutes: Int) -> Int
+    // Adds minutes to a Unix timestamp.
+    //
+    // Multiplies minutes by 60 and adds to the timestamp. Use negative values to subtract.
+    // @param timestamp Unix timestamp in seconds
+    // @param minutes Number of minutes to add (negative to subtract)
+    // @returns New Unix timestamp with minutes added
+    // @see_also add_seconds, add_hours, add_days, add_weeks, diff
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example add_minutes(0, 5) => 300 ~ "Add 5 minutes to epoch"
+    // @error TypeError ~ "add_minutes() requires (timestamp: Int, minutes: Int)" fix: "Pass two Int arguments"
     module.insert(
         "add_minutes".to_string(),
         Value::NativeFunction {
@@ -360,7 +554,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // add_hours(timestamp, hours) -> Int
+    // @ntnt add_hours
+    // @module std/time
+    // @signature add_hours(timestamp: Int, hours: Int) -> Int
+    // Adds hours to a Unix timestamp.
+    //
+    // Multiplies hours by 3600 and adds to the timestamp. Use negative values to subtract.
+    // @param timestamp Unix timestamp in seconds
+    // @param hours Number of hours to add (negative to subtract)
+    // @returns New Unix timestamp with hours added
+    // @see_also add_seconds, add_minutes, add_days, add_weeks, diff
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example add_hours(0, 2) => 7200 ~ "Add 2 hours to epoch"
+    // @error TypeError ~ "add_hours() requires (timestamp: Int, hours: Int)" fix: "Pass two Int arguments"
     module.insert(
         "add_hours".to_string(),
         Value::NativeFunction {
@@ -375,7 +582,22 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // add_days(timestamp, days) -> Int
+    // @ntnt add_days
+    // @module std/time
+    // @signature add_days(timestamp: Int, days: Int) -> Int
+    // Adds days to a Unix timestamp.
+    //
+    // Multiplies days by 86400 and adds to the timestamp. Use negative values to subtract.
+    // Not calendar-aware (always 86400 seconds per day). For DST-sensitive
+    // calculations, use to_timezone() with manual adjustment.
+    // @param timestamp Unix timestamp in seconds
+    // @param days Number of days to add (negative to subtract)
+    // @returns New Unix timestamp with days added
+    // @see_also add_seconds, add_hours, add_weeks, add_months, diff
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example add_days(0, 1) => 86400 ~ "Add 1 day to epoch"
+    // @error TypeError ~ "add_days() requires (timestamp: Int, days: Int)" fix: "Pass two Int arguments"
     module.insert(
         "add_days".to_string(),
         Value::NativeFunction {
@@ -390,7 +612,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // add_weeks(timestamp, weeks) -> Int
+    // @ntnt add_weeks
+    // @module std/time
+    // @signature add_weeks(timestamp: Int, weeks: Int) -> Int
+    // Adds weeks to a Unix timestamp.
+    //
+    // Multiplies weeks by 604800 (7 * 86400) and adds to the timestamp.
+    // Use negative values to subtract.
+    // @param timestamp Unix timestamp in seconds
+    // @param weeks Number of weeks to add (negative to subtract)
+    // @returns New Unix timestamp with weeks added
+    // @see_also add_days, add_months, add_years, diff
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example add_weeks(0, 1) => 604800 ~ "Add 1 week to epoch"
+    // @error TypeError ~ "add_weeks() requires (timestamp: Int, weeks: Int)" fix: "Pass two Int arguments"
     module.insert(
         "add_weeks".to_string(),
         Value::NativeFunction {
@@ -405,7 +641,24 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // add_months(timestamp, months) -> Int - Calendar-aware month addition
+    // @ntnt add_months
+    // @module std/time
+    // @signature add_months(timestamp: Int, months: Int) -> Int
+    // Adds months to a Unix timestamp with calendar-aware logic.
+    //
+    // Properly handles month boundaries and varying month lengths.
+    // For example, Jan 31 + 1 month = Feb 28 (or 29 in a leap year).
+    // Preserves the time-of-day component.
+    // @param timestamp Unix timestamp in seconds
+    // @param months Number of months to add (negative to subtract)
+    // @returns New Unix timestamp with months added
+    // @see_also add_years, add_days, add_weeks, diff
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example add_months(0, 1) => 2678400 ~ "Add 1 month to epoch (Jan->Feb)"
+    // @error TypeError ~ "add_months() requires (timestamp: Int, months: Int)" fix: "Pass two Int arguments"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
+    // @error RuntimeError ~ "Invalid date after month addition" fix: "The resulting date is out of representable range"
     module.insert(
         "add_months".to_string(),
         Value::NativeFunction {
@@ -468,7 +721,23 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // add_years(timestamp, years) -> Int - Calendar-aware year addition
+    // @ntnt add_years
+    // @module std/time
+    // @signature add_years(timestamp: Int, years: Int) -> Int
+    // Adds years to a Unix timestamp with calendar-aware logic.
+    //
+    // Properly handles leap year boundaries. For example, Feb 29 of a leap
+    // year + 1 year = Feb 28 (non-leap year). Preserves the time-of-day component.
+    // @param timestamp Unix timestamp in seconds
+    // @param years Number of years to add (negative to subtract)
+    // @returns New Unix timestamp with years added
+    // @see_also add_months, add_days, is_leap_year, diff
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example add_years(0, 1) => 31536000 ~ "Add 1 year to epoch"
+    // @error TypeError ~ "add_years() requires (timestamp: Int, years: Int)" fix: "Pass two Int arguments"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
+    // @error RuntimeError ~ "Invalid date after year addition" fix: "The resulting date is out of representable range"
     module.insert(
         "add_years".to_string(),
         Value::NativeFunction {
@@ -522,8 +791,23 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // diff(timestamp1, timestamp2) -> Map - Difference between two timestamps
-    // Returns { seconds, minutes, hours, days }
+    // @ntnt diff
+    // @module std/time
+    // @signature diff(timestamp1: Int, timestamp2: Int) -> Map
+    // Computes the difference between two timestamps.
+    //
+    // Returns a map with the difference expressed in multiple units:
+    // { seconds, minutes, hours, days }. The result is timestamp1 - timestamp2,
+    // so it is positive when timestamp1 is later.
+    // @param timestamp1 First Unix timestamp in seconds
+    // @param timestamp2 Second Unix timestamp in seconds
+    // @returns Map with keys: seconds, minutes, hours, days (all Int)
+    // @see_also before, after, equal
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example diff(86400, 0).days => 1 ~ "One day difference"
+    // @example diff(3600, 0).hours => 1 ~ "One hour difference"
+    // @error TypeError ~ "diff() requires two timestamps" fix: "Pass two Int arguments"
     module.insert(
         "diff".to_string(),
         Value::NativeFunction {
@@ -548,7 +832,21 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Comparisons ==========
 
-    // before(timestamp1, timestamp2) -> Bool - Is ts1 before ts2?
+    // @ntnt before
+    // @module std/time
+    // @signature before(timestamp1: Int, timestamp2: Int) -> Bool
+    // Checks whether the first timestamp is before the second.
+    //
+    // Returns true if timestamp1 < timestamp2.
+    // @param timestamp1 First Unix timestamp in seconds
+    // @param timestamp2 Second Unix timestamp in seconds
+    // @returns true if timestamp1 is earlier than timestamp2
+    // @see_also after, equal, diff
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example before(0, 86400) => true ~ "Epoch is before day 1"
+    // @example before(86400, 0) => false ~ "Day 1 is not before epoch"
+    // @error TypeError ~ "before() requires two timestamps" fix: "Pass two Int arguments"
     module.insert(
         "before".to_string(),
         Value::NativeFunction {
@@ -563,7 +861,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // after(timestamp1, timestamp2) -> Bool - Is ts1 after ts2?
+    // @ntnt after
+    // @module std/time
+    // @signature after(timestamp1: Int, timestamp2: Int) -> Bool
+    // Checks whether the first timestamp is after the second.
+    //
+    // Returns true if timestamp1 > timestamp2.
+    // @param timestamp1 First Unix timestamp in seconds
+    // @param timestamp2 Second Unix timestamp in seconds
+    // @returns true if timestamp1 is later than timestamp2
+    // @see_also before, equal, diff
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example after(86400, 0) => true ~ "Day 1 is after epoch"
+    // @example after(0, 86400) => false ~ "Epoch is not after day 1"
+    // @error TypeError ~ "after() requires two timestamps" fix: "Pass two Int arguments"
     module.insert(
         "after".to_string(),
         Value::NativeFunction {
@@ -578,7 +890,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // equal(timestamp1, timestamp2) -> Bool - Are timestamps equal?
+    // @ntnt equal
+    // @module std/time
+    // @signature equal(timestamp1: Int, timestamp2: Int) -> Bool
+    // Checks whether two timestamps are equal.
+    //
+    // Returns true if both timestamps represent the same instant.
+    // @param timestamp1 First Unix timestamp in seconds
+    // @param timestamp2 Second Unix timestamp in seconds
+    // @returns true if both timestamps are the same value
+    // @see_also before, after, diff
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example equal(0, 0) => true ~ "Same timestamps are equal"
+    // @example equal(0, 1) => false ~ "Different timestamps are not equal"
+    // @error TypeError ~ "equal() requires two timestamps" fix: "Pass two Int arguments"
     module.insert(
         "equal".to_string(),
         Value::NativeFunction {
@@ -595,7 +921,19 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Date Components ==========
 
-    // year(timestamp) -> Int
+    // @ntnt year
+    // @module std/time
+    // @signature year(timestamp: Int) -> Int
+    // Extracts the year from a Unix timestamp (UTC).
+    //
+    // @param timestamp Unix timestamp in seconds
+    // @returns The year as an integer (e.g., 2024)
+    // @see_also month, day, hour, minute, second, to_utc
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example year(0) => 1970 ~ "Epoch year"
+    // @error TypeError ~ "year() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "year".to_string(),
         Value::NativeFunction {
@@ -615,7 +953,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // month(timestamp) -> Int (1-12)
+    // @ntnt month
+    // @module std/time
+    // @signature month(timestamp: Int) -> Int
+    // Extracts the month from a Unix timestamp (UTC).
+    //
+    // @param timestamp Unix timestamp in seconds
+    // @returns The month as an integer (1-12)
+    // @see_also year, day, month_name, to_utc
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example month(0) => 1 ~ "Epoch is January"
+    // @error TypeError ~ "month() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "month".to_string(),
         Value::NativeFunction {
@@ -635,7 +985,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // day(timestamp) -> Int (1-31)
+    // @ntnt day
+    // @module std/time
+    // @signature day(timestamp: Int) -> Int
+    // Extracts the day of the month from a Unix timestamp (UTC).
+    //
+    // @param timestamp Unix timestamp in seconds
+    // @returns The day as an integer (1-31)
+    // @see_also year, month, day_of_year, weekday, to_utc
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example day(0) => 1 ~ "Epoch is the 1st"
+    // @error TypeError ~ "day() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "day".to_string(),
         Value::NativeFunction {
@@ -655,7 +1017,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // hour(timestamp) -> Int (0-23)
+    // @ntnt hour
+    // @module std/time
+    // @signature hour(timestamp: Int) -> Int
+    // Extracts the hour from a Unix timestamp (UTC).
+    //
+    // @param timestamp Unix timestamp in seconds
+    // @returns The hour as an integer (0-23)
+    // @see_also minute, second, year, month, day, to_utc
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example hour(0) => 0 ~ "Epoch is midnight"
+    // @error TypeError ~ "hour() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "hour".to_string(),
         Value::NativeFunction {
@@ -675,7 +1049,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // minute(timestamp) -> Int (0-59)
+    // @ntnt minute
+    // @module std/time
+    // @signature minute(timestamp: Int) -> Int
+    // Extracts the minute from a Unix timestamp (UTC).
+    //
+    // @param timestamp Unix timestamp in seconds
+    // @returns The minute as an integer (0-59)
+    // @see_also hour, second, to_utc
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example minute(0) => 0 ~ "Epoch minute is 0"
+    // @error TypeError ~ "minute() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "minute".to_string(),
         Value::NativeFunction {
@@ -695,7 +1081,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // second(timestamp) -> Int (0-59)
+    // @ntnt second
+    // @module std/time
+    // @signature second(timestamp: Int) -> Int
+    // Extracts the second from a Unix timestamp (UTC).
+    //
+    // @param timestamp Unix timestamp in seconds
+    // @returns The second as an integer (0-59)
+    // @see_also hour, minute, to_utc
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example second(0) => 0 ~ "Epoch second is 0"
+    // @error TypeError ~ "second() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "second".to_string(),
         Value::NativeFunction {
@@ -715,7 +1113,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // weekday(timestamp) -> Int (0=Sunday, 1=Monday, ..., 6=Saturday)
+    // @ntnt weekday
+    // @module std/time
+    // @signature weekday(timestamp: Int) -> Int
+    // Extracts the day of the week from a Unix timestamp (UTC).
+    //
+    // Returns 0 for Sunday, 1 for Monday, through 6 for Saturday.
+    // @param timestamp Unix timestamp in seconds
+    // @returns The weekday as an integer (0=Sunday, 6=Saturday)
+    // @see_also weekday_name, day, day_of_year
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example weekday(0) => 4 ~ "Epoch (Jan 1, 1970) was a Thursday"
+    // @error TypeError ~ "weekday() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "weekday".to_string(),
         Value::NativeFunction {
@@ -735,7 +1146,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // weekday_name(timestamp) -> String ("Sunday", "Monday", etc.)
+    // @ntnt weekday_name
+    // @module std/time
+    // @signature weekday_name(timestamp: Int) -> String
+    // Returns the full English name of the weekday for a timestamp (UTC).
+    //
+    // Returns one of: "Sunday", "Monday", "Tuesday", "Wednesday",
+    // "Thursday", "Friday", "Saturday".
+    // @param timestamp Unix timestamp in seconds
+    // @returns Full weekday name as a string
+    // @see_also weekday, month_name, day
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example weekday_name(0) => "Thursday" ~ "Epoch was a Thursday"
+    // @error TypeError ~ "weekday_name() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "weekday_name".to_string(),
         Value::NativeFunction {
@@ -764,7 +1189,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // month_name(timestamp) -> String ("January", "February", etc.)
+    // @ntnt month_name
+    // @module std/time
+    // @signature month_name(timestamp: Int) -> String
+    // Returns the full English name of the month for a timestamp (UTC).
+    //
+    // Returns one of: "January" through "December".
+    // @param timestamp Unix timestamp in seconds
+    // @returns Full month name as a string
+    // @see_also month, weekday_name, year
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example month_name(0) => "January" ~ "Epoch is in January"
+    // @error TypeError ~ "month_name() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "month_name".to_string(),
         Value::NativeFunction {
@@ -799,7 +1237,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // day_of_year(timestamp) -> Int (1-366)
+    // @ntnt day_of_year
+    // @module std/time
+    // @signature day_of_year(timestamp: Int) -> Int
+    // Extracts the ordinal day of the year from a timestamp (UTC).
+    //
+    // Returns the day number within the year (1-366).
+    // @param timestamp Unix timestamp in seconds
+    // @returns The ordinal day of the year (1-366)
+    // @see_also day, weekday, is_leap_year
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example day_of_year(0) => 1 ~ "Epoch is day 1 of the year"
+    // @error TypeError ~ "day_of_year() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "day_of_year".to_string(),
         Value::NativeFunction {
@@ -819,7 +1270,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // is_leap_year(timestamp) -> Bool
+    // @ntnt is_leap_year
+    // @module std/time
+    // @signature is_leap_year(timestamp: Int) -> Bool
+    // Checks whether the year of the given timestamp is a leap year.
+    //
+    // Uses the standard Gregorian leap year rules: divisible by 4,
+    // except centuries unless also divisible by 400.
+    // @param timestamp Unix timestamp in seconds
+    // @returns true if the timestamp falls in a leap year
+    // @see_also year, day_of_year, add_years
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example is_leap_year(0) => false ~ "1970 is not a leap year"
+    // @error TypeError ~ "is_leap_year() requires a timestamp" fix: "Pass an Int timestamp"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "is_leap_year".to_string(),
         Value::NativeFunction {
@@ -843,7 +1308,22 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Utilities ==========
 
-    // sleep(millis) -> Unit - Sleep for milliseconds
+    // @ntnt sleep
+    // @module std/time
+    // @signature sleep(millis: Int) -> Unit
+    // Pauses execution for the specified number of milliseconds.
+    //
+    // Blocks the current thread. Requires a non-negative value.
+    // Use sparingly in production code; primarily useful for testing,
+    // rate limiting, or animation delays.
+    // @param millis Duration to sleep in milliseconds (must be >= 0)
+    // @returns Unit
+    // @see_also elapsed, now_millis
+    // @since v0.1.0
+    // @tags #time
+    // @example sleep(100) => Unit ~ "Pauses for 100ms"
+    // @error TypeError ~ "sleep() requires an integer (milliseconds)" fix: "Pass an Int value"
+    // @error RuntimeError ~ "sleep() requires non-negative milliseconds" fix: "Pass a value >= 0"
     module.insert(
         "sleep".to_string(),
         Value::NativeFunction {
@@ -866,7 +1346,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // elapsed(start_millis) -> Int - Milliseconds since start
+    // @ntnt elapsed
+    // @module std/time
+    // @signature elapsed(start_millis: Int) -> Int
+    // Returns the number of milliseconds elapsed since the given start time.
+    //
+    // Computes (now_millis() - start_millis). Useful for measuring
+    // execution time of code blocks.
+    // @param start_millis A starting timestamp in milliseconds (from now_millis())
+    // @returns Milliseconds elapsed since start_millis
+    // @see_also now_millis, now, sleep
+    // @since v0.1.0
+    // @tags #time
+    // @example elapsed(now_millis()) => 0 ~ "Elapsed time is near 0 when called immediately"
+    // @error TypeError ~ "elapsed() requires a start timestamp" fix: "Pass an Int value from now_millis()"
     module.insert(
         "elapsed".to_string(),
         Value::NativeFunction {
@@ -886,7 +1379,19 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Timezone Utilities ==========
 
-    // list_timezones() -> [String] - List common available timezones
+    // @ntnt list_timezones
+    // @module std/time
+    // @signature list_timezones() -> Array<String>
+    // Returns a list of commonly used IANA timezone identifiers.
+    //
+    // Provides a curated set of ~25 widely-used timezone strings that can
+    // be passed to to_timezone() and format_in(). Includes major cities
+    // across all continents.
+    // @returns Array of IANA timezone identifier strings
+    // @see_also to_timezone, format_in
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example list_timezones()[0] => "UTC" ~ "First timezone is UTC"
     module.insert(
         "list_timezones".to_string(),
         Value::NativeFunction {
@@ -942,7 +1447,22 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Backward Compatibility ==========
 
-    // format_timestamp - alias for format
+    // @ntnt format_timestamp
+    // @module std/time
+    // @signature format_timestamp(timestamp: Int, format_str: String) -> String
+    // Formats a Unix timestamp as a string (legacy alias for format()).
+    //
+    // Deprecated alias for format(). Retained for backward compatibility.
+    // Prefer using format() in new code.
+    // @param timestamp Unix timestamp in seconds
+    // @param format_str strftime-compatible format string
+    // @returns Formatted date/time string
+    // @see_also format, format_in, to_iso
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example format_timestamp(0, "%Y-%m-%d") => "1970-01-01" ~ "Epoch date formatted"
+    // @error TypeError ~ "format_timestamp() requires int and format string" fix: "Pass an Int timestamp and a String format"
+    // @error RuntimeError ~ "Invalid timestamp" fix: "Ensure the timestamp is a valid Unix epoch value"
     module.insert(
         "format_timestamp".to_string(),
         Value::NativeFunction {
@@ -962,7 +1482,22 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // duration_secs - kept for compatibility
+    // @ntnt duration_secs
+    // @module std/time
+    // @signature duration_secs(seconds: Int) -> Map
+    // Creates a duration map from seconds (legacy utility).
+    //
+    // Converts a duration in seconds to a map with keys: secs, millis, nanos.
+    // Retained for backward compatibility. Prefer using the SECOND/MINUTE/HOUR
+    // constants with arithmetic in new code.
+    // @param seconds Duration in seconds
+    // @returns Map with keys: secs (Int), millis (Int), nanos (Int)
+    // @see_also duration_millis, SECOND, MINUTE, HOUR
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example duration_secs(1).millis => 1000 ~ "1 second = 1000 milliseconds"
+    // @example duration_secs(1).nanos => 1000000000 ~ "1 second = 1 billion nanoseconds"
+    // @error TypeError ~ "duration_secs() requires an integer" fix: "Pass an Int value"
     module.insert(
         "duration_secs".to_string(),
         Value::NativeFunction {
@@ -983,7 +1518,22 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // duration_millis - kept for compatibility
+    // @ntnt duration_millis
+    // @module std/time
+    // @signature duration_millis(milliseconds: Int) -> Map
+    // Creates a duration map from milliseconds (legacy utility).
+    //
+    // Converts a duration in milliseconds to a map with keys: secs, millis, nanos.
+    // Retained for backward compatibility. Prefer using the SECOND/MINUTE/HOUR
+    // constants with arithmetic in new code.
+    // @param milliseconds Duration in milliseconds
+    // @returns Map with keys: secs (Int), millis (Int), nanos (Int)
+    // @see_also duration_secs, SECOND, MINUTE, HOUR
+    // @since v0.1.0
+    // @tags #time #pure #deterministic
+    // @example duration_millis(1000).secs => 1 ~ "1000 milliseconds = 1 second"
+    // @example duration_millis(500).nanos => 500000000 ~ "500ms in nanoseconds"
+    // @error TypeError ~ "duration_millis() requires an integer" fix: "Pass an Int value"
     module.insert(
         "duration_millis".to_string(),
         Value::NativeFunction {

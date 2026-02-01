@@ -184,16 +184,28 @@ IAL is a term rewriting system that translates natural language assertions into 
 
 ## Documentation System
 
-Documentation is auto-generated from TOML source files:
+Documentation is auto-generated from multiple sources:
 
 ```
-docs/
-├── stdlib.toml          → STDLIB_REFERENCE.md   (functions)
-├── syntax.toml          → SYNTAX_REFERENCE.md   (keywords, operators)
-├── ial.toml             → IAL_REFERENCE.md      (IAL primitives, terms)
+src/stdlib/*.rs          → STDLIB_REFERENCE.md   (functions, via // @ntnt comments)
+src/interpreter.rs       → STDLIB_REFERENCE.md   (builtins, via // @ntnt comments)
+docs/syntax.toml         → SYNTAX_REFERENCE.md   (keywords, operators)
+docs/ial.toml            → IAL_REFERENCE.md      (IAL primitives, terms)
+docs/runtime.toml        → RUNTIME_REFERENCE.md  (CLI, environment, server)
+docs/AI_AGENT_GUIDE.md   → CLAUDE.md, .github/copilot-instructions.md  (agent sync)
 ```
 
-Generate with: `ntnt docs --generate`
+### Stdlib doc pipeline (`build.rs`)
+
+`build.rs` auto-discovers all `src/stdlib/*.rs` files (no registration needed for new modules) and scans `// @ntnt` comment blocks. It validates that every `NativeFunction` has a doc block and every doc block has a matching function — orphaned or undocumented functions **fail the build**. The result is embedded as `doc_data.json` in the binary via `include_str!()`.
+
+```
+build.rs scan → doc_data.json → binary (OnceLock) → REPL :doc / CLI ntnt docs / markdown
+```
+
+### Agent file sync
+
+`ntnt docs --generate` also syncs the coding guide from `docs/AI_AGENT_GUIDE.md` into `CLAUDE.md` and `.github/copilot-instructions.md` using `<!-- BEGIN/END NTNT CODING GUIDE -->` markers, rewriting doc links for each target's relative path.
 
 The CI pipeline validates that generated docs are up-to-date.
 

@@ -6,6 +6,14 @@
 fn get_all_posts() {
     return [
         map {
+            "slug": "documentation-philosophy",
+            "title": "Documentation as a Build Constraint",
+            "date": "January 29, 2026",
+            "author": "NTNT Team",
+            "excerpt": "Most languages treat documentation as a social contract. Elixir elevated it to a first-class citizen. NTNT makes it a build constraint — the compiler refuses to produce a binary until every function is documented. Is this obviously correct or obviously insane?",
+            "template": "views/blog/documentation-philosophy.html"
+        },
+        map {
             "slug": "intent-assertion-language",
             "title": "The Intent Assertion Language (IAL)",
             "date": "January 25, 2026",

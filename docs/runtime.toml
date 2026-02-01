@@ -200,7 +200,7 @@ command = "ntnt docs [QUERY]"
 description = "Look up documentation for stdlib modules or functions"
 options = [
     { name = "--validate", short = "", type = "flag", description = "Validate that all stdlib functions are documented" },
-    { name = "--generate", short = "", type = "flag", description = "Regenerate docs/STDLIB_REFERENCE.md from stdlib.toml" },
+    { name = "--generate", short = "", type = "flag", description = "Regenerate reference docs from source annotations and TOML, and sync agent instruction files (CLAUDE.md, copilot-instructions.md) from AI_AGENT_GUIDE.md" },
     { name = "--json", short = "", type = "flag", description = "Output as JSON (for tooling)" }
 ]
 examples = [

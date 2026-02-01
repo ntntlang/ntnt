@@ -1,6 +1,6 @@
 [package]
 name = "ntnt"
-version = "0.3.8"
+version = "0.3.9"
 edition = "2021"
 authors = ["NTNT Language Team"]
 description = "NTNT (Intent) - A programming language designed for AI-driven development"
@@ -69,6 +69,11 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 rust_decimal = { version = "1.36", features = ["db-postgres"] }
 chrono = "0.4"
 chrono-tz = "0.10.4"
+
+[build-dependencies]
+# Doc comment scanner (build.rs extracts /// @ntnt blocks)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [dev-dependencies]
 pretty_assertions = "1.4"

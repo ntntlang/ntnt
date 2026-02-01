@@ -13,7 +13,22 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Basic Operations ==========
 
-    // split(str, delimiter) -> [String]
+    // @ntnt split
+    // @module std/string
+    // @module_description String manipulation: splitting, joining, trimming, searching, and transforming text
+    // @signature split(s: String, delim: String) -> Array<String>
+    // @param s The string to split
+    // @param delim The delimiter to split on
+    // Splits a string into an array of substrings.
+    //
+    // When the delimiter is not found, returns a single-element array
+    // containing the original string. An empty delimiter splits into
+    // individual characters.
+    // @see_also join, chars, split_pattern
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example split("a,b,c", ",") => ["a", "b", "c"] ~ "Basic comma-separated split"
+    // @example split("no-match", ",") => ["no-match"] ~ "No delimiter found returns original in array"
     module.insert(
         "split".to_string(),
         Value::NativeFunction {
@@ -34,7 +49,18 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // join(arr, delimiter) -> String
+    // @ntnt join
+    // @module std/string
+    // @signature join(arr: Array, delim: String) -> String
+    // @param arr The array of elements to join
+    // @param delim The delimiter to insert between elements
+    // Joins array elements into a string with a delimiter.
+    //
+    // Non-string elements are converted to their string representation.
+    // @see_also split, concat
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example join(["a", "b"], ",") => "a,b" ~ "Join with comma"
     module.insert(
         "join".to_string(),
         Value::NativeFunction {
@@ -58,8 +84,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // concat(str1, str2, ...) -> String - Concatenate multiple strings
-    // Note: In NTNT you can also use + operator, but this is useful for arrays
+    // @ntnt concat
+    // @module std/string
+    // @signature concat(a: String, b: String) -> String
+    // @param a The first string, or an array of strings to concatenate
+    // @param b The second string to append
+    // Concatenates two strings, or joins an array of strings.
+    //
+    // Also accepts an array as the first argument, in which case
+    // all elements are concatenated without a delimiter.
+    // @see_also join, split
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example concat("hello", " world") => "hello world" ~ "Concatenate two strings"
     module.insert(
         "concat".to_string(),
         Value::NativeFunction {
@@ -89,7 +126,17 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // repeat(str, count) -> String
+    // @ntnt repeat
+    // @module std/string
+    // @signature repeat(s: String, n: Int) -> String
+    // @param s The string to repeat
+    // @param n The number of times to repeat the string
+    // Repeats a string n times.
+    // @see_also pad_left, pad_right
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example repeat("ab", 3) => "ababab" ~ "Repeat string three times"
+    // @error RuntimeError ~ "repeat count must be non-negative" fix: "Ensure n >= 0"
     module.insert(
         "repeat".to_string(),
         Value::NativeFunction {
@@ -111,7 +158,14 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // reverse(str) -> String
+    // @ntnt reverse
+    // @module std/string
+    // @signature reverse(s: String) -> String
+    // @param s The string to reverse
+    // Reverses a string.
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example reverse("abc") => "cba" ~ "Reverse characters"
     module.insert(
         "reverse".to_string(),
         Value::NativeFunction {
@@ -128,7 +182,15 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Trimming ==========
 
-    // trim(str) -> String - Trim both ends
+    // @ntnt trim
+    // @module std/string
+    // @signature trim(s: String) -> String
+    // @param s The string to trim
+    // Removes leading and trailing whitespace.
+    // @see_also trim_left, trim_right, trim_chars
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example trim("  hello  ") => "hello" ~ "Trim both ends"
     module.insert(
         "trim".to_string(),
         Value::NativeFunction {
@@ -143,7 +205,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // trim_left(str) -> String - Trim start/left
+    // @ntnt trim_left
+    // @module std/string
+    // @signature trim_left(s: String) -> String
+    // @param s The string to trim from the left
+    // Removes leading whitespace.
+    // @see_also trim, trim_right, trim_start
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example trim_left("  hello") => "hello" ~ "Remove leading spaces"
     module.insert(
         "trim_left".to_string(),
         Value::NativeFunction {
@@ -158,7 +228,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // trim_right(str) -> String - Trim end/right
+    // @ntnt trim_right
+    // @module std/string
+    // @signature trim_right(s: String) -> String
+    // @param s The string to trim from the right
+    // Removes trailing whitespace.
+    // @see_also trim, trim_left, trim_end
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example trim_right("hello  ") => "hello" ~ "Remove trailing spaces"
     module.insert(
         "trim_right".to_string(),
         Value::NativeFunction {
@@ -173,7 +251,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // trim_chars(str, chars) -> String - Trim specific characters
+    // @ntnt trim_chars
+    // @module std/string
+    // @signature trim_chars(s: String, chars: String) -> String
+    // @param s The string to trim
+    // @param chars The set of characters to remove from both ends
+    // Removes specified characters from both ends.
+    // @see_also trim, remove_chars
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example trim_chars("-hello-", "-") => "hello" ~ "Trim specific character"
     module.insert(
         "trim_chars".to_string(),
         Value::NativeFunction {
@@ -195,7 +282,15 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Case Conversion ==========
 
-    // to_upper(str) -> String
+    // @ntnt to_upper
+    // @module std/string
+    // @signature to_upper(s: String) -> String
+    // @param s The string to convert to uppercase
+    // Converts string to uppercase.
+    // @see_also to_lower, capitalize, upper
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example to_upper("hello") => "HELLO" ~ "Convert to uppercase"
     module.insert(
         "to_upper".to_string(),
         Value::NativeFunction {
@@ -210,7 +305,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // to_lower(str) -> String
+    // @ntnt to_lower
+    // @module std/string
+    // @signature to_lower(s: String) -> String
+    // @param s The string to convert to lowercase
+    // Converts string to lowercase.
+    // @see_also to_upper, capitalize, lower
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example to_lower("HELLO") => "hello" ~ "Convert to lowercase"
     module.insert(
         "to_lower".to_string(),
         Value::NativeFunction {
@@ -225,7 +328,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // capitalize(str) -> String - First letter uppercase
+    // @ntnt capitalize
+    // @module std/string
+    // @signature capitalize(s: String) -> String
+    // @param s The string to capitalize
+    // Capitalizes the first character, lowercases the rest.
+    // @see_also title, to_upper
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example capitalize("hello") => "Hello" ~ "Capitalize first letter"
     module.insert(
         "capitalize".to_string(),
         Value::NativeFunction {
@@ -252,7 +363,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // title(str) -> String - Title Case Each Word
+    // @ntnt title
+    // @module std/string
+    // @signature title(s: String) -> String
+    // @param s The string to convert to title case
+    // Capitalizes the first letter of each word.
+    // @see_also capitalize, to_upper
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example title("hello world") => "Hello World" ~ "Title case each word"
     module.insert(
         "title".to_string(),
         Value::NativeFunction {
@@ -283,7 +402,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // to_snake_case(str) -> String - "helloWorld" -> "hello_world"
+    // @ntnt to_snake_case
+    // @module std/string
+    // @signature to_snake_case(s: String) -> String
+    // @param s The string to convert to snake_case
+    // Converts to snake_case.
+    // @see_also to_camel_case, to_pascal_case, to_kebab_case
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example to_snake_case("helloWorld") => "hello_world" ~ "camelCase to snake_case"
     module.insert(
         "to_snake_case".to_string(),
         Value::NativeFunction {
@@ -313,7 +440,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // to_camel_case(str) -> String - "hello_world" -> "helloWorld"
+    // @ntnt to_camel_case
+    // @module std/string
+    // @signature to_camel_case(s: String) -> String
+    // @param s The string to convert to camelCase
+    // Converts to camelCase.
+    // @see_also to_snake_case, to_pascal_case, to_kebab_case
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example to_camel_case("hello_world") => "helloWorld" ~ "snake_case to camelCase"
     module.insert(
         "to_camel_case".to_string(),
         Value::NativeFunction {
@@ -342,7 +477,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // to_pascal_case(str) -> String - "hello_world" -> "HelloWorld"
+    // @ntnt to_pascal_case
+    // @module std/string
+    // @signature to_pascal_case(s: String) -> String
+    // @param s The string to convert to PascalCase
+    // Converts to PascalCase.
+    // @see_also to_snake_case, to_camel_case, to_kebab_case
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example to_pascal_case("hello_world") => "HelloWorld" ~ "snake_case to PascalCase"
     module.insert(
         "to_pascal_case".to_string(),
         Value::NativeFunction {
@@ -371,7 +514,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // to_kebab_case(str) -> String - "hello_world" -> "hello-world"
+    // @ntnt to_kebab_case
+    // @module std/string
+    // @signature to_kebab_case(s: String) -> String
+    // @param s The string to convert to kebab-case
+    // Converts to kebab-case.
+    // @see_also to_snake_case, to_camel_case, slugify
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example to_kebab_case("helloWorld") => "hello-world" ~ "camelCase to kebab-case"
     module.insert(
         "to_kebab_case".to_string(),
         Value::NativeFunction {
@@ -401,7 +552,18 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // slugify(str) -> String - "Hello World!" -> "hello-world"
+    // @ntnt slugify
+    // @module std/string
+    // @signature slugify(s: String) -> String
+    // @param s The string to convert into a URL-friendly slug
+    // Converts to a URL-friendly slug.
+    //
+    // Lowercases, replaces spaces and underscores with hyphens,
+    // removes non-alphanumeric characters, and collapses consecutive hyphens.
+    // @see_also to_kebab_case, to_snake_case
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example slugify("Hello World!") => "hello-world" ~ "URL-friendly slug"
     module.insert(
         "slugify".to_string(),
         Value::NativeFunction {
@@ -452,7 +614,16 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Search & Replace ==========
 
-    // contains(str, substr) -> Bool
+    // @ntnt contains
+    // @module std/string
+    // @signature contains(s: String, substr: String) -> Bool
+    // @param s The string to search within
+    // @param substr The substring to search for
+    // Checks if string contains substring.
+    // @see_also starts_with, ends_with, index_of
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example contains("hello", "ell") => true ~ "Substring found"
     module.insert(
         "contains".to_string(),
         Value::NativeFunction {
@@ -469,7 +640,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // starts_with(str, prefix) -> Bool
+    // @ntnt starts_with
+    // @module std/string
+    // @signature starts_with(s: String, prefix: String) -> Bool
+    // @param s The string to check
+    // @param prefix The prefix to test for
+    // Checks if string starts with prefix.
+    // @see_also ends_with, contains
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example starts_with("hello", "he") => true ~ "Prefix match"
     module.insert(
         "starts_with".to_string(),
         Value::NativeFunction {
@@ -486,7 +666,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // ends_with(str, suffix) -> Bool
+    // @ntnt ends_with
+    // @module std/string
+    // @signature ends_with(s: String, suffix: String) -> Bool
+    // @param s The string to check
+    // @param suffix The suffix to look for at the end of the string
+    // Checks if string ends with suffix.
+    // @see_also starts_with, contains
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example ends_with("hello", "lo") => true ~ "Suffix match"
     module.insert(
         "ends_with".to_string(),
         Value::NativeFunction {
@@ -503,7 +692,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // index_of(str, substr) -> Int (-1 if not found)
+    // @ntnt index_of
+    // @module std/string
+    // @signature index_of(s: String, substr: String) -> Int
+    // @param s The string to search within
+    // @param substr The substring to find the first occurrence of
+    // Returns index of first occurrence, or -1 if not found.
+    // @see_also last_index_of, contains
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example index_of("hello", "l") => 2 ~ "First occurrence index"
     module.insert(
         "index_of".to_string(),
         Value::NativeFunction {
@@ -521,7 +719,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // last_index_of(str, substr) -> Int (-1 if not found)
+    // @ntnt last_index_of
+    // @module std/string
+    // @signature last_index_of(s: String, substr: String) -> Int
+    // @param s The string to search within
+    // @param substr The substring to find the last occurrence of
+    // Returns index of last occurrence, or -1 if not found.
+    // @see_also index_of, contains
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example last_index_of("hello", "l") => 3 ~ "Last occurrence index"
     module.insert(
         "last_index_of".to_string(),
         Value::NativeFunction {
@@ -539,7 +746,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // count(str, substr) -> Int - Count occurrences
+    // @ntnt count
+    // @module std/string
+    // @signature count(s: String, substr: String) -> Int
+    // @param s The string to search within
+    // @param substr The substring to count occurrences of
+    // Counts occurrences of substring.
+    // @see_also contains, index_of
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example count("ababa", "a") => 3 ~ "Count character occurrences"
     module.insert(
         "count".to_string(),
         Value::NativeFunction {
@@ -556,7 +772,17 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // replace(str, from, to) -> String - Replace all occurrences
+    // @ntnt replace
+    // @module std/string
+    // @signature replace(s: String, from: String, to: String) -> String
+    // @param s The input string to perform replacements on
+    // @param from The substring to search for
+    // @param to The replacement string for each occurrence
+    // Replaces all occurrences of from with to.
+    // @see_also replace_first, replace_chars, replace_pattern, replace_all
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example replace("hello", "l", "L") => "heLLo" ~ "Replace all occurrences"
     module.insert(
         "replace".to_string(),
         Value::NativeFunction {
@@ -573,7 +799,17 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // replace_first(str, from, to) -> String - Replace only first occurrence
+    // @ntnt replace_first
+    // @module std/string
+    // @signature replace_first(s: String, from: String, to: String) -> String
+    // @param s The input string to perform the replacement on
+    // @param from The substring to search for
+    // @param to The replacement string for the first match
+    // Replaces first occurrence of from with to.
+    // @see_also replace, replace_pattern
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example replace_first("abab", "a", "X") => "Xbab" ~ "Replace first only"
     module.insert(
         "replace_first".to_string(),
         Value::NativeFunction {
@@ -590,7 +826,17 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // replace_chars(str, chars, replacement) -> String - Replace any character in chars set
+    // @ntnt replace_chars
+    // @module std/string
+    // @signature replace_chars(s: String, chars: String, repl: String) -> String
+    // @param s The input string to perform replacements on
+    // @param chars The set of characters to replace (each character is matched individually)
+    // @param repl The replacement string for each matched character
+    // Replaces any character in the chars set with replacement.
+    // @see_also remove_chars, keep_chars, replace
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example replace_chars("a.b_c", "._", "-") => "a-b-c" ~ "Replace characters from set"
     module.insert(
         "replace_chars".to_string(),
         Value::NativeFunction {
@@ -618,7 +864,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // remove_chars(str, chars) -> String - Remove all characters in chars set
+    // @ntnt remove_chars
+    // @module std/string
+    // @signature remove_chars(s: String, chars: String) -> String
+    // @param s The input string to remove characters from
+    // @param chars The set of characters to remove (each character is matched individually)
+    // Removes all characters in the chars set.
+    // @see_also replace_chars, keep_chars
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example remove_chars("a!b?", "!?") => "ab" ~ "Remove punctuation"
     module.insert(
         "remove_chars".to_string(),
         Value::NativeFunction {
@@ -637,7 +892,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // keep_chars(str, allowed) -> String - Keep only characters in allowed set
+    // @ntnt keep_chars
+    // @module std/string
+    // @signature keep_chars(s: String, allowed: String) -> String
+    // @param s The input string to filter
+    // @param allowed The set of characters to keep (all others are removed)
+    // Keeps only characters in the allowed set.
+    // @see_also remove_chars, replace_chars
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example keep_chars("a1b2", "ab") => "ab" ~ "Keep only letters"
     module.insert(
         "keep_chars".to_string(),
         Value::NativeFunction {
@@ -658,7 +922,18 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Regex Operations ==========
 
-    // replace_pattern(str, pattern, replacement) -> String - Replace all regex matches
+    // @ntnt replace_pattern
+    // @module std/string
+    // @signature replace_pattern(s: String, pattern: String, repl: String) -> String
+    // @param s The input string to search within
+    // @param pattern A regular expression pattern to match against
+    // @param repl The replacement string for each match
+    // Replaces all regex matches with replacement.
+    // @see_also matches_pattern, find_pattern, split_pattern, replace
+    // @since v0.2.0
+    // @tags #pure
+    // @example replace_pattern("a1b2", "\\d", "X") => "aXbX" ~ "Replace digits with X"
+    // @error RuntimeError ~ "Invalid regex pattern" fix: "Check regex syntax"
     module.insert(
         "replace_pattern".to_string(),
         Value::NativeFunction {
@@ -683,7 +958,17 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // matches_pattern(str, pattern) -> Bool - Check if string matches regex pattern
+    // @ntnt matches_pattern
+    // @module std/string
+    // @signature matches_pattern(s: String, pattern: String) -> Bool
+    // @param s The string to test
+    // @param pattern A regular expression pattern to match against
+    // Checks if string matches regex pattern.
+    // @see_also find_pattern, replace_pattern, matches
+    // @since v0.2.0
+    // @tags #pure
+    // @example matches_pattern("test123", "\\d+") => true ~ "Contains digits"
+    // @error RuntimeError ~ "Invalid regex pattern" fix: "Check regex syntax"
     module.insert(
         "matches_pattern".to_string(),
         Value::NativeFunction {
@@ -704,7 +989,17 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // find_pattern(str, pattern) -> Option<String> - Find first regex match
+    // @ntnt find_pattern
+    // @module std/string
+    // @signature find_pattern(s: String, pattern: String) -> Option<String>
+    // @param s The string to search within
+    // @param pattern A regular expression pattern to find
+    // Returns first regex match or None.
+    // @see_also find_all_pattern, matches_pattern
+    // @since v0.2.0
+    // @tags #pure
+    // @example find_pattern("ab12cd", "\\d+") => Some("12") ~ "Find first digit sequence"
+    // @error RuntimeError ~ "Invalid regex pattern" fix: "Check regex syntax"
     module.insert(
         "find_pattern".to_string(),
         Value::NativeFunction {
@@ -736,7 +1031,17 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // find_all_pattern(str, pattern) -> [String] - Find all regex matches
+    // @ntnt find_all_pattern
+    // @module std/string
+    // @signature find_all_pattern(s: String, pattern: String) -> Array<String>
+    // @param s The string to search within
+    // @param pattern A regular expression pattern to find all occurrences of
+    // Returns all regex matches.
+    // @see_also find_pattern, matches_pattern
+    // @since v0.2.0
+    // @tags #pure
+    // @example find_all_pattern("a1b2", "\\d") => ["1", "2"] ~ "Find all digits"
+    // @error RuntimeError ~ "Invalid regex pattern" fix: "Check regex syntax"
     module.insert(
         "find_all_pattern".to_string(),
         Value::NativeFunction {
@@ -763,7 +1068,17 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // split_pattern(str, pattern) -> [String] - Split by regex pattern
+    // @ntnt split_pattern
+    // @module std/string
+    // @signature split_pattern(s: String, pattern: String) -> Array<String>
+    // @param s The string to split
+    // @param pattern A regular expression pattern to split on
+    // Splits string by regex pattern.
+    // @see_also split, find_all_pattern
+    // @since v0.2.0
+    // @tags #pure
+    // @example split_pattern("a1b2c", "\\d") => ["a", "b", "c"] ~ "Split on digits"
+    // @error RuntimeError ~ "Invalid regex pattern" fix: "Check regex syntax"
     module.insert(
         "split_pattern".to_string(),
         Value::NativeFunction {
@@ -790,7 +1105,17 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Substring & Extraction ==========
 
-    // char_at(str, index) -> String
+    // @ntnt char_at
+    // @module std/string
+    // @signature char_at(s: String, index: Int) -> String
+    // @param s The string to index into
+    // @param index Zero-based position of the character to retrieve
+    // Returns character at index.
+    // @see_also substring, chars
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example char_at("hello", 0) => "h" ~ "First character"
+    // @error RuntimeError ~ "Index out of bounds" fix: "Check string length with len() first"
     module.insert(
         "char_at".to_string(),
         Value::NativeFunction {
@@ -813,7 +1138,18 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // substring(str, start, end) -> String
+    // @ntnt substring
+    // @module std/string
+    // @signature substring(s: String, start: Int, end: Int) -> String
+    // @param s The source string to extract from
+    // @param start The zero-based starting index (inclusive)
+    // @param end The zero-based ending index (exclusive)
+    // Extracts substring from start to end (exclusive).
+    // @see_also char_at, chars
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example substring("hello", 1, 4) => "ell" ~ "Extract middle portion"
+    // @error RuntimeError ~ "Invalid substring range" fix: "Ensure 0 <= start <= end <= len(s)"
     module.insert(
         "substring".to_string(),
         Value::NativeFunction {
@@ -838,7 +1174,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // chars(str) -> [String] - Split into characters
+    // @ntnt chars
+    // @module std/string
+    // @signature chars(s: String) -> Array<String>
+    // @param s The string to split into individual characters
+    // Splits string into array of characters.
+    // @see_also split, char_at
+    // @since v0.1.0
+    // @tags #pure, #deterministic, #allocates
+    // @example chars("hi") => ["h", "i"] ~ "Split into characters"
     module.insert(
         "chars".to_string(),
         Value::NativeFunction {
@@ -857,7 +1201,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // lines(str) -> [String] - Split by newlines
+    // @ntnt lines
+    // @module std/string
+    // @signature lines(s: String) -> Array<String>
+    // @param s The string to split into newline-delimited lines
+    // Splits string by newlines.
+    // @see_also split, words
+    // @since v0.1.0
+    // @tags #pure, #deterministic, #allocates
+    // @example lines("a\nb") => ["a", "b"] ~ "Split by newline"
     module.insert(
         "lines".to_string(),
         Value::NativeFunction {
@@ -876,7 +1228,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // words(str) -> [String] - Split by whitespace
+    // @ntnt words
+    // @module std/string
+    // @signature words(s: String) -> Array<String>
+    // @param s The string to split into whitespace-delimited words
+    // Splits string by whitespace.
+    // @see_also split, lines
+    // @since v0.1.0
+    // @tags #pure, #deterministic, #allocates
+    // @example words("hello world") => ["hello", "world"] ~ "Split by whitespace"
     module.insert(
         "words".to_string(),
         Value::NativeFunction {
@@ -897,7 +1257,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // truncate(str, max_len, suffix) -> String - Truncate with suffix
+    // @ntnt truncate
+    // @module std/string
+    // @signature truncate(s: String, max_len: Int, suffix: String) -> String
+    // @param s The string to truncate
+    // @param max_len The maximum length of the resulting string (including suffix)
+    // @param suffix The string to append when truncation occurs (e.g. "...")
+    // Truncates string to max length with suffix.
+    //
+    // If the string is shorter than max_len, it is returned unchanged.
+    // @see_also substring
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example truncate("hello world", 8, "...") => "hello..." ~ "Truncate with ellipsis"
     module.insert(
         "truncate".to_string(),
         Value::NativeFunction {
@@ -924,7 +1296,17 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Padding ==========
 
-    // pad_left(str, length, char) -> String
+    // @ntnt pad_left
+    // @module std/string
+    // @signature pad_left(s: String, len: Int, char: String) -> String
+    // @param s The string to pad
+    // @param len The desired total length of the result
+    // @param char The character to use for padding (first char used if multi-char)
+    // Pads string on the left to reach target length.
+    // @see_also pad_right, center
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example pad_left("5", 3, "0") => "005" ~ "Zero-pad a number"
     module.insert(
         "pad_left".to_string(),
         Value::NativeFunction {
@@ -949,7 +1331,17 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // pad_right(str, length, char) -> String
+    // @ntnt pad_right
+    // @module std/string
+    // @signature pad_right(s: String, len: Int, char: String) -> String
+    // @param s The string to pad
+    // @param len The desired total length of the result
+    // @param char The character to use for padding (first char used if multi-char)
+    // Pads string on the right to reach target length.
+    // @see_also pad_left, center
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example pad_right("5", 3, "0") => "500" ~ "Pad right with zeros"
     module.insert(
         "pad_right".to_string(),
         Value::NativeFunction {
@@ -974,7 +1366,17 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // center(str, length, char) -> String - Center with padding
+    // @ntnt center
+    // @module std/string
+    // @signature center(s: String, len: Int, char: String) -> String
+    // @param s The string to center
+    // @param len The desired total length of the result
+    // @param char The character to use for padding on both sides
+    // Centers string with padding on both sides.
+    // @see_also pad_left, pad_right
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example center("hi", 6, "-") => "--hi--" ~ "Center with dashes"
     module.insert(
         "center".to_string(),
         Value::NativeFunction {
@@ -1004,7 +1406,15 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Validation ==========
 
-    // is_empty(str) -> Bool
+    // @ntnt is_empty
+    // @module std/string
+    // @signature is_empty(s: String) -> Bool
+    // @param s The string to check for emptiness
+    // Returns true if string is empty.
+    // @see_also is_blank
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example is_empty("") => true ~ "Empty string"
     module.insert(
         "is_empty".to_string(),
         Value::NativeFunction {
@@ -1019,7 +1429,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // is_blank(str) -> Bool - Empty or only whitespace
+    // @ntnt is_blank
+    // @module std/string
+    // @signature is_blank(s: String) -> Bool
+    // @param s The string to check for blankness (empty or whitespace-only)
+    // Returns true if string is empty or only whitespace.
+    // @see_also is_empty, is_whitespace
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example is_blank("  ") => true ~ "Whitespace-only is blank"
     module.insert(
         "is_blank".to_string(),
         Value::NativeFunction {
@@ -1034,7 +1452,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // is_numeric(str) -> Bool - All digits
+    // @ntnt is_numeric
+    // @module std/string
+    // @signature is_numeric(s: String) -> Bool
+    // @param s The string to check for numeric-only content
+    // Returns true if string contains only digits.
+    // @see_also is_alpha, is_alphanumeric
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example is_numeric("123") => true ~ "All digits"
     module.insert(
         "is_numeric".to_string(),
         Value::NativeFunction {
@@ -1051,7 +1477,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // is_alpha(str) -> Bool - All letters
+    // @ntnt is_alpha
+    // @module std/string
+    // @signature is_alpha(s: String) -> Bool
+    // @param s The string to check for alphabetic-only content
+    // Returns true if string contains only letters.
+    // @see_also is_numeric, is_alphanumeric
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example is_alpha("abc") => true ~ "All letters"
     module.insert(
         "is_alpha".to_string(),
         Value::NativeFunction {
@@ -1068,7 +1502,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // is_alphanumeric(str) -> Bool - Letters and digits only
+    // @ntnt is_alphanumeric
+    // @module std/string
+    // @signature is_alphanumeric(s: String) -> Bool
+    // @param s The string to check for alphanumeric-only content
+    // Returns true if string contains only letters and digits.
+    // @see_also is_alpha, is_numeric
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example is_alphanumeric("abc123") => true ~ "Letters and digits"
     module.insert(
         "is_alphanumeric".to_string(),
         Value::NativeFunction {
@@ -1085,7 +1527,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // is_lowercase(str) -> Bool
+    // @ntnt is_lowercase
+    // @module std/string
+    // @signature is_lowercase(s: String) -> Bool
+    // @param s The string to check for lowercase letters
+    // Returns true if all letters are lowercase.
+    // @see_also is_uppercase, to_lower
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example is_lowercase("hello") => true ~ "All lowercase"
     module.insert(
         "is_lowercase".to_string(),
         Value::NativeFunction {
@@ -1102,7 +1552,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // is_uppercase(str) -> Bool
+    // @ntnt is_uppercase
+    // @module std/string
+    // @signature is_uppercase(s: String) -> Bool
+    // @param s The string to check for uppercase letters
+    // Returns true if all letters are uppercase.
+    // @see_also is_lowercase, to_upper
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example is_uppercase("HELLO") => true ~ "All uppercase"
     module.insert(
         "is_uppercase".to_string(),
         Value::NativeFunction {
@@ -1119,7 +1577,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // is_whitespace(str) -> Bool
+    // @ntnt is_whitespace
+    // @module std/string
+    // @signature is_whitespace(s: String) -> Bool
+    // @param s The string to check for whitespace-only content
+    // Returns true if string contains only whitespace.
+    // @see_also is_blank, is_empty
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example is_whitespace("  \t") => true ~ "Spaces and tabs"
     module.insert(
         "is_whitespace".to_string(),
         Value::NativeFunction {
@@ -1136,7 +1602,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // matches(str, pattern) -> Bool - Simple glob-like matching (* and ?)
+    // @ntnt matches
+    // @module std/string
+    // @signature matches(s: String, pattern: String) -> Bool
+    // @param s The string to test against the pattern
+    // @param pattern A glob pattern using * (any chars) and ? (single char) wildcards
+    // Simple glob matching with * and ? wildcards.
+    //
+    // Uses glob-style patterns, not regular expressions.
+    // Use matches_pattern() for regex matching.
+    // @see_also matches_pattern, contains
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example matches("hello.txt", "*.txt") => true ~ "Glob wildcard match"
     module.insert(
         "matches".to_string(),
         Value::NativeFunction {
@@ -1155,7 +1633,17 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Aliases for compatibility ==========
 
-    // replace_all(str, from, to) -> String (alias for replace)
+    // @ntnt replace_all
+    // @module std/string
+    // @signature replace_all(s: String, from: String, to: String) -> String
+    // @param s The input string to perform replacements on
+    // @param from The substring to search for
+    // @param to The replacement string for each occurrence
+    // Alias for replace. Replaces all occurrences of from with to.
+    // @see_also replace
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example replace_all("hello", "l", "L") => "heLLo" ~ "Replace all occurrences"
     module.insert(
         "replace_all".to_string(),
         Value::NativeFunction {
@@ -1172,7 +1660,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // upper(str) -> String (alias for to_upper)
+    // @ntnt upper
+    // @module std/string
+    // @signature upper(s: String) -> String
+    // @param s The string to convert to uppercase
+    // Alias for to_upper. Converts string to uppercase.
+    // @see_also to_upper, lower
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example upper("hello") => "HELLO" ~ "Convert to uppercase"
     module.insert(
         "upper".to_string(),
         Value::NativeFunction {
@@ -1187,7 +1683,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // lower(str) -> String (alias for to_lower)
+    // @ntnt lower
+    // @module std/string
+    // @signature lower(s: String) -> String
+    // @param s The string to convert to lowercase
+    // Alias for to_lower. Converts string to lowercase.
+    // @see_also to_lower, upper
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example lower("HELLO") => "hello" ~ "Convert to lowercase"
     module.insert(
         "lower".to_string(),
         Value::NativeFunction {
@@ -1202,7 +1706,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // trim_start(str) -> String (alias for trim_left)
+    // @ntnt trim_start
+    // @module std/string
+    // @signature trim_start(s: String) -> String
+    // @param s The string to trim from the left
+    // Alias for trim_left. Removes leading whitespace.
+    // @see_also trim_left, trim_end
+    // @since v0.3.0
+    // @tags #pure, #deterministic
+    // @example trim_start("  hello") => "hello" ~ "Remove leading spaces"
     module.insert(
         "trim_start".to_string(),
         Value::NativeFunction {
@@ -1217,7 +1729,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // trim_end(str) -> String (alias for trim_right)
+    // @ntnt trim_end
+    // @module std/string
+    // @signature trim_end(s: String) -> String
+    // @param s The string to trim from the right
+    // Alias for trim_right. Removes trailing whitespace.
+    // @see_also trim_right, trim_start
+    // @since v0.3.0
+    // @tags #pure, #deterministic
+    // @example trim_end("hello  ") => "hello" ~ "Remove trailing spaces"
     module.insert(
         "trim_end".to_string(),
         Value::NativeFunction {

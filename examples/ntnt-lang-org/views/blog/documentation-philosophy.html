@@ -1,0 +1,134 @@
+{{! Documentation Philosophy blog post }}
+<a href="/blog" class="back-link">&larr; Back to Blog</a>
+
+<article class="blog-post">
+    <h2>Documentation as a Build Constraint</h2>
+    <div class="blog-meta" style="margin-bottom: 2rem;">January 29, 2026 - NTNT Team</div>
+
+    <div class="content">
+        <p>In most programming languages, documentation is a social expectation. Linters might warn about it. Style guides might mandate it. But the code compiles either way, and the undocumented function ships to production without complaint from the toolchain.</p>
+
+        <p>In NTNT, an undocumented standard library function is a compilation error. The Rust compiler will not produce a binary until every public function has a corresponding documentation block, and every documentation block has a corresponding function. This is not a lint rule or a CI gate. It is a hard constraint on the build.</p>
+
+        <p>Whether this is a good idea is genuinely debatable. We want to explain where the idea came from, how we implemented it, and what we think we've learned from living with it.</p>
+
+        <h3>Elixir's Contribution</h3>
+
+        <p>The intellectual foundation here belongs to Elixir and to Jos&eacute; Valim in particular. Elixir made a deliberate architectural choice to treat documentation as a language feature rather than a comment convention. The <code>@moduledoc</code> and <code>@doc</code> attributes are compiled into the <code>.beam</code> bytecode as structured data, which means documentation survives deployment and can be queried at runtime without access to source files. When you type <code>h Enum.map</code> in IEx, you are reading documentation from the compiled binary, not grepping through source.</p>
+
+        <p>Valim extended this beyond Elixir with EEP 48, an Erlang Enhancement Proposal that standardizes documentation storage across all BEAM languages. The result is that an Erlang IDE can display docs for an Elixir library, and a Gleam tool can render docs for an LFE module. Documentation becomes a VM-level interoperability concern.</p>
+
+        <p>Elixir also introduced doctests, where code examples embedded in documentation become executable tests:</p>
+
+        <pre><code>@doc &quot;&quot;&quot;
+Adds two numbers.
+
+## Examples
+
+    iex> Math.add(3, 4)
+    7
+&quot;&quot;&quot;
+def add(x, y), do: x + y</code></pre>
+
+        <p>When you run <code>mix test</code>, that <code>iex></code> block executes. If the function's behavior drifts from the documented example, the test suite fails. This is an elegant solution to the stale-documentation problem: examples cannot go out of date because out-of-date examples are test failures.</p>
+
+        <p>The practical results are visible across the Elixir ecosystem. HexDocs provides consistent, cross-linked documentation for published packages, and the overall quality is high. This is not a cultural accident. It follows from making documentation easy to write, hard to lose, and executable.</p>
+
+        <h3>What We Took and Where We Diverged</h3>
+
+        <p>NTNT borrowed three principles from Elixir directly:</p>
+
+        <ul>
+            <li>Documentation lives in the source, adjacent to the code. NTNT uses <code>// @ntnt</code> comment blocks in the Rust source files that implement each function.</li>
+            <li>Documentation survives compilation. A build script extracts structured doc blocks and embeds the result as JSON in the binary via <code>include_str!()</code>.</li>
+            <li>Documentation is queryable without source access. The REPL's <code>:doc</code> command and the CLI's <code>ntnt docs</code> command both read from this embedded data.</li>
+        </ul>
+
+        <p>The divergence is in enforcement. Elixir makes documentation convenient. NTNT makes it mandatory.</p>
+
+        <p>At compile time, <code>build.rs</code> scans every <code>NativeFunction</code> registration in the standard library and every <code>// @ntnt</code> documentation block. If a function exists without a doc block, the build fails. If a doc block exists without a matching function &mdash; perhaps the function was renamed or deleted &mdash; the build also fails. This is bidirectional: the set of functions and the set of doc blocks must be identical.</p>
+
+        <p>The consequence is that the NTNT standard library currently has 263 documented functions across 16 modules. This is not the result of a documentation effort. It is a tautology. The number of documented functions equals the number of functions because the build system makes any other state unrepresentable.</p>
+
+        <h3>The Agent Motivation</h3>
+
+        <p>NTNT is designed for AI agents as the primary code authors, and this is the practical reason we chose enforcement over encouragement.</p>
+
+        <p>Agents consume documentation as structured data: function names, parameter types, return types, examples. The reliability of this data directly affects the quality of generated code. When an agent queries "what string functions are available?", the answer needs to be complete (no undocumented functions omitted from the list), accurate (signatures matching actual behavior), and available without network access or source file parsing.</p>
+
+        <p>Compile-time enforcement provides the first two properties by construction. Embedding provides the third. The documentation in a given binary is guaranteed to describe exactly the functions in that binary, because the build cannot succeed otherwise.</p>
+
+        <p>This is a narrower guarantee than it might sound. We can ensure structural coverage &mdash; every function has a doc block with a description, parameter list, and return type. We cannot ensure semantic accuracy. A doc block can claim a function returns an array when it actually returns a map, and the build will pass as long as the block exists and has all required fields. We validate presence, not truth. This is a real limitation.</p>
+
+        <h3>The Shape of a Doc Block</h3>
+
+        <p>A doc block is a set of structured comment directives in the Rust source:</p>
+
+        <pre><code>// @ntnt split
+// @module std/string
+// @description Splits a string by a separator pattern
+// @param text: String - The string to split
+// @param separator: String - Pattern to split on
+// @returns Array&lt;String&gt; - Array of substrings
+// @example split("a,b,c", ",") => ["a", "b", "c"]
+// @example split("hello", "") => ["h", "e", "l", "l", "o"]</code></pre>
+
+        <p><code>build.rs</code> parses these into structured <code>DocEntry</code> values with typed fields for name, module, description, parameters (each with name, type, and description), return type, and examples. The embedded JSON is structured data, not prose, which means it can be filtered by module, searched by name, and rendered into different output formats depending on the consumer.</p>
+
+        <p>Multi-line examples are supported for functions that need them:</p>
+
+        <pre><code>// @example ~ "POST with JSON body"
+//   let opts = map {
+//     "url": "https://api.example.com",
+//     "method": "POST",
+//     "json": map { "key": "value" }
+//   }
+//   fetch(opts)
+// @expected Ok({status: 201, ...})</code></pre>
+
+        <h3>Auto-Discovery</h3>
+
+        <p>An earlier version of <code>build.rs</code> maintained a hardcoded list of source files to scan. Every new stdlib module required a corresponding edit to this list, which meant the list was perpetually at risk of going stale. We replaced it with directory scanning: <code>build.rs</code> discovers all <code>.rs</code> files in <code>src/stdlib/</code> at build time. Adding a new module file is sufficient; no registration is needed.</p>
+
+        <p>This is the same principle behind Elixir's ExDoc reading from compiled modules rather than a manifest. A documentation system that requires manual registration will, given enough time, have incomplete registrations. The directory should be the source of truth.</p>
+
+        <h3>What We Don't Have</h3>
+
+        <p>There are several things Elixir does that we have not implemented:</p>
+
+        <ul>
+            <li><strong>Doctests.</strong> Our examples are not executed during testing. They are purely documentary. This means an example can claim a function returns <code>[1, 2, 3]</code> when it actually returns <code>[3, 2, 1]</code>, and nothing in the build process will catch it. We validate that examples exist, not that they are correct. Addressing this is an open design question.</li>
+            <li><strong>Cross-project documentation.</strong> HexDocs links documentation across the entire Elixir package ecosystem. NTNT does not have a package manager, so this is not yet relevant, but it will become relevant.</li>
+            <li><strong>Internationalization.</strong> EEP 48 supports documentation keyed by language. We embed English only.</li>
+        </ul>
+
+        <p>There is also a philosophical gap. Elixir's model is enabling: the tooling makes it easy to write good documentation, and the ecosystem rewards it. NTNT's model is coercive: you cannot ship without documentation. The difference matters. Elixir's approach scales with community norms. Ours scales with compiler enforcement but risks producing grudging, low-quality documentation when the author would rather not write any.</p>
+
+        <h3>The Case Against</h3>
+
+        <p>Mandatory documentation has an obvious failure mode: if the build requires a <code>@description</code>, someone will write "Does the thing" and move on. The build passes. The documentation is technically present but practically worthless. You have added friction to the development process without adding value to the documentation.</p>
+
+        <p>We do not have a strong counterargument to this. Our experience so far is that the structured format mitigates it somewhat &mdash; filling in <code>@param name: String - ...</code> makes it harder to write something completely vacuous than writing a free-text docstring does. And in our case, the primary authors are AI agents, which tend to generate reasonable descriptions by default. Whether this holds with a broader contributor base is an open question, and we should be honest that it might not.</p>
+
+        <p>What we can observe is that for a language whose primary consumers are machines, coverage has a different value calculus than it does for human-oriented documentation. An agent working with 263 adequately-documented functions will produce more reliable code than one working with 200 well-documented functions and 63 undocumented ones, because the undocumented functions become a source of hallucination. Whether "adequate coverage everywhere" is better than "excellent coverage in most places" depends on who is reading.</p>
+
+        <h3>The Recursive Part</h3>
+
+        <p>NTNT's documentation system is itself documented in the project's AI instruction file (CLAUDE.md), which is auto-generated from the AI Agent Guide by <code>ntnt docs --generate</code>. When an agent contributes a new stdlib function, it reads the documentation format from CLAUDE.md, writes the <code>// @ntnt</code> block, and the build tells it whether the block is structurally complete. The agent does not need to understand the internals of <code>build.rs</code>. It follows a documented format and gets compiler feedback.</p>
+
+        <p>We have watched this loop work in practice. An agent adds a function, omits the <code>@returns</code> directive, the build fails with an explicit error, the agent adds the directive, the build passes. The documentation system functions as a feedback mechanism between the agent and the compiler, which is approximately what we hoped for when we designed it.</p>
+
+        <h3>Applicability Beyond NTNT</h3>
+
+        <p>The specific implementation &mdash; comment directives parsed by a Rust build script and embedded as JSON &mdash; is particular to our toolchain. The underlying ideas are transferable to any language:</p>
+
+        <ol>
+            <li>Count public functions and documented functions in CI. Fail the build if they differ.</li>
+            <li>Detect orphaned documentation that references functions which no longer exist.</li>
+            <li>Embed documentation in the build artifact as queryable data, not only as rendered HTML.</li>
+            <li>Auto-discover source files rather than maintaining a manual registry.</li>
+        </ol>
+
+        <p>These are worth doing regardless of how you feel about mandatory documentation. Elixir demonstrated that treating documentation as data, rather than as text that happens to live near code, produces measurably better ecosystems. The remaining question is where to draw the line between encouragement and enforcement, and we do not claim to have a definitive answer. We chose enforcement. We will see how it holds up.</p>
+    </div>
+</article>

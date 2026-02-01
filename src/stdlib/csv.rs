@@ -8,8 +8,21 @@ use std::collections::HashMap;
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // parse_csv(csv_str, delimiter?) -> Array of Arrays
-    // parse_csv("a,b,c\n1,2,3") -> [["a","b","c"], ["1","2","3"]]
+    // @ntnt parse_csv
+    // @module std/csv
+    // @module_description CSV parsing and generation
+    // @signature parse_csv(csv: String) -> Array<Array<String>>
+    // Parses a CSV string into an array of rows, where each row is an array of strings.
+    //
+    // Handles quoted fields with commas and escaped double-quotes. Empty rows
+    // are automatically skipped. Supports both LF and CRLF line endings.
+    // @param csv The CSV string to parse
+    // @returns Array of rows, each row an array of field strings
+    // @see_also parse_with_headers, stringify
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example parse_csv("a,b\n1,2") => [["a", "b"], ["1", "2"]] ~ "Basic CSV parsing"
+    // @error TypeError ~ "parse_csv() requires a string" fix: "Pass a CSV string"
     module.insert(
         "parse_csv".to_string(),
         Value::NativeFunction {
@@ -46,8 +59,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // parse_with_headers(csv_str, delimiter?) -> Array of Maps
-    // parse_with_headers("name,age\nAlice,30") -> [{"name": "Alice", "age": "30"}]
+    // @ntnt parse_with_headers
+    // @module std/csv
+    // @signature parse_with_headers(csv: String) -> Array<Map<String, String>>
+    // Parses CSV into an array of maps using the first row as column headers.
+    //
+    // The first row defines the map keys. Each subsequent row becomes a map
+    // with those keys mapped to the corresponding field values.
+    // @param csv The CSV string with a header row
+    // @returns Array of maps, one per data row
+    // @see_also parse_csv, stringify_with_headers
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example parse_with_headers("name,age\nAlice,30") => [map { "name": "Alice", "age": "30" }] ~ "Headers become map keys"
+    // @error TypeError ~ "csv.parse_with_headers() requires a string" fix: "Pass a CSV string"
     module.insert(
         "parse_with_headers".to_string(),
         Value::NativeFunction {
@@ -98,8 +123,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // stringify(rows, delimiter?) -> String
-    // stringify([["a","b"], ["1","2"]]) -> "a,b\n1,2"
+    // @ntnt stringify
+    // @module std/csv
+    // @signature stringify(rows: Array<Array<Any>>) -> String
+    // Converts an array of rows to a CSV string.
+    //
+    // Values are converted to strings. Fields containing commas, quotes,
+    // or newlines are automatically quoted with escaped double-quotes.
+    // @param rows Array of arrays, each inner array is a row
+    // @returns CSV-formatted string
+    // @see_also stringify_with_headers, parse_csv
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example stringify([["a", "b"], [1, 2]]) => "a,b\n1,2" ~ "Array rows to CSV"
+    // @error TypeError ~ "csv.stringify() requires an array" fix: "Pass an array of row arrays"
     module.insert(
         "stringify".to_string(),
         Value::NativeFunction {
@@ -154,8 +191,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // stringify_with_headers(data, headers, delimiter?) -> String
-    // stringify_with_headers([{"name": "Alice"}], ["name"]) -> "name\nAlice"
+    // @ntnt stringify_with_headers
+    // @module std/csv
+    // @signature stringify_with_headers(rows: Array<Map>, headers: Array<String>) -> String
+    // Converts an array of maps to a CSV string with a header row.
+    //
+    // The headers array defines both the column order and the header row.
+    // Each map row is serialized by looking up the header keys.
+    // @param rows Array of maps, one per data row
+    // @param headers Array of column names (also used as map keys)
+    // @returns CSV string with header row followed by data rows
+    // @see_also stringify, parse_with_headers
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example stringify_with_headers([map { "name": "Alice" }], ["name"]) => "name\nAlice" ~ "Maps to CSV with headers"
+    // @error TypeError ~ "csv.stringify_with_headers() first arg must be array" fix: "Pass array of maps"
     module.insert(
         "stringify_with_headers".to_string(),
         Value::NativeFunction {

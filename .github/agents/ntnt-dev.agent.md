@@ -44,15 +44,18 @@ ntnt/
 │       ├── http.rs         # std/http (client)
 │       ├── http_server.rs  # std/http/server
 │       ├── postgres.rs     # std/db/postgres
+│       ├── sqlite.rs       # std/db/sqlite
 │       └── concurrent.rs   # std/concurrent
+├── build.rs                # Doc extraction: scans // @ntnt blocks, validates coverage
 ├── examples/               # Example .tnt programs (test against these!)
 ├── tests/                  # Integration tests
 ├── docs/                   # Documentation
-│   ├── AI_AGENT_GUIDE.md   # Agent guide for NTNT syntax
-│   └── INTENT_DRIVEN_DEVELOPMENT.md
-├── LANGUAGE_SPEC.md        # Language specification
+│   ├── AI_AGENT_GUIDE.md   # Canonical NTNT coding guide (source for agent files)
+│   ├── STDLIB_REFERENCE.md # Auto-generated from // @ntnt blocks
+│   └── SYNTAX_REFERENCE.md # Language syntax reference
+├── CLAUDE.md               # Claude Code instructions (includes full coding guide)
 ├── ARCHITECTURE.md         # System architecture
-├── ROADMAP.md              # Implementation roadmap (10 phases)
+├── ROADMAP.md              # Implementation roadmap
 └── Cargo.toml              # Rust dependencies
 ```
 
@@ -160,9 +163,10 @@ cargo run -- run examples/hello.tnt    # Test execution
 ### 4. Update Documentation
 
 When adding features:
-- Update `LANGUAGE_SPEC.md` for syntax changes
-- Update `docs/AI_AGENT_GUIDE.md` for user-facing features
-- Update `.github/copilot-instructions.md` for AI agents
+- Add `// @ntnt` doc blocks on all new stdlib/builtin functions (build enforces this)
+- Run `ntnt docs --generate` to regenerate `STDLIB_REFERENCE.md`
+- Update `docs/AI_AGENT_GUIDE.md` for user-facing syntax or patterns
+- Copy AI_AGENT_GUIDE changes to `CLAUDE.md` and `.github/copilot-instructions.md`
 - Add examples to `examples/` directory
 
 ## Key Implementation Patterns
@@ -233,28 +237,40 @@ fn eval_expr(&mut self, expr: &Expr) -> Result<Value, RuntimeError> {
 
 ### Adding a Stdlib Function (stdlib/*.rs)
 
+Every stdlib function needs a `// @ntnt` doc block directly above its `module.insert()` call. The build fails if any `NativeFunction` is undocumented.
+
 ```rust
 // In the module file (e.g., stdlib/string.rs)
-pub fn register_functions(registry: &mut FunctionRegistry) {
-    registry.insert("my_function", my_function);
-}
 
-fn my_function(args: Vec<Value>) -> Result<Value, String> {
-    if args.len() != 1 {
-        return Err("my_function expects 1 argument".to_string());
-    }
-    let input = args[0].as_string()?;
-    Ok(Value::String(input.to_uppercase()))
-}
-
-// In stdlib/mod.rs - register the new function
-pub fn get_stdlib_function(module: &str, name: &str) -> Option<NativeFunction> {
-    match (module, name) {
-        ("std/string", "my_function") => Some(string::my_function),
-        // ...
-    }
-}
+// @ntnt my_function
+// @module std/string
+// @signature my_function(s: String) -> String
+// Converts a string to uppercase.
+// @param s The input string
+// @returns The uppercased string
+// @see_also to_lower
+// @since v0.3.9
+// @tags #pure, #deterministic
+// @example my_function("hello") => "HELLO" ~ "Basic uppercase"
+module.insert(
+    "my_function".to_string(),
+    Value::NativeFunction {
+        name: "my_function".to_string(),
+        arity: 1,
+        func: |args| match &args[0] {
+            Value::String(s) => Ok(Value::String(s.to_uppercase())),
+            _ => Err(IntentError::TypeError(
+                "my_function() requires a string".to_string(),
+            )),
+        },
+    },
+);
 ```
+
+Doc blocks are scanned by `build.rs` at compile time, which:
+- Validates every `NativeFunction` has a `// @ntnt` block (build fails if missing)
+- Embeds documentation in the binary for REPL `:doc` and `:search` commands
+- Generates `doc_data.json` used by `ntnt docs --generate` for STDLIB_REFERENCE.md
 
 ## Common Implementation Tasks
 
@@ -272,10 +288,12 @@ pub fn get_stdlib_function(module: &str, name: &str) -> Option<NativeFunction> {
 ### Adding a Stdlib Module
 
 1. Create `src/stdlib/mymodule.rs`
-2. Add to `src/stdlib/mod.rs`
-3. Register functions in the module registry
-4. Add tests
-5. Document in `docs/AI_AGENT_GUIDE.md`
+2. Add to `src/stdlib/mod.rs` (register with `modules.insert("std/mymodule"...)`)
+3. Add `// @ntnt` doc blocks above every `NativeFunction` insert
+4. Add the new file to `SOURCE_FILES` in `build.rs`
+5. Add tests
+6. Run `ntnt docs --generate` to update STDLIB_REFERENCE.md
+7. Update `docs/AI_AGENT_GUIDE.md` with usage examples
 
 ### Fixing a Bug
 
@@ -461,15 +479,34 @@ Before submitting changes:
 - [ ] `cargo test` passes
 - [ ] `cargo clippy` has no warnings
 - [ ] `cargo fmt` applied
+- [ ] `// @ntnt` doc blocks on all new/changed functions
+- [ ] `cargo build` succeeds (validates doc coverage)
 - [ ] New tests added for new features
-- [ ] Documentation updated
+- [ ] `ntnt docs --generate` run (if stdlib changed)
+- [ ] `docs/AI_AGENT_GUIDE.md` updated (if user-facing feature)
+- [ ] Agent files synced (`CLAUDE.md`, `.github/copilot-instructions.md`)
 - [ ] Example file added (if user-facing feature)
-- [ ] LANGUAGE_SPEC.md updated (if syntax change)
+
+## Testing Documentation in the REPL
+
+After building, verify docs with the REPL:
+
+```bash
+ntnt
+```
+
+```
+ntnt> :doc split              # Full docs for a function
+ntnt> :doc my_new_function    # Verify new function appears
+ntnt> :search "uppercase"     # Search names, summaries, descriptions
+ntnt> :help                   # Show all REPL commands
+ntnt> :env                    # Show current bindings
+```
 
 ## Reference Documents
 
-- **LANGUAGE_SPEC.md**: Complete syntax specification
 - **ARCHITECTURE.md**: System design and component overview
-- **ROADMAP.md**: 10-phase implementation plan
-- **docs/AI_AGENT_GUIDE.md**: User-facing syntax guide
-- **CONTRIBUTING.md**: Contribution guidelines
+- **ROADMAP.md**: Implementation plan
+- **docs/AI_AGENT_GUIDE.md**: Canonical NTNT coding guide (source for CLAUDE.md and copilot-instructions.md)
+- **docs/STDLIB_REFERENCE.md**: Auto-generated from `// @ntnt` source blocks
+- **build.rs**: Doc extraction and coverage validation

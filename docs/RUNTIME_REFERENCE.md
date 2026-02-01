@@ -2,7 +2,7 @@
 
 > **Auto-generated from [runtime.toml](runtime.toml)** - Do not edit directly.
 >
-> Last updated: v0.3.8
+> Last updated: v0.3.9
 
 Runtime configuration, environment variables, and CLI commands for NTNT
 
@@ -269,7 +269,7 @@ Look up documentation for stdlib modules or functions
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `--validate` | flag | - | Validate that all stdlib functions are documented |
-| `--generate` | flag | - | Regenerate docs/STDLIB_REFERENCE.md from stdlib.toml |
+| `--generate` | flag | - | Regenerate reference docs from source annotations and TOML, and sync agent instruction files (CLAUDE.md, copilot-instructions.md) from AI_AGENT_GUIDE.md |
 | `--json` | flag | - | Output as JSON (for tooling) |
 
 **Examples:**

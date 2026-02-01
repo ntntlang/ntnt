@@ -438,7 +438,22 @@ fn create_response_value(status: i64, headers: HashMap<String, Value>, body: Str
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // Response.text(body) -> Response - Create a text response
+    // @ntnt text
+    // @module std/http/server
+    // @module_description HTTP response builders for server route handlers
+    // @signature text(body: String) -> Response
+    // Create a plain-text HTTP response with status 200.
+    //
+    // Wraps the given string in a Response map with Content-Type set to
+    // `text/plain; charset=utf-8` and cache-control headers that prevent
+    // browser caching of dynamic content.
+    // @param body The plain-text string to send as the response body.
+    // @returns A Response map with status 200, text/plain content-type, and no-cache headers.
+    // @see_also html, json, status, redirect, response
+    // @since v0.1.0
+    // @tags #http, #server
+    // @example text("Hello, World!") => Response { status: 200, body: "Hello, World!" } ~ "Plain text response"
+    // @error TypeError ~ "text() requires a string" fix: "Pass a String value as the argument"
     module.insert(
         "text".to_string(),
         Value::NativeFunction {
@@ -467,8 +482,26 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // Response.html(body, status_code?) -> Response - Create an HTML response
-    // Includes cache-control headers to prevent browser caching
+    // @ntnt html
+    // @module std/http/server
+    // @signature html(body: String, status_code?: Int) -> Response
+    // Create an HTML HTTP response.
+    //
+    // Returns a Response map with Content-Type `text/html; charset=utf-8`.
+    // Accepts an optional second argument to override the default 200 status code.
+    // Includes cache-control and pragma headers to prevent browser caching of
+    // dynamic HTML content.
+    // @param body The HTML string to send as the response body.
+    // @param status_code Optional HTTP status code (defaults to 200).
+    // @returns A Response map with the given status, text/html content-type, and no-cache headers.
+    // @see_also text, json, status, redirect, response
+    // @since v0.1.0
+    // @tags #http, #server
+    // @example html("<h1>Hello</h1>") => Response { status: 200, body: "<h1>Hello</h1>" } ~ "HTML response"
+    // @example html("<h1>Not Found</h1>", 404) => Response { status: 404 } ~ "HTML with custom status"
+    // @error TypeError ~ "html() requires 1 or 2 arguments (body, optional status_code)" fix: "Pass 1 or 2 arguments"
+    // @error TypeError ~ "html() body must be a string" fix: "Ensure the first argument is a String"
+    // @error TypeError ~ "html() status code must be an integer" fix: "Pass an Int as the second argument"
     module.insert(
         "html".to_string(),
         Value::NativeFunction {
@@ -519,9 +552,25 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // Response.json(data, status_code?) -> Response - Create a JSON response
-    // If status_code is provided, use it; otherwise default to 200
-    // Includes cache-control headers to prevent browser caching
+    // @ntnt json
+    // @module std/http/server
+    // @signature json(data: Any, status_code?: Int) -> Response
+    // Create a JSON HTTP response.
+    //
+    // Serializes the given value (typically a Map or Array) to a JSON string
+    // and returns a Response with Content-Type `application/json`. Accepts an
+    // optional second argument to override the default 200 status code. Includes
+    // cache-control headers to prevent browser caching of API responses.
+    // @param data The value to serialize as JSON (Map, Array, String, Int, Float, Bool, or Unit).
+    // @param status_code Optional HTTP status code (defaults to 200).
+    // @returns A Response map with the given status, application/json content-type, and no-cache headers.
+    // @see_also text, html, status, redirect, response, parse_json
+    // @since v0.1.0
+    // @tags #http, #server
+    // @example json(map { "ok": true }) => Response { status: 200, body: "{\"ok\":true}" } ~ "JSON response"
+    // @example json(map { "error": "not found" }, 404) => Response { status: 404 } ~ "JSON with custom status"
+    // @error TypeError ~ "json() requires 1 or 2 arguments (data, optional status_code)" fix: "Pass 1 or 2 arguments"
+    // @error TypeError ~ "json() status code must be an integer" fix: "Pass an Int as the second argument"
     module.insert(
         "json".to_string(),
         Value::NativeFunction {
@@ -564,7 +613,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // Response.status(code, body) -> Response - Create response with status code
+    // @ntnt status
+    // @module std/http/server
+    // @signature status(code: Int, body: String) -> Response
+    // Create a plain-text HTTP response with an explicit status code.
+    //
+    // Returns a Response map with the specified status code, Content-Type
+    // `text/plain; charset=utf-8`, and the provided body string.
+    // @param code The HTTP status code (e.g., 201, 400, 503).
+    // @param body The plain-text body string.
+    // @returns A Response map with the given status and text/plain content-type.
+    // @see_also text, html, json, redirect, error, response
+    // @since v0.1.0
+    // @tags #http, #server
+    // @example status(201, "Created") => Response { status: 201, body: "Created" } ~ "Custom status response"
+    // @error TypeError ~ "status() requires int and string" fix: "Pass an Int status code and a String body"
     module.insert(
         "status".to_string(),
         Value::NativeFunction {
@@ -586,7 +649,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // Response.redirect(url) -> Response - Create a redirect response
+    // @ntnt redirect
+    // @module std/http/server
+    // @signature redirect(url: String) -> Response
+    // Create an HTTP 302 redirect response.
+    //
+    // Returns a Response map with status 302 and a `Location` header set to
+    // the provided URL. The body is empty.
+    // @param url The URL to redirect the client to (absolute or relative path).
+    // @returns A Response map with status 302, a Location header, and an empty body.
+    // @see_also text, html, json, status, response
+    // @since v0.1.0
+    // @tags #http, #server
+    // @example redirect("/dashboard") => Response { status: 302, headers: { "location": "/dashboard" } } ~ "Redirect response"
+    // @error TypeError ~ "redirect() requires a URL string" fix: "Pass a String URL as the argument"
     module.insert(
         "redirect".to_string(),
         Value::NativeFunction {
@@ -605,7 +681,18 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // Response.not_found() -> Response - Create a 404 response
+    // @ntnt not_found
+    // @module std/http/server
+    // @signature not_found() -> Response
+    // Create an HTTP 404 Not Found response.
+    //
+    // Returns a Response map with status 404, Content-Type `text/plain; charset=utf-8`,
+    // and body "Not Found". Takes no arguments.
+    // @returns A Response map with status 404, text/plain content-type, and body "Not Found".
+    // @see_also error, status, text, html, json, response
+    // @since v0.1.0
+    // @tags #http, #server
+    // @example not_found() => Response { status: 404, body: "Not Found" } ~ "404 response"
     module.insert(
         "not_found".to_string(),
         Value::NativeFunction {
@@ -622,7 +709,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // Response.error(message) -> Response - Create a 500 error response
+    // @ntnt error
+    // @module std/http/server
+    // @signature error(message: String) -> Response
+    // Create an HTTP 500 Internal Server Error response.
+    //
+    // Returns a Response map with status 500, Content-Type `text/plain; charset=utf-8`,
+    // and the provided message as the body.
+    // @param message The error message to send as the response body.
+    // @returns A Response map with status 500, text/plain content-type, and the error message body.
+    // @see_also not_found, status, text, html, json, response
+    // @since v0.1.0
+    // @tags #http, #server
+    // @example error("Something went wrong") => Response { status: 500, body: "Something went wrong" } ~ "500 error response"
+    // @error TypeError ~ "error() requires a string" fix: "Pass a String message as the argument"
     module.insert(
         "error".to_string(),
         Value::NativeFunction {
@@ -644,9 +744,28 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // Response.static_file(content, content_type, max_age?) -> Response
-    // Create a response with caching enabled for static assets
-    // max_age is in seconds, defaults to 3600 (1 hour)
+    // @ntnt static_file
+    // @module std/http/server
+    // @signature static_file(content: String, content_type: String, max_age?: Int) -> Response
+    // Create a cacheable HTTP response for static assets.
+    //
+    // Returns a Response map with status 200, the specified Content-Type, and a
+    // `Cache-Control: public, max-age=<seconds>` header. The optional `max_age`
+    // parameter controls how long browsers cache the asset (defaults to 3600
+    // seconds / 1 hour).
+    // @param content The file content as a string.
+    // @param content_type The MIME type for the Content-Type header (e.g., "text/css", "image/png").
+    // @param max_age Optional cache duration in seconds (defaults to 3600).
+    // @returns A Response map with status 200, the given content-type, and public cache-control headers.
+    // @see_also text, html, json, response
+    // @since v0.1.0
+    // @tags #http, #server
+    // @example static_file(css, "text/css") => Response { status: 200 } ~ "Static CSS with default 1h cache"
+    // @example static_file(js, "application/javascript", 86400) => Response { status: 200 } ~ "Static JS with 24h cache"
+    // @error TypeError ~ "static_file() requires 2-3 arguments (content, content_type, optional max_age)" fix: "Pass 2 or 3 arguments"
+    // @error TypeError ~ "static_file() content must be a string" fix: "Ensure the first argument is a String"
+    // @error TypeError ~ "static_file() content_type must be a string" fix: "Ensure the second argument is a String"
+    // @error TypeError ~ "static_file() max_age must be an integer" fix: "Pass an Int as the third argument"
     module.insert("static_file".to_string(), Value::NativeFunction {
         name: "static_file".to_string(),
         arity: 0, // Accepts 2 or 3 arguments
@@ -689,8 +808,25 @@ pub fn init() -> HashMap<String, Value> {
         },
     });
 
-    // Response.response(status, headers, body) -> Response
-    // Create a fully custom response with complete control over headers
+    // @ntnt response
+    // @module std/http/server
+    // @signature response(status: Int, headers: Map<String, String>, body: String) -> Response
+    // Create a fully custom HTTP response.
+    //
+    // Provides complete control over status code, headers, and body. Header keys
+    // are lowercased automatically. Use this when the convenience builders
+    // (text, html, json) do not offer enough flexibility.
+    // @param status The HTTP status code.
+    // @param headers A Map of header names to header values.
+    // @param body The response body string.
+    // @returns A Response map with the given status, headers (lowercased keys), and body.
+    // @see_also text, html, json, status, redirect, static_file
+    // @since v0.1.0
+    // @tags #http, #server
+    // @example response(200, map { "X-Custom": "value" }, "OK") => Response { status: 200 } ~ "Custom response"
+    // @error TypeError ~ "response() status must be an integer" fix: "Pass an Int as the first argument"
+    // @error TypeError ~ "response() headers must be a map" fix: "Pass a Map as the second argument"
+    // @error TypeError ~ "response() body must be a string" fix: "Pass a String as the third argument"
     module.insert(
         "response".to_string(),
         Value::NativeFunction {
@@ -734,7 +870,23 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // parse_json(req) -> Result<Value, Error> - Parse request body as JSON
+    // @ntnt parse_json
+    // @module std/http/server
+    // @signature parse_json(req: Request | String) -> Result<Map<String, Any>, String>
+    // Parse a request body (or raw string) as JSON.
+    //
+    // Accepts either a Request map (extracts the `body` field) or a plain String.
+    // Returns a Result enum: `Ok(value)` on success with the parsed data, or
+    // `Err(message)` if the JSON is malformed.
+    // @param req A Request map with a `body` field, or a raw JSON string.
+    // @returns Result<Map<String, Any>, String> -- Ok with parsed value, or Err with parse error message.
+    // @see_also json, parse_form
+    // @since v0.1.0
+    // @tags #http, #server
+    // @example parse_json("{\"key\": \"value\"}") => Ok(map { "key": "value" }) ~ "Parse JSON string"
+    // @example parse_json("not json") => Err("expected ...") ~ "Returns Err on invalid JSON"
+    // @error TypeError ~ "parse_json() requires a request with body" fix: "Pass a Request map that contains a body field"
+    // @error TypeError ~ "parse_json() requires a request map or body string" fix: "Pass a Request map or a String"
     module.insert(
         "parse_json".to_string(),
         Value::NativeFunction {
@@ -777,7 +929,24 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // parse_form(req) -> Map - Parse request body as URL-encoded form data
+    // @ntnt parse_form
+    // @module std/http/server
+    // @signature parse_form(req: Request | String) -> Map<String, String>
+    // Parse a request body (or raw string) as URL-encoded form data.
+    //
+    // Accepts either a Request map (extracts the `body` field) or a plain String.
+    // Splits the body on `&` and `=` to produce key-value pairs. Keys and values
+    // are URL-decoded automatically. Keys without a value are mapped to an empty
+    // string.
+    // @param req A Request map with a `body` field, or a raw URL-encoded form string.
+    // @returns A Map<String, String> of decoded form field names to values.
+    // @see_also parse_json, json
+    // @since v0.1.0
+    // @tags #http, #server
+    // @example parse_form("name=Alice&age=30") => map { "name": "Alice", "age": "30" } ~ "Parse form data"
+    // @example parse_form("q=hello+world") => map { "q": "hello world" } ~ "URL-decoded values"
+    // @error TypeError ~ "parse_form() requires a request with body" fix: "Pass a Request map that contains a body field"
+    // @error TypeError ~ "parse_form() requires a request map or body string" fix: "Pass a Request map or a String"
     module.insert(
         "parse_form".to_string(),
         Value::NativeFunction {

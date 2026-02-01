@@ -12,7 +12,15 @@ use uuid::Uuid;
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // sha256(data) -> String - SHA-256 hash as hex string
+    // @ntnt sha256
+    // @module std/crypto
+    // @module_description Cryptographic hashing and random value generation
+    // @signature sha256(data: String | Array<Int>) -> String
+    // SHA-256 hash as hex string. Accepts string or byte array.
+    // @param data The input data to hash (string or byte array)
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example sha256("hello") => "2cf24dba..." ~ "Hash a string"
     module.insert(
         "sha256".to_string(),
         Value::NativeFunction {
@@ -51,7 +59,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // sha256_bytes(data) -> [Int] - SHA-256 hash as byte array
+    // @ntnt sha256_bytes
+    // @module std/crypto
+    // @signature sha256_bytes(data: String) -> Array<Int>
+    // SHA-256 hash as byte array. Returns array of 32 integers (0-255).
+    // @param data The input string to hash
+    // @see_also sha256
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example sha256_bytes("hello")[0] => 44 ~ "First byte of SHA-256 hash of 'hello'"
     module.insert(
         "sha256_bytes".to_string(),
         Value::NativeFunction {
@@ -72,7 +88,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // hmac_sha256(key, data) -> String - HMAC-SHA256 as hex string
+    // @ntnt hmac_sha256
+    // @module std/crypto
+    // @signature hmac_sha256(key: String, data: String) -> String
+    // HMAC-SHA256 message authentication code as hex string.
+    // @param key The secret key for HMAC
+    // @param data The data to authenticate
+    // @see_also sha256
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example hmac_sha256("secret", "message") ~ "Returns HMAC-SHA256 as 64-char hex string"
     module.insert(
         "hmac_sha256".to_string(),
         Value::NativeFunction {
@@ -94,7 +119,12 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // uuid() -> String - Generate a random UUID v4
+    // @ntnt uuid
+    // @module std/crypto
+    // @signature uuid() -> String
+    // Generates a random UUID v4 string.
+    // @since v0.2.0
+    // @example uuid() => "550e8400-e29b-41d4-a716-446655440000" ~ "Random UUID v4"
     module.insert(
         "uuid".to_string(),
         Value::NativeFunction {
@@ -104,7 +134,14 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // random_bytes(n) -> [Int] - Generate n cryptographically secure random bytes
+    // @ntnt random_bytes
+    // @module std/crypto
+    // @signature random_bytes(n: Int) -> Array<Int>
+    // Generates n cryptographically secure random bytes. Size limit 0-1048576.
+    // @param n Number of random bytes to generate
+    // @since v0.2.0
+    // @example random_bytes(16) ~ "Returns 16 random bytes as array of integers 0-255"
+    // @error RuntimeError ~ "size must be 0-1048576" fix: "Reduce the requested byte count"
     module.insert(
         "random_bytes".to_string(),
         Value::NativeFunction {
@@ -129,7 +166,14 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // random_hex(n) -> String - Generate n random bytes as hex string
+    // @ntnt random_hex
+    // @module std/crypto
+    // @signature random_hex(n: Int) -> String
+    // Generates n random bytes as hex string (2n chars).
+    // @param n Number of random bytes to generate
+    // @see_also random_bytes
+    // @since v0.2.0
+    // @example random_hex(8) ~ "Returns 16-char hex string from 8 random bytes"
     module.insert(
         "random_hex".to_string(),
         Value::NativeFunction {
@@ -153,7 +197,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // hex_encode(bytes) -> String - Encode bytes as hex
+    // @ntnt hex_encode
+    // @module std/crypto
+    // @signature hex_encode(data: Array<Int> | String) -> String
+    // Encodes bytes or string as hex.
+    // @param data Byte array or string to encode
+    // @see_also hex_decode
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example hex_encode("hi") => "6869"
     module.insert(
         "hex_encode".to_string(),
         Value::NativeFunction {
@@ -180,7 +232,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // hex_decode(hex_str) -> Result<[Int], Error> - Decode hex string to bytes
+    // @ntnt hex_decode
+    // @module std/crypto
+    // @signature hex_decode(hex: String) -> Result<Array<Int>, String>
+    // Decodes hex string to byte array. Returns Err for invalid hex.
+    // @param hex The hex string to decode
+    // @see_also hex_encode
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example hex_decode("6869") => Ok([104, 105]) ~ "Decode hex to bytes for 'hi'"
+    // @example hex_decode("zz") => Err("...") ~ "Invalid hex returns Err"
     module.insert(
         "hex_decode".to_string(),
         Value::NativeFunction {

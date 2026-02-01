@@ -21,7 +21,7 @@ These documents are auto-generated from TOML source files. Regenerate with: `ntn
 | [IAL Reference](IAL_REFERENCE.md) | Intent Assertion Language primitives and terms |
 
 Source files:
-- [stdlib.toml](stdlib.toml) - Function documentation
+- Stdlib functions: `// @ntnt` comments in `src/stdlib/*.rs` and `src/interpreter.rs`
 - [syntax.toml](syntax.toml) - Language syntax
 - [ial.toml](ial.toml) - IAL specification
 

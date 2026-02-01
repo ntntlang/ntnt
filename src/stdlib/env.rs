@@ -8,7 +8,20 @@ use std::collections::HashMap;
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // get_env(name) -> Option<String>
+    // @ntnt get_env
+    // @module std/env
+    // @module_description Environment variable access
+    // @signature get_env(name: String) -> Option<String>
+    // Gets an environment variable by name.
+    //
+    // Returns Some(value) if the variable is set, or None if it is not defined
+    // in the current process environment.
+    // @param name The environment variable name
+    // @returns Option containing the value or None
+    // @see_also load_env
+    // @since v0.1.0
+    // @example get_env("HOME") => Some("/Users/...") ~ "Get home directory"
+    // @example get_env("UNDEFINED_VAR") => None ~ "Missing variable"
     module.insert(
         "get_env".to_string(),
         Value::NativeFunction {
@@ -34,7 +47,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // args() -> [String] - command line arguments
+    // @ntnt args
+    // @module std/env
+    // @signature args() -> Array<String>
+    // Returns command-line arguments as an array of strings.
+    //
+    // The first element is the program name, followed by any arguments
+    // passed on the command line.
+    // @returns Array of argument strings
+    // @since v0.1.0
+    // @example args() => ["ntnt", "script.tnt", "--flag"] ~ "Program name and arguments"
     module.insert(
         "args".to_string(),
         Value::NativeFunction {
@@ -47,7 +69,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // cwd() -> String - current working directory
+    // @ntnt cwd
+    // @module std/env
+    // @signature cwd() -> String
+    // Returns the current working directory as a string.
+    // @returns Absolute path of the current working directory
+    // @since v0.1.0
+    // @tags #deterministic
+    // @example cwd() => "/Users/dev/project" ~ "Current directory path"
+    // @error RuntimeError ~ "Failed to get cwd" fix: "Ensure the process has filesystem access"
     module.insert(
         "cwd".to_string(),
         Value::NativeFunction {
@@ -63,7 +93,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // load_env(path) -> Result<(), String> - Load .env file
+    // @ntnt load_env
+    // @module std/env
+    // @signature load_env(path: String) -> Result<Unit, String>
+    // Loads environment variables from a .env file.
+    //
+    // Reads the file line by line, parsing KEY=VALUE pairs. Lines starting
+    // with # are treated as comments and skipped. Variables are set in
+    // the current process environment.
+    // @param path Path to the .env file
+    // @returns Result indicating success or file read error
+    // @see_also get_env
+    // @since v0.2.0
+    // @example load_env(".env") ~ "Load default .env file"
+    // @example load_env(".env.local") ~ "Load environment-specific file"
     module.insert(
         "load_env".to_string(),
         Value::NativeFunction {

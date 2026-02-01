@@ -2,6 +2,8 @@
 
 This document outlines the implementation plan for NTNT, a programming language designed for AI-driven development. The roadmap prioritizes getting to a working web application quickly while focusing on NTNT's unique differentiators: contracts, AI integration, and intent encoding.
 
+> **Completed Phases:** Phases 1-5 (Core Language, Type System, Modules, Traits, Web) are 100% complete and documented in [ROADMAP_COMPLETE.md](ROADMAP_COMPLETE.md).
+
 ---
 
 ## Design Principles
@@ -58,430 +60,19 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] CSV parsing (`std/csv`)
 - [x] `ntnt test` command for HTTP endpoint testing
 - [x] `ntnt docs` command for stdlib documentation search
-- [x] `ntnt docs --generate` for auto-generating reference docs from TOML
+- [x] `ntnt docs --generate` for auto-generating reference docs and AI agent guide sync
 - [x] `ntnt completions <shell>` for shell completions (bash, zsh, fish)
 - [x] Auto-generated documentation (STDLIB_REFERENCE.md, SYNTAX_REFERENCE.md, IAL_REFERENCE.md)
 - [x] External templates with `template()` function (Mustache-style syntax)
 - [x] Async HTTP server (Axum + Tokio) with bridge to sync interpreter
 - [x] Hot-reload for file-based routes (routes/*.tnt) in async server
 - [x] Hot-reload tracks imported files (lib modules, local imports)
+- [x] Hot-reload for lib modules, middleware, and route directory changes
+- [x] Template cache invalidation (mtime-based hot-reload for compiled templates)
 - [x] NTNT_ENV=production disables hot-reload for better performance
 - [x] Runtime documentation (RUNTIME_REFERENCE.md)
-
----
-
-## Phase 1: Core Contract System ✅ COMPLETE
-
-**Status:** Complete
-
-### 1.1 Runtime Contract Enforcement ✅
-
-- [x] Precondition (`requires`) evaluation before function execution
-- [x] Postcondition (`ensures`) evaluation after function execution
-- [x] Access to `old()` values in postconditions
-- [x] Access to `result` in postconditions
-- [x] Contract violation error handling with clear messages
-
-### 1.2 Class/Struct Invariants ✅
-
-- [x] `invariant` clause support in impl blocks
-- [x] Invariant checking on struct construction
-- [x] Invariant checking after method calls
-- [x] Invariant checking after field assignments
-- [x] `self` keyword access in invariant expressions
-
----
-
-## Phase 2: Type System & Pattern Matching ✅ COMPLETE
-
-**Status:** Complete
-
-### 2.1 Algebraic Data Types ✅
-
-- [x] Enum types with associated data
-- [x] `Option<T>` and `Result<T, E>` as built-ins
-- [x] Pattern matching with `match` expressions
-- [x] Exhaustiveness checking
-- [x] Destructuring in `let` bindings
-
-### 2.2 Generics ✅
-
-- [x] Generic functions: `fn map<T, U>(arr: [T], f: fn(T) -> U) -> [U]`
-- [x] Generic types: `struct Stack<T> { items: [T] }`
-
-### 2.3 Type System Improvements ✅
-
-- [x] Type aliases: `type UserId = String`
-- [x] Union types: `String | Int`
-- [x] Nullable types: `String?` (sugar for `Option<String>`)
-- [x] Never type for functions that don't return
-
-### 2.4 Effects System (Foundation) ✅ → Removed in Phase 7.1
-
-- [x] Effect annotations: `fn read_file(path: String) -> String with io`
-- [x] Pure function marking
-- **Removed:** The Effect enum, `with` keyword parsing, and `pure` keyword parsing are removed in Phase 7.1. The syntax was parsed but never enforced — no runtime or static checking existed. A real effect system requires the static analysis infrastructure from Phase 13+ and is tracked in Future Considerations.
-
----
-
-## Phase 3: Module System & Standard Library ✅ COMPLETE
-
-**Status:** Complete
-
-### 3.1 Module System ✅
-
-- [x] File-based modules
-- [x] `import` / `export` syntax
-- [x] Public/private visibility (`pub` keyword)
-- [x] Module aliasing: `import "std/string" as str`
-- [x] Selective imports: `import { split, join } from "std/string"`
-
-### 3.2 Core Standard Library ✅
-
-- [x] `std/string`: 35+ string functions including split, join, trim, replace, regex (replace_pattern, matches_pattern, find_pattern), regex functions (replace_pattern, matches_pattern, find_pattern, find_all_pattern, split_pattern)
-- [x] `std/math`: sin, cos, tan, asin, acos, atan, atan2, log, log10, exp, PI, E
-- [x] `std/collections`: push, pop, first, last (with optional defaults), reverse, slice, concat, is_empty, filter, transform
-- [x] `std/env`: get_env, args, cwd
-
----
-
-## Phase 4: Traits & Essential Features ✅ COMPLETE
-
-**Status:** Complete
-
-**Goal:** Polymorphism, code reuse, and missing language essentials.
-
-### 4.1 Trait Definitions ✅
-
-- [x] Trait declaration syntax
-- [x] Required methods
-- [x] Default method implementations
-
-```ntnt
-trait Serializable {
-    fn to_json(self) -> String
-    fn from_json(json: String) -> Self
-}
-
-trait Comparable {
-    fn compare(self, other: Self) -> Int
-
-    // Default implementation
-    fn less_than(self, other: Self) -> Bool {
-        return self.compare(other) < 0
-    }
-}
-```
-
-### 4.2 Trait Implementations ✅
-
-- [x] `impl Trait for Type` syntax
-- [x] Multiple trait implementations
-- [x] Trait bounds in generics: `fn sort<T: Comparable>(arr: [T]) -> [T]`
-
-### 4.3 Essential Language Features ✅
-
-- [x] `defer` statement for cleanup (like Go)
-- [x] `Map<K, V>` built-in type with literal syntax `map { "key": value }`
-- [x] String interpolation: `"Hello, {name}!"`
-- [x] Raw strings: `r"SELECT * FROM users"` and `r#"..."#`
-- [x] Range syntax: `0..10`, `0..=10`
-- [x] For-in loops: `for item in items { }`
-- [x] Nested map inference: `map { "a": { "b": 1 } }` (no inner `map` keyword needed)
-- [x] Map iteration: `keys(map)`, `values(map)`, `entries(map)`, `has_key(map, key)`
-- [x] Truthy/falsy values: 0 is truthy, empty strings/arrays/maps are falsy, None is falsy
-- [x] Template strings: `"""..."""` with `{{expr}}` interpolation (CSS-safe)
-  - `{{#for x in items}}...{{/for}}` for loops
-  - `{{#if cond}}...{{#elif cond2}}...{{#else}}...{{/if}}` for conditionals with elif
-  - `{{#empty}}` fallback for empty loops
-  - `@index`, `@first`, `@last`, `@length`, `@even`, `@odd` loop metadata
-  - `{{! comment }}` template comments
-  - `{{expr | filter1 | filter2(arg)}}` filter/pipe syntax
-  - `\{{` and `\}}` for literal double braces
-
-```ntnt
-fn process_file(path: String) -> Result<Data, Error> {
-    let file = open(path)?
-    defer file.close()  // Always runs, even on error
-
-    let query = r"SELECT * FROM users WHERE name = 'test'"
-    return Ok(data)
-}
-```
-
-**Deliverables:**
-
-- Full trait system with bounds
-- defer statement
-- Map type
-- String interpolation and raw strings
-- Ranges and for-in loops
-
----
-
-## Phase 5: Concurrency, I/O & Web ✅ COMPLETE
-
-**Status:** Complete
-
-**Goal:** Everything needed to build a web application.
-
-### 5.1 Concurrency ✅ COMPLETE
-
-**Design Decision:** Go-style concurrency (threads + channels) instead of async/await.
-
-- Simpler mental model (no function coloring)
-- Existing stdlib works without modification
-- Covers 99% of web app use cases
-
-- [x] `std/concurrent`: channel, send, recv, try_recv, recv_timeout, close
-- [x] Thread-safe value serialization for channel communication
-- [x] sleep_ms, thread_count utilities
-
-```ntnt
-import { channel, send, recv, try_recv, close } from "std/concurrent"
-
-// Create channel for communication
-let ch = channel()
-
-// Send values (primitives, arrays, maps, structs)
-send(ch, map { "user_id": 123, "action": "signup" })
-
-// Receive (blocks until value available)
-let msg = recv(ch)
-
-// Non-blocking receive
-match try_recv(ch) {
-    Some(value) => process(value),
-    None => print("No message yet")
-}
-
-// With timeout
-match recv_timeout(ch, 5000) {
-    Some(value) => handle(value),
-    None => print("Timeout after 5 seconds")
-}
-
-close(ch)
-```
-
-### 5.2 File System I/O ✅ COMPLETE
-
-- [x] `std/fs`: read_file, write_file, read_bytes, append_file, exists, is_file, is_dir, mkdir, mkdir_all, readdir, remove, remove_dir, remove_dir_all, rename, copy, file_size
-- [x] `std/path`: join, dirname, basename, extension, stem, resolve, is_absolute, is_relative, with_extension, normalize
-
-### 5.3 HTTP Server ✅ COMPLETE
-
-- [x] Built-in HTTP server (Axum + Tokio async runtime)
-- [x] Bridge pattern connecting async handlers to sync interpreter
-- [x] Request/Response types
-- [x] Router with path parameters
-- [x] Middleware support
-- [x] Static file serving with MIME type detection
-- [x] Contract-verified endpoints (preconditions return 400, postconditions return 500)
-
-```ntnt
-import { text, html, json, status, redirect } from "std/http/server"
-
-fn home(req) {
-    return text("Welcome!")
-}
-
-fn get_user(req) {
-    let id = req.params.id
-    return json(map {
-        "id": id,
-        "name": "User " + id
-    })
-}
-
-// Register routes (use raw strings for path params)
-get("/", home)
-get(r"/users/{id}", get_user)
-post("/users", create_user)
-
-listen(8080)  // Start server
-```
-
-### 5.4 HTTP Client ✅ COMPLETE
-
-- [x] `std/http` with unified `fetch()` API for all HTTP requests
-- [x] Full request control via options: method, headers, body, json, form, auth, cookies, timeout
-- [x] Response caching with `Cache(ttl)` and `cache_fetch(cache, request)`
-- [x] File downloads with `download(url, path)`
-
-### 5.5 File-Based Routing & Introspection
-
-**Goal:** Convention-based project structure with agent-friendly introspection. No configuration files—the folder structure IS the architecture.
-
----
-
-#### Project Structure
-
-```
-my-app/
-├── routes/                # File-based routing (path = URL)
-│   ├── index.tnt          # GET /
-│   ├── about.tnt          # GET /about
-│   ├── users/
-│   │   ├── index.tnt      # GET /users
-│   │   └── [id].tnt       # GET/POST/DELETE /users/:id
-│   └── api/
-│       └── orders.tnt     # /api/orders
-├── lib/                   # Shared modules (auto-imported)
-│   └── db.tnt
-└── middleware/            # Auto-loaded in alphabetical order
-    ├── 01_logger.tnt
-    └── 02_auth.tnt
-```
-
-**Conventions:**
-
-- [x] `routes/` - File path = URL path, exports = HTTP methods
-- [x] `[param].tnt` - Dynamic URL segments (e.g., `[id].tnt` → `/users/:id`)
-- [x] `index.tnt` - Directory root handler
-- [x] `lib/` - Shared code, auto-imported into all routes
-- [x] `middleware/` - Auto-loaded in alphabetical order (use `01_`, `02_` prefixes)
-- [x] Hot-reload on file changes
-
-**Example Route:**
-
-```ntnt
-// routes/users/[id].tnt
-
-export fn get(req) {
-    let user = db.find_user(req.params.id)
-    return json(user)
-}
-
-export fn delete(req)
-    requires req.user.role == "admin"
-{
-    db.delete_user(req.params.id)
-    return status(204)
-}
-```
-
-**Entry Point:**
-
-```ntnt
-// app.tnt
-routes("routes/")  // Auto-discover all routes
-listen(3000)
-```
-
----
-
-#### CLI Commands
-
-**`ntnt inspect [path]`** - JSON description of project structure (for agents)
-
-```bash
-$ ntnt inspect
-
-{
-  "routes": [
-    {"method": "GET", "path": "/", "file": "routes/index.tnt"},
-    {"method": "GET", "path": "/users/{id}", "file": "routes/users/[id].tnt",
-     "contracts": ["requires req.params.id != \"\""]}
-  ],
-  "lib": ["lib/db.tnt"],
-  "middleware": ["middleware/01_logger.tnt", "middleware/02_auth.tnt"]
-}
-```
-
-**`ntnt validate`** - Check for errors before running
-
-```bash
-$ ntnt validate
-
-✓ routes/index.tnt
-✓ routes/users/[id].tnt
-✗ routes/api/orders.tnt
-  Line 15: Unused import 'status'
-
-Errors: 1
-```
-
----
-
-**Why This Matters for Agents:**
-
-| Task                     | Traditional               | NTNT                           |
-| ------------------------ | ------------------------- | ------------------------------ |
-| Add route `/api/orders`  | Edit router + create file | Create `routes/api/orders.tnt` |
-| Understand app structure | Read all files            | `ntnt inspect`                 |
-| Check for errors         | Run and hope              | `ntnt validate`                |
-
-**Features:**
-
-- [x] File-based route discovery via `routes()` function
-- [x] Dynamic segments `[param].tnt` → `{param}` in URL
-- [x] Auto-loaded middleware and lib directories
-- [x] Hot-reload on file changes (mtime-based, zero dependencies)
-- [x] `ntnt inspect` - JSON introspection (detects file-based routes)
-- [x] `ntnt validate` - Pre-run validation
-
-### 5.6 Database Connectivity ✅
-
-- [x] Connection management
-- [x] Parameterized queries (prevent SQL injection)
-- [x] Transaction support (begin/commit/rollback)
-- [x] PostgreSQL driver (`std/db/postgres`)
-
-```ntnt
-import { Database } from "std/db/postgres"
-
-fn transfer(db: Database, from: String, to: String, amount: Int) -> Result<(), DbError>
-    requires amount > 0
-{
-    db.transaction(|tx| {
-        tx.execute("UPDATE accounts SET balance = balance - $1 WHERE id = $2", [amount, from])?
-        tx.execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", [amount, to])?
-        Ok(())
-    })
-}
-```
-
-### 5.7 Supporting Libraries ✅ COMPLETE
-
-- [x] `std/json`: parse_json, stringify, stringify_pretty
-- [x] `std/time`: now, now_millis, now_nanos, sleep, elapsed, format_timestamp, parse_datetime, duration_secs, duration_millis
-- [x] `std/crypto`: sha256, sha256_bytes, hmac_sha256, uuid, random_bytes, random_hex, hex_encode, hex_decode
-- [x] `std/url`: parse_url, encode, encode_component, decode, build_query, parse_query, join
-- [x] `std/http`: fetch (unified API), download, Cache
-- [x] `std/csv`: parse_csv, parse_with_headers, stringify, stringify_with_headers
-
-### 5.8 CLI & Testing Tools ✅ COMPLETE
-
-- [x] `ntnt run` - Execute NTNT files
-- [x] `ntnt lint` / `ntnt validate` - Pre-run error checking with JSON output
-- [x] `ntnt inspect` - JSON introspection for agents (functions, routes, imports)
-- [x] `ntnt test` - HTTP endpoint testing (start server, make requests, validate responses)
-  - `--get /path`, `--post /path`, `--put /path`, `--delete /path`
-  - `--body 'key=value'` for form data
-  - `--verbose` for detailed output
-  - Automatic server startup and shutdown
-- [x] `ntnt docs` - Stdlib documentation search and generation
-- [x] `ntnt completions <shell>` - Shell completions (bash, zsh, fish)
-
-**Phase 5 Deliverables:**
-
-- [x] Concurrency primitives (`std/concurrent` - channels, send/recv, thread_count)
-- [x] File system operations
-- [x] HTTP client (blocking)
-- [x] HTTP server with routing
-- [x] File-based routing (`routes()` with `routes/`, `lib/`, `middleware/` conventions)
-- [x] Hot-reload on file changes (mtime-based, no dependencies)
-- [x] `ntnt inspect` - JSON introspection for agents
-- [x] `ntnt validate` - Pre-run error checking
-- [x] `ntnt test` - HTTP endpoint testing (auto start/stop server)
-- [x] PostgreSQL database driver (`std/db/postgres`)
-- [x] JSON, time, crypto, URL, CSV utilities
-- [x] Template strings with `{{}}` interpolation
-- [x] Map iteration functions (`keys`, `values`, `entries`, `has_key`)
-- [x] Truthy/falsy value semantics
-- [x] External templates via `template()` function (Mustache-style with partials)
-- [x] Async HTTP server (Axum + Tokio) with bridge to sync interpreter
+- [x] Documentation system: `// @ntnt` doc comments in Rust source, `build.rs` validation, 263 functions documented
+- [x] 100% documentation coverage enforced at compile time (undocumented function = build error)
 
 ---
 
@@ -822,11 +413,11 @@ Constraint: Global Rate Limiting
 
 ---
 
-## Phase 7: Language Ergonomics ← UP NEXT
+## Phase 7: Language Ergonomics & Documentation ← UP NEXT
 
-**Status:** Not Started
+**Status:** In Progress
 
-**Goal:** Address the biggest daily friction points for AI agents and human developers writing NTNT code. The type system comes first because it's a foundation that makes every subsequent feature stronger.
+**Goal:** Address the biggest daily friction points for AI agents and human developers writing NTNT code, and establish the documentation systems that will serve the language long-term. The type system comes first because it's a foundation that makes every subsequent feature stronger.
 
 > These features were identified through real-world usage as the highest-impact improvements to the language. The type system is sequenced first because error propagation (`?`) needs to know return types, closures benefit from type inference, and SQLite needs type mapping. Together, these features transform a typical web handler from ~22 lines of match pyramids to ~6 lines of linear, readable code.
 
@@ -1130,7 +721,7 @@ Error[E012]: Type mismatch in function call
 - [x] Color-coded CLI output (error codes in red, line numbers in blue, suggestions in green, help text in cyan)
 - [ ] Full AST span tracking on all nodes (line, column, span) — deferred
 - [ ] Runtime error line numbers via AST span tracking — deferred
-- [ ] "Did you mean?" suggestions for wrong imports (scan stdlib for similar names)
+- [ ] "Did you mean?" suggestions for wrong imports (scan stdlib for similar names) — see 7.13
 - [ ] Contract violation messages show the contract expression and actual values
 - [ ] `ntnt lint --format=json` structured error output for agent consumption
 
@@ -1278,7 +869,145 @@ let order = find_order(user, order_id) else return status(404, "Order not found"
 - [ ] Remove unused `Meta:` section parsing from intent files (the `## Overview` section serves the same purpose)
 - [ ] Clean up any other dead parsing paths identified during Phase 7 work
 
-**Deliverables:**
+### 7.12 NTNT Language Documentation (Rust Source → Reference Docs)
+
+> **Design Doc:** [plans/documentation_system_design.md](plans/documentation_system_design.md)
+>
+> Make the Rust source code the single source of truth for all NTNT language documentation. Replace disconnected TOML files with structured `/// @ntnt` doc comments placed directly above implementation code. `build.rs` validates 100% coverage at compile time. Documentation is embedded in the binary — `ntnt docs` works anywhere with zero setup.
+
+**Core Principles:**
+1. **Impossible to go stale** — `build.rs` cross-references doc comments against implementations; undocumented elements fail the build
+2. **AI-native** — Structured data (JSON, embedded) for queries, not just markdown
+3. **Self-validating** — Every example executes and passes, or CI fails
+4. **Multi-level** — L0 (signature) → L4 (gotchas/patterns) from one source
+5. **Embedded in binary** — Like Elixir's bytecode docs; no external files or path configuration needed
+
+**Current (TOML-based) — To Be Replaced:**
+- [x] TOML files as documentation source (stdlib.toml, syntax.toml, etc.)
+- [x] `ntnt docs --generate` generates markdown from TOML
+- [x] `ntnt docs [query]` searches stdlib
+- [x] Pre-commit regeneration
+
+#### Phase 1: `build.rs` Scanner + Proof of Concept ✅
+
+**Goal:** Replace TOML with structured doc comments that live above implementation code.
+
+```rust
+// @ntnt split
+// @module std/string
+// @signature split(s: String, delim: String) -> Array<String>
+// Splits a string into an array of substrings.
+//
+// When the delimiter is not found, returns a single-element array
+// containing the original string.
+// @see_also join, trim, replace
+// @since v0.1.0
+// @example split("a,b,c", ",") => ["a", "b", "c"] ~ "Basic comma-separated split"
+// @example split("no-match", ",") => ["no-match"] ~ "No delimiter found"
+module.insert("split".to_string(), Value::NativeFunction {
+    name: "split".to_string(),
+    func: |args| { /* existing implementation — unchanged */ },
+});
+```
+
+- [x] Write `build.rs` source scanner — parse `// @ntnt` blocks, extract fields
+- [x] Add doc comments to `std/string` module (24 functions) as proof of concept
+- [x] Validate coverage: scanner detects undocumented `NativeFunction` inserts
+- [x] Generate `doc_data.json` embedded in binary via `include_str!()`
+- [x] Auto-discover source files (no hardcoded list — directory scanning)
+- [x] Bidirectional validation: undocumented functions AND orphaned doc blocks fail the build
+
+#### Phase 2: Complete Source Documentation ✅
+
+- [x] Add doc comments to all 16 stdlib modules (string, math, collections, http, fs, json, csv, url, path, time, crypto, env, postgres, sqlite, concurrent, http_server)
+- [x] Document global builtins (len, print, str, int, float, type, assert, etc.)
+- [x] Document all 263 functions with full structured metadata (@description, @param, @returns, @example, @see_also, @since, @tags, @error, @gotcha)
+- [x] 100% documentation coverage enforced at compile time
+- [x] Delete TOML documentation files (replaced by source-embedded docs)
+
+#### Phase 3: Enhanced CLI + Embedded Docs
+
+```bash
+# Querying (works anywhere — docs are in the binary)
+ntnt docs split                       # Full docs for a function
+ntnt docs std/string                  # All functions in a module
+ntnt docs --examples split            # Just the examples
+ntnt docs --search "convert string"   # Full-text search
+ntnt docs --related split             # Cross-references
+ntnt docs --json split                # JSON output for tooling
+ntnt docs --ai-context                # Full dump for AI session start
+
+# Validation
+ntnt docs --coverage                  # Documentation completeness report
+ntnt docs --test                      # Execute all examples (doctests)
+ntnt docs --orphans                   # Docs without implementation
+ntnt docs --diff v0.3.7               # What changed since a version
+
+# Generation (publishing — on demand)
+ntnt docs --generate                  # Markdown + JSON output
+ntnt docs --update-agent-docs         # Regenerate auto-sections in AI_AGENT_GUIDE.md
+```
+
+- [x] `ntnt docs [query]` — search and display function docs from embedded data
+- [x] `ntnt docs --generate` — generate markdown reference docs + AI agent guide sync
+- [x] REPL integration: `:doc` command
+- [ ] `ntnt docs --examples` — show just examples for a function
+- [ ] `ntnt docs --search` — full-text search across all docs
+- [ ] `ntnt docs --related` — cross-reference via `@see_also`
+- [ ] `ntnt docs --json` — JSON output for tooling
+- [ ] `ntnt docs --ai-context` — full dump for AI session start
+- [ ] `ntnt docs --coverage` — documentation completeness report
+- [ ] `ntnt docs --test` — execute all doc examples (doctests, see below)
+- [ ] `ntnt docs --orphans` — detect orphaned doc blocks
+- [ ] `ntnt docs --diff` — version diffing between releases
+
+#### Phase 3.5: Doctests (Execute Documentation Examples)
+
+> **Design Doc:** [plans/doctest_design.md](plans/doctest_design.md)
+>
+> Run the 329 `@example` directives as automated tests during `cargo test`. Eval both the example code and expected value as NTNT expressions, compare structurally. ~260 examples in pure modules are testable; I/O modules are skipped. Inspired by Elixir's doctests.
+
+- [ ] Expose embedded doc JSON from `lib.rs` for integration test access
+- [ ] Add `Interpreter::import_module_all()` for programmatic wildcard imports
+- [ ] Write `tests/doctest_tests.rs` integration test (~150-200 lines)
+- [ ] Implement `values_equal()` recursive structural comparison (no `PartialEq` on Value)
+- [ ] Fix any doc examples that fail (the whole point — catch documentation bugs)
+- [ ] Wire into `ntnt docs --test` CLI command
+
+#### Phase 4: AI-Native Features + Error Integration
+
+- [ ] Semantic concept index from module membership and `@see_also` relationships
+- [ ] Gotchas per function (non-obvious behaviors)
+- [ ] Rich error messages with doc links and suggested fixes
+- [ ] `ntnt docs --ai-context` for efficient AI session start
+
+**Success Criteria:**
+
+| Metric | Target |
+|--------|--------|
+| TOML files remaining | 0 |
+| Documentation coverage | 100% (build fails otherwise) |
+| Example pass rate | 100% (CI fails otherwise) |
+| Files edited to add a function | 1 (the Rust source file) |
+| AI query accuracy | 95%+ from structured JSON |
+| Binary size increase | < 500 KB (~2-5%) |
+| `ntnt docs` works without external files | Yes — embedded in binary |
+
+### 7.13 Import Error Quality — Collision Warnings + "Did You Mean?"
+
+**Priority:** Moderate — better error messages for the most common language operation.
+
+> **Design Doc:** [plans/bare_imports_design.md](plans/bare_imports_design.md)
+>
+> Add collision warnings in lint when the same name is imported from two modules, and wire "Did you mean?" suggestions into import error paths for both wrong module names and wrong export names.
+
+**Implementation plan:**
+
+- [ ] Import collision warnings in `ntnt lint` (detect when same name imported from two modules, suggest aliases)
+- [ ] "Did you mean?" suggestions for wrong module names (wire existing Levenshtein into `import_std_module()`)
+- [ ] "Did you mean?" suggestions for wrong export names (wire into `bind_imports()`, show available exports)
+
+**Phase 7 Deliverables:**
 
 - Type system with inference and enforcement
 - Effect enum removed (dead code cleanup)
@@ -1292,6 +1021,8 @@ let order = find_order(user, order_id) else return status(404, "Order not found"
 - Default parameter values
 - Guard clauses (`let-else`) for flat validation sequences
 - Intent file Meta section cleanup
+- NTNT language documentation system (`/// @ntnt` doc comments, `build.rs` validation, embedded binary docs)
+- Import error quality (collision warnings, "Did you mean?" for imports)
 - Updated examples using new features
 
 ---
@@ -1993,18 +1724,7 @@ ntnt test
 ntnt build --release
 ```
 
-### 12.3 Documentation Generator
-
-- [ ] Doc comments (`///`)
-- [x] Automatic API documentation from TOML source files
-- [ ] Contract documentation
-- [ ] Example extraction and testing
-- [x] `ntnt docs --generate` command
-- [x] `ntnt docs [query]` for searching stdlib documentation
-- [x] Auto-generated references: STDLIB_REFERENCE.md, SYNTAX_REFERENCE.md, IAL_REFERENCE.md
-- [x] CI/CD validation for documentation drift
-
-### 12.4 Human Approval Mechanisms (From Whitepaper)
+### 12.3 Human Approval Mechanisms (From Whitepaper)
 
 - [ ] `@requires_approval` annotations
 - [ ] Approval workflows in IDE
@@ -2023,7 +1743,7 @@ pub fn get_user(id: String) -> User {
 }
 ```
 
-### 12.5 Debugger
+### 12.4 Debugger
 
 - [ ] Breakpoints
 - [ ] Step debugging
@@ -2032,13 +1752,28 @@ pub fn get_user(id: String) -> User {
 - [ ] Contract state inspection
 - [ ] DAP (Debug Adapter Protocol) support
 
+### 12.5 User Code Documentation (.tnt Files)
+
+> **Design Doc:** [plans/tnt_code_documentation_design.md](plans/tnt_code_documentation_design.md)
+>
+> Doc comments (`///`, `//!`), doctests, and contract-as-documentation for user-written `.tnt` code. Depends on LSP (12.1) for hover integration.
+
+- [ ] Add `DocComment` (`///`) and `ModuleDocComment` (`//!`) token types to lexer
+- [ ] Attach doc comments to Function, Struct, Enum AST nodes
+- [ ] Parse doc comments into structured data (summary, params, examples, metadata annotations)
+- [ ] `ntnt docs <file> [function]` displays formatted output for user code
+- [ ] Doctest runner: extract `// =>` examples from doc comments, execute, report pass/fail
+- [ ] Contract extraction: `requires`/`ensures`/`invariant` auto-generate documentation sections
+- [ ] Include doc comments in `ntnt inspect` JSON output
+- [ ] LSP hover support for user-defined functions
+
 **Deliverables:**
 
 - Full LSP server
-- Package manager with registry
-- Documentation generator
+- Package registry and publishing
 - Human approval system
 - Debugger
+- User code documentation (doc comments, doctests, contract-as-documentation)
 
 ---
 
@@ -2531,7 +2266,7 @@ fn reset_database(db: Database) with io {
 - [ ] Effect inference (auto-detect effects from function body)
 - [ ] Effect propagation (if `f` calls `g with io`, then `f` has `io` too)
 - [ ] Static enforcement (`pure` functions cannot call `io` functions)
-- [ ] `Approval` effect integrated with Human Approval Mechanisms (Phase 12.4)
+- [ ] `Approval` effect integrated with Human Approval Mechanisms (Phase 12.3)
 - [ ] Effect polymorphism (generic functions that preserve caller's effects)
 - [ ] Contract interaction (contracts on `pure` functions can be statically verified)
 
@@ -2587,37 +2322,25 @@ The HTTP server now uses Axum + Tokio for async request handling:
 
 ## Implementation Priority Matrix
 
-| Phase  | Focus                      | Business Value     | Effort   |
-| ------ | -------------------------- | ------------------ | -------- |
-| 1-3 ✅ | Core Language              | Foundation         | Complete |
-| 4 ✅   | Traits + Essentials        | High               | Complete |
-| 5 ✅   | Concurrency + Web          | **Critical**       | Complete |
-| 6 ✅   | Intent-Driven Dev          | High               | Complete |
-| **7**  | **Language Ergonomics**        | **High (Up Next)** | **Medium** |
-| **8**  | **Intent System Maturity**     | **High**           | **Medium** |
-| **9**  | **Package Ecosystem**          | **Critical**       | **Medium** |
-| **10** | **Jobs, WebSockets & Real-Time** | **High**           | **Medium** |
-| 11     | Testing Framework          | High               | Medium   |
-| 12     | Tooling & DX               | Very High          | High     |
-| 13     | Performance                | High               | Medium   |
-| 14     | AI Integration             | **Differentiator** | Medium   |
-| 15     | Deployment                 | High               | Medium   |
+| Phase      | Focus                            | Business Value     | Effort     |
+| ---------- | -------------------------------- | ------------------ | ---------- |
+| 1-5 ✅     | Core Language + Web              | Foundation         | Complete   |
+| 6 ✅       | Intent-Driven Dev                | High               | Complete   |
+| **7**      | **Ergonomics & Documentation**   | **High (Up Next)** | **Medium** |
+| **8**      | **Intent System Maturity**       | **High**           | **Medium** |
+| **9**      | **Package Ecosystem**            | **Critical**       | **Medium** |
+| **10**     | **Jobs, WebSockets & Real-Time** | **High**           | **Medium** |
+| 11         | Testing Framework                | High               | Medium     |
+| 12         | Tooling & DX                     | Very High          | High       |
+| 13         | Performance                      | High               | Medium     |
+| 14         | AI Integration                   | **Differentiator** | Medium     |
+| 15         | Deployment                       | High               | Medium     |
 
 ---
 
 ## Milestones
 
-### M1: Language Complete (End of Phase 4) ✅
-
-- Traits and polymorphism
-- All essential language features
-- Comprehensive type system
-
-### M2: Web Ready (End of Phase 5) ✅
-
-- HTTP server running
-- Database connectivity
-- Can build real web apps
+> Milestones M1 (Language Complete) and M2 (Web Ready) are complete. See [ROADMAP_COMPLETE.md](ROADMAP_COMPLETE.md).
 
 ### M3: Ergonomic Language (End of Phase 7)
 
@@ -2630,6 +2353,7 @@ The HTTP server now uses Axum + Tokio for async request handling:
 - Route pattern auto-detection (no `r""` needed)
 - Destructuring, default parameters, guard clauses
 - Two-layer safety: types (structural) + contracts (semantic)
+- NTNT language documentation system (doc comments + `build.rs` validation, embedded in binary)
 - A typical web handler drops from ~22 lines to ~6
 
 ### M4: Mature Intent System (End of Phase 8)
@@ -2662,7 +2386,6 @@ The HTTP server now uses Axum + Tokio for async request handling:
 
 - Full IDE support (LSP)
 - Package registry and publishing
-- Documentation generator
 - Human approval workflows
 - Comprehensive testing framework (unit + IDD)
 
@@ -2755,4 +2478,4 @@ pub fn main() {
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: January 2026 (v0.3.6 — Phases 7-10: Language Ergonomics, Intent System Maturity, Package Ecosystem, Background Jobs)_
+_Last updated: January 2026 (v0.3.8 — Active: Phase 7 Language Ergonomics & Documentation)_

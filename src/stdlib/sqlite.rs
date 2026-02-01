@@ -314,7 +314,24 @@ fn sqlite_rollback(conn: &Value) -> Result<Value> {
 pub fn init() -> HashMap<String, Value> {
     let mut module = HashMap::new();
 
-    // connect(path) -> Result<Connection, Error>
+    // @ntnt connect
+    // @module std/sqlite
+    // @module_description SQLite database operations
+    // @signature connect(path: String) -> Result<Connection, String>
+    // Open a connection to a SQLite database.
+    //
+    // Opens a file-based or in-memory SQLite database. Automatically enables
+    // WAL journal mode for better concurrent read performance and turns on
+    // foreign key enforcement. Returns a connection handle for use with
+    // query, execute, and transaction functions.
+    // @param path File path to the database, or ":memory:" for an in-memory database
+    // @returns Result containing a connection handle map on success, or an error string on failure
+    // @see_also close, query, execute
+    // @since v0.2.0
+    // @tags #database
+    // @example connect(":memory:") => Result::Ok(connection) ~ "Open in-memory database"
+    // @example connect("app.db") => Result::Ok(connection) ~ "Open file-based database"
+    // @error TypeError ~ "connect() requires a database path string" fix: "Pass a String path argument"
     module.insert(
         "connect".to_string(),
         Value::NativeFunction {
@@ -329,7 +346,27 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // query(conn, sql, params) -> Result<Array<Row>, Error>
+    // @ntnt query
+    // @module std/sqlite
+    // @signature query(conn: Connection, sql: String, params: Array) -> Result<Array<Map>, String>
+    // Execute a SELECT query and return all matching rows.
+    //
+    // Runs a parameterized SQL query against the database and returns all
+    // result rows as an array of maps. Each map represents a row with column
+    // names as keys. Use positional `?` placeholders for parameterized queries
+    // to prevent SQL injection.
+    // @param conn A connection handle obtained from connect()
+    // @param sql SQL query string with optional `?` placeholders
+    // @param params Array of parameter values to bind, or unit for no parameters
+    // @returns Result containing an Array of row Maps on success, or an error string on failure
+    // @see_also query_one, execute, connect
+    // @since v0.2.0
+    // @tags #database
+    // @example query(db, "SELECT * FROM users", []) => Result::Ok([...]) ~ "Fetch all rows"
+    // @example query(db, "SELECT * FROM users WHERE id = ?", [1]) => Result::Ok([...]) ~ "Parameterized query"
+    // @error TypeError ~ "query() requires (connection, sql_string, params_array)" fix: "Pass (connection, sql_string, params_array)"
+    // @error RuntimeError ~ "Query preparation failed: ..." fix: "Check SQL syntax and table/column names"
+    // @error RuntimeError ~ "Failed to lock connection: ..." fix: "Ensure connection is not used concurrently in conflicting ways"
     module.insert(
         "query".to_string(),
         Value::NativeFunction {
@@ -345,7 +382,26 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // query_one(conn, sql, params) -> Result<Row | Unit, Error>
+    // @ntnt query_one
+    // @module std/sqlite
+    // @signature query_one(conn: Connection, sql: String, params: Array) -> Result<Map | Unit, String>
+    // Execute a SELECT query and return a single row.
+    //
+    // Runs a parameterized SQL query expecting at most one result row.
+    // Returns the row as a map if found, or Unit if no rows match.
+    // Useful for lookups by primary key or unique constraint.
+    // @param conn A connection handle obtained from connect()
+    // @param sql SQL query string with optional `?` placeholders
+    // @param params Array of parameter values to bind, or unit for no parameters
+    // @returns Result containing a row Map if found, Unit if no match, or an error string on failure
+    // @see_also query, execute, connect
+    // @since v0.2.0
+    // @tags #database
+    // @example query_one(db, "SELECT * FROM users WHERE id = ?", [1]) => Result::Ok({...}) ~ "Fetch single row"
+    // @example query_one(db, "SELECT * FROM users WHERE id = ?", [999]) => Result::Ok(unit) ~ "No matching row"
+    // @error TypeError ~ "query_one() requires (connection, sql_string, params_array)" fix: "Pass (connection, sql_string, params_array)"
+    // @error RuntimeError ~ "Query preparation failed: ..." fix: "Check SQL syntax and table/column names"
+    // @error RuntimeError ~ "Failed to lock connection: ..." fix: "Ensure connection is not used concurrently in conflicting ways"
     module.insert(
         "query_one".to_string(),
         Value::NativeFunction {
@@ -363,7 +419,27 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // execute(conn, sql, params) -> Result<Int, Error>
+    // @ntnt execute
+    // @module std/sqlite
+    // @signature execute(conn: Connection, sql: String, params: Array) -> Result<Int, String>
+    // Execute a SQL statement and return the number of affected rows.
+    //
+    // Runs a parameterized INSERT, UPDATE, DELETE, or DDL statement against the
+    // database. Returns the count of rows affected by the operation. Use
+    // positional `?` placeholders for parameterized statements to prevent
+    // SQL injection.
+    // @param conn A connection handle obtained from connect()
+    // @param sql SQL statement string with optional `?` placeholders
+    // @param params Array of parameter values to bind, or unit for no parameters
+    // @returns Result containing the number of affected rows (Int) on success, or an error string on failure
+    // @see_also query, query_one, connect
+    // @since v0.2.0
+    // @tags #database
+    // @example execute(db, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)", []) => Result::Ok(0) ~ "Create table"
+    // @example execute(db, "INSERT INTO users (name) VALUES (?)", ["Alice"]) => Result::Ok(1) ~ "Insert row"
+    // @error TypeError ~ "execute() requires (connection, sql_string, params_array)" fix: "Pass (connection, sql_string, params_array)"
+    // @error RuntimeError ~ "Execute failed: ..." fix: "Check SQL syntax, table/column names, and constraint violations"
+    // @error RuntimeError ~ "Failed to lock connection: ..." fix: "Ensure connection is not used concurrently in conflicting ways"
     module.insert(
         "execute".to_string(),
         Value::NativeFunction {
@@ -381,7 +457,22 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // close(conn) -> Bool
+    // @ntnt close
+    // @module std/sqlite
+    // @signature close(conn: Connection) -> Bool
+    // Close a SQLite database connection.
+    //
+    // Removes the connection from the internal registry and releases
+    // the underlying SQLite resources. Returns true if the connection
+    // was found and closed, false otherwise. After closing, any further
+    // operations on the connection handle will fail.
+    // @param conn A connection handle obtained from connect()
+    // @returns true if the connection was successfully closed, false otherwise
+    // @see_also connect
+    // @since v0.2.0
+    // @tags #database
+    // @example close(db) => true ~ "Close an open connection"
+    // @error TypeError ~ "Expected a SQLite connection handle" fix: "Pass a valid connection handle from connect()"
     module.insert(
         "close".to_string(),
         Value::NativeFunction {
@@ -391,7 +482,24 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // begin(conn) -> Result<Connection, Error>
+    // @ntnt begin
+    // @module std/sqlite
+    // @signature begin(conn: Connection) -> Result<Connection, String>
+    // Begin a database transaction.
+    //
+    // Starts a new SQLite transaction on the given connection. All subsequent
+    // execute and query calls on this connection will be part of the transaction
+    // until commit() or rollback() is called. Returns the same connection handle
+    // wrapped in a Result for chaining.
+    // @param conn A connection handle obtained from connect()
+    // @returns Result containing the connection handle on success, or an error string on failure
+    // @see_also commit, rollback
+    // @since v0.2.0
+    // @tags #database
+    // @example begin(db) => Result::Ok(db) ~ "Start a transaction"
+    // @error RuntimeError ~ "BEGIN failed: ..." fix: "Ensure no transaction is already active on this connection"
+    // @error RuntimeError ~ "Invalid or closed SQLite connection" fix: "Use an open connection handle from connect()"
+    // @error RuntimeError ~ "Failed to lock connection: ..." fix: "Ensure connection is not used concurrently in conflicting ways"
     module.insert(
         "begin".to_string(),
         Value::NativeFunction {
@@ -401,7 +509,23 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // commit(conn) -> Result<Bool, Error>
+    // @ntnt commit
+    // @module std/sqlite
+    // @signature commit(conn: Connection) -> Result<Bool, String>
+    // Commit the current transaction.
+    //
+    // Commits all changes made since the last begin() call, making them
+    // permanent in the database. Returns true on success. If no transaction
+    // is active, SQLite will return an error.
+    // @param conn A connection handle with an active transaction
+    // @returns true on success, or a Result::Err with an error string on failure
+    // @see_also begin, rollback
+    // @since v0.2.0
+    // @tags #database
+    // @example commit(db) => true ~ "Commit the active transaction"
+    // @error RuntimeError ~ "COMMIT failed: ..." fix: "Ensure a transaction was started with begin() before committing"
+    // @error RuntimeError ~ "Invalid or closed SQLite connection" fix: "Use an open connection handle from connect()"
+    // @error RuntimeError ~ "Failed to lock connection: ..." fix: "Ensure connection is not used concurrently in conflicting ways"
     module.insert(
         "commit".to_string(),
         Value::NativeFunction {
@@ -411,7 +535,24 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // rollback(conn) -> Result<Bool, Error>
+    // @ntnt rollback
+    // @module std/sqlite
+    // @signature rollback(conn: Connection) -> Result<Bool, String>
+    // Roll back the current transaction.
+    //
+    // Discards all changes made since the last begin() call, reverting
+    // the database to the state before the transaction started. Returns
+    // true on success. Typically used in error-handling paths to undo
+    // partial changes.
+    // @param conn A connection handle with an active transaction
+    // @returns true on success, or a Result::Err with an error string on failure
+    // @see_also begin, commit
+    // @since v0.2.0
+    // @tags #database
+    // @example rollback(db) => true ~ "Roll back the active transaction"
+    // @error RuntimeError ~ "ROLLBACK failed: ..." fix: "Ensure a transaction was started with begin() before rolling back"
+    // @error RuntimeError ~ "Invalid or closed SQLite connection" fix: "Use an open connection handle from connect()"
+    // @error RuntimeError ~ "Failed to lock connection: ..." fix: "Ensure connection is not used concurrently in conflicting ways"
     module.insert(
         "rollback".to_string(),
         Value::NativeFunction {

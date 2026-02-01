@@ -554,7 +554,23 @@ fn pg_rollback(conn: &Value) -> Result<Value> {
 pub fn init() -> HashMap<String, Value> {
     let mut module = HashMap::new();
 
-    // connect(connection_string) -> Result<Connection, Error>
+    // @ntnt connect
+    // @module std/postgres
+    // @module_description PostgreSQL database operations
+    // @signature connect(connection_string: String) -> Result<Connection, String>
+    // Open a connection to a PostgreSQL database.
+    //
+    // Establishes a TCP connection using the provided connection string and
+    // returns a connection handle that can be passed to query, execute, and
+    // transaction functions. The handle is stored in a global registry keyed
+    // by an internal connection ID.
+    // @param connection_string A PostgreSQL connection URI (e.g. "postgres://user:pass@localhost/mydb")
+    // @returns Result::Ok containing a Connection map handle, or Result::Err with a description
+    // @see_also close, query, execute, begin
+    // @since v0.2.0
+    // @tags #database
+    // @example connect("postgres://user:pass@localhost/mydb") => Result::Ok(Connection) ~ "Open a database connection"
+    // @error TypeError ~ "connect() requires a connection string" fix: "Pass a String connection URI as the argument"
     module.insert(
         "connect".to_string(),
         Value::NativeFunction {
@@ -569,7 +585,24 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // query(conn, sql, params?) -> Result<Array<Row>, Error>
+    // @ntnt query
+    // @module std/postgres
+    // @signature query(conn: Connection, sql: String, params: Array | Unit) -> Result<Array<Map>, String>
+    // Execute a SQL query and return all matching rows.
+    //
+    // Runs a parameterized SELECT (or any row-returning statement) against the
+    // database. Parameters use PostgreSQL $1, $2, ... placeholders. Each
+    // returned row is a Map whose keys are column names. Pass an empty array
+    // or Unit when no parameters are needed.
+    // @param conn A Connection handle obtained from connect()
+    // @param sql The SQL query string with optional $N parameter placeholders
+    // @param params An Array of bind parameter values, or Unit for no parameters
+    // @returns Result::Ok containing an Array of row Maps, or Result::Err with a description
+    // @see_also query_one, execute, connect
+    // @since v0.2.0
+    // @tags #database
+    // @example query(db, "SELECT * FROM users WHERE active = $1", [true]) => Result::Ok([...]) ~ "Query with parameters"
+    // @error TypeError ~ "query() requires (connection, sql_string, params_array)" fix: "Provide (Connection, String, Array) arguments"
     module.insert(
         "query".to_string(),
         Value::NativeFunction {
@@ -585,7 +618,23 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // query_one(conn, sql, params?) -> Result<Row | null, Error>
+    // @ntnt query_one
+    // @module std/postgres
+    // @signature query_one(conn: Connection, sql: String, params: Array | Unit) -> Result<Map | Unit, String>
+    // Execute a SQL query and return at most one row.
+    //
+    // Behaves like query() but uses PostgreSQL's query_opt internally to
+    // return either a single row Map or Unit (null) when no row matches.
+    // Ideal for lookups by primary key or unique column.
+    // @param conn A Connection handle obtained from connect()
+    // @param sql The SQL query string with optional $N parameter placeholders
+    // @param params An Array of bind parameter values, or Unit for no parameters
+    // @returns Result::Ok containing a row Map or Unit if no match, or Result::Err with a description
+    // @see_also query, execute, connect
+    // @since v0.2.0
+    // @tags #database
+    // @example query_one(db, "SELECT * FROM users WHERE id = $1", [1]) => Result::Ok({...}) ~ "Fetch one row by ID"
+    // @error TypeError ~ "query_one() requires (connection, sql_string, params_array)" fix: "Provide (Connection, String, Array) arguments"
     module.insert(
         "query_one".to_string(),
         Value::NativeFunction {
@@ -601,7 +650,23 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // execute(conn, sql, params?) -> Result<int, Error> (returns affected row count)
+    // @ntnt execute
+    // @module std/postgres
+    // @signature execute(conn: Connection, sql: String, params: Array | Unit) -> Result<Int, String>
+    // Execute a SQL statement and return the number of affected rows.
+    //
+    // Use this for INSERT, UPDATE, DELETE, and other statements that do not
+    // return row data. Parameters use $1, $2, ... placeholders. The Ok
+    // variant contains an Int representing the count of rows affected.
+    // @param conn A Connection handle obtained from connect()
+    // @param sql The SQL statement string with optional $N parameter placeholders
+    // @param params An Array of bind parameter values, or Unit for no parameters
+    // @returns Result::Ok containing the Int count of affected rows, or Result::Err with a description
+    // @see_also query, query_one, connect, begin
+    // @since v0.2.0
+    // @tags #database
+    // @example execute(db, "INSERT INTO users (name) VALUES ($1)", ["Alice"]) => Result::Ok(1) ~ "Insert one row"
+    // @error TypeError ~ "execute() requires (connection, sql_string, params_array)" fix: "Provide (Connection, String, Array) arguments"
     module.insert(
         "execute".to_string(),
         Value::NativeFunction {
@@ -617,7 +682,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // close(conn) -> bool
+    // @ntnt close
+    // @module std/postgres
+    // @signature close(conn: Connection) -> Bool
+    // Close a PostgreSQL database connection.
+    //
+    // Removes the connection from the internal registry, allowing the
+    // underlying TCP socket to be released. Returns true if the connection
+    // was found and removed, false otherwise.
+    // @param conn A Connection handle obtained from connect()
+    // @returns true if the connection was successfully closed, false if it was not found
+    // @see_also connect
+    // @since v0.2.0
+    // @tags #database
+    // @example close(db) => true ~ "Close an open connection"
+    // @error TypeError ~ "Expected a database connection handle" fix: "Pass a Connection handle returned by connect()"
     module.insert(
         "close".to_string(),
         Value::NativeFunction {
@@ -627,7 +706,22 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // begin(conn) -> Result<Connection, Error> (starts transaction)
+    // @ntnt begin
+    // @module std/postgres
+    // @signature begin(conn: Connection) -> Result<Connection, String>
+    // Begin a database transaction.
+    //
+    // Issues a SQL BEGIN statement on the connection. On success the same
+    // connection handle is returned inside Result::Ok -- subsequent query()
+    // and execute() calls on that handle operate within the transaction
+    // until commit() or rollback() is called.
+    // @param conn A Connection handle obtained from connect()
+    // @returns Result::Ok containing the Connection handle (now in a transaction), or Result::Err with a description
+    // @see_also commit, rollback, execute, query
+    // @since v0.2.0
+    // @tags #database
+    // @example begin(db) => Result::Ok(Connection) ~ "Start a transaction"
+    // @error RuntimeError ~ "Failed to lock connection: ..." fix: "Ensure the connection is not being used concurrently"
     module.insert(
         "begin".to_string(),
         Value::NativeFunction {
@@ -637,7 +731,20 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // commit(conn) -> Result<bool, Error>
+    // @ntnt commit
+    // @module std/postgres
+    // @signature commit(conn: Connection) -> Result<Bool, String>
+    // Commit the current transaction.
+    //
+    // Issues a SQL COMMIT on the connection, making all changes since the
+    // last begin() permanent. Returns true on success.
+    // @param conn A Connection handle with an active transaction from begin()
+    // @returns true on success, or Result::Err with a description on failure
+    // @see_also begin, rollback
+    // @since v0.2.0
+    // @tags #database
+    // @example commit(db) => true ~ "Commit an active transaction"
+    // @error RuntimeError ~ "COMMIT failed: ..." fix: "Ensure a transaction was started with begin() before committing"
     module.insert(
         "commit".to_string(),
         Value::NativeFunction {
@@ -647,7 +754,21 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // rollback(conn) -> Result<bool, Error>
+    // @ntnt rollback
+    // @module std/postgres
+    // @signature rollback(conn: Connection) -> Result<Bool, String>
+    // Roll back the current transaction.
+    //
+    // Issues a SQL ROLLBACK on the connection, discarding all changes made
+    // since the last begin(). Returns true on success. Use this to abort a
+    // transaction when an error occurs mid-way.
+    // @param conn A Connection handle with an active transaction from begin()
+    // @returns true on success, or Result::Err with a description on failure
+    // @see_also begin, commit
+    // @since v0.2.0
+    // @tags #database
+    // @example rollback(db) => true ~ "Roll back an active transaction"
+    // @error RuntimeError ~ "ROLLBACK failed: ..." fix: "Ensure a transaction was started with begin() before rolling back"
     module.insert(
         "rollback".to_string(),
         Value::NativeFunction {

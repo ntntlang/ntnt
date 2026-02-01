@@ -68,7 +68,22 @@ pub fn intent_value_to_json(value: &Value) -> serde_json::Value {
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // parse_json(json_str) -> Result<Value, Error>
+    // @ntnt parse_json
+    // @module std/json
+    // @module_description JSON parsing and serialization
+    // @signature parse_json(json_str: String) -> Result<Any, String>
+    // Parses a JSON string into a value.
+    //
+    // Returns Ok with the parsed value on success, or Err with a descriptive
+    // parse error message. Supports all JSON types: objects become Maps,
+    // arrays become Arrays, numbers become Int or Float.
+    // @param json_str The JSON string to parse
+    // @returns Result containing the parsed value or an error message
+    // @see_also stringify, stringify_pretty
+    // @since v0.1.0
+    // @tags #pure
+    // @example parse_json("{\"key\": \"value\"}") => Ok(map { "key": "value" }) ~ "Parse JSON object"
+    // @error TypeError ~ "parse_json() requires a JSON string" fix: "Pass a string argument"
     module.insert(
         "parse_json".to_string(),
         Value::NativeFunction {
@@ -99,7 +114,19 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // stringify(value) -> String
+    // @ntnt stringify
+    // @module std/json
+    // @signature stringify(value: Any) -> String
+    // Converts a value to a compact JSON string.
+    //
+    // Maps, arrays, strings, numbers, booleans, and null are serialized to
+    // their JSON equivalents. Structs are serialized as JSON objects.
+    // @param value The value to serialize
+    // @returns Compact JSON string with no extra whitespace
+    // @see_also stringify_pretty, parse_json
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example stringify(map { "key": "value" }) => "{\"key\":\"value\"}" ~ "Compact JSON"
     module.insert(
         "stringify".to_string(),
         Value::NativeFunction {
@@ -112,7 +139,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // stringify_pretty(value) -> String - With indentation
+    // @ntnt stringify_pretty
+    // @module std/json
+    // @signature stringify_pretty(value: Any) -> String
+    // Converts a value to a pretty-printed JSON string with indentation.
+    // @param value The value to serialize
+    // @returns Indented JSON string for human readability
+    // @see_also stringify, parse_json
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example stringify_pretty(map { "a": 1 }) ~ "Pretty-printed with newlines and indentation"
     module.insert(
         "stringify_pretty".to_string(),
         Value::NativeFunction {

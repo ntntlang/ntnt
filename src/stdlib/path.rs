@@ -9,7 +9,16 @@ use std::path::{Path, PathBuf};
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // join(parts...) -> String - Join path components (takes array)
+    // @ntnt join
+    // @module std/path
+    // @module_description File path manipulation and resolution
+    // @signature join(parts: Array<String>) -> String
+    // Joins path segments into a single path string.
+    // @param parts Array of path segments to join
+    // @see_also dirname, basename, normalize
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example join(["src", "lib", "main.tnt"]) => "src/lib/main.tnt" ~ "Joins path segments"
     module.insert(
         "join".to_string(),
         Value::NativeFunction {
@@ -37,7 +46,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // dirname(path) -> Option<String>
+    // @ntnt dirname
+    // @module std/path
+    // @signature dirname(path: String) -> Option<String>
+    // Returns the directory portion of a path.
+    // @param path The file path to extract the directory from
+    // @see_also basename, join, extension, stem
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example dirname("src/lib/main.tnt") => Some("src/lib") ~ "Returns directory portion"
     module.insert(
         "dirname".to_string(),
         Value::NativeFunction {
@@ -63,7 +80,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // basename(path) -> Option<String>
+    // @ntnt basename
+    // @module std/path
+    // @signature basename(path: String) -> Option<String>
+    // Returns the filename portion of a path.
+    // @param path The file path to extract the filename from
+    // @see_also dirname, extension, stem, join
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example basename("src/lib/main.tnt") => Some("main.tnt") ~ "Returns filename portion"
     module.insert(
         "basename".to_string(),
         Value::NativeFunction {
@@ -89,7 +114,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // extension(path) -> Option<String>
+    // @ntnt extension
+    // @module std/path
+    // @signature extension(path: String) -> Option<String>
+    // Returns the file extension without the leading dot.
+    // @param path The file path to extract the extension from
+    // @see_also stem, basename, with_extension
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example extension("main.tnt") => Some("tnt") ~ "Returns file extension without dot"
     module.insert(
         "extension".to_string(),
         Value::NativeFunction {
@@ -115,7 +148,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // stem(path) -> Option<String> - Filename without extension
+    // @ntnt stem
+    // @module std/path
+    // @signature stem(path: String) -> Option<String>
+    // Returns the filename without its extension.
+    // @param path The file path to extract the stem from
+    // @see_also extension, basename, with_extension
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example stem("main.tnt") => Some("main") ~ "Returns filename without extension"
     module.insert(
         "stem".to_string(),
         Value::NativeFunction {
@@ -141,7 +182,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // resolve(path) -> Result<String, Error> - Absolute path
+    // @ntnt resolve
+    // @module std/path
+    // @signature resolve(path: String) -> Result<String, String>
+    // Resolves a path to an absolute path using filesystem canonicalize.
+    // @param path The file path to resolve
+    // @see_also is_absolute, normalize
+    // @since v0.2.0
+    // @tags #filesystem
+    // @example resolve(".") => Ok("/Users/dev/project") ~ "Resolves current directory to absolute path"
+    // @example resolve("nonexistent") => Err("No such file or directory") ~ "Returns Err for missing path"
     module.insert(
         "resolve".to_string(),
         Value::NativeFunction {
@@ -167,7 +217,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // is_absolute(path) -> Bool
+    // @ntnt is_absolute
+    // @module std/path
+    // @signature is_absolute(path: String) -> Bool
+    // Returns true if the path is absolute.
+    // @param path The file path to check
+    // @see_also is_relative
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example is_absolute("/usr/bin") => true ~ "Absolute path starts with /"
+    // @example is_absolute("src/main.tnt") => false ~ "Relative path is not absolute"
     module.insert(
         "is_absolute".to_string(),
         Value::NativeFunction {
@@ -182,7 +241,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // is_relative(path) -> Bool
+    // @ntnt is_relative
+    // @module std/path
+    // @signature is_relative(path: String) -> Bool
+    // Returns true if the path is relative.
+    // @param path The file path to check
+    // @see_also is_absolute
+    // @since v0.1.0
+    // @tags #pure, #deterministic
+    // @example is_relative("src/main.tnt") => true ~ "Relative path without leading /"
+    // @example is_relative("/usr/bin") => false ~ "Absolute path is not relative"
     module.insert(
         "is_relative".to_string(),
         Value::NativeFunction {
@@ -197,7 +265,16 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // with_extension(path, ext) -> String
+    // @ntnt with_extension
+    // @module std/path
+    // @signature with_extension(path: String, ext: String) -> String
+    // Returns the path with its extension changed to the given extension.
+    // @param path The original file path
+    // @param ext The new extension (without leading dot)
+    // @see_also extension, stem, basename
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example with_extension("file.txt", "md") => "file.md" ~ "Changes file extension"
     module.insert(
         "with_extension".to_string(),
         Value::NativeFunction {
@@ -215,7 +292,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // normalize(path) -> String - Cleans up .. and . components
+    // @ntnt normalize
+    // @module std/path
+    // @signature normalize(path: String) -> String
+    // Cleans up `..` and `.` path components without touching the filesystem.
+    // @param path The file path to normalize
+    // @see_also join, resolve, dirname
+    // @since v0.2.0
+    // @tags #pure, #deterministic
+    // @example normalize("a/b/../c") => "a/c" ~ "Cleans up path components"
     module.insert(
         "normalize".to_string(),
         Value::NativeFunction {

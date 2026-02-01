@@ -318,6 +318,61 @@ Queue.on_shutdown(fn() {
 - After `visibility_timeout` seconds, jobs are automatically re-enqueued
 - This is why jobs MUST be idempotent
 
+### Interpreter Pool Architecture
+
+Background jobs run on a pool of interpreter instances (one per CPU core by default):
+
+```ntnt
+Queue.configure(map {
+    "workers": thread_count(),  // Default: one interpreter per core
+    // ...
+})
+```
+
+**Why multiple interpreters?**
+
+The NTNT interpreter uses `Rc<RefCell<>>` internally, which is not thread-safe. Rather than adding complex locking (which would hurt single-threaded performance), we run **N independent interpreters in N threads**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Tokio Async Runtime                         │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐             │
+│  │ HTTP Handler│  │ Job Poller  │  │ Job Poller  │             │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘             │
+│         │                │                │                     │
+│         └────────────────┼────────────────┘                     │
+│                          │                                      │
+│                    ┌─────▼─────┐                                │
+│                    │  Dispatch │  (round-robin or least-busy)   │
+│                    └─────┬─────┘                                │
+└──────────────────────────┼──────────────────────────────────────┘
+                           │
+         ┌─────────────────┼─────────────────┐
+         │                 │                 │
+┌────────▼────────┐ ┌──────▼──────┐ ┌────────▼────────┐
+│  Interpreter 1  │ │ Interpreter 2│ │  Interpreter N  │
+│  (own memory)   │ │ (own memory) │ │  (own memory)   │
+│  [dedicated     │ │ [dedicated   │ │  [dedicated     │
+│   thread]       │ │  thread]     │ │   thread]       │
+└─────────────────┘ └──────────────┘ └─────────────────┘
+```
+
+Each interpreter:
+- Has its own memory space (no shared state between workers)
+- Runs in a dedicated OS thread
+- Processes jobs independently
+
+This enables true parallel execution while keeping the interpreter simple (no locks, no contention).
+
+**Shared State**
+
+Jobs should NOT share in-memory state. Use:
+- **Database** for persistent state
+- **Redis/Valkey** for ephemeral shared state  
+- **Message passing** via Queue for coordination between jobs
+
+This constraint makes jobs naturally idempotent and horizontally scalable.
+
 ---
 
 ## Job Lifecycle

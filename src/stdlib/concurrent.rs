@@ -381,7 +381,15 @@ fn concurrent_thread_count() -> Result<Value> {
 pub fn init() -> HashMap<String, Value> {
     let mut module = HashMap::new();
 
-    // channel() -> Channel
+    // @ntnt channel
+    // @module std/concurrent
+    // @module_description Concurrent execution with parallel and background tasks
+    // @signature channel() -> Channel
+    // Creates a new unbounded channel for inter-task communication.
+    // @returns Channel handle (Map with _channel_id)
+    // @see_also send, recv, close
+    // @since v0.2.0
+    // @example channel() ~ "Create a channel for inter-task communication"
     module.insert(
         "channel".to_string(),
         Value::NativeFunction {
@@ -391,7 +399,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // send(channel, value) -> Bool
+    // @ntnt send
+    // @module std/concurrent
+    // @signature send(ch: Channel, value: Any) -> Bool
+    // Sends a value through a channel. Returns false if channel is closed.
+    // @param ch The channel to send on
+    // @param value The value to send (only primitive types: Int, Float, String, Bool, Array, Map)
+    // @see_also channel, recv
+    // @since v0.2.0
+    // @example send(ch, "hello") ~ "Send a string through the channel"
     module.insert(
         "send".to_string(),
         Value::NativeFunction {
@@ -401,7 +417,14 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // recv(channel) -> Value
+    // @ntnt recv
+    // @module std/concurrent
+    // @signature recv(ch: Channel) -> Any
+    // Receives a value from a channel. Blocks until a value is available. Returns Unit if channel is closed and empty.
+    // @param ch The channel to receive from
+    // @see_also channel, send, try_recv, recv_timeout
+    // @since v0.2.0
+    // @example recv(ch) ~ "Block until a value is received"
     module.insert(
         "recv".to_string(),
         Value::NativeFunction {
@@ -411,7 +434,15 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // recv_timeout(channel, millis) -> Option<Value>
+    // @ntnt recv_timeout
+    // @module std/concurrent
+    // @signature recv_timeout(ch: Channel, millis: Int) -> Option<Any>
+    // Receives with timeout. Returns None if timeout expires or channel disconnected.
+    // @param ch The channel to receive from
+    // @param millis Timeout in milliseconds
+    // @see_also recv, try_recv
+    // @since v0.2.0
+    // @example recv_timeout(ch, 5000) ~ "Wait up to 5 seconds for a value"
     module.insert(
         "recv_timeout".to_string(),
         Value::NativeFunction {
@@ -426,7 +457,14 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // try_recv(channel) -> Option<Value>
+    // @ntnt try_recv
+    // @module std/concurrent
+    // @signature try_recv(ch: Channel) -> Option<Any>
+    // Non-blocking receive. Returns None if no value is available.
+    // @param ch The channel to receive from
+    // @see_also recv, recv_timeout
+    // @since v0.2.0
+    // @example try_recv(ch) ~ "Check for a value without blocking"
     module.insert(
         "try_recv".to_string(),
         Value::NativeFunction {
@@ -436,7 +474,14 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // close(channel) -> Bool
+    // @ntnt close
+    // @module std/concurrent
+    // @signature close(ch: Channel) -> Bool
+    // Closes a channel. Senders will fail, receivers get remaining messages then Unit.
+    // @param ch The channel to close
+    // @see_also channel
+    // @since v0.2.0
+    // @example close(ch) ~ "Close the channel when done"
     module.insert(
         "close".to_string(),
         Value::NativeFunction {
@@ -446,7 +491,13 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // sleep_ms(millis) -> Unit
+    // @ntnt sleep_ms
+    // @module std/concurrent
+    // @signature sleep_ms(ms: Int) -> Unit
+    // Pauses execution for specified milliseconds.
+    // @param ms Duration to sleep in milliseconds
+    // @since v0.2.0
+    // @example sleep_ms(1000) ~ "Sleep for 1 second"
     module.insert(
         "sleep_ms".to_string(),
         Value::NativeFunction {
@@ -461,7 +512,12 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // thread_count() -> Int
+    // @ntnt thread_count
+    // @module std/concurrent
+    // @signature thread_count() -> Int
+    // Returns the number of available CPU threads. Useful for sizing parallel work.
+    // @since v0.2.0
+    // @example thread_count() => 8 ~ "Number of CPU threads"
     module.insert(
         "thread_count".to_string(),
         Value::NativeFunction {
