@@ -24,6 +24,12 @@ pub fn init() -> HashMap<String, Value> {
     // NEG_INFINITY constant
     module.insert("NEG_INFINITY".to_string(), Value::Float(f64::NEG_INFINITY));
 
+    // INT_MAX constant (largest 64-bit signed integer)
+    module.insert("INT_MAX".to_string(), Value::Int(i64::MAX));
+
+    // INT_MIN constant (smallest 64-bit signed integer)
+    module.insert("INT_MIN".to_string(), Value::Int(i64::MIN));
+
     // @ntnt sin
     // @module std/math
     // @module_description Mathematical functions and constants

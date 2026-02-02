@@ -2,7 +2,7 @@
 // Demonstrates std/env for system interaction
 
 import { get_env, args, cwd } from "std/env"
-import { split, contains, starts_with } from "std/string"
+import { split } from "std/string"
 
 // === Current Directory ===
 print("=== Current Directory ===")

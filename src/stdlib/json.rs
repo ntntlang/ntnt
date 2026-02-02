@@ -7,7 +7,11 @@ use std::collections::HashMap;
 /// Convert JSON value to Intent Value
 pub fn json_to_intent_value(json: &serde_json::Value) -> Value {
     match json {
-        serde_json::Value::Null => Value::Unit,
+        serde_json::Value::Null => Value::EnumValue {
+            enum_name: "Option".to_string(),
+            variant: "None".to_string(),
+            values: vec![],
+        },
         serde_json::Value::Bool(b) => Value::Bool(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -59,6 +63,18 @@ pub fn intent_value_to_json(value: &Value) -> serde_json::Value {
                 .collect();
             serde_json::Value::Object(obj)
         }
+        Value::EnumValue {
+            enum_name,
+            variant,
+            values,
+        } if enum_name == "Option" => match variant.as_str() {
+            "None" => serde_json::Value::Null,
+            "Some" => values
+                .first()
+                .map(intent_value_to_json)
+                .unwrap_or(serde_json::Value::Null),
+            _ => serde_json::Value::String(value.to_string()),
+        },
         // For other types, convert to string representation
         _ => serde_json::Value::String(value.to_string()),
     }
@@ -76,14 +92,16 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Returns Ok with the parsed value on success, or Err with a descriptive
     // parse error message. Supports all JSON types: objects become Maps,
-    // arrays become Arrays, numbers become Int or Float.
+    // arrays become Arrays, numbers become Int or Float, and null becomes None.
     // @param json_str The JSON string to parse
     // @returns Result containing the parsed value or an error message
     // @see_also stringify, stringify_pretty
     // @since v0.1.0
     // @tags #pure
     // @example parse_json("{\"key\": \"value\"}") => Ok(map { "key": "value" }) ~ "Parse JSON object"
+    // @example parse_json("null") => Ok(None) ~ "JSON null becomes None"
     // @error TypeError ~ "parse_json() requires a JSON string" fix: "Pass a string argument"
+    // @gotcha JSON null is parsed as None (not Unit), enabling round-trip with stringify(None) → "null"
     module.insert(
         "parse_json".to_string(),
         Value::NativeFunction {
@@ -119,14 +137,18 @@ pub fn init() -> HashMap<String, Value> {
     // @signature stringify(value: Any) -> String
     // Converts a value to a compact JSON string.
     //
-    // Maps, arrays, strings, numbers, booleans, and null are serialized to
+    // Maps, arrays, strings, numbers, booleans, and Unit are serialized to
     // their JSON equivalents. Structs are serialized as JSON objects.
+    // Option values are unwrapped: None becomes null, Some(v) becomes v.
     // @param value The value to serialize
     // @returns Compact JSON string with no extra whitespace
     // @see_also stringify_pretty, parse_json
     // @since v0.1.0
     // @tags #pure, #deterministic
     // @example stringify(map { "key": "value" }) => "{\"key\":\"value\"}" ~ "Compact JSON"
+    // @example stringify(None) => "null" ~ "None serializes to null"
+    // @example stringify(Some(42)) => "42" ~ "Some unwraps to inner value"
+    // @gotcha Both None and Unit serialize to JSON null
     module.insert(
         "stringify".to_string(),
         Value::NativeFunction {
@@ -143,6 +165,9 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/json
     // @signature stringify_pretty(value: Any) -> String
     // Converts a value to a pretty-printed JSON string with indentation.
+    //
+    // Behaves identically to stringify() but formats the output with newlines
+    // and 2-space indentation for readability. None becomes null, Some(v) becomes v.
     // @param value The value to serialize
     // @returns Indented JSON string for human readability
     // @see_also stringify, parse_json

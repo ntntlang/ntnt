@@ -2,7 +2,7 @@
 
 > **Auto-generated from [syntax.toml](syntax.toml)** - Do not edit directly.
 >
-> Last updated: v0.3.9
+> Last updated: v0.3.10
 
 ## Table of Contents
 
@@ -17,6 +17,8 @@
 - [Types](#types)
 - [Imports](#imports)
 - [Match Expressions](#match-expressions)
+- [Destructuring Patterns](#destructuring-patterns)
+- [Function Parameters](#function-parameters)
 
 ---
 
@@ -47,6 +49,12 @@ _Variable declaration (mut for mutable)_
 `if`, `else`, `match`, `for`, `in`, `while`, `loop`, `break`, `continue`, `defer`
 
 _Control flow statements_
+
+### Error Handling
+
+`otherwise`
+
+_Inline error handling on let bindings — unwraps Ok/Some or runs a diverging block for Err/None_
 
 ### Types
 
@@ -81,6 +89,7 @@ NTNT operators by precedence (lowest to highest)
 | arithmetic | `+`, `-`, `*`, `/`, `%` | Arithmetic operators | `a + b, x * y, n % 2` |
 | unary | `-`, `!` | Unary negation and logical NOT | `-x, !condition` |
 | range | `..`, `..=` | Range operators (exclusive and inclusive) | `0..10 (0-9), 0..=10 (0-10)` |
+| postfix | `?` | Try operator — unwraps Ok/Some or early-returns Err/None | `parse_json(req)?` |
 | member | `.`, `[]` | Member access and indexing | `user.name, arr[0], map["key"]` |
 | pipe | `|>` | Pipeline operator (passes left as first arg to right) | `data |> transform |> validate` |
 
@@ -101,6 +110,8 @@ Value literal syntax
 | arrays | `[1, 2, 3], []` | Array literals |
 | maps | `map { "key": value }` | Map literals (MUST use `map` keyword at top level) |
 | ranges | `0..10, 0..=10` | Range literals (exclusive and inclusive) |
+| closures | `fn(params) { body }` | Anonymous functions / closures in expression position |
+| if_expression | `if cond { expr } else { expr }` | If-expression returns a value from the selected branch. Else is required. |
 
 ---
 
@@ -281,4 +292,33 @@ Pattern matching syntax
 | guards | `pattern if condition => result` | Pattern with guard condition |
 | wildcard | `_` | Wildcard pattern matches anything |
 | binding | `name` | Bind matched value to name |
+
+---
+
+## Destructuring Patterns
+
+| Pattern | Syntax | Description |
+|---------|--------|-------------|
+| map basic | `let { field1, field2 } = expr` | Extract map/struct fields into variables |
+| map rename | `let { field: alias } = expr` | Extract map field with a different variable name |
+| map nested | `let { field: { subfield } } = expr` | Nested map destructuring |
+| array | `let [a, b, c] = expr` | Extract array elements into variables |
+| array rest | `let [first, ...rest] = expr` | Extract leading elements and collect remaining into array |
+| map rest | `let { field, ...rest } = expr` | Extract named fields and collect remaining into map |
+| for loop | `for [a, b] in expr { }` | Destructure each element during iteration |
+| spread token | `...` | Rest/spread operator in destructuring patterns |
+
+---
+
+## Function Parameters
+
+Function parameter syntax
+
+| Feature | Syntax | Description |
+|---------|--------|-------------|
+| basic | `fn name(a, b) { }` | Basic parameters (untyped, gradual typing) |
+| typed | `fn name(a: Int, b: String) -> Bool { }` | Parameters with type annotations and return type |
+| default values | `fn name(a, b = expr) { }` | Parameters with default values (must come after required params) |
+| default typed | `fn name(a: Int, b: Int = 10) -> Int { }` | Default values with type annotations |
+| default reference | `fn name(a = 0, b = a + 10) { }` | Default expressions can reference earlier parameters |
 

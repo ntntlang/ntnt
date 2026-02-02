@@ -53,18 +53,14 @@ fn get(req) {
         return response(301, map { "location": redirect_to }, "")
     }
 
-    let post = blog.get_post_by_slug(slug)
-
-    // Check if post exists (get_post_by_slug returns Some(post) or None)
-    match post {
-        Some(p) => {
-            let content = template(p["template"], map {})
-            return cached_html(render_page(content, p["title"] + " - NTNT Blog"), 60)
-        },
-        None => {}
+    let post = blog.get_post_by_slug(slug) otherwise {
+        // 404 - post not found (short cache so new posts appear quickly)
+        let content = template("views/blog/404.html", map {})
+        return not_found_html(render_page(content, "Post Not Found - NTNT Blog"))
     }
 
-    // 404 - post not found (short cache so new posts appear quickly)
-    let content = template("views/blog/404.html", map {})
-    return not_found_html(render_page(content, "Post Not Found - NTNT Blog"))
+    // Destructure the post to extract template path and title
+    let { template: tmpl, title } = post
+    let content = template(tmpl, map {})
+    return cached_html(render_page(content, title + " - NTNT Blog"), 60)
 }

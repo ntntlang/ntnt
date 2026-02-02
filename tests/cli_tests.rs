@@ -89,15 +89,31 @@ fn test_validate_directory() {
 }
 
 #[test]
-fn test_validate_shows_warnings() {
-    let (stdout, _, _) = run_ntnt(&["validate", "examples/http_server.tnt"]);
+fn test_validate_outputs_structured_json() {
+    let (stdout, _, code) = run_ntnt(&["validate", "examples/http_server.tnt"]);
+
+    assert_eq!(code, 0, "validate should succeed on a valid file");
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("validate should output valid JSON");
 
-    // http_server.tnt has unused imports
-    let warnings = json["summary"]["warnings"].as_i64().unwrap();
-    assert!(warnings > 0, "Should detect unused import warnings");
+    // Verify expected structure
+    assert!(
+        json["summary"]["errors"].is_number(),
+        "summary should have errors count"
+    );
+    assert!(
+        json["summary"]["warnings"].is_number(),
+        "summary should have warnings count"
+    );
+    assert!(json["files"].is_array(), "should have files array");
+
+    let files = json["files"].as_array().unwrap();
+    assert!(!files.is_empty(), "should have at least one file entry");
+    assert!(
+        files[0]["valid"].as_bool().unwrap(),
+        "http_server.tnt should be valid"
+    );
 }
 
 // ============================================================================

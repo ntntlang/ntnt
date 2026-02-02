@@ -2014,7 +2014,9 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                 }
             }
             Expression::Lambda { body, .. } => {
-                check_expr_for_issues(body, source_lines, issues, http_route_functions);
+                for stmt in &body.statements {
+                    check_stmt_for_issues(stmt, source_lines, issues, http_route_functions);
+                }
             }
             Expression::Block(block) => {
                 for stmt in &block.statements {
@@ -2302,6 +2304,40 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
         // NOTE: NTNT DOES support escape sequences in regular strings!
         // The lexer handles: \n \t \r \\ \" \' \{ \}
         // Previous versions had incorrect warnings here - those have been removed.
+
+        // Check for unnecessary semicolons (not inside triple-quoted template strings)
+        // Only flag lines that end with a semicolon and are not inside template strings or embedded JS/CSS
+        if trimmed.ends_with(';') && !trimmed.starts_with("//") {
+            // Heuristic: skip lines that look like embedded CSS/JS (common inside template strings)
+            let looks_like_css_js = trimmed.contains('{')
+                || trimmed.contains('}')
+                || trimmed.starts_with("const ")
+                || trimmed.starts_with("var ")
+                || trimmed.starts_with("let ") && trimmed.contains("= ") && trimmed.contains(".")
+                || trimmed.starts_with("return ") && trimmed.contains(".")
+                || trimmed.contains("font-family")
+                || trimmed.contains("margin")
+                || trimmed.contains("padding")
+                || trimmed.contains("color:")
+                || trimmed.contains("text-align")
+                || trimmed.contains("max-width")
+                || trimmed.contains("border")
+                || trimmed.contains("background")
+                || trimmed.contains("box-shadow")
+                || trimmed.contains("max-height");
+
+            if !looks_like_css_js {
+                issues.push(json!({
+                    "severity": "warning",
+                    "rule": "unnecessary_semicolon",
+                    "message": "Semicolons are not needed in NTNT. Remove the trailing semicolon.",
+                    "line": line_num + 1,
+                    "fix": {
+                        "description": "Remove the semicolon at the end of the line"
+                    }
+                }));
+            }
+        }
     }
 
     issues
@@ -3425,7 +3461,9 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
 
             // Lambda/closures - recurse into body
             Expression::Lambda { body, .. } => {
-                collect_from_expr(body, names);
+                for s in &body.statements {
+                    collect_used_names(s, names);
+                }
             }
 
             // Block expressions
@@ -3504,8 +3542,18 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                     }
                 }
             }
-            Pattern::Tuple(patterns) | Pattern::Array(patterns) => {
+            Pattern::Tuple(patterns) => {
                 for p in patterns {
+                    collect_from_pattern(p, names);
+                }
+            }
+            Pattern::Array { elements, .. } => {
+                for p in elements {
+                    collect_from_pattern(p, names);
+                }
+            }
+            Pattern::Map { fields, .. } => {
+                for (_, p) in fields {
                     collect_from_pattern(p, names);
                 }
             }
@@ -3609,8 +3657,7 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
         | Statement::Trait { .. }
         | Statement::TypeAlias { .. }
         | Statement::Use { .. }
-        | Statement::Import { .. }
-        | Statement::Protocol { .. } => {}
+        | Statement::Import { .. } => {}
     }
 }
 
@@ -4422,6 +4469,8 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
     md.push_str("- [Types](#types)\n");
     md.push_str("- [Imports](#imports)\n");
     md.push_str("- [Match Expressions](#match-expressions)\n");
+    md.push_str("- [Destructuring Patterns](#destructuring-patterns)\n");
+    md.push_str("- [Function Parameters](#function-parameters)\n");
     md.push_str("\n---\n\n");
 
     // Keywords
@@ -4436,6 +4485,7 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             ("functions", "Functions"),
             ("variables", "Variables"),
             ("control_flow", "Control Flow"),
+            ("error_handling", "Error Handling"),
             ("types", "Types"),
             ("modules", "Modules"),
             ("literals", "Literals"),
@@ -4478,6 +4528,7 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             "arithmetic",
             "unary",
             "range",
+            "postfix",
             "member",
             "pipe",
         ];
@@ -4529,6 +4580,8 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             "arrays",
             "maps",
             "ranges",
+            "closures",
+            "if_expression",
         ];
 
         for lit in &lit_types {
@@ -4793,6 +4846,70 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                 let syntax_str = f.get("syntax").and_then(|v| v.as_str()).unwrap_or("");
                 let desc = f.get("description").and_then(|v| v.as_str()).unwrap_or("");
                 md.push_str(&format!("| {} | `{}` | {} |\n", feat, syntax_str, desc));
+            }
+        }
+        md.push_str("\n---\n\n");
+    }
+
+    // Destructuring Patterns
+    if let Some(destructuring) = syntax.get("destructuring") {
+        md.push_str("## Destructuring Patterns\n\n");
+
+        md.push_str("| Pattern | Syntax | Description |\n");
+        md.push_str("|---------|--------|-------------|\n");
+
+        let patterns = [
+            "map_basic",
+            "map_rename",
+            "map_nested",
+            "array",
+            "array_rest",
+            "map_rest",
+            "for_loop",
+            "spread_token",
+        ];
+        for pat in &patterns {
+            if let Some(p) = destructuring.get(*pat) {
+                let syntax_str = p.get("syntax").and_then(|v| v.as_str()).unwrap_or("");
+                let desc = p.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                md.push_str(&format!(
+                    "| {} | `{}` | {} |\n",
+                    pat.replace("_", " "),
+                    syntax_str,
+                    desc
+                ));
+            }
+        }
+        md.push_str("\n---\n\n");
+    }
+
+    // Function Parameters
+    if let Some(func_params) = syntax.get("function_parameters") {
+        md.push_str("## Function Parameters\n\n");
+        if let Some(desc) = func_params.get("description").and_then(|v| v.as_str()) {
+            md.push_str(&format!("{}\n\n", desc));
+        }
+
+        md.push_str("| Feature | Syntax | Description |\n");
+        md.push_str("|---------|--------|-------------|\n");
+
+        let features = [
+            "basic",
+            "typed",
+            "default_values",
+            "default_typed",
+            "default_reference",
+        ];
+        for feat in &features {
+            if let Some(f) = func_params.get(*feat) {
+                let syntax_str = f.get("syntax").and_then(|v| v.as_str()).unwrap_or("");
+                let desc = f.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                md.push_str(&format!(
+                    "| {} | `{}` | {} |\n",
+                    feat.replace("_", " "),
+                    syntax_str,
+                    desc
+                ));
             }
         }
         md.push_str("\n");

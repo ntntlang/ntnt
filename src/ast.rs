@@ -46,6 +46,8 @@ pub enum Statement {
         value: Option<Expression>,
         /// Optional pattern for destructuring: `let (a, b) = expr;`
         pattern: Option<Pattern>,
+        /// Optional otherwise block for error handling: `let x = expr otherwise { ... }`
+        otherwise: Option<Block>,
     },
 
     /// Function declaration
@@ -145,9 +147,10 @@ pub enum Statement {
     /// While loop
     While { condition: Expression, body: Block },
 
-    /// For-in loop: `for item in items { }`
+    /// For-in loop: `for item in items { }` or `for [k, v] in entries(m) { }`
     ForIn {
         variable: String,
+        pattern: Option<Pattern>,
         iterable: Expression,
         body: Block,
     },
@@ -163,12 +166,6 @@ pub enum Statement {
 
     /// Defer statement: `defer expr` - executes when scope exits
     Defer(Expression),
-
-    /// Protocol declaration for concurrency
-    Protocol {
-        name: String,
-        steps: Vec<ProtocolStep>,
-    },
 
     /// Intent annotation
     Intent {
@@ -268,11 +265,8 @@ pub enum Expression {
         arguments: Vec<Expression>,
     },
 
-    /// Lambda/closure
-    Lambda {
-        params: Vec<Parameter>,
-        body: Box<Expression>,
-    },
+    /// Lambda/closure: fn(params) { body }
+    Lambda { params: Vec<Parameter>, body: Block },
 
     /// Block expression
     Block(Block),
@@ -506,8 +500,17 @@ pub enum Pattern {
     /// Tuple pattern
     Tuple(Vec<Pattern>),
 
-    /// Array pattern
-    Array(Vec<Pattern>),
+    /// Array pattern: [a, b, c] or [first, ...rest]
+    Array {
+        elements: Vec<Pattern>,
+        rest: Option<String>,
+    },
+
+    /// Map destructuring pattern: { name, age } or { name: n, age: a } or { name, ...other }
+    Map {
+        fields: Vec<(String, Pattern)>,
+        rest: Option<String>,
+    },
 }
 
 /// Attribute/annotation
@@ -515,22 +518,6 @@ pub enum Pattern {
 pub struct Attribute {
     pub name: String,
     pub args: Vec<Expression>,
-}
-
-/// Protocol step for concurrency
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ProtocolStep {
-    Send {
-        message_type: String,
-        payload: Option<TypeExpr>,
-    },
-    Receive {
-        message_type: String,
-        payload: Option<TypeExpr>,
-    },
-    Choice(Vec<Vec<ProtocolStep>>),
-    Loop(Vec<ProtocolStep>),
-    End,
 }
 
 impl Program {

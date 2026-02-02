@@ -26,7 +26,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Recursive descent parser
 - [x] Complete AST definitions
 - [x] Tree-walking interpreter
-- [x] Basic type system (Int, Float, String, Bool, Array, Object, Function, Unit) — parsed, not yet enforced (→ Phase 7.1)
+- [x] Basic type system (Int, Float, String, Bool, Array, Object, Function, Unit) — enforced with gradual typing (Phase 7.1)
 - [x] Full contract system (`requires`, `ensures`, `old()`, `result`)
 - [x] Struct invariants with automatic checking
 - [x] Built-in math functions (`abs`, `min`, `max`, `sqrt`, `pow`, `round` with optional decimals, etc.)
@@ -71,7 +71,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Template cache invalidation (mtime-based hot-reload for compiled templates)
 - [x] NTNT_ENV=production disables hot-reload for better performance
 - [x] Runtime documentation (RUNTIME_REFERENCE.md)
-- [x] Documentation system: `// @ntnt` doc comments in Rust source, `build.rs` validation, 263 functions documented
+- [x] Documentation system: `// @ntnt` doc comments in Rust source, `build.rs` validation, 267 functions documented
 - [x] 100% documentation coverage enforced at compile time (undocumented function = build error)
 
 ---
@@ -516,9 +516,25 @@ fn divide(a: Int, b: Int) -> Int
 - [x] `fetch()` returns `Result<Response, String>` instead of `Any`
 - [x] Match arm struct pattern narrowing: fields bind with struct field types
 - [x] Cross-file import type propagation: `import { foo } from "./lib/utils"` resolves function signatures
+- [x] Union type soundness: union VALUES require ALL members compatible with target, union TARGETS require ANY member match
+- [x] Union type flattening and deduplication in `union_type()` computation
+- [x] Block divergence analysis (`block_diverges`) for otherwise/lambda validation
+- [x] `otherwise` block divergence warning (must end with return/break/continue)
+- [x] Lambda return type inference via `collected_returns` (early returns included in union)
+- [x] Flow-sensitive type narrowing after guards (`if x == None { return }` narrows `x` to inner type)
+- [x] Narrowing patterns: `x == None`, `x != None`, `is_some(x)`, `is_none(x)`, `is_ok(x)`, `is_err(x)`, `!cond`
+- [x] Guard clause narrowing: diverging then-branch applies false-facts to subsequent code
+- [x] If-expression narrowing: branches get narrowed types from condition
+- [x] Static match exhaustiveness checking for `Option`, `Result`, and user-defined enums
+- [x] Map field access returns value type: `map.field` on `Map<K, V>` returns `V`
+- [x] Variadic functions check declared parameter types (not just skip all checking)
+- [x] Variadic functions check minimum argument count
+- [x] Cross-file Pass 2 inference: unannotated exported functions get inferred return types
+- [x] Circular import safety: shared module cache prevents infinite recursion during cross-file analysis
+- [x] Strict mode: string interpolation warning for complex types (Array, Map, Function)
+- [x] Strict mode: Float→Int precision loss warning
 - [ ] Cross-file struct/enum propagation (extend import type resolution to include struct and enum definitions)
-- [ ] Closure parameter type inference from call context (depends on 7.3: `filter(arr, fn(x) { x > 0 })` infers `x: T` from `Array<T>`)
-- [ ] Flow-sensitive type narrowing after guards (e.g., `if x != None { x.unwrap() }` narrows `x`; tracked in Phase 13)
+- [ ] Closure parameter type inference from call context (7.3 closures done; inference from `Array<T>` context remaining)
 - [ ] Heterogeneous map return types: functions returning `map { "name": str, "values": arr }` need user-defined structs for real types
 
 **Backward compatibility:** Existing NTNT code continues to work. Untyped function parameters are treated as `Any`. Adding types is opt-in but encouraged. `ntnt lint --strict` warns about untyped public function signatures.
@@ -563,51 +579,110 @@ fn handle_request(req: Request) -> Result<Response, Error> {
 
 **Implementation plan:**
 
-- [ ] `?` operator on `Result<T, E>` values — unwrap `Ok` or early-return `Err`
-- [ ] `?` operator on `Option<T>` values — unwrap `Some` or early-return `None`
+- [x] `?` operator on `Result<T, E>` values — unwrap `Ok` or early-return `Err`
+- [x] `?` operator on `Option<T>` values — unwrap `Some` or early-return `None`
+- [x] Type checker unwraps `Result<T, E>` → `T` and `Option<T>` → `T` for `?` expressions
+- [x] Gradual typing: non-Result/Option values pass through unchanged
 - [ ] Error type coercion (auto-convert between compatible error types)
 - [ ] Type system verifies `?` is used in functions that return `Result` or `Option`
 - [ ] Clear error message when `?` is used in a function with wrong return type
 
-### 7.3 Anonymous Functions / Closures
+### 7.2.1 Inline Error Handling (`otherwise`)
 
-**Priority:** High — needed for idiomatic use of `filter`, `transform`, and higher-order functions.
+> **Design Doc:** [plans/syntax-analysis-and-innovation.md](plans/syntax-analysis-and-innovation.md) § 3.3
 
-Currently, every callback requires a named function:
+**Priority:** High — can ship independently of `?` (no type system dependencies). Immediate ergonomic win for both web handlers and CLI scripts.
+
+The `?` operator propagates errors to the caller. `otherwise` handles errors at the call site — each failure gets its own recovery logic inline. They are complementary: `?` for library internals, `otherwise` for handlers and scripts.
 
 ```ntnt
-// Current: must define named functions for simple transformations
-fn double(x) { return x * 2 }
-fn is_even(x) { return x % 2 == 0 }
+// Web handler — each error gets a specific HTTP response
+fn create_user(req) {
+    let data = parse_json(req)
+        otherwise return status(400, "Invalid JSON: {err}")
 
-let doubled = transform(nums, double)
-let evens = filter(nums, is_even)
+    let name = data["name"]
+        otherwise return status(400, "Missing field: name")
+
+    let saved = execute(db, "INSERT INTO users (name) VALUES ($1)", [name])
+        otherwise return status(500, "Database error: {err}")
+
+    return json(map { "created": true, "name": name }, 201)
+}
+
+// CLI script — handle errors, skip bad data, keep going
+let content = read_file("data/input.csv")
+    otherwise { print("Cannot read input: {err}"); return }
+
+for line in lines {
+    let value = float(fields[2])
+        otherwise { print("Bad number on line: {line}"); continue }
+    // ...
+}
 ```
 
-With closures:
+**Semantics:**
+- Works on `Result<T, E>`: unwraps `Ok(v)` into the binding, runs the otherwise block on `Err(e)`
+- Works on `Option<T>`: unwraps `Some(v)` into the binding, runs the otherwise block on `None`
+- `err` is automatically bound to the error value (or `None` for Option) inside the otherwise block
+- The otherwise block must diverge: `return`, `continue`, `break`, or panic
+- Single-expression form: `otherwise return status(400, "msg")` (no braces needed)
+- Block form: `otherwise { print("error"); return }` (braces for multiple statements)
+
+**Implementation plan:**
+
+- [x] `Otherwise` keyword in lexer
+- [x] Parse `otherwise` clause on `let` bindings: `let x = expr otherwise { diverging }`
+- [x] `err` auto-binding for the error/None value
+- [x] Single-expression shorthand (no braces for simple cases)
+- [x] Works with `Result<T, E>` — unwrap Ok or run otherwise on Err
+- [x] Works with `Option<T>` — unwrap Some or run otherwise on None
+- [x] Verify otherwise block diverges (return/break/continue)
+- [x] Type checker unwraps `Result<T, E>` → `T` and `Option<T>` → `T` for let with otherwise
+- [ ] Lint integration: warn if otherwise block doesn't diverge
+
+### 7.3 Anonymous Functions / Closures ✅
+
+**Status:** Complete (v0.4.0)
+
+Anonymous functions use `fn(params) { body }` syntax in expression position:
 
 ```ntnt
-// Target: inline anonymous functions
-let doubled = transform(nums, fn(x: Int) -> Int { x * 2 })
-let evens = filter(nums, fn(x: Int) -> Bool { x % 2 == 0 })
-
-// Type inference from context — when transform() expects fn(Int) -> T,
-// parameter types can be inferred:
+// Inline closures with filter and transform
 let doubled = transform(nums, fn(x) { x * 2 })
+let evens = filter(nums, fn(x) { x % 2 == 0 })
+
+// Typed params and return type
+let multiply = fn(a: Int, b: Int) -> Int { a * b }
+
+// Multi-statement body
+let process = fn(item) {
+    let cleaned = trim(item)
+    return to_lower(cleaned)
+}
 
 // Closures capture surrounding variables
 let threshold = 10
 let above = filter(nums, fn(x) { x > threshold })
+
+// Nested closures (currying)
+let make_adder = fn(x) { fn(y) { x + y } }
+
+// Immediate invocation
+let result = fn(x) { x + 1 }(5)
 ```
 
-**Implementation plan:**
+**Implementation:**
 
-- [ ] Anonymous function expression: `fn(params) { body }`
-- [ ] Implicit return (last expression is return value) for single-expression closures
-- [ ] Variable capture from enclosing scope (closure semantics)
-- [ ] Closures as function arguments (higher-order functions)
+- [x] Anonymous function expression: `fn(params) { body }`
+- [x] Block body with implicit return (last expression is return value)
+- [x] Multi-statement closures with explicit `return`
+- [x] Optional type annotations: `fn(x: Int) -> Int { ... }`
+- [x] Variable capture from enclosing scope (closure semantics)
+- [x] Closures as function arguments (higher-order functions)
+- [x] Nested closures and immediate invocation
+- [x] Lint, type checker, and interpreter support
 - [ ] Type inference from call context (parameter types inferred from expected signature)
-- [ ] Named function handlers still required for HTTP routes (readability rule)
 
 ### 7.4 SQLite Support (`std/db/sqlite`)
 
@@ -642,7 +717,7 @@ for user in users {
 - [x] `close(db)` — close database connection
 - [x] Transaction support (`begin`, `commit`, `rollback`)
 - [x] In-memory databases: `connect(":memory:")`
-- [x] Type mapping: INTEGER↔Int, REAL↔Float, TEXT↔String, BLOB↔Array<Int>, NULL↔Unit
+- [x] Type mapping: INTEGER↔Int, REAL↔Float, TEXT↔String, BLOB↔Array<Int>, NULL↔None
 
 ### 7.5 Pipe Operator (`|>`)
 
@@ -719,8 +794,11 @@ Error[E012]: Type mismatch in function call
 - [x] Column info added to ParserError
 - [x] Source code snippets in error output (3-line context for parser errors)
 - [x] Color-coded CLI output (error codes in red, line numbers in blue, suggestions in green, help text in cyan)
-- [ ] Full AST span tracking on all nodes (line, column, span) — deferred
-- [ ] Runtime error line numbers via AST span tracking — deferred
+- [x] Type checker forward-scanning cursor (`find_line_near`) — fixes line number accuracy for all 26 diagnostic sites without AST changes
+- [x] Expression-aware search hints (`expr_search_hint`) — uses AST structure to build better search needles for line lookup
+- [x] Actionable type hints for conditions (Int → "use != 0"), comparisons (Int vs String → "use int()/str()"), and let bindings (untyped map access)
+- [ ] Full AST span tracking on all nodes (line, column, span) — the proper fix; would eliminate heuristic line search entirely and enable exact column-level diagnostics. Requires adding a `Span { line, col, offset, len }` to every AST node, propagating spans through the parser, and updating the type checker to read spans directly instead of searching source text.
+- [ ] Runtime error line numbers via AST span tracking — deferred, depends on full span tracking above
 - [ ] "Did you mean?" suggestions for wrong imports (scan stdlib for similar names) — see 7.13
 - [ ] Contract violation messages show the contract expression and actual values
 - [ ] `ntnt lint --format=json` structured error output for agent consumption
@@ -782,16 +860,19 @@ fn create_user({ name, email }: Map) -> User {
 
 **Implementation plan:**
 
-- [ ] Map destructuring in `let` bindings: `let { key1, key2 } = expr`
-- [ ] Array destructuring: `let [first, second] = expr`
-- [ ] Rest patterns: `let [head, ...tail] = arr`
-- [ ] Nested destructuring: `let { user: { name } } = data`
+- [x] Map destructuring in `let` bindings: `let { key1, key2 } = expr`
+- [x] Array destructuring: `let [first, second] = expr`
+- [x] Rest patterns: `let [head, ...tail] = arr`, `let { name, ...other } = map`
+- [x] Nested destructuring: `let { user: { name } } = data`
 - [ ] Destructuring with type annotations
 - [ ] Destructuring in function parameters
-- [ ] Destructuring in `for` loops: `for { name, email } in users { ... }`
-- [ ] Type checking: destructured fields are type-inferred from the source expression
+- [x] Destructuring in `for` loops: `for { name, email } in users { ... }`
+- [x] Type checking: destructured fields are type-inferred from the source expression
+- [x] Map destructuring with rename: `let { name: n } = data`
+- [x] Map destructuring works with structs: `let { name } = user`
+- [x] Map destructuring in `match` expressions
 
-### 7.9 Default Parameter Values
+### 7.9 Default Parameter Values ✅
 
 **Priority:** Moderate — reduces boilerplate in utility functions and makes APIs more ergonomic.
 
@@ -820,47 +901,16 @@ fn respond(data: Map, status_code: Int = 200, content_type: String = "applicatio
 
 **Implementation plan:**
 
-- [ ] Default value expressions in function parameter lists: `param: Type = expr`
-- [ ] Default parameters must come after required parameters
-- [ ] Default expressions evaluated at call time (not definition time)
-- [ ] Type inference: default value provides type if annotation is missing
-- [ ] `ntnt inspect` includes default values in function signatures
-- [ ] Works with contracts: `requires` can reference defaulted parameters
+- [x] Default value expressions in function parameter lists: `param: Type = expr`
+- [x] Default parameters must come after required parameters (parser error if violated)
+- [x] Default expressions evaluated at call time (not definition time)
+- [x] Type inference: default value provides type if annotation is missing
+- [x] `ntnt inspect` includes default values in function signatures (`has_default: true`)
+- [x] Works with contracts: `requires` can reference defaulted parameters
 
-### 7.10 Guard Clauses (`let-else`)
+### ~~7.10 Guard Clauses (`let-else`)~~ — Removed
 
-**Priority:** High — eliminates a level of nesting for every validation check. Pairs with `?` (7.2) to flatten web handlers from match pyramids to linear sequences.
-
-The `?` operator handles `Result` propagation, but web handlers also bail out for non-Result conditions — "if the user doesn't exist, return 404." Today this requires a full `match` block that pushes the happy path one indent level deeper:
-
-```ntnt
-// Current: match pyramid for every check
-match find_user(id) {
-    Some(user) => {
-        match find_order(user, order_id) {
-            Some(order) => {
-                // ... handler at indent level 2
-            },
-            None => return status(404, "Order not found")
-        }
-    },
-    None => return status(404, "User not found")
-}
-
-// With guard clauses: flat, linear, reads top-to-bottom
-let user = find_user(id) else return status(404, "User not found")
-let order = find_order(user, order_id) else return status(404, "Order not found")
-// ... handler at indent level 0
-```
-
-**Implementation plan:**
-
-- [ ] `let x = expr else { diverging_expr }` syntax (like Rust's let-else)
-- [ ] The `else` block must diverge (return, break, continue, or panic)
-- [ ] Works with `Option`: unwraps `Some(v)` or runs else block on `None`
-- [ ] Works with `Result`: unwraps `Ok(v)` or runs else block on `Err(e)`
-- [ ] The error value is accessible in the else block: `let x = expr else |e| return status(500, str(e))`
-- [ ] Type system verifies the else block diverges (doesn't fall through)
+Superseded by `otherwise` (7.2.1), which provides the same unwrap-or-diverge pattern with better ergonomics: `err` auto-binding, readable keyword, and works with both `Result`/`Option` and non-Result values.
 
 ### 7.11 Intent File Cleanup
 
@@ -921,7 +971,7 @@ module.insert("split".to_string(), Value::NativeFunction {
 
 - [x] Add doc comments to all 16 stdlib modules (string, math, collections, http, fs, json, csv, url, path, time, crypto, env, postgres, sqlite, concurrent, http_server)
 - [x] Document global builtins (len, print, str, int, float, type, assert, etc.)
-- [x] Document all 263 functions with full structured metadata (@description, @param, @returns, @example, @see_also, @since, @tags, @error, @gotcha)
+- [x] Document all 267 functions with full structured metadata (@description, @param, @returns, @example, @see_also, @since, @tags, @error, @gotcha)
 - [x] 100% documentation coverage enforced at compile time
 - [x] Delete TOML documentation files (replaced by source-embedded docs)
 
@@ -1007,22 +1057,111 @@ ntnt docs --update-agent-docs         # Regenerate auto-sections in AI_AGENT_GUI
 - [ ] "Did you mean?" suggestions for wrong module names (wire existing Levenshtein into `import_std_module()`)
 - [ ] "Did you mean?" suggestions for wrong export names (wire into `bind_imports()`, show available exports)
 
+### 7.14 If-Expressions (Ternary / Conditional Expressions)
+
+**Priority:** Moderate — the AST and interpreter already support this; only the parser needs updating.
+
+Currently, NTNT has no way to use `if/else` as an expression that returns a value. This forces unnecessary mutability:
+
+```ntnt
+// Current: must use mut
+let mut label = ""
+if count > 0 {
+    label = "active"
+} else {
+    label = "inactive"
+}
+
+// Target: if-expression returns a value
+let label = if count > 0 { "active" } else { "inactive" }
+
+// Works in any expression position
+return json(map { "status": if ok { "success" } else { "error" } })
+```
+
+**Implementation status:** ✅ Complete (v0.3.10)
+
+- [x] `Expression::IfExpr` in AST (`src/ast.rs`)
+- [x] `IfExpr` evaluation in interpreter (`src/interpreter.rs`)
+- [x] Parse `if` in expression position in `primary()` (`src/parser.rs`)
+- [x] Type inference: both branches return union type (`src/typechecker.rs`)
+- [x] Require `else` branch (no dangling if-expressions)
+- [x] Else-if chains via recursive `primary()` parsing
+- [x] Integration tests (8 tests covering all patterns)
+- [x] Snowgauge examples updated to use if-expressions
+
+### 7.15 Regex Capture Groups (`capture_pattern`)
+
+**Priority:** Moderate — the existing regex functions (`find_pattern`, `matches_pattern`, etc.) only work with the full match. Capture groups are essential for structured text extraction.
+
+```ntnt
+// Current: find_pattern returns only the full match, not groups
+let match = find_pattern("Bear Lake (1042)", r"([^()]+)\s*\((\d+)\)")
+// match = Some("Bear Lake (1042)") — no access to capture groups
+
+// Target: capture_pattern returns an array of captured groups
+let groups = capture_pattern("Bear Lake (1042)", r"([^()]+)\s*\((\d+)\)")
+// groups = Some(["Bear Lake (1042)", "Bear Lake ", "1042"])
+//           ^full match             ^group 1      ^group 2
+
+// Named capture groups (stretch goal)
+let groups = capture_pattern(line, r"(?P<name>[^()]+)\s*\((?P<id>\d+)\)")
+// groups = Some(map { "0": "Bear Lake (1042)", "name": "Bear Lake ", "id": "1042" })
+```
+
+**Why this matters:** PHP's `preg_match` with capture groups is one of the places where PHP is more concise than NTNT for text extraction. The snowgauge example's `extract_snotel_name` function could be reduced from 6 lines to 2 with capture groups.
+
+**Implementation plan:**
+
+- [x] `capture_pattern(s: String, pattern: String) -> Option<Array<String>>` — returns all capture groups (index 0 = full match, 1+ = groups)
+- [x] `capture_all_pattern(s: String, pattern: String) -> Array<Array<String>>` — all matches with their capture groups
+- [x] `capture_named_pattern(s: String, pattern: String) -> Option<Map<String, String>>` — named capture groups as map keys
+- [x] Add `// @ntnt` doc blocks and update STDLIB_REFERENCE.md
+
+### 7.16 None/null JSON Serialization ✅
+
+**Priority:** Low — edge case, but affects data interchange.
+
+`None` serializes as JSON `null` in `stringify()`, and `parse_json("null")` returns `None`. Consistent NULL→None mapping across all modules (json, sqlite, postgres, http_server). Previously:
+
+```ntnt
+// Current: None values have no JSON representation
+let data = map { "name": "Alice", "phone": None }
+stringify(data)  // behavior undefined — may skip the key or error
+
+// Target: None serializes to null
+stringify(data)  // {"name":"Alice","phone":null}
+```
+
+**Implementation plan:**
+
+- [x] `Value::None` serializes as `null` in `stringify()`
+- [x] `parse_json()` maps JSON `null` to `None`
+- [x] Round-trip: `parse_json(stringify(map { "x": None }))` preserves `None`
+- [x] Consistent NULL→None across all modules: `std/json`, `std/db/sqlite`, `std/db/postgres`, `std/http/server`
+
 **Phase 7 Deliverables:**
 
-- Type system with inference and enforcement
-- Effect enum removed (dead code cleanup)
-- `?` operator for Result and Option types
-- Anonymous functions with closure semantics
-- `std/db/sqlite` module with full CRUD support
-- Pipe operator for linear data transformations
-- Context-rich error messages with suggestions and source snippets
-- Route pattern auto-detection (no more `r""` for route paths)
-- Destructuring assignment (maps, arrays, nested, in parameters and loops)
-- Default parameter values
-- Guard clauses (`let-else`) for flat validation sequences
-- Intent file Meta section cleanup
-- NTNT language documentation system (`/// @ntnt` doc comments, `build.rs` validation, embedded binary docs)
-- Import error quality (collision warnings, "Did you mean?" for imports)
+- ✅ Semicolons removed from language (lint warning `unnecessary_semicolon`, examples cleaned up, return parser updated)
+- ✅ Ghost keywords removed (`approve`, `observe`, `protocol` — no longer reserved)
+- ✅ `otherwise` keyword for inline error handling on Result/Option
+- ✅ Type system with inference and enforcement (gradual typing, strict mode)
+- ✅ Effect enum removed (dead code cleanup)
+- ✅ `?` operator for Result and Option types
+- ✅ Anonymous functions with closure semantics
+- ✅ `std/db/sqlite` module with full CRUD support
+- ✅ Pipe operator for linear data transformations
+- ✅ Context-rich error messages with suggestions and source snippets
+- ✅ Route pattern auto-detection (no more `r""` for route paths)
+- ✅ Destructuring assignment (maps, arrays, nested, in parameters and loops)
+- ✅ Default parameter values (with type inference from defaults, contract support)
+- ✅ NTNT language documentation system (`// @ntnt` doc comments, `build.rs` validation, embedded binary docs)
+- ✅ If-expressions (conditional ternary returning a value)
+- ✅ Regex capture groups (`capture_pattern`, `capture_all_pattern`, `capture_named_pattern`)
+- ✅ None/null JSON serialization (consistent NULL→None across json, sqlite, postgres, http_server)
+- ~~Guard clauses (`let-else`)~~ — superseded by `otherwise` (7.2.1)
+- Intent file Meta section cleanup (7.11 — pending)
+- Import error quality (7.13 — pending)
 - Updated examples using new features
 
 ---
@@ -1986,9 +2125,9 @@ fn compute(x: Int, y: Int) -> Int {
 
 **Type Analysis:**
 
-- [ ] Flow-sensitive typing (type narrows after null checks)
-- [ ] Exhaustive type checking at compile time (full coverage)
-- [ ] Type narrowing in conditionals and match arms
+- [x] Flow-sensitive typing (type narrows after null checks) — implemented in Phase 7.1
+- [x] Exhaustive type checking at compile time (match exhaustiveness for Option/Result/enums) — implemented in Phase 7.1
+- [x] Type narrowing in conditionals and match arms — implemented in Phase 7.1
 - [ ] Escape analysis for optimization hints
 
 ### 13.6 Advanced Type System Features
@@ -2351,7 +2490,9 @@ The HTTP server now uses Axum + Tokio for async request handling:
 - Pipe operator for linear data flow
 - Context-rich error messages with suggestions
 - Route pattern auto-detection (no `r""` needed)
-- Destructuring, default parameters, guard clauses
+- Destructuring, default parameters
+- If-expressions (inline conditional values)
+- Regex capture groups for structured text extraction
 - Two-layer safety: types (structural) + contracts (semantic)
 - NTNT language documentation system (doc comments + `build.rs` validation, embedded in binary)
 - A typical web handler drops from ~22 lines to ~6

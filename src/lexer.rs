@@ -104,11 +104,11 @@ pub enum TokenKind {
     Try,
     Catch,
 
+    // Error handling keywords
+    Otherwise,
+
     // AI/Collaboration keywords
     Intent,
-    Approve,
-    Observe,
-    Protocol,
     Async,
     Await,
 
@@ -164,6 +164,7 @@ pub enum TokenKind {
     Pipe,             // |
     PipeArrow,        // |>
     DotDot,           // ..
+    DotDotDot,        // ...
     DotDotEqual,      // ..=
 
     // Raw strings
@@ -1134,11 +1135,11 @@ impl<'a> Lexer<'a> {
             "try" => TokenKind::Try,
             "catch" => TokenKind::Catch,
 
+            // Error handling keywords
+            "otherwise" => TokenKind::Otherwise,
+
             // AI/Collaboration keywords
             "intent" => TokenKind::Intent,
-            "approve" => TokenKind::Approve,
-            "observe" => TokenKind::Observe,
-            "protocol" => TokenKind::Protocol,
             "async" => TokenKind::Async,
             "await" => TokenKind::Await,
 
@@ -1304,7 +1305,9 @@ impl<'a> Lexer<'a> {
             ',' => Token::new(TokenKind::Comma, start_line, start_column, ",".into()),
             '.' => {
                 if self.match_char('.') {
-                    if self.match_char('=') {
+                    if self.match_char('.') {
+                        Token::new(TokenKind::DotDotDot, start_line, start_column, "...".into())
+                    } else if self.match_char('=') {
                         Token::new(
                             TokenKind::DotDotEqual,
                             start_line,

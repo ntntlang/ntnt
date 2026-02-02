@@ -110,7 +110,8 @@ NTNT explores a different approach. Requirements are executable specifications w
 | **Intent-Driven Development** | Write requirements in `.intent` files. Link code with `@implements`. Run `ntnt intent check` to verify. Full traceability from requirement to implementation. |
 | **Design by Contract** | `requires` and `ensures` built into function syntax. In HTTP routes, contract violations return 400/500 automatically. |
 | **Agent-Native Tooling** | `ntnt inspect` outputs JSON describing every function, route, and contract. `ntnt validate` returns machine-readable errors. |
-| **Batteries Included** | HTTP servers, PostgreSQL, JSON, CSV, file I/O, crypto, concurrency - all in the standard library. No package manager needed. |
+| **Gradual Type System** | Optional type annotations with inference. Types catch structural errors at lint time; contracts catch semantic errors. Strict mode for full enforcement. |
+| **Batteries Included** | HTTP servers, PostgreSQL, SQLite, JSON, CSV, file I/O, crypto, concurrency - all in the standard library. No package manager needed. |
 | **Hot Reload** | HTTP servers reload automatically when you save. Edit code, refresh browser, see changes. |
 
 ### Design by Contract
@@ -135,7 +136,7 @@ fn withdraw(amount: Int) -> Int
 | Category | Modules | Includes |
 |----------|---------|----------|
 | **Web** | `std/http/server`, `std/http` | HTTP server with routing, middleware, static files; HTTP client |
-| **Data** | `std/json`, `std/csv`, `std/db/postgres` | Parse/stringify; PostgreSQL with transactions |
+| **Data** | `std/json`, `std/csv`, `std/db/postgres`, `std/db/sqlite` | Parse/stringify; PostgreSQL and SQLite with transactions |
 | **I/O** | `std/fs`, `std/path`, `std/env` | File operations, path manipulation, environment variables |
 | **Text** | `std/string`, `std/url` | Split, join, trim, regex; URL encode/decode |
 | **Utilities** | `std/time`, `std/math`, `std/crypto` | Timestamps, trig/log/exp, SHA256/HMAC/UUID |
@@ -159,6 +160,9 @@ fn withdraw(amount: Int) -> Int
 ```bash
 ntnt run <file>              # Run a .tnt file
 ntnt lint <file>             # Check for errors
+ntnt lint --strict <file>    # Check with strict type warnings
+ntnt validate <file>         # Validate with JSON output
+ntnt test <file> --get /     # Quick HTTP endpoint testing
 ntnt intent check <file>     # Verify code matches intent
 ntnt intent studio <intent>  # Visual studio with live tests
 ntnt intent coverage <file>  # Show feature coverage

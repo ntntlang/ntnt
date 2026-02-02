@@ -391,19 +391,40 @@ for i in 0..=10 { }    // 0-10 inclusive
 for i in range(10) { }  // range() doesn't exist
 ```
 
-### 6. Functions Not Methods (Use Pipe for Chaining)
+### 6. Dot Reads, Functions Transform (Use Pipe for Chaining)
+
+NTNT uses a consistent two-part access model:
+
+- **Dot notation** reads properties and fields (accessing what's already there)
+- **Free functions** transform data (computing new values)
+- **Pipe operator** chains transformations left-to-right
 
 ```ntnt
-// CORRECT - Standalone functions
-len("hello")
-str(42)
-push(arr, item)
-split(text, ",")
+// READING data → dot notation
+req.method              // read a property
+req.path                // read a property
+req.params.id           // read a map key (static key)
+req.params["id"]        // read a map key (bracket form — required for dynamic keys or keys with special chars)
+req.headers["content-type"]  // bracket form for hyphenated keys
+user.name               // read a struct field
+config.port             // read a struct field
 
-// WRONG - Method style
-"hello".len()
-arr.push(item)
+// TRANSFORMING data → free functions
+len("hello")            // compute a value from input
+split(text, ",")        // create a new array from a string
+trim(input)             // create a new string
+push(arr, item)         // create a new array with item added
+int(form.age)           // convert a value to a new type
+
+// WRONG - method-style calls on stdlib functions
+"hello".len()           // Use len("hello")
+arr.push(item)          // Use push(arr, item)
+text.split(",")         // Use split(text, ",")
 ```
+
+**When to use dot vs brackets on maps:**
+- **Dot notation** for static keys known at write time: `req.params.id`
+- **Bracket notation** for dynamic keys or keys with special characters: `req.headers["content-type"]`, `row[column_name]`
 
 Use the pipe operator `|>` for readable left-to-right data transformations:
 
@@ -434,6 +455,174 @@ let counter = 0
 counter = 1  // ERROR: immutable
 ```
 
+### 8. Anonymous Functions / Closures
+
+Use `fn(params) { body }` in expression position for inline callbacks:
+
+```ntnt
+// Single-expression body (implicit return)
+let double = fn(x) { x * 2 }
+
+// Multi-statement body
+let process = fn(item) {
+    let cleaned = trim(item)
+    return to_lower(cleaned)
+}
+
+// With type annotations
+let multiply = fn(a: Int, b: Int) -> Int { a * b }
+
+// Inline with higher-order functions
+let evens = filter(nums, fn(x) { x % 2 == 0 })
+let doubled = transform(nums, fn(x) { x * 2 })
+
+// Closures capture enclosing variables
+let threshold = 10
+let above = filter(nums, fn(x) { x > threshold })
+
+// Nested closures (currying)
+let make_adder = fn(x) { fn(y) { x + y } }
+let add5 = make_adder(5)
+print(add5(10))  // 15
+
+// Immediate invocation
+let result = fn(x) { x + 1 }(5)  // 6
+
+// WRONG - pipe-style lambdas don't exist
+let f = |x| x * 2               // Use fn(x) { x * 2 }
+```
+
+### 9. Default Parameter Values
+
+Functions and lambdas support default values for parameters. Parameters with defaults must come after all required parameters:
+
+```ntnt
+// Basic default
+fn greet(name = "World") {
+    return "Hello, {name}!"
+}
+greet()        // "Hello, World!"
+greet("Alice") // "Hello, Alice!"
+
+// Multiple defaults — required params first
+fn paginate(items, page = 1, per_page = 25) {
+    // items is required, page and per_page are optional
+}
+paginate("users")           // page=1, per_page=25
+paginate("users", 2)        // page=2, per_page=25
+paginate("users", 3, 10)    // page=3, per_page=10
+
+// With type annotations
+fn add(a: Int, b: Int = 10) -> Int {
+    return a + b
+}
+
+// Defaults can reference earlier parameters
+fn make_range(start = 0, end = start + 10) {
+    return "{start}..{end}"
+}
+make_range()     // "0..10"
+make_range(5)    // "5..15"
+
+// Works with contracts
+fn divide(a, b = 1)
+    requires b != 0
+{
+    return a / b
+}
+
+// WRONG - required params after defaults
+fn bad(a = 1, b) { }  // Parse error!
+```
+
+The type checker infers parameter types from default expressions when no type annotation is provided.
+
+### 10. If-Expressions (Conditional Values)
+
+`if`/`else` can be used in expression position to return a value. Both branches are single expressions, and `else` is required:
+
+```ntnt
+// Basic if-expression
+let x = if a > b { a } else { b }
+
+// In function arguments
+print(if debug { "verbose" } else { "summary" })
+
+// In return statements
+return if found { json(data) } else { not_found() }
+
+// Else-if chains
+let label = if x > 0 { "positive" } else if x == 0 { "zero" } else { "negative" }
+
+// Nested
+let result = if outer { if inner { 1 } else { 2 } } else { 3 }
+
+// WRONG - else is required for if-expressions
+let x = if true { 1 }  // ERROR: If-expressions require an else branch
+```
+
+### 11. Destructuring Assignment
+
+Map, array, and nested destructuring in `let` bindings, `match`, and `for` loops:
+
+```ntnt
+// Map destructuring
+let { name, age } = map { "name": "Alice", "age": 30 }
+
+// Rename fields
+let { name: n } = map { "name": "Alice" }
+
+// Nested destructuring
+let { user: { name } } = map { "user": { "name": "Bob" } }
+
+// Works with structs
+struct User { name: String }
+let u = User { name: "Eve" }
+let { name } = u
+
+// Array destructuring
+let [a, b, c] = [1, 2, 3]
+
+// Rest patterns with ...
+let [first, ...rest] = [1, 2, 3, 4]    // first=1, rest=[2,3,4]
+let { name, ...other } = map { "name": "A", "age": 30 }  // other={"age": 30}
+
+// For-loop destructuring
+import { entries } from "std/collections"
+for [k, v] in entries(data) {
+    print("{k}={v}")
+}
+for { name } in users {
+    print(name)
+}
+
+// Map destructuring in match
+match data {
+    { name, age } => print("{name} is {age}"),
+    _ => print("no match")
+}
+```
+
+### 12. Regex Capture Groups
+
+Extract capture groups from regex matches:
+
+```ntnt
+import { capture_pattern, capture_all_pattern, capture_named_pattern } from "std/string"
+
+// Single match with groups (index 0 = full match)
+let groups = capture_pattern("Bear Lake (1042)", r"(.+) \((\d+)\)")
+// groups = Some(["Bear Lake (1042)", "Bear Lake", "1042"])
+
+// All matches with groups
+let all = capture_all_pattern("2024-01 and 2025-02", r"(\d{4})-(\d{2})")
+// all = [["2024-01", "2024", "01"], ["2025-02", "2025", "02"]]
+
+// Named groups as map keys (use (?P<name>...) syntax)
+let m = capture_named_pattern("2024-01-15", r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})")
+// m = Some({"0": "2024-01-15", "year": "2024", "month": "01", "day": "15"})
+```
+
 ---
 
 ## HTTP Server Pattern
@@ -444,7 +633,7 @@ counter = 1  // ERROR: immutable
 // ONLY import response builders
 import { json, html, parse_form, parse_json } from "std/http/server"
 
-// Handler function (named - no inline lambdas)
+// Handler function (named functions recommended for routes)
 // Use Request/Response types for fully typed handlers
 fn get_user(req: Request) -> Response {
     let id = req.params["id"]
@@ -470,12 +659,20 @@ listen(8080)  // Starts with hot reload enabled
 ```ntnt
 req.method        // String: "GET", "POST"
 req.path          // String: "/users/123"
-req.params        // Map<String, String>: route params, req.params["id"]
-req.query_params  // Map<String, String>: query string, req.query_params["name"]
+req.params        // Map<String, String>: route params
+req.query_params  // Map<String, String>: query string params
 req.headers       // Map<String, String>: headers map
 req.body          // String: raw body
 req.ip            // String: client IP (supports X-Forwarded-For)
 req.id            // String: request ID (from X-Request-ID or auto-generated)
+```
+
+**Accessing request data** (dot reads properties, brackets for dynamic/special keys):
+```ntnt
+req.params.id              // dot for static keys
+req.params["id"]           // bracket form also works
+req.query_params.page      // dot for simple keys
+req.headers["content-type"] // brackets required (hyphenated key)
 ```
 
 **Common mistakes:**
@@ -483,13 +680,14 @@ req.id            // String: request ID (from X-Request-ID or auto-generated)
 // WRONG - Do NOT import routing functions
 import { listen, get, post } from "std/http/server"
 
-// WRONG - No inline lambdas
+// WRONG - Pipe-style lambdas don't exist; use fn() syntax
 get("/users/{id}", |req| { ... })
+// OK (but named handlers preferred for routes for readability)
+get("/health", fn(req) { json(map { "ok": true }) })
 
-// WRONG - These don't exist
-req.json       // Use parse_json(req)
-req.form       // Use parse_form(req)
-req.params.id  // Use req.params["id"]
+// WRONG - These don't exist as properties
+req.json       // Use parse_json(req) — a transform function
+req.form       // Use parse_form(req) — a transform function
 ```
 
 ### Environment Variables
@@ -575,6 +773,85 @@ fn create_user(req)
 
 ## Error Handling with Result/Option
 
+### The `?` Operator (Error Propagation)
+
+The `?` operator unwraps `Ok`/`Some` values or early-returns `Err`/`None` from the enclosing function:
+
+```ntnt
+// ? flattens nested match pyramids into linear code
+fn process_request(req) {
+    let data = parse_json(req)?          // Err → early-return Err
+    let valid = validate(data)?          // Err → early-return Err
+    let result = save_to_db(valid)?      // Err → early-return Err
+    return Ok(json(result))
+}
+
+// Also works with Option
+fn find_user_email(id) {
+    let user = find_user(id)?            // None → early-return None
+    let email = user_email(user)?        // None → early-return None
+    return Some(email)
+}
+```
+
+**Behavior:**
+- `Ok(v)?` → evaluates to `v`
+- `Err(e)?` → early-returns `Err(e)` from the enclosing function
+- `Some(v)?` → evaluates to `v`
+- `None?` → early-returns `None` from the enclosing function
+- Non-Result/Option values pass through unchanged (gradual typing)
+
+### The `otherwise` Keyword (Inline Error Handling)
+
+`otherwise` unwraps `Ok`/`Some` or runs a diverging block for `Err`/`None`. Unlike `?`, it handles errors at the call site with custom recovery logic:
+
+```ntnt
+// Block form — err is automatically bound to the error value
+fn create_user(req) {
+    let data = parse_json(req) otherwise {
+        return status(400, "Invalid JSON: {err}")
+    }
+
+    let saved = execute(db, "INSERT INTO users (name) VALUES ($1)", [data["name"]]) otherwise {
+        return status(500, "Database error: {err}")
+    }
+
+    return json(map { "created": true }, 201)
+}
+
+// Single-expression form (no braces needed)
+fn get_user(req) {
+    let user = find_user(req.params.id) otherwise return not_found("User not found")
+    return json(user)
+}
+
+// In loops — use continue to skip, break to stop
+for line in lines {
+    let value = parse_line(line) otherwise {
+        print("Skipping bad line: {err}")
+        continue
+    }
+    process(value)
+}
+```
+
+**Behavior:**
+- `Ok(v)` / `Some(v)` → binds `v` to the variable
+- `Err(e)` / `None` → runs the otherwise block with `err` bound to `e` (or `Unit` for None)
+- The otherwise block **must diverge**: `return`, `break`, `continue`, or call a function that doesn't return
+- Non-Result/Option values bind as-is (gradual typing)
+
+### When to Use Each
+
+| Pattern | Use When |
+|---------|----------|
+| `?` operator | Propagating errors to the caller (library/internal code) |
+| `otherwise` | Handling errors with specific recovery at the call site |
+| `match` | Complex branching on multiple variants |
+| `unwrap()` | Quick prototyping (panics on error) |
+
+### Match for Explicit Handling
+
 ```ntnt
 import { connect, query } from "std/db/postgres"
 
@@ -616,6 +893,11 @@ fn greet(name: String) -> String {
     return "Hello, {name}!"
 }
 
+// Default parameter values (with or without type annotations)
+fn connect(host: String = "localhost", port: Int = 5432) -> String {
+    return "{host}:{port}"
+}
+
 // No annotations required — these work fine
 let x = 42
 fn add(a, b) { return a + b }
@@ -649,9 +931,9 @@ The type checker tracks types through common operations:
 - **Math functions preserve numeric type** — `abs()`, `min()`, `max()`, `clamp()` return `Int` or `Float` based on input
 - **Map accessors return typed results** — `keys(Map<K, V>)` → `Array<K>`, `values(Map<K, V>)` → `Array<V>`, `get_key(Map<K, V>, key)` → `V`
 - **Map index access** — `map["key"]` on `Map<K, V>` returns `V`
-- **`transform()` / `.map()` infer callback return** — `transform(Array<T>, fn(T)->R)` → `Array<R>` when callback is a typed named function
+- **`transform()` infers callback return** — `transform(Array<T>, fn(T)->R)` → `Array<R>` when callback is a typed named function
 - **`html()`, `json()`, `text()`, `redirect()`** — all return `Response`
-- **`parse_json()`** — returns `Result<Map<String, Any>, String>` (unwrap gives a map)
+- **`parse_json()`** — returns `Result<Map<String, Any>, String>` (unwrap gives a map). JSON `null` becomes `None`.
 - **`fetch()`** — returns `Result<Response, String>` (unwrap gives `Response`)
 - **`parse_datetime()`** — returns `Result<Int, String>`
 - **`parse_csv()`** — returns `Array<Array<String>>`
@@ -769,6 +1051,28 @@ let price = float(form["price"])
 
 // WRONG - String to integer column causes "db error"
 execute(db, "INSERT INTO users (age) VALUES ($1)", [form["age"]])
+```
+
+**NULL handling:** SQL NULL values are returned as `None` (not `Unit`) in query results. Use `None` when inserting NULL values:
+```ntnt
+// Reading NULL from database
+let user = unwrap(query_one(db, "SELECT * FROM users WHERE id = ?", [1]))
+match user["middle_name"] {
+    None => print("No middle name"),
+    Some(name) => print(name),
+    name => print(name)  // also works with gradual typing
+}
+
+// Inserting NULL
+execute(db, "INSERT INTO users (name, age) VALUES (?, ?)", ["Alice", None])
+
+// query_one returns Ok(None) when no row matches
+let result = query_one(db, "SELECT * FROM users WHERE id = ?", [999])
+match result {
+    Ok(Some(row)) => print("Found: {row}"),
+    Ok(None) => print("No row found"),
+    Err(e) => print("Query error: {e}")
+}
 ```
 
 ---
@@ -897,17 +1201,17 @@ NTNT doesn't have a debugger. Use these strategies:
 ### Common Imports
 
 ```ntnt
-import { split, join, trim, replace, contains } from "std/string"
+import { split, join, trim, replace, contains, capture_pattern, capture_all_pattern, capture_named_pattern } from "std/string"
 import { json, html, text, redirect, status, not_found, error, response, parse_form, parse_json } from "std/http/server"
-import { connect, query, execute, close } from "std/db/postgres"
-import { connect, query, execute, close } from "std/db/sqlite"
+import { connect, query, query_one, execute, begin, commit, rollback, close } from "std/db/postgres"
+import { connect, query, query_one, execute, begin, commit, rollback, close } from "std/db/sqlite"
 import { fetch, download } from "std/http"
 import { read_file, write_file, exists } from "std/fs"
 import { parse_json, stringify } from "std/json"
 import { get_env, load_env } from "std/env"
 import { now, format } from "std/time"
 import { sha256, uuid } from "std/crypto"
-import { first, last, keys, values, entries, has_key, get_key } from "std/collections"
+import { first, last, keys, values, entries, has_key, get_key, get_index } from "std/collections"
 ```
 
 ### CLI Commands
@@ -958,7 +1262,8 @@ Error[E001]: Undefined variable `usr`
 | `unexpected token '{'` | Using `{}` for map literal | Add `map` keyword: `map { "key": "value" }` |
 | `unexpected token '$'` | Using `${expr}` interpolation | Use `{expr}` without the `$` |
 | `expected identifier` | Inline lambda in route | Use named function: `fn handler(req) { ... }` |
-| `unexpected token '.'` | Method-style call | Use function style: `len(s)` not `s.len()` |
+| `unexpected token '.'` | Method-style call on stdlib function | Use function style: `len(s)` not `s.len()`. Dot notation is for reading properties, not calling stdlib functions. |
+| `Required parameter 'x' cannot follow a parameter with a default value` | Non-default param after default | Move all required params before defaulted ones: `fn f(a, b = 1)` not `fn f(a = 1, b)` |
 
 ### Common Runtime Errors
 

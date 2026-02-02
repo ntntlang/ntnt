@@ -7,7 +7,7 @@
 // Note: Route patterns use {param} syntax which conflicts with string interpolation.
 //       Use raw strings r"..." for route patterns with parameters.
 
-import { text, html, json, status, redirect, not_found, error } from "std/http/server"
+import { text, html, json, status, redirect } from "std/http/server"
 
 // ============================================
 // Middleware: Request Logger

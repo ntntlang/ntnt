@@ -1,4 +1,4 @@
-import { html, json, text } from "std/http/server"
+import { html } from "std/http/server"
 
 // Partial implementation - missing API endpoint
 

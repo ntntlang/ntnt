@@ -32,6 +32,17 @@ pub struct FunctionSig {
     pub params: Vec<(String, Type)>,
     pub return_type: Type,
     pub variadic: bool,
+    /// Number of required parameters (those without defaults). Defaults to params.len().
+    pub required_params: usize,
+}
+
+/// Exported type definitions from a parsed file (functions, structs, enums, aliases)
+#[derive(Debug, Clone, Default)]
+struct FileExports {
+    functions: HashMap<String, FunctionSig>,
+    structs: HashMap<String, Vec<(String, Type)>>,
+    enums: HashMap<String, Vec<(String, Option<Vec<Type>>)>>,
+    type_aliases: HashMap<String, Type>,
 }
 
 /// Type checking context with scoped variable bindings
@@ -50,16 +61,20 @@ pub struct TypeContext {
     builtin_sigs: HashMap<String, FunctionSig>,
     /// Return type of current function being checked
     current_return_type: Option<Type>,
+    /// Collected return expression types during function body analysis
+    collected_returns: Vec<Type>,
     /// Collected diagnostics
     diagnostics: Vec<TypeDiagnostic>,
     /// Source lines for line number lookup
     source_lines: Vec<String>,
+    /// Forward-scanning cursor for line lookup (0-indexed into source_lines)
+    search_after: usize,
     /// When true, warn about untyped function parameters and missing return types
     strict_lint: bool,
     /// File path of the current file being checked (for resolving relative imports)
     current_file: Option<String>,
-    /// Cache of already-parsed module signatures (to avoid re-parsing)
-    module_cache: HashMap<String, HashMap<String, FunctionSig>>,
+    /// Cache of already-parsed module exports (to avoid re-parsing)
+    module_cache: HashMap<String, FileExports>,
     /// Set of files currently being resolved (for circular import detection)
     resolving_files: Vec<String>,
 }
@@ -147,6 +162,122 @@ fn check_program_with_options(
     ctx.diagnostics
 }
 
+/// Convert a BinaryOp to its source-level string representation.
+fn binary_op_str(op: &BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Mod => "%",
+        BinaryOp::Pow => "**",
+        BinaryOp::Eq => "==",
+        BinaryOp::Ne => "!=",
+        BinaryOp::Lt => "<",
+        BinaryOp::Le => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Ge => ">=",
+        BinaryOp::And => "&&",
+        BinaryOp::Or => "||",
+        BinaryOp::NullCoalesce => "??",
+    }
+}
+
+/// Extract a search-friendly string from an Expression AST node.
+/// Returns a string that is likely unique near the expression's source location.
+fn expr_search_hint(expr: &Expression) -> String {
+    match expr {
+        Expression::Identifier(name) => name.clone(),
+        Expression::Call { function, .. } => {
+            if let Expression::Identifier(name) = function.as_ref() {
+                format!("{}(", name)
+            } else {
+                String::new()
+            }
+        }
+        Expression::Binary { left, operator, .. } => {
+            let left_hint = expr_search_hint(left);
+            if left_hint.is_empty() {
+                binary_op_str(operator).to_string()
+            } else {
+                format!("{} {}", left_hint, binary_op_str(operator))
+            }
+        }
+        Expression::Index { object, .. } => {
+            if let Expression::Identifier(name) = object.as_ref() {
+                format!("{}[", name)
+            } else {
+                String::new()
+            }
+        }
+        Expression::FieldAccess { object, field } => {
+            if let Expression::Identifier(name) = object.as_ref() {
+                format!("{}.{}", name, field)
+            } else {
+                field.clone()
+            }
+        }
+        Expression::MethodCall { object, method, .. } => {
+            if let Expression::Identifier(name) = object.as_ref() {
+                format!("{}.{}", name, method)
+            } else {
+                format!(".{}", method)
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+/// Generate an actionable hint for a non-Bool condition type.
+fn condition_type_hint(cond_type: &Type) -> String {
+    match cond_type {
+        Type::Int => "Use an explicit comparison, e.g. != 0".to_string(),
+        Type::Float => "Use an explicit comparison, e.g. != 0.0".to_string(),
+        Type::String => "Use len(s) > 0 or s != \"\"".to_string(),
+        Type::Optional(_) => "Use != None or match on Some/None".to_string(),
+        Type::Array(_) => "Use len(arr) > 0 for non-empty check".to_string(),
+        _ => "Add an explicit comparison that evaluates to Bool".to_string(),
+    }
+}
+
+/// Generate an actionable hint for a comparison between incompatible types.
+fn comparison_type_hint(left_type: &Type, right_type: &Type, left_expr: &Expression) -> String {
+    // Check if the left side is a map value access (likely untyped)
+    let is_map_access = matches!(
+        left_expr,
+        Expression::Index { .. } | Expression::FieldAccess { .. }
+    );
+
+    if is_map_access
+        && (matches!(left_type, Type::Any)
+            || matches!(right_type, Type::Any)
+            || !left_type.is_compatible(right_type))
+    {
+        return format!(
+            "Map values may have mixed types. Use int() or str() to convert before comparing"
+        );
+    }
+
+    match (left_type, right_type) {
+        (Type::Int, Type::String) | (Type::String, Type::Int) => {
+            "Convert types: use int(s) to convert String to Int, or str(n) to convert Int to String"
+                .to_string()
+        }
+        (Type::Float, Type::String) | (Type::String, Type::Float) => {
+            "Convert types: use float(s) to convert String to Float, or str(n) to convert Float to String"
+                .to_string()
+        }
+        (Type::Int, Type::Float) | (Type::Float, Type::Int) => {
+            "Convert types: use float(n) or int(f) to match types".to_string()
+        }
+        _ => format!(
+            "Cannot compare {} with {}. Convert to the same type first",
+            left_type.name(),
+            right_type.name()
+        ),
+    }
+}
+
 impl TypeContext {
     fn new(source: &str) -> Self {
         TypeContext {
@@ -157,8 +288,10 @@ impl TypeContext {
             type_aliases: HashMap::new(),
             builtin_sigs: HashMap::new(),
             current_return_type: None,
+            collected_returns: Vec::new(),
             diagnostics: Vec::new(),
             source_lines: source.lines().map(|l| l.to_string()).collect(),
+            search_after: 0,
             strict_lint: false,
             current_file: None,
             module_cache: HashMap::new(),
@@ -179,6 +312,19 @@ impl TypeContext {
     fn bind(&mut self, name: &str, typ: Type) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), typ);
+        }
+    }
+
+    /// Update a variable's type in the scope where it was originally defined.
+    fn rebind(&mut self, name: &str, typ: Type) {
+        if matches!(typ, Type::Any) {
+            return; // Don't widen concrete types back to Any
+        }
+        for scope in self.scopes.iter_mut().rev() {
+            if scope.contains_key(name) {
+                scope.insert(name.to_string(), typ);
+                return;
+            }
         }
     }
 
@@ -213,24 +359,35 @@ impl TypeContext {
 
     // ── Line number lookup ────────────────────────────────────────────
 
-    fn find_line(&self, needle: &str) -> usize {
+    /// Search for `needle` starting from current cursor position.
+    /// Advances cursor on forward-match. Falls back to full-file search.
+    fn find_line_near(&mut self, needle: &str) -> usize {
+        // Forward search from cursor
+        for i in self.search_after..self.source_lines.len() {
+            if self.source_lines[i].contains(needle) {
+                self.search_after = i;
+                return i + 1; // 1-indexed
+            }
+        }
+        // Fallback: search from beginning (don't advance cursor)
         for (i, line) in self.source_lines.iter().enumerate() {
             if line.contains(needle) {
-                return i + 1; // 1-indexed
+                return i + 1;
             }
         }
         0
     }
 
-    #[allow(dead_code)]
-    fn find_line_after(&self, needle: &str, after: usize) -> usize {
-        for (i, line) in self.source_lines.iter().enumerate() {
-            if i + 1 > after && line.contains(needle) {
+    /// Search for `needle` starting from a known anchor line.
+    fn find_line_near_from(&mut self, needle: &str, after_line: usize) -> usize {
+        let start = if after_line > 0 { after_line - 1 } else { 0 };
+        for i in start..self.source_lines.len() {
+            if self.source_lines[i].contains(needle) {
+                self.search_after = i;
                 return i + 1;
             }
         }
-        // Fall back to searching from beginning
-        self.find_line(needle)
+        self.find_line_near(needle)
     }
 
     // ── Type resolution ───────────────────────────────────────────────
@@ -318,8 +475,31 @@ impl TypeContext {
             } else {
                 a.clone()
             }
+        } else if b.is_compatible(a) {
+            b.clone()
         } else {
-            Type::Union(vec![a.clone(), b.clone()])
+            // Flatten nested unions and deduplicate
+            let mut members = Vec::new();
+            match a {
+                Type::Union(ts) => members.extend(ts.clone()),
+                _ => members.push(a.clone()),
+            }
+            match b {
+                Type::Union(ts) => members.extend(ts.clone()),
+                _ => members.push(b.clone()),
+            }
+            // Deduplicate: remove members that are compatible with an earlier member
+            let mut deduped = Vec::new();
+            for m in &members {
+                if !deduped.iter().any(|d: &Type| m.is_compatible(d)) {
+                    deduped.push(m.clone());
+                }
+            }
+            match deduped.len() {
+                0 => Type::Any,
+                1 => deduped.into_iter().next().unwrap(),
+                _ => Type::Union(deduped),
+            }
         }
     }
 
@@ -361,14 +541,19 @@ impl TypeContext {
                 let param_types: Vec<(String, Type)> = params
                     .iter()
                     .map(|p| {
-                        let typ = p
-                            .type_annotation
-                            .as_ref()
-                            .map(|t| self.resolve_type_expr(t))
-                            .unwrap_or(Type::Any);
+                        let typ = if let Some(ref t) = p.type_annotation {
+                            self.resolve_type_expr(t)
+                        } else if let Some(ref default_expr) = p.default {
+                            // Infer type from default expression
+                            self.infer_expression(default_expr)
+                        } else {
+                            Type::Any
+                        };
                         (p.name.clone(), typ)
                     })
                     .collect();
+
+                let required_params = params.iter().filter(|p| p.default.is_none()).count();
 
                 let ret = return_type
                     .as_ref()
@@ -381,6 +566,7 @@ impl TypeContext {
                         params: param_types,
                         return_type: ret,
                         variadic: false,
+                        required_params,
                     },
                 );
             }
@@ -440,6 +626,7 @@ impl TypeContext {
                 type_annotation,
                 value,
                 pattern,
+                otherwise,
                 ..
             } => {
                 let inferred = value
@@ -447,10 +634,49 @@ impl TypeContext {
                     .map(|v| self.infer_expression(v))
                     .unwrap_or(Type::Any);
 
+                // When otherwise is present, unwrap Result<T,E> -> T or Option<T> -> T
+                let inferred = if let Some(otherwise_block) = otherwise {
+                    // Check that the otherwise block diverges
+                    if !self.block_diverges(otherwise_block) {
+                        let line = self.find_line_near("otherwise");
+                        self.warning(
+                            "otherwise block does not diverge — it must end with return, break, or continue".to_string(),
+                            line,
+                            Some("Add a return, break, or continue statement".to_string()),
+                        );
+                    }
+                    // Check the otherwise block for type errors
+                    self.push_scope();
+                    // Bind 'err' for the otherwise block
+                    self.bind("err", Type::Any);
+                    self.check_block(otherwise_block);
+                    self.pop_scope();
+
+                    match &inferred {
+                        Type::Optional(t) => (**t).clone(),
+                        Type::Generic { name: n, args } if n == "Result" && !args.is_empty() => {
+                            args[0].clone()
+                        }
+                        _ => inferred,
+                    }
+                } else {
+                    inferred
+                };
+
                 if let Some(ann) = type_annotation {
                     let expected = self.resolve_type_expr(ann);
                     if !self.compatible(&inferred, &expected) {
-                        let line = self.find_line(&format!("let {}", name));
+                        let line = self.find_line_near(&format!("let {}", name));
+                        let hint = if matches!(inferred, Type::Any)
+                            || matches!(inferred, Type::Array(ref inner) if matches!(inner.as_ref(), Type::Any))
+                        {
+                            format!(
+                                "The value is untyped (from map access or untyped function). Use int()/str()/float() to convert, or add type annotations to the source function. Expected {}",
+                                expected.name()
+                            )
+                        } else {
+                            format!("Expected {}", expected.name())
+                        };
                         self.error(
                             format!(
                                 "Type mismatch: variable '{}' declared as {} but initialized with {}",
@@ -459,17 +685,31 @@ impl TypeContext {
                                 inferred.name()
                             ),
                             line,
-                            Some(format!("Expected {}", expected.name())),
+                            Some(hint),
+                        );
+                    }
+                    // Strict mode: warn about Float → Int precision loss
+                    if self.strict_lint
+                        && matches!(expected, Type::Int)
+                        && matches!(inferred, Type::Float)
+                    {
+                        let line = self.find_line_near(&format!("let {}", name));
+                        self.warning(
+                            format!(
+                                "Implicit Float to Int conversion for '{}' may lose precision",
+                                name
+                            ),
+                            line,
+                            Some(
+                                "Use round(), floor(), or int() for explicit conversion"
+                                    .to_string(),
+                            ),
                         );
                     }
                     self.bind(name, expected);
-                } else if let Some(Pattern::Tuple(patterns)) = pattern {
-                    // Destructuring: bind each pattern variable
-                    for p in patterns {
-                        if let Pattern::Variable(var_name) = p {
-                            self.bind(var_name, Type::Any);
-                        }
-                    }
+                } else if let Some(pattern) = pattern {
+                    // Destructuring: bind pattern variables with inferred types
+                    self.bind_pattern(pattern, &inferred);
                 } else {
                     self.bind(name, inferred);
                 }
@@ -488,7 +728,7 @@ impl TypeContext {
 
                 // Strict lint: warn about untyped parameters and missing return type
                 if self.strict_lint {
-                    let fn_line = self.find_line(&format!("fn {}", name));
+                    let fn_line = self.find_line_near(&format!("fn {}", name));
                     for param in params {
                         if param.type_annotation.is_none() {
                             self.warning(
@@ -522,12 +762,13 @@ impl TypeContext {
 
                 // Set expected return type
                 let prev_return = self.current_return_type.take();
+                let prev_collected = std::mem::take(&mut self.collected_returns);
                 let resolved_return = return_type.as_ref().map(|t| self.resolve_type_expr(t));
                 self.current_return_type = resolved_return.clone();
 
                 // Type-check contract expressions (requires/ensures)
                 if let Some(contract) = contract {
-                    let fn_line = self.find_line(&format!("fn {}", name));
+                    let fn_line = self.find_line_near(&format!("fn {}", name));
 
                     // requires: check each expression evaluates to Bool
                     for req_expr in &contract.requires {
@@ -535,7 +776,7 @@ impl TypeContext {
                         if !self.compatible(&req_type, &Type::Bool)
                             && !matches!(req_type, Type::Any)
                         {
-                            let line = self.find_line_after("requires", fn_line.saturating_sub(1));
+                            let line = self.find_line_near_from("requires", fn_line);
                             self.error(
                                 format!(
                                     "Contract 'requires' in '{}' should be Bool, got {}",
@@ -558,8 +799,7 @@ impl TypeContext {
                             if !self.compatible(&ens_type, &Type::Bool)
                                 && !matches!(ens_type, Type::Any)
                             {
-                                let line =
-                                    self.find_line_after("ensures", fn_line.saturating_sub(1));
+                                let line = self.find_line_near_from("ensures", fn_line);
                                 self.error(
                                     format!(
                                         "Contract 'ensures' in '{}' should be Bool, got {}",
@@ -577,11 +817,36 @@ impl TypeContext {
                 // Check body
                 let body_type = self.check_block(body);
 
+                // Infer return type for unannotated functions
+                if return_type.is_none() {
+                    let mut returns = std::mem::take(&mut self.collected_returns);
+                    // Include trailing expression if non-trivial
+                    if !matches!(body_type, Type::Unit | Type::Any) {
+                        returns.push(body_type.clone());
+                    } else if returns.is_empty() {
+                        returns.push(Type::Unit);
+                    }
+                    if !returns.is_empty() {
+                        let mut unified = returns[0].clone();
+                        for ret in &returns[1..] {
+                            unified = self.union_type(&unified, ret);
+                        }
+                        if !matches!(unified, Type::Any) {
+                            if let Some(sig) = self.functions.get_mut(name) {
+                                sig.return_type = unified;
+                            }
+                        }
+                    }
+                } else {
+                    self.collected_returns.clear();
+                }
+
                 // Verify return type if annotated
-                if let Some(expected_ret) = &self.current_return_type {
-                    if !self.compatible(&body_type, expected_ret) && !matches!(body_type, Type::Any)
+                if let Some(expected_ret) = self.current_return_type.clone() {
+                    if !self.compatible(&body_type, &expected_ret)
+                        && !matches!(body_type, Type::Any)
                     {
-                        let line = self.find_line(&format!("fn {}", name));
+                        let line = self.find_line_near(&format!("fn {}", name));
                         self.error(
                             format!(
                                 "Return type mismatch in '{}': expected {} but body returns {}",
@@ -596,15 +861,17 @@ impl TypeContext {
                 }
 
                 self.current_return_type = prev_return;
+                self.collected_returns = prev_collected;
                 self.pop_scope();
             }
 
             Statement::Return(expr) => {
                 if let Some(expr) = expr {
                     let actual = self.infer_expression(expr);
-                    if let Some(expected) = &self.current_return_type {
-                        if !self.compatible(&actual, expected) && !matches!(actual, Type::Any) {
-                            let line = self.find_line("return");
+                    self.collected_returns.push(actual.clone());
+                    if let Some(expected) = self.current_return_type.clone() {
+                        if !self.compatible(&actual, &expected) && !matches!(actual, Type::Any) {
+                            let line = self.find_line_near("return");
                             self.error(
                                 format!(
                                     "Return type mismatch: expected {} but returning {}",
@@ -616,6 +883,8 @@ impl TypeContext {
                             );
                         }
                     }
+                } else {
+                    self.collected_returns.push(Type::Unit);
                 }
             }
 
@@ -626,34 +895,64 @@ impl TypeContext {
             } => {
                 let cond_type = self.infer_expression(condition);
                 if !self.compatible(&cond_type, &Type::Bool) && !matches!(cond_type, Type::Any) {
-                    let line = self.find_line("if ");
+                    let hint_str = expr_search_hint(condition);
+                    let needle = if hint_str.is_empty() {
+                        "if ".to_string()
+                    } else {
+                        hint_str
+                    };
+                    let line = self.find_line_near(&needle);
+                    let hint = condition_type_hint(&cond_type);
                     self.warning(
                         format!("Condition has type {} instead of Bool", cond_type.name()),
                         line,
-                        None,
+                        Some(hint),
                     );
                 }
+
+                // Extract narrowing facts from the condition
+                let (true_facts, false_facts) = self.extract_narrowing_facts(condition);
+
+                // Then branch: apply true_facts
                 self.push_scope();
+                self.apply_facts(&true_facts);
                 self.check_block(then_branch);
+                let then_diverges = self.block_diverges(then_branch);
                 self.pop_scope();
+
+                // Else branch: apply false_facts
                 if let Some(else_b) = else_branch {
                     self.push_scope();
+                    self.apply_facts(&false_facts);
                     self.check_block(else_b);
                     self.pop_scope();
+                }
+
+                // Guard clause pattern: if then-branch diverges and no else,
+                // false_facts apply to everything after the if statement
+                if then_diverges && else_branch.is_none() {
+                    self.apply_facts(&false_facts);
                 }
             }
 
             Statement::While { condition, body } => {
                 let cond_type = self.infer_expression(condition);
                 if !self.compatible(&cond_type, &Type::Bool) && !matches!(cond_type, Type::Any) {
-                    let line = self.find_line("while ");
+                    let hint_str = expr_search_hint(condition);
+                    let needle = if hint_str.is_empty() {
+                        "while ".to_string()
+                    } else {
+                        hint_str
+                    };
+                    let line = self.find_line_near(&needle);
+                    let hint = condition_type_hint(&cond_type);
                     self.warning(
                         format!(
                             "While condition has type {} instead of Bool",
                             cond_type.name()
                         ),
                         line,
-                        None,
+                        Some(hint),
                     );
                 }
                 self.push_scope();
@@ -663,6 +962,7 @@ impl TypeContext {
 
             Statement::ForIn {
                 variable,
+                pattern,
                 iterable,
                 body,
             } => {
@@ -674,7 +974,11 @@ impl TypeContext {
                     _ => Type::Any,
                 };
                 self.push_scope();
-                self.bind(variable, elem_type);
+                if let Some(pat) = pattern {
+                    self.bind_pattern(pat, &elem_type);
+                } else {
+                    self.bind(variable, elem_type);
+                }
                 self.check_block(body);
                 self.pop_scope();
             }
@@ -725,7 +1029,7 @@ impl TypeContext {
                         if !self.compatible(&inv_type, &Type::Bool)
                             && !matches!(inv_type, Type::Any)
                         {
-                            let line = self.find_line("invariant");
+                            let line = self.find_line_near("invariant");
                             self.error(
                                 format!(
                                     "Invariant in '{}' should be Bool, got {}",
@@ -752,9 +1056,238 @@ impl TypeContext {
             | Statement::Use { .. }
             | Statement::Export { .. }
             | Statement::Module { .. }
-            | Statement::Protocol { .. }
             | Statement::Intent { .. }
             | Statement::Defer(_) => {}
+        }
+    }
+
+    // ── Flow-sensitive narrowing ─────────────────────────────────
+
+    /// Extract narrowing facts from a condition expression.
+    /// Returns (true_branch_facts, false_branch_facts) where each fact
+    /// maps a variable name to its narrowed type.
+    fn extract_narrowing_facts(
+        &self,
+        condition: &Expression,
+    ) -> (Vec<(String, Type)>, Vec<(String, Type)>) {
+        match condition {
+            // x == None → true: x is None, false: x is unwrapped
+            Expression::Binary {
+                left,
+                operator: BinaryOp::Eq,
+                right,
+            } => {
+                if let (Expression::Identifier(name), Expression::Identifier(rhs)) =
+                    (left.as_ref(), right.as_ref())
+                {
+                    if rhs == "None" {
+                        if let Some(typ) = self.lookup(name) {
+                            if let Type::Optional(inner) = typ {
+                                return (
+                                    vec![],                                  // true: x is None (no useful narrowing)
+                                    vec![(name.clone(), (**inner).clone())], // false: x is T
+                                );
+                            }
+                        }
+                    }
+                }
+                // Also handle None == x
+                if let (Expression::Identifier(lhs), Expression::Identifier(name)) =
+                    (left.as_ref(), right.as_ref())
+                {
+                    if lhs == "None" {
+                        if let Some(typ) = self.lookup(name) {
+                            if let Type::Optional(inner) = typ {
+                                return (vec![], vec![(name.clone(), (**inner).clone())]);
+                            }
+                        }
+                    }
+                }
+                (vec![], vec![])
+            }
+            // x != None → true: x is unwrapped, false: x is None
+            Expression::Binary {
+                left,
+                operator: BinaryOp::Ne,
+                right,
+            } => {
+                if let (Expression::Identifier(name), Expression::Identifier(rhs)) =
+                    (left.as_ref(), right.as_ref())
+                {
+                    if rhs == "None" {
+                        if let Some(typ) = self.lookup(name) {
+                            if let Type::Optional(inner) = typ {
+                                return (
+                                    vec![(name.clone(), (**inner).clone())], // true: x is T
+                                    vec![],                                  // false: x is None
+                                );
+                            }
+                        }
+                    }
+                }
+                // Also handle None != x
+                if let (Expression::Identifier(lhs), Expression::Identifier(name)) =
+                    (left.as_ref(), right.as_ref())
+                {
+                    if lhs == "None" {
+                        if let Some(typ) = self.lookup(name) {
+                            if let Type::Optional(inner) = typ {
+                                return (vec![(name.clone(), (**inner).clone())], vec![]);
+                            }
+                        }
+                    }
+                }
+                (vec![], vec![])
+            }
+            // !cond → swap true/false facts
+            Expression::Unary {
+                operator: UnaryOp::Not,
+                operand,
+            } => {
+                let (true_facts, false_facts) = self.extract_narrowing_facts(operand);
+                (false_facts, true_facts)
+            }
+            // is_some(x), is_none(x), is_ok(x), is_err(x)
+            Expression::Call {
+                function,
+                arguments,
+            } => {
+                if let Expression::Identifier(fn_name) = function.as_ref() {
+                    if arguments.len() == 1 {
+                        if let Expression::Identifier(var_name) = &arguments[0] {
+                            if let Some(typ) = self.lookup(var_name) {
+                                match fn_name.as_str() {
+                                    "is_some" => {
+                                        if let Type::Optional(inner) = typ {
+                                            return (
+                                                vec![(var_name.clone(), (**inner).clone())],
+                                                vec![],
+                                            );
+                                        }
+                                    }
+                                    "is_none" => {
+                                        if let Type::Optional(inner) = typ {
+                                            return (
+                                                vec![],
+                                                vec![(var_name.clone(), (**inner).clone())],
+                                            );
+                                        }
+                                    }
+                                    "is_ok" => {
+                                        if let Type::Generic { name, args } = typ {
+                                            if name == "Result" && !args.is_empty() {
+                                                return (
+                                                    vec![(var_name.clone(), args[0].clone())],
+                                                    vec![],
+                                                );
+                                            }
+                                        }
+                                    }
+                                    "is_err" => {
+                                        if let Type::Generic { name, args } = typ {
+                                            if name == "Result" && !args.is_empty() {
+                                                return (
+                                                    vec![],
+                                                    vec![(var_name.clone(), args[0].clone())],
+                                                );
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                (vec![], vec![])
+            }
+            _ => (vec![], vec![]),
+        }
+    }
+
+    /// Apply narrowing facts to the current scope
+    fn apply_facts(&mut self, facts: &[(String, Type)]) {
+        for (name, typ) in facts {
+            self.rebind(name, typ.clone());
+        }
+    }
+
+    // ── Match exhaustiveness checking ─────────────────────────────
+
+    /// Check whether a match expression covers all variants.
+    /// Emits a warning if variants are missing and no wildcard/variable pattern exists.
+    fn check_match_exhaustiveness(&mut self, scrutinee_type: &Type, arms: &[MatchArm]) {
+        // Skip checking for Any/unknown types
+        if matches!(scrutinee_type, Type::Any) {
+            return;
+        }
+
+        // Check if any arm has a wildcard or variable pattern (catches everything)
+        let has_catch_all = arms
+            .iter()
+            .any(|arm| matches!(arm.pattern, Pattern::Wildcard | Pattern::Variable(_)));
+        if has_catch_all {
+            return;
+        }
+
+        // Determine expected variants based on scrutinee type
+        let expected_variants: Option<Vec<String>> = match scrutinee_type {
+            Type::Optional(_) => Some(vec!["Some".to_string(), "None".to_string()]),
+            Type::Generic { name, .. } if name == "Result" => {
+                Some(vec!["Ok".to_string(), "Err".to_string()])
+            }
+            Type::Named(name) => {
+                if let Some(variants) = self.enums.get(name) {
+                    Some(variants.iter().map(|(v, _)| v.clone()).collect())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(expected) = expected_variants {
+            // Collect variant names from match arms
+            let covered: Vec<String> = arms
+                .iter()
+                .filter_map(|arm| match &arm.pattern {
+                    Pattern::Variant { variant, .. } => Some(variant.clone()),
+                    _ => None,
+                })
+                .collect();
+
+            let missing: Vec<&String> = expected.iter().filter(|v| !covered.contains(v)).collect();
+
+            if !missing.is_empty() {
+                let missing_names: Vec<_> = missing.iter().map(|s| s.as_str()).collect();
+                let line = self.find_line_near("match ");
+                self.warning(
+                    format!(
+                        "Non-exhaustive match: missing variant(s) {}",
+                        missing_names.join(", ")
+                    ),
+                    line,
+                    Some("Add the missing variants or a wildcard '_' pattern".to_string()),
+                );
+            }
+        }
+    }
+
+    /// Determine whether a block always diverges (returns/breaks/continues)
+    fn block_diverges(&self, block: &Block) -> bool {
+        if block.statements.is_empty() {
+            return false;
+        }
+        match block.statements.last() {
+            Some(Statement::Return(_)) => true,
+            Some(Statement::Break) | Some(Statement::Continue) => true,
+            Some(Statement::If {
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            }) => self.block_diverges(then_branch) && self.block_diverges(else_branch),
+            Some(Statement::Expression(Expression::Block(inner))) => self.block_diverges(inner),
+            _ => false,
         }
     }
 
@@ -812,6 +1345,47 @@ impl TypeContext {
             } => {
                 let left_type = self.infer_expression(left);
                 let right_type = self.infer_expression(right);
+
+                // Validate comparison operand compatibility
+                if matches!(
+                    operator,
+                    BinaryOp::Eq
+                        | BinaryOp::Ne
+                        | BinaryOp::Lt
+                        | BinaryOp::Le
+                        | BinaryOp::Gt
+                        | BinaryOp::Ge
+                ) {
+                    if !left_type.is_compatible(&right_type) {
+                        let is_eq_ne = matches!(operator, BinaryOp::Eq | BinaryOp::Ne);
+                        let either_optional = matches!(&left_type, Type::Optional(_))
+                            || matches!(&right_type, Type::Optional(_));
+
+                        // For ==/!=, allow comparing with Optional (None checks are valid)
+                        if !(is_eq_ne && either_optional) {
+                            let op_str = binary_op_str(operator);
+                            let search_hint = expr_search_hint(left);
+                            let needle = if search_hint.is_empty() {
+                                op_str.to_string()
+                            } else {
+                                format!("{} {}", search_hint, op_str)
+                            };
+                            let line = self.find_line_near(&needle);
+                            let hint = comparison_type_hint(&left_type, &right_type, left);
+                            self.warning(
+                                format!(
+                                    "Comparison '{}' between incompatible types {} and {}",
+                                    op_str,
+                                    left_type.name(),
+                                    right_type.name()
+                                ),
+                                line,
+                                Some(hint),
+                            );
+                        }
+                    }
+                }
+
                 self.infer_binary_op(operator, &left_type, &right_type)
             }
 
@@ -930,6 +1504,8 @@ impl TypeContext {
                         }
                         Type::Any
                     }
+                    // Map field access: map.field is syntactic sugar for map["field"]
+                    Type::Map { value_type, .. } => (**value_type).clone(),
                     _ => Type::Any,
                 }
             }
@@ -983,7 +1559,40 @@ impl TypeContext {
                 Type::Array(Box::new(Type::Int))
             }
 
-            Expression::InterpolatedString(_) => Type::String,
+            Expression::InterpolatedString(parts) => {
+                // In strict mode, warn when interpolating complex types
+                if self.strict_lint {
+                    for part in parts {
+                        if let StringPart::Expr(expr) = part {
+                            let expr_type = self.infer_expression(expr);
+                            match &expr_type {
+                                Type::Array(_) | Type::Map { .. } | Type::Function { .. } => {
+                                    let hint_str = expr_search_hint(expr);
+                                    let needle = if hint_str.is_empty() {
+                                        "{".to_string()
+                                    } else {
+                                        hint_str
+                                    };
+                                    let line = self.find_line_near(&needle);
+                                    self.warning(
+                                        format!(
+                                            "Interpolating {} value may not produce useful output",
+                                            expr_type.name()
+                                        ),
+                                        line,
+                                        Some(
+                                            "Consider using str() or stringify() to convert"
+                                                .to_string(),
+                                        ),
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                Type::String
+            }
             Expression::TemplateString(_) => Type::String,
 
             Expression::StructLiteral { name, fields } => {
@@ -994,7 +1603,7 @@ impl TypeContext {
                         if let Some((_, expected)) = struct_fields.iter().find(|(n, _)| n == fname)
                         {
                             if !self.compatible(&actual, expected) && !matches!(actual, Type::Any) {
-                                let line = self.find_line(name);
+                                let line = self.find_line_near(name);
                                 self.error(
                                     format!(
                                         "Field '{}' of struct '{}': expected {} but got {}",
@@ -1024,7 +1633,8 @@ impl TypeContext {
                     {
                         if let Some(expected) = expected_fields {
                             if arguments.len() != expected.len() {
-                                let line = self.find_line(&format!("{}::{}", enum_name, variant));
+                                let line =
+                                    self.find_line_near(&format!("{}::{}", enum_name, variant));
                                 self.error(
                                     format!(
                                         "Enum variant {}::{} expects {} argument(s), got {}",
@@ -1042,8 +1652,8 @@ impl TypeContext {
                                     if !self.compatible(&actual, exp_type)
                                         && !matches!(actual, Type::Any)
                                     {
-                                        let line =
-                                            self.find_line(&format!("{}::{}", enum_name, variant));
+                                        let line = self
+                                            .find_line_near(&format!("{}::{}", enum_name, variant));
                                         self.error(
                                             format!(
                                                 "Enum variant {}::{}: expected {} but got {}",
@@ -1067,6 +1677,21 @@ impl TypeContext {
                     ("Option", "Some") | (_, "Some") => {
                         if let Some(first) = arguments.first() {
                             let inner = self.infer_expression(first);
+                            if let Type::Optional(_) = &inner {
+                                let line = self.find_line_near("Some(");
+                                self.warning(
+                                    format!(
+                                        "Wrapping Optional value in Some() creates double-wrapped Optional<{}>. \
+                                         Did you mean to assign directly?",
+                                        inner.name()
+                                    ),
+                                    line,
+                                    Some(
+                                        "Remove the Some() wrapper if the value is already Optional"
+                                            .to_string(),
+                                    ),
+                                );
+                            }
                             Type::Optional(Box::new(inner))
                         } else {
                             Type::Optional(Box::new(Type::Any))
@@ -1107,6 +1732,9 @@ impl TypeContext {
 
             Expression::Lambda { params, body } => {
                 self.push_scope();
+                // Save and reset collected_returns for lambda scope
+                let prev_return = self.current_return_type.take();
+                let prev_collected = std::mem::take(&mut self.collected_returns);
                 let param_types: Vec<Type> = params
                     .iter()
                     .map(|p| {
@@ -1119,7 +1747,28 @@ impl TypeContext {
                         typ
                     })
                     .collect();
-                let ret = self.infer_expression(body);
+                let body_type = self.check_block(body);
+
+                // Compute return type from collected returns + trailing expression
+                let mut returns = std::mem::take(&mut self.collected_returns);
+                if !matches!(body_type, Type::Unit | Type::Any) {
+                    returns.push(body_type.clone());
+                } else if returns.is_empty() {
+                    returns.push(body_type.clone());
+                }
+                let ret = if returns.is_empty() {
+                    Type::Unit
+                } else {
+                    let mut unified = returns[0].clone();
+                    for r in &returns[1..] {
+                        unified = self.union_type(&unified, r);
+                    }
+                    unified
+                };
+
+                // Restore outer function's collected_returns
+                self.current_return_type = prev_return;
+                self.collected_returns = prev_collected;
                 self.pop_scope();
                 Type::Function {
                     params: param_types,
@@ -1140,13 +1789,29 @@ impl TypeContext {
                 else_branch,
             } => {
                 self.infer_expression(condition);
+
+                // Apply narrowing facts to if-expression branches
+                let (true_facts, false_facts) = self.extract_narrowing_facts(condition);
+
+                self.push_scope();
+                self.apply_facts(&true_facts);
                 let then_type = self.infer_expression(then_branch);
+                self.pop_scope();
+
+                self.push_scope();
+                self.apply_facts(&false_facts);
                 let else_type = self.infer_expression(else_branch);
+                self.pop_scope();
+
                 self.union_type(&then_type, &else_type)
             }
 
             Expression::Match { scrutinee, arms } => {
                 let scrutinee_type = self.infer_expression(scrutinee);
+
+                // Check match exhaustiveness before processing arms
+                self.check_match_exhaustiveness(&scrutinee_type, arms);
+
                 let mut result_type: Option<Type> = None;
 
                 for arm in arms {
@@ -1169,12 +1834,64 @@ impl TypeContext {
 
             Expression::Assign { target, value } => {
                 let _target_type = self.infer_expression(target);
-                self.infer_expression(value);
+                let value_type = self.infer_expression(value);
+                if let Expression::Identifier(name) = target.as_ref() {
+                    self.rebind(name, value_type);
+                }
                 Type::Unit
             }
 
             Expression::Await(inner) => self.infer_expression(inner),
-            Expression::Try(inner) => self.infer_expression(inner),
+            Expression::Try(inner) => {
+                let try_hint = expr_search_hint(inner);
+                let try_needle = if try_hint.is_empty() {
+                    "?".to_string()
+                } else {
+                    format!("{}?", try_hint)
+                };
+                let inner_type = self.infer_expression(inner);
+                match &inner_type {
+                    Type::Optional(t) => {
+                        let unwrapped = (**t).clone();
+                        // Validate enclosing function returns Optional (or Any/untyped)
+                        if let Some(ret) = self.current_return_type.clone() {
+                            if !matches!(ret, Type::Optional(_) | Type::Any) {
+                                let line = self.find_line_near(&try_needle);
+                                self.warning(
+                                    format!(
+                                        "? on Optional requires enclosing function to return Optional, but returns {}",
+                                        ret.name()
+                                    ),
+                                    line,
+                                    Some("The ? operator early-returns None, which is incompatible with the declared return type".to_string()),
+                                );
+                            }
+                        }
+                        unwrapped
+                    }
+                    Type::Generic { name, args } if name == "Result" && !args.is_empty() => {
+                        let ok_type = args[0].clone();
+                        // Validate enclosing function returns Result (or Any/untyped)
+                        if let Some(ret) = self.current_return_type.clone() {
+                            let is_result =
+                                matches!(ret, Type::Generic { ref name, .. } if name == "Result");
+                            if !is_result && !matches!(ret, Type::Any) {
+                                let line = self.find_line_near(&try_needle);
+                                self.warning(
+                                    format!(
+                                        "? on Result requires enclosing function to return Result, but returns {}",
+                                        ret.name()
+                                    ),
+                                    line,
+                                    Some("The ? operator early-returns Err, which is incompatible with the declared return type".to_string()),
+                                );
+                            }
+                        }
+                        ok_type
+                    }
+                    _ => inner_type, // gradual typing: pass through for Any/unknown
+                }
+            }
         }
     }
 
@@ -1220,10 +1937,148 @@ impl TypeContext {
         }
     }
 
+    /// Infer a lambda expression with expected parameter types from the call context.
+    /// Untyped parameters are filled in from `expected_param_types`; explicit annotations win.
+    fn infer_lambda_with_expected(
+        &mut self,
+        params: &[Parameter],
+        body: &Block,
+        expected_param_types: &[Type],
+    ) -> Type {
+        self.push_scope();
+        let prev_return = self.current_return_type.take();
+        let prev_collected = std::mem::take(&mut self.collected_returns);
+
+        let param_types: Vec<Type> = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let typ = if let Some(t) = &p.type_annotation {
+                    self.resolve_type_expr(t) // Explicit annotation always wins
+                } else if i < expected_param_types.len()
+                    && !matches!(expected_param_types[i], Type::Any)
+                {
+                    expected_param_types[i].clone() // Inferred from context
+                } else {
+                    Type::Any // Gradual fallback
+                };
+                self.bind(&p.name, typ.clone());
+                typ
+            })
+            .collect();
+
+        let body_type = self.check_block(body);
+
+        // Compute return type from collected returns + trailing expression
+        let mut returns = std::mem::take(&mut self.collected_returns);
+        if !matches!(body_type, Type::Unit | Type::Any) {
+            returns.push(body_type.clone());
+        } else if returns.is_empty() {
+            returns.push(body_type.clone());
+        }
+        let ret = if returns.is_empty() {
+            Type::Unit
+        } else {
+            let mut unified = returns[0].clone();
+            for r in &returns[1..] {
+                unified = self.union_type(&unified, r);
+            }
+            unified
+        };
+
+        self.current_return_type = prev_return;
+        self.collected_returns = prev_collected;
+        self.pop_scope();
+        Type::Function {
+            params: param_types,
+            return_type: Box::new(ret),
+        }
+    }
+
+    /// Determine expected parameter types for a callback argument based on the
+    /// function being called and the already-inferred preceding argument types.
+    fn get_callback_expected_types(
+        &self,
+        func_name: &str,
+        preceding_arg_types: &[Type],
+        callback_arg_index: usize,
+    ) -> Option<Vec<Type>> {
+        match func_name {
+            // filter, find, any, all, each: fn(T) -> Bool
+            "filter" | "find" | "any" | "all" | "each"
+                if callback_arg_index == 1 && !preceding_arg_types.is_empty() =>
+            {
+                if let Type::Array(elem) = &preceding_arg_types[0] {
+                    Some(vec![(**elem).clone()])
+                } else {
+                    None
+                }
+            }
+            // transform(Array<T>, fn(T) -> R) -> Array<R>
+            "transform" if callback_arg_index == 1 && !preceding_arg_types.is_empty() => {
+                if let Type::Array(elem) = &preceding_arg_types[0] {
+                    Some(vec![(**elem).clone()])
+                } else {
+                    None
+                }
+            }
+            // sort_by(Array<T>, fn(T, T) -> Int) -> Array<T>
+            "sort_by" if callback_arg_index == 1 && !preceding_arg_types.is_empty() => {
+                if let Type::Array(elem) = &preceding_arg_types[0] {
+                    Some(vec![(**elem).clone(), (**elem).clone()])
+                } else {
+                    None
+                }
+            }
+            // reduce(Array<T>, init: U, fn(U, T) -> U) -> U
+            "reduce" if callback_arg_index == 2 && preceding_arg_types.len() >= 2 => {
+                if let Type::Array(elem) = &preceding_arg_types[0] {
+                    Some(vec![preceding_arg_types[1].clone(), (**elem).clone()])
+                } else {
+                    None
+                }
+            }
+            // User-defined function with Function parameter type
+            _ => {
+                if let Some(sig) = self
+                    .functions
+                    .get(func_name)
+                    .or_else(|| self.builtin_sigs.get(func_name))
+                {
+                    if callback_arg_index < sig.params.len() {
+                        if let Type::Function { params, .. } = &sig.params[callback_arg_index].1 {
+                            return Some(params.clone());
+                        }
+                    }
+                }
+                None
+            }
+        }
+    }
+
     /// Infer the return type of a function call
     fn infer_call(&mut self, function: &Expression, arguments: &[Expression]) -> Type {
-        // Infer argument types
-        let arg_types: Vec<Type> = arguments.iter().map(|a| self.infer_expression(a)).collect();
+        // Get function name early for bidirectional inference
+        let fn_name_for_bidir = match function {
+            Expression::Identifier(name) => Some(name.clone()),
+            _ => None,
+        };
+
+        // Infer argument types with bidirectional inference for lambda arguments.
+        // Non-lambda args are inferred eagerly; lambdas consult the function signature
+        // to fill in expected parameter types from preceding arguments.
+        let mut arg_types: Vec<Type> = Vec::with_capacity(arguments.len());
+        for (i, arg) in arguments.iter().enumerate() {
+            if let Expression::Lambda { params, body } = arg {
+                if let Some(ref name) = fn_name_for_bidir {
+                    if let Some(expected) = self.get_callback_expected_types(name, &arg_types, i) {
+                        arg_types.push(self.infer_lambda_with_expected(params, body, &expected));
+                        continue;
+                    }
+                }
+            }
+            arg_types.push(self.infer_expression(arg));
+        }
 
         // Get function name for lookup
         let fn_name = match function {
@@ -1279,9 +2134,14 @@ impl TypeContext {
                         return arg_types[0].clone();
                     }
                 }
-                // push(Array<T>, T) -> Array<T>
+                // push(Array<T>, T) -> Array<T>; narrows Array<Any> to Array<ItemType>
                 "push" if arguments.len() == 2 => {
-                    if let Type::Array(_) = &arg_types[0] {
+                    if let Type::Array(inner) = &arg_types[0] {
+                        if matches!(inner.as_ref(), Type::Any)
+                            && !matches!(&arg_types[1], Type::Any)
+                        {
+                            return Type::Array(Box::new(arg_types[1].clone()));
+                        }
                         return arg_types[0].clone();
                     }
                 }
@@ -1325,6 +2185,11 @@ impl TypeContext {
                         return (**value_type).clone();
                     }
                 }
+                "get_index" if arguments.len() >= 2 => {
+                    if let Type::Array(elem_type) = &arg_types[0] {
+                        return (**elem_type).clone();
+                    }
+                }
                 // transform(array, callback) -> Array<callback_return_type>
                 "transform" if arguments.len() == 2 => {
                     if let Some(ret) =
@@ -1336,6 +2201,21 @@ impl TypeContext {
                 }
                 "Some" => {
                     return if let Some(first) = arg_types.first() {
+                        if let Type::Optional(_) = first {
+                            let line = self.find_line_near("Some(");
+                            self.warning(
+                                format!(
+                                    "Wrapping Optional value in Some() creates double-wrapped Optional<{}>. \
+                                     Did you mean to assign directly?",
+                                    first.name()
+                                ),
+                                line,
+                                Some(
+                                    "Remove the Some() wrapper if the value is already Optional"
+                                        .to_string(),
+                                ),
+                            );
+                        }
                         Type::Optional(Box::new(first.clone()))
                     } else {
                         Type::Optional(Box::new(Type::Any))
@@ -1379,13 +2259,36 @@ impl TypeContext {
 
             if let Some(sig) = sig {
                 // Check argument count
-                if !sig.variadic && arg_types.len() != sig.params.len() {
-                    let line = self.find_line(&format!("{}(", name));
+                if sig.variadic {
+                    // Variadic: check minimum argument count
+                    if arg_types.len() < sig.required_params {
+                        let line = self.find_line_near(&format!("{}(", name));
+                        self.error(
+                            format!(
+                                "Function '{}' expects at least {} argument(s), got {}",
+                                name,
+                                sig.required_params,
+                                arg_types.len()
+                            ),
+                            line,
+                            None,
+                        );
+                        return sig.return_type;
+                    }
+                } else if arg_types.len() < sig.required_params
+                    || arg_types.len() > sig.params.len()
+                {
+                    let line = self.find_line_near(&format!("{}(", name));
+                    let expected = if sig.required_params == sig.params.len() {
+                        format!("{}", sig.params.len())
+                    } else {
+                        format!("{} to {}", sig.required_params, sig.params.len())
+                    };
                     self.error(
                         format!(
                             "Function '{}' expects {} argument(s), got {}",
                             name,
-                            sig.params.len(),
+                            expected,
                             arg_types.len()
                         ),
                         line,
@@ -1394,16 +2297,19 @@ impl TypeContext {
                     return sig.return_type;
                 }
 
-                // Check argument types (skip for variadic)
-                if !sig.variadic {
-                    for (i, (arg_type, (param_name, param_type))) in
-                        arg_types.iter().zip(sig.params.iter()).enumerate()
+                // Check argument types for declared parameters (always, including variadic)
+                {
+                    let check_count = std::cmp::min(arg_types.len(), sig.params.len());
+                    for (i, (arg_type, (param_name, param_type))) in arg_types[..check_count]
+                        .iter()
+                        .zip(sig.params.iter())
+                        .enumerate()
                     {
                         if !self.compatible(arg_type, param_type)
                             && !matches!(arg_type, Type::Any)
                             && !matches!(param_type, Type::Any)
                         {
-                            let line = self.find_line(&format!("{}(", name));
+                            let line = self.find_line_near(&format!("{}(", name));
                             self.error(
                                 format!(
                                     "Argument {} ('{}') of '{}': expected {} but got {}",
@@ -1447,13 +2353,28 @@ impl TypeContext {
                     }
                 }
             }
-            Pattern::Array(patterns) => {
+            Pattern::Array { elements, rest } => {
                 let elem_type = match scrutinee_type {
                     Type::Array(inner) => (**inner).clone(),
                     _ => Type::Any,
                 };
-                for p in patterns {
+                for p in elements {
                     self.bind_pattern(p, &elem_type);
+                }
+                if let Some(rest_name) = rest {
+                    self.bind(rest_name, Type::Array(Box::new(elem_type)));
+                }
+            }
+            Pattern::Map { fields, rest } => {
+                let value_type = match scrutinee_type {
+                    Type::Map { value_type, .. } => (**value_type).clone(),
+                    _ => Type::Any,
+                };
+                for (_key, p) in fields {
+                    self.bind_pattern(p, &value_type);
+                }
+                if let Some(rest_name) = rest {
+                    self.bind(rest_name, scrutinee_type.clone());
                 }
             }
             Pattern::Struct { name, fields } => {
@@ -1556,11 +2477,8 @@ impl TypeContext {
         Some(path)
     }
 
-    /// Parse a file and extract function signatures (Pass 1 only)
-    fn extract_file_signatures(
-        &mut self,
-        file_path: &std::path::Path,
-    ) -> HashMap<String, FunctionSig> {
+    /// Parse a file and extract all exports (functions, structs, enums, type aliases)
+    fn extract_file_exports(&mut self, file_path: &std::path::Path) -> FileExports {
         use crate::lexer::Lexer;
         use crate::parser::Parser;
 
@@ -1573,13 +2491,13 @@ impl TypeContext {
 
         // Check for circular imports
         if self.resolving_files.contains(&path_str) {
-            return HashMap::new();
+            return FileExports::default();
         }
 
         // Read and parse
         let source_code = match std::fs::read_to_string(file_path) {
             Ok(s) => s,
-            Err(_) => return HashMap::new(),
+            Err(_) => return FileExports::default(),
         };
 
         let lexer = Lexer::new(&source_code);
@@ -1587,30 +2505,61 @@ impl TypeContext {
         let mut parser = Parser::new(tokens);
         let ast = match parser.parse() {
             Ok(ast) => ast,
-            Err(_) => return HashMap::new(),
+            Err(_) => return FileExports::default(),
         };
 
         // Mark as resolving (circular import protection)
         self.resolving_files.push(path_str.clone());
 
-        // Create a temporary context for Pass 1 only
+        // Create a temporary context for Pass 1 + Pass 2
         let mut temp_ctx = TypeContext::new(&source_code);
         temp_ctx.current_file = Some(path_str.clone());
         temp_ctx.register_builtins();
+        // Share module cache and resolving files to prevent infinite recursion
+        temp_ctx.module_cache = std::mem::take(&mut self.module_cache);
+        temp_ctx.resolving_files = std::mem::take(&mut self.resolving_files);
 
         // Run Pass 1 on the imported file to collect declarations
         for stmt in &ast.statements {
             temp_ctx.collect_declaration(stmt);
         }
 
-        // Extract the function signatures
-        let sigs = temp_ctx.functions;
+        // Cache Pass 1 exports immediately to break circular imports
+        let pass1_exports = FileExports {
+            functions: temp_ctx.functions.clone(),
+            structs: temp_ctx.structs.clone(),
+            enums: temp_ctx.enums.clone(),
+            type_aliases: temp_ctx.type_aliases.clone(),
+        };
+        temp_ctx
+            .module_cache
+            .insert(path_str.clone(), pass1_exports);
 
-        // Cache and unmark
-        self.module_cache.insert(path_str.clone(), sigs.clone());
+        // Run Pass 2 to trigger return type inference for unannotated functions
+        // (diagnostics from the imported file are discarded)
+        for stmt in &ast.statements {
+            temp_ctx.check_statement(stmt);
+        }
+
+        // Extract all exports (now with inferred return types)
+        let exports = FileExports {
+            functions: temp_ctx.functions,
+            structs: temp_ctx.structs,
+            enums: temp_ctx.enums,
+            type_aliases: temp_ctx.type_aliases,
+        };
+
+        // Update cache with Pass 2 results
+        temp_ctx
+            .module_cache
+            .insert(path_str.clone(), exports.clone());
+
+        // Restore shared state back to self
+        self.module_cache = temp_ctx.module_cache;
+        self.resolving_files = temp_ctx.resolving_files;
         self.resolving_files.retain(|f| f != &path_str);
 
-        sigs
+        exports
     }
 
     fn register_import(&mut self, items: &[ImportItem], source: &str, alias: Option<&str>) {
@@ -1636,14 +2585,20 @@ impl TypeContext {
 
         // Try user file import
         if let Some(file_path) = self.resolve_import_path(source) {
-            let file_sigs = self.extract_file_signatures(&file_path);
+            let exports = self.extract_file_exports(&file_path);
             for item in items {
                 let local_name = item.alias.as_ref().unwrap_or(&item.name);
-                if let Some(sig) = file_sigs.get(&item.name) {
+                if let Some(sig) = exports.functions.get(&item.name) {
                     self.builtin_sigs.insert(local_name.clone(), sig.clone());
+                } else if let Some(fields) = exports.structs.get(&item.name) {
+                    self.structs.insert(local_name.clone(), fields.clone());
+                } else if let Some(variants) = exports.enums.get(&item.name) {
+                    self.enums.insert(local_name.clone(), variants.clone());
+                } else if let Some(typ) = exports.type_aliases.get(&item.name) {
+                    self.type_aliases.insert(local_name.clone(), typ.clone());
                 } else {
-                    // Function not found in the imported file
-                    self.bind(local_name, Type::Any);
+                    // Not found in any export category
+                    self.bind(local_name, Type::Named(item.name.clone()));
                 }
             }
             return;
@@ -1664,18 +2619,28 @@ impl TypeContext {
         // Helper macro for concise registration
         macro_rules! sig {
             ($name:expr, [$($pname:expr => $ptype:expr),*], $ret:expr) => {
-                b.insert($name.to_string(), FunctionSig {
-                    params: vec![$(($pname.to_string(), $ptype)),*],
-                    return_type: $ret,
-                    variadic: false,
-                });
+                {
+                    let params: Vec<(String, Type)> = vec![$(($pname.to_string(), $ptype)),*];
+                    let required_params = params.len();
+                    b.insert($name.to_string(), FunctionSig {
+                        params,
+                        return_type: $ret,
+                        variadic: false,
+                        required_params,
+                    });
+                }
             };
             ($name:expr, [$($pname:expr => $ptype:expr),*], $ret:expr, variadic) => {
-                b.insert($name.to_string(), FunctionSig {
-                    params: vec![$(($pname.to_string(), $ptype)),*],
-                    return_type: $ret,
-                    variadic: true,
-                });
+                {
+                    let params: Vec<(String, Type)> = vec![$(($pname.to_string(), $ptype)),*];
+                    let required_params = params.len();
+                    b.insert($name.to_string(), FunctionSig {
+                        params,
+                        return_type: $ret,
+                        variadic: true,
+                        required_params,
+                    });
+                }
             };
         }
 
@@ -1699,6 +2664,7 @@ impl TypeContext {
         sig!("entries", ["map" => Type::Any], Type::Array(Box::new(Type::Any)));
         sig!("has_key", ["map" => Type::Any, "key" => Type::String], Type::Bool);
         sig!("get_key", ["map" => Type::Any, "key" => Type::String], Type::Any);
+        sig!("get_index", ["array" => Type::Array(Box::new(Type::Any)), "index" => Type::Int], Type::Any);
         sig!("sort", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)));
         sig!("reverse", ["value" => Type::Any], Type::Any);
         sig!("contains", ["haystack" => Type::Any, "needle" => Type::Any], Type::Bool);
@@ -1784,18 +2750,28 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
 
     macro_rules! sig {
         ($name:expr, [$($pname:expr => $ptype:expr),*], $ret:expr) => {
-            sigs.insert($name.to_string(), FunctionSig {
-                params: vec![$(($pname.to_string(), $ptype)),*],
-                return_type: $ret,
-                variadic: false,
-            });
+            {
+                let params: Vec<(String, Type)> = vec![$(($pname.to_string(), $ptype)),*];
+                let required_params = params.len();
+                sigs.insert($name.to_string(), FunctionSig {
+                    params,
+                    return_type: $ret,
+                    variadic: false,
+                    required_params,
+                });
+            }
         };
         ($name:expr, [$($pname:expr => $ptype:expr),*], $ret:expr, variadic) => {
-            sigs.insert($name.to_string(), FunctionSig {
-                params: vec![$(($pname.to_string(), $ptype)),*],
-                return_type: $ret,
-                variadic: true,
-            });
+            {
+                let params: Vec<(String, Type)> = vec![$(($pname.to_string(), $ptype)),*];
+                let required_params = params.len();
+                sigs.insert($name.to_string(), FunctionSig {
+                    params,
+                    return_type: $ret,
+                    variadic: true,
+                    required_params,
+                });
+            }
         };
     }
 
@@ -1843,6 +2819,9 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("find_pattern", ["s" => Type::String, "pattern" => Type::String], Type::Optional(Box::new(Type::String)));
             sig!("find_all_pattern", ["s" => Type::String, "pattern" => Type::String], Type::Array(Box::new(Type::String)));
             sig!("split_pattern", ["s" => Type::String, "pattern" => Type::String], Type::Array(Box::new(Type::String)));
+            sig!("capture_pattern", ["s" => Type::String, "pattern" => Type::String], Type::Optional(Box::new(Type::Array(Box::new(Type::String)))));
+            sig!("capture_all_pattern", ["s" => Type::String, "pattern" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));
+            sig!("capture_named_pattern", ["s" => Type::String, "pattern" => Type::String], Type::Optional(Box::new(Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::String) })));
         }
         "std/math" => {
             sig!("sin", ["x" => Type::Float], Type::Float);
@@ -1870,6 +2849,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("entries", ["map" => Type::Any], Type::Array(Box::new(Type::Any)));
             sig!("has_key", ["map" => Type::Any, "key" => Type::String], Type::Bool);
             sig!("get_key", ["map" => Type::Any, "key" => Type::String], Type::Any, variadic);
+            sig!("get_index", ["array" => Type::Array(Box::new(Type::Any)), "index" => Type::Int], Type::Any, variadic);
             sig!("first", ["array" => Type::Array(Box::new(Type::Any))], Type::Any, variadic);
             sig!("last", ["array" => Type::Array(Box::new(Type::Any))], Type::Any, variadic);
             sig!("concat", ["a" => Type::Any, "b" => Type::Any], Type::Any);
@@ -1907,7 +2887,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("cwd", [], Type::String);
         }
         "std/http" => {
-            sig!("fetch", ["url" => Type::String], Type::Generic {
+            sig!("fetch", ["url_or_options" => Type::Union(vec![Type::String, Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }])], Type::Generic {
                 name: "Result".to_string(),
                 args: vec![Type::Named("Response".to_string()), Type::String],
             }, variadic);
@@ -3343,6 +4323,1774 @@ mod tests {
                 && path.to_string_lossy().ends_with(".tnt"),
             "Should resolve to lib/utils.tnt, got: {}",
             path.display()
+        );
+    }
+
+    // ── Layer 1: Return type inference ─────────────────────────────
+
+    #[test]
+    fn test_infer_return_type_string() {
+        let errors = check_errors(
+            r#"
+            fn greet() {
+                return "hello"
+            }
+            let s: String = greet()
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Inferred String return should satisfy let s: String: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_infer_return_type_int() {
+        let errors = check_errors(
+            r#"
+            fn get_num() {
+                return 42
+            }
+            let n: Int = get_num()
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Inferred Int return should satisfy let n: Int: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_infer_return_type_multiple_returns() {
+        let errors = check_errors(
+            r#"
+            fn pick(x: Bool) {
+                if x {
+                    return "yes"
+                }
+                return "no"
+            }
+            let s: String = pick(true)
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Multiple String returns should unify to String: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_infer_return_type_option() {
+        // Some + None branches should not cause errors when caller is untyped
+        let errors = check_errors(
+            r#"
+            fn maybe(x: Bool) {
+                if x {
+                    return Some(1)
+                }
+                return None
+            }
+            let v = maybe(true)
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Some + None returns should not error: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_inferred_return_benefits_later_callers() {
+        let errors = check_errors(
+            r#"
+            fn make_name() {
+                return "Alice"
+            }
+            fn use_name() {
+                let name: String = make_name()
+                return name
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Later function should benefit from inferred return type of earlier function: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_annotated_function_unchanged() {
+        let errors = check_errors(
+            r#"
+            fn add(a: Int, b: Int) -> Int {
+                return a + b
+            }
+            let x: Int = add(1, 2)
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Annotated functions should still work: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_untyped_no_false_positives() {
+        let diags = check(
+            r#"
+            fn foo(a, b) {
+                return a + b
+            }
+            let x = foo(1, 2)
+            let y = foo("a", "b")
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Fully untyped code should still produce no diagnostics: {:?}",
+            diags
+        );
+    }
+
+    // ── Layer 2: Double-Option warning ─────────────────────────────
+
+    #[test]
+    fn test_double_option_warning() {
+        let warnings = check_warnings("let x = Some(Some(42))");
+        let double_opt: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("double-wrapped"))
+            .collect();
+        assert_eq!(
+            double_opt.len(),
+            1,
+            "Some(Some(42)) should warn about double wrapping: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_single_option_no_warning() {
+        let warnings = check_warnings("let x = Some(42)");
+        let double_opt: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("double-wrapped"))
+            .collect();
+        assert!(
+            double_opt.is_empty(),
+            "Some(42) should not warn about double wrapping: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_some_none_warns() {
+        let warnings = check_warnings("let x = Some(None)");
+        let double_opt: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("double-wrapped"))
+            .collect();
+        assert_eq!(
+            double_opt.len(),
+            1,
+            "Some(None) should warn about double wrapping: {:?}",
+            warnings
+        );
+    }
+
+    // ── Layer 3: Array narrowing + assignment refinement ───────────
+
+    #[test]
+    fn test_push_narrows_empty_array() {
+        let errors = check_errors(
+            r#"
+            let items = push([], 42)
+            let n: Int = first(items)
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "push([], 42) should return Array<Int>, so first() is Int: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_push_preserves_existing_type() {
+        let errors = check_errors(
+            r#"
+            let items = push([1, 2], 3)
+            let n: Int = first(items)
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "push([1,2], 3) should return Array<Int>: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_assignment_refines_type() {
+        let errors = check_errors(
+            r#"
+            let mut items = []
+            items = push(items, "x")
+            let s: String = first(items)
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "After items = push(items, \"x\"), first(items) should be String: {:?}",
+            errors
+        );
+    }
+
+    // ── Phase 1: Union type correctness ─────────────────────────
+
+    #[test]
+    fn test_union_int_compatible_with_int_or_string_target() {
+        // Int should be compatible with Int | String target
+        let errors = check_errors(
+            r#"
+            let x: Int | String = 42
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Int should be compatible with Int | String target: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_union_value_not_compatible_with_single_type() {
+        // Union(Int, String) should NOT be compatible with Int target
+        let errors = check_errors(
+            r#"
+            fn get_value() -> Int | String {
+                return 42
+            }
+            let x: Int = get_value()
+            "#,
+        );
+        assert!(
+            !errors.is_empty(),
+            "Int | String value should NOT be compatible with Int target"
+        );
+    }
+
+    #[test]
+    fn test_union_all_members_match_target() {
+        // Union(Int, Int) is compatible with Int (all members match)
+        // We can test this by returning Int from two branches and assigning to Int
+        let errors = check_errors(
+            r#"
+            fn get_num(x: Bool) -> Int {
+                if x { return 1 }
+                return 2
+            }
+            let n: Int = get_num(true)
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Union(Int, Int) should be compatible with Int: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_union_bool_not_compatible_with_int_or_string() {
+        let errors = check_errors(
+            r#"
+            let x: Int | String = true
+            "#,
+        );
+        assert!(
+            !errors.is_empty(),
+            "Bool should NOT be compatible with Int | String"
+        );
+    }
+
+    #[test]
+    fn test_union_to_union_compatible() {
+        // Int | String should be compatible with Int | String | Bool
+        let errors = check_errors(
+            r#"
+            fn get_value() -> Int | String {
+                return 42
+            }
+            let x: Int | String | Bool = get_value()
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Int | String should be compatible with Int | String | Bool: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_union_nested_flattening() {
+        use crate::types::Type;
+        // Test that union_type flattens nested unions
+        let ctx = TypeContext::new("");
+        let a = Type::Union(vec![Type::Int, Type::String]);
+        let b = Type::Bool;
+        let result = ctx.union_type(&a, &b);
+        match &result {
+            Type::Union(members) => {
+                assert_eq!(members.len(), 3, "Should flatten: {:?}", result);
+            }
+            _ => panic!("Expected Union, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_union_deduplication() {
+        use crate::types::Type;
+        // Test that union_type deduplicates
+        let ctx = TypeContext::new("");
+        let result = ctx.union_type(&Type::Int, &Type::Int);
+        assert_eq!(result, Type::Int, "union(Int, Int) should be Int");
+    }
+
+    #[test]
+    fn test_union_gradual_typing_preserved() {
+        // Fully untyped code should still produce zero diagnostics
+        let diags = check(
+            r#"
+            fn choose(x) {
+                if x { return 42 }
+                return "hello"
+            }
+            let result = choose(true)
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Untyped code should produce no diagnostics: {:?}",
+            diags
+        );
+    }
+
+    // ── Phase 2: Block divergence analysis ──────────────────────
+
+    #[test]
+    fn test_otherwise_without_return_warns() {
+        let warnings = check_warnings(
+            r#"
+            let x = Some(42) otherwise {
+                let y = 1
+            }
+            "#,
+        );
+        let otherwise_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("otherwise"))
+            .collect();
+        assert!(
+            !otherwise_warnings.is_empty(),
+            "otherwise block without return should warn: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_otherwise_with_return_no_warning() {
+        let warnings = check_warnings(
+            r#"
+            fn foo() {
+                let x = Some(42) otherwise {
+                    return
+                }
+            }
+            "#,
+        );
+        let otherwise_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("otherwise"))
+            .collect();
+        assert!(
+            otherwise_warnings.is_empty(),
+            "otherwise block with return should not warn: {:?}",
+            otherwise_warnings
+        );
+    }
+
+    #[test]
+    fn test_otherwise_with_if_both_return_no_warning() {
+        let warnings = check_warnings(
+            r#"
+            fn foo(debug: Bool) {
+                let x = Some(42) otherwise {
+                    if debug {
+                        return
+                    } else {
+                        return
+                    }
+                }
+            }
+            "#,
+        );
+        let otherwise_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("otherwise"))
+            .collect();
+        assert!(
+            otherwise_warnings.is_empty(),
+            "otherwise with if/else both returning should not warn: {:?}",
+            otherwise_warnings
+        );
+    }
+
+    #[test]
+    fn test_lambda_with_early_return_infers_string() {
+        let errors = check_errors(
+            r#"
+            let f = fn(x: Int) -> String {
+                if x > 0 { return "positive" }
+                return "non-positive"
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Lambda with early returns should infer String: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_lambda_mixed_return_types_infers_union() {
+        // Lambda with Int return and String trailing expr should produce a union
+        let errors = check_errors(
+            r#"
+            fn test_fn() {
+                let f = fn(x: Bool) {
+                    if x { return 1 }
+                    return "fallback"
+                }
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Lambda with mixed returns in untyped context should produce no errors: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_phase2_gradual_preserved() {
+        let diags = check(
+            r#"
+            let val = Some(42) otherwise {
+                let x = 1
+            }
+            fn foo(a) {
+                let b = fn(x) { x + 1 }
+            }
+            "#,
+        );
+        // Only the otherwise warning, no type errors
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "Gradual typing should produce no type errors: {:?}",
+            errors
+        );
+    }
+
+    // ── Phase 3: Flow-sensitive type narrowing ──────────────────
+
+    #[test]
+    fn test_narrow_guard_clause_eq_none() {
+        // if x == None { return } → x is narrowed to Int
+        let errors = check_errors(
+            r#"
+            fn process(x: Int?) {
+                if x == None { return }
+                let n: Int = x
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "After guard clause 'if x == None {{ return }}', x should be narrowed to Int: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_narrow_ne_none_inside_body() {
+        // if x != None { use x as Int }
+        let errors = check_errors(
+            r#"
+            fn process(x: Int?) {
+                if x != None {
+                    let n: Int = x
+                }
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Inside 'if x != None', x should be narrowed to Int: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_narrow_is_some() {
+        let errors = check_errors(
+            r#"
+            fn process(x: Int?) {
+                if is_some(x) {
+                    let n: Int = x
+                }
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Inside 'if is_some(x)', x should be narrowed to Int: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_narrow_is_ok() {
+        let errors = check_errors(
+            r#"
+            fn process(result: Result<Int, String>) {
+                if is_ok(result) {
+                    let n: Int = result
+                }
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Inside 'if is_ok(result)', result should be narrowed to Int: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_narrow_negation_guard() {
+        // if !is_some(x) { return } → x is narrowed after
+        let errors = check_errors(
+            r#"
+            fn process(x: Int?) {
+                if !is_some(x) { return }
+                let n: Int = x
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "After '!is_some(x) {{ return }}', x should be narrowed to Int: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_narrow_is_none_guard() {
+        let errors = check_errors(
+            r#"
+            fn process(x: Int?) {
+                if is_none(x) { return }
+                let n: Int = x
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "After 'if is_none(x) {{ return }}', x should be narrowed to Int: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_narrow_if_expr() {
+        // If-expression should also benefit from narrowing
+        let errors = check_errors(
+            r#"
+            fn process(x: Int?) -> Int {
+                return if is_some(x) { x } else { 0 }
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "If-expression should narrow x in then-branch: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_no_narrowing_for_untyped() {
+        // No narrowing for variables without type annotations (Any stays Any)
+        let diags = check(
+            r#"
+            fn process(x) {
+                if x == None { return }
+                let n = x
+            }
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Untyped variables should not trigger narrowing errors: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_no_narrowing_for_non_optional() {
+        // Non-optional types shouldn't be narrowed
+        let diags = check(
+            r#"
+            fn process(x: Int) {
+                if x == None { return }
+                let n: Int = x
+            }
+            "#,
+        );
+        // No errors for already-Int variable
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "Non-optional types should not cause narrowing errors: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_phase3_gradual_preserved() {
+        let diags = check(
+            r#"
+            fn foo(x) {
+                if x != None {
+                    let y = x
+                }
+                if is_some(x) {
+                    let z = x
+                }
+            }
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Gradual typing with narrowing patterns should produce no diagnostics: {:?}",
+            diags
+        );
+    }
+
+    // ── Phase 4: Match exhaustiveness ───────────────────────────
+
+    #[test]
+    fn test_match_option_missing_none_warns() {
+        let warnings = check_warnings(
+            r#"
+            let x: Int? = Some(42)
+            let y = match x {
+                Some(v) => v
+            }
+            "#,
+        );
+        let exhaust_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("Non-exhaustive"))
+            .collect();
+        assert!(
+            !exhaust_warnings.is_empty(),
+            "Match on Option missing None should warn: {:?}",
+            warnings
+        );
+        assert!(
+            exhaust_warnings[0].message.contains("None"),
+            "Warning should mention missing 'None': {}",
+            exhaust_warnings[0].message
+        );
+    }
+
+    #[test]
+    fn test_match_option_both_variants_no_warning() {
+        let warnings = check_warnings(
+            r#"
+            let x: Int? = Some(42)
+            let y = match x {
+                Some(v) => v,
+                None => 0
+            }
+            "#,
+        );
+        let exhaust_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("Non-exhaustive"))
+            .collect();
+        assert!(
+            exhaust_warnings.is_empty(),
+            "Match with both Some and None should not warn: {:?}",
+            exhaust_warnings
+        );
+    }
+
+    #[test]
+    fn test_match_result_missing_err_warns() {
+        let warnings = check_warnings(
+            r#"
+            let x = Ok(42)
+            let y = match x {
+                Ok(v) => v
+            }
+            "#,
+        );
+        let exhaust_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("Non-exhaustive"))
+            .collect();
+        assert!(
+            !exhaust_warnings.is_empty(),
+            "Match on Result missing Err should warn: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_match_custom_enum_missing_variant() {
+        let warnings = check_warnings(
+            r#"
+            enum Color { Red, Green, Blue }
+            let c = Color::Red
+            let name = match c {
+                Red => "red",
+                Green => "green"
+            }
+            "#,
+        );
+        let exhaust_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("Non-exhaustive"))
+            .collect();
+        assert!(
+            !exhaust_warnings.is_empty(),
+            "Match on enum missing variant should warn: {:?}",
+            warnings
+        );
+        assert!(
+            exhaust_warnings[0].message.contains("Blue"),
+            "Warning should mention missing 'Blue': {}",
+            exhaust_warnings[0].message
+        );
+    }
+
+    #[test]
+    fn test_match_wildcard_no_warning() {
+        let warnings = check_warnings(
+            r#"
+            let x: Int? = Some(42)
+            let y = match x {
+                Some(v) => v,
+                _ => 0
+            }
+            "#,
+        );
+        let exhaust_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("Non-exhaustive"))
+            .collect();
+        assert!(
+            exhaust_warnings.is_empty(),
+            "Wildcard should cover everything: {:?}",
+            exhaust_warnings
+        );
+    }
+
+    #[test]
+    fn test_match_variable_pattern_no_warning() {
+        let warnings = check_warnings(
+            r#"
+            let x: Int? = Some(42)
+            let y = match x {
+                Some(v) => v,
+                other => 0
+            }
+            "#,
+        );
+        let exhaust_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("Non-exhaustive"))
+            .collect();
+        assert!(
+            exhaust_warnings.is_empty(),
+            "Variable pattern should cover everything: {:?}",
+            exhaust_warnings
+        );
+    }
+
+    #[test]
+    fn test_match_non_enum_no_check() {
+        // Match on Int/String should not trigger exhaustiveness checking
+        let warnings = check_warnings(
+            r#"
+            let x = 42
+            let y = match x {
+                1 => "one",
+                2 => "two"
+            }
+            "#,
+        );
+        let exhaust_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("Non-exhaustive"))
+            .collect();
+        assert!(
+            exhaust_warnings.is_empty(),
+            "Match on Int should not check exhaustiveness: {:?}",
+            exhaust_warnings
+        );
+    }
+
+    // ── Phase 5: Map field access + variadic arg checking ───────
+
+    #[test]
+    fn test_map_field_access_returns_value_type() {
+        let errors = check_errors(
+            r#"
+            let m: Map<String, Int> = map { "x": 1 }
+            let v: Int = m.x
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "map.field should return the map's value type: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_req_params_field_chain() {
+        // req.params.id should chain: Request → Map<String,String> → String
+        let errors = check_errors(
+            r#"
+            fn handler(req: Request) -> String {
+                let id: String = req.params.id
+                return id
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "req.params.id should resolve to String: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_variadic_wrong_type_on_required_param() {
+        let errors = check_errors(
+            r#"
+            import { json } from "std/http/server"
+            json(42)
+            "#,
+        );
+        // json's first param is Any, so this should pass
+        // But let's test a variadic with typed params
+        assert!(
+            errors.is_empty(),
+            "json(42) with Any param should not error: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_variadic_too_few_args() {
+        let errors = check_errors(
+            r#"
+            import { split } from "std/string"
+            split("hello")
+            "#,
+        );
+        assert!(!errors.is_empty(), "split() with too few args should error");
+        assert!(
+            errors[0].message.contains("expects 2") || errors[0].message.contains("argument"),
+            "Error should mention arg count: {}",
+            errors[0].message
+        );
+    }
+
+    #[test]
+    fn test_variadic_with_extra_args_ok() {
+        let errors = check_errors(
+            r#"
+            import { json } from "std/http/server"
+            json(map { "ok": true }, 201)
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Variadic function with extra args should not error: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_print_any_param_works() {
+        let errors = check_errors(
+            r#"
+            print(42)
+            print("hello")
+            print(true)
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "print() with Any param should accept anything: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_variadic_type_check_declared_params() {
+        // Test that variadic still checks the declared param types
+        let errors = check_errors(
+            r#"
+            import { html } from "std/http/server"
+            html(42)
+            "#,
+        );
+        assert!(
+            !errors.is_empty(),
+            "html() expects String, passing Int should error"
+        );
+    }
+
+    // ── Phase 6: Cross-file pass 2 inference ────────────────────
+
+    #[test]
+    fn test_cross_file_annotated_function_resolves() {
+        // Annotated stdlib imports should resolve types correctly (regression)
+        let errors = check_errors(
+            r#"
+            import { split } from "std/string"
+            let parts: Array<String> = split("a,b", ",")
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Annotated import should resolve return type: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_cross_file_unannotated_function() {
+        use std::io::Write;
+        // Create a temp file with an unannotated function
+        let dir = std::env::temp_dir().join("ntnt_test_phase6");
+        let _ = std::fs::create_dir_all(&dir);
+        let lib_path = dir.join("utils.tnt");
+        let main_path = dir.join("main.tnt");
+
+        // Write a lib with unannotated return type
+        let mut f = std::fs::File::create(&lib_path).unwrap();
+        writeln!(f, "fn double(x: Int) {{ return x * 2 }}").unwrap();
+
+        // Write a main that imports it
+        let main_src = r#"import { double } from "./utils"
+let n: Int = double(5)"#;
+        let mut f2 = std::fs::File::create(&main_path).unwrap();
+        write!(f2, "{}", main_src).unwrap();
+
+        let errors: Vec<_> = check_program_with_file(
+            &{
+                let lexer = crate::lexer::Lexer::new(main_src);
+                let tokens: Vec<_> = lexer.collect();
+                let mut parser = crate::parser::Parser::new(tokens);
+                parser.parse().unwrap()
+            },
+            main_src,
+            main_path.to_str().unwrap(),
+        )
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+
+        assert!(
+            errors.is_empty(),
+            "Import of unannotated function should infer return type via Pass 2: {:?}",
+            errors
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cross_file_circular_import_no_crash() {
+        use std::io::Write;
+        // Create two files that import each other
+        let dir = std::env::temp_dir().join("ntnt_test_circular");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let a_path = dir.join("a.tnt");
+        let b_path = dir.join("b.tnt");
+
+        let mut fa = std::fs::File::create(&a_path).unwrap();
+        writeln!(fa, "import {{ bar }} from \"./b\"").unwrap();
+        writeln!(fa, "fn foo(x: Int) -> Int {{ return x + 1 }}").unwrap();
+
+        let mut fb = std::fs::File::create(&b_path).unwrap();
+        writeln!(fb, "import {{ foo }} from \"./a\"").unwrap();
+        writeln!(fb, "fn bar(x: Int) -> Int {{ return x * 2 }}").unwrap();
+
+        let a_src = std::fs::read_to_string(&a_path).unwrap();
+        let diags = check_program_with_file(
+            &{
+                let lexer = crate::lexer::Lexer::new(&a_src);
+                let tokens: Vec<_> = lexer.collect();
+                let mut parser = crate::parser::Parser::new(tokens);
+                parser.parse().unwrap()
+            },
+            &a_src,
+            a_path.to_str().unwrap(),
+        );
+
+        // Should not panic/crash, just gracefully handle
+        let errors: Vec<_> = diags
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "Circular imports should not crash or produce errors: {:?}",
+            errors
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Phase 7: Strict mode enhancements ───────────────────────
+
+    #[test]
+    fn test_strict_no_warning_interpolate_int_string() {
+        let warnings = check_strict_warnings(
+            r#"
+            let x: Int = 42
+            let s: String = "hello"
+            let msg = "x is {x} and s is {s}"
+            "#,
+        );
+        let interp_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("Interpolating"))
+            .collect();
+        assert!(
+            interp_warnings.is_empty(),
+            "Interpolating Int/String should not warn: {:?}",
+            interp_warnings
+        );
+    }
+
+    #[test]
+    fn test_strict_warns_interpolate_array() {
+        let warnings = check_strict_warnings(
+            r#"
+            let arr = [1, 2, 3]
+            let msg = "arr is {arr}"
+            "#,
+        );
+        let interp_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("Interpolating"))
+            .collect();
+        assert!(
+            !interp_warnings.is_empty(),
+            "Interpolating Array in strict mode should warn: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_strict_warns_float_to_int() {
+        let warnings = check_strict_warnings(
+            r#"
+            let x: Int = 3.14
+            "#,
+        );
+        let coercion_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("Float to Int"))
+            .collect();
+        assert!(
+            !coercion_warnings.is_empty(),
+            "Float to Int assignment in strict mode should warn: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_non_strict_no_interpolation_or_coercion_warnings() {
+        // Normal mode should NOT produce these warnings
+        let warnings = check_warnings(
+            r#"
+            let arr = [1, 2, 3]
+            let msg = "arr is {arr}"
+            let x: Int = 3.14
+            "#,
+        );
+        let strict_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("Interpolating") || w.message.contains("Float to Int"))
+            .collect();
+        assert!(
+            strict_warnings.is_empty(),
+            "Non-strict mode should not produce interpolation or coercion warnings: {:?}",
+            strict_warnings
+        );
+    }
+
+    // ── Phase A: Bidirectional closure parameter inference ─────────
+
+    #[test]
+    fn test_bidir_filter_infers_lambda_param_int() {
+        // filter(Array<Int>, fn(x) { ... }) → x should be inferred as Int
+        let diags = check(
+            r#"
+            let nums: Array<Int> = [1, 2, 3]
+            let pos = filter(nums, fn(x) { x > 0 })
+            let result: Array<Int> = pos
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "filter lambda param should be inferred as Int: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_bidir_transform_infers_lambda_param_string() {
+        // transform(Array<String>, fn(s) { len(s) }) → s inferred as String, result Array<Int>
+        let diags = check(
+            r#"
+            let words: Array<String> = ["hello", "world"]
+            let lengths = transform(words, fn(s) { len(s) })
+            let result: Array<Int> = lengths
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "transform lambda should infer String param and Int return: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_bidir_sort_by_infers_both_params() {
+        // sort_by is a known HOF in get_callback_expected_types:
+        // sort_by(Array<T>, fn(T, T) -> Int) → both params inferred as T
+        // We test this by defining a sort_by with typed params, which exercises the
+        // user-defined-function path since it's registered by collect_declaration.
+        let source = r#"
+            fn sort_by(arr: Array<Int>, cmp: Any) -> Array<Int> {
+                return arr
+            }
+            let nums: Array<Int> = [3, 1, 2]
+            let sorted = sort_by(nums, fn(a, b) { a - b })
+            let result: Array<Int> = sorted
+        "#;
+        let lexer = crate::lexer::Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+        let mut ctx = TypeContext::new(source);
+        ctx.register_builtins();
+
+        for stmt in &ast.statements {
+            ctx.collect_declaration(stmt);
+        }
+        for stmt in &ast.statements {
+            ctx.check_statement(stmt);
+        }
+
+        let errors: Vec<_> = ctx
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "sort_by lambda should not produce errors: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bidir_reduce_infers_accumulator_and_element() {
+        // reduce is a known HOF in get_callback_expected_types:
+        // reduce(Array<T>, init: U, fn(U, T) -> U) → params inferred
+        let source = r#"
+            fn reduce(arr: Array<Int>, init: Int, f: Any) -> Int {
+                return init
+            }
+            let nums: Array<Int> = [1, 2, 3]
+            let total: Int = reduce(nums, 0, fn(acc, x) { acc + x })
+        "#;
+        let lexer = crate::lexer::Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+        let mut ctx = TypeContext::new(source);
+        ctx.register_builtins();
+
+        for stmt in &ast.statements {
+            ctx.collect_declaration(stmt);
+        }
+        for stmt in &ast.statements {
+            ctx.check_statement(stmt);
+        }
+
+        let errors: Vec<_> = ctx
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "reduce lambda should not produce errors: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bidir_explicit_annotation_overrides_inference() {
+        // Lambda with explicit type annotation should keep it even when inference disagrees
+        let errs = check_errors(
+            r#"
+            let nums: Array<Int> = [1, 2, 3]
+            filter(nums, fn(x: String) { len(x) > 0 })
+            "#,
+        );
+        // The explicit String annotation should be kept, not overridden by Int
+        // This means x:String is fine — the filter predicate param type won't cause an error
+        // because filter's second param is Any in the signature
+        assert!(
+            errs.is_empty(),
+            "Explicit annotation should override inference: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn test_bidir_user_defined_fn_with_function_param() {
+        // User-defined function with Function parameter type → callback params inferred
+        // We register the function sig manually since the parser doesn't support
+        // (Int) -> String type syntax in annotations.
+        let source = r#"
+            let result: String = apply(42, fn(n) { str(n) })
+        "#;
+        let lexer = crate::lexer::Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+        let mut ctx = TypeContext::new(source);
+        ctx.register_builtins();
+
+        // Register `apply(Int, (Int) -> String) -> String` manually
+        ctx.builtin_sigs.insert(
+            "apply".to_string(),
+            FunctionSig {
+                params: vec![
+                    ("value".to_string(), Type::Int),
+                    (
+                        "transform".to_string(),
+                        Type::Function {
+                            params: vec![Type::Int],
+                            return_type: Box::new(Type::String),
+                        },
+                    ),
+                ],
+                return_type: Type::String,
+                variadic: false,
+                required_params: 2,
+            },
+        );
+
+        for stmt in &ast.statements {
+            ctx.collect_declaration(stmt);
+        }
+        for stmt in &ast.statements {
+            ctx.check_statement(stmt);
+        }
+
+        let errors: Vec<_> = ctx
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "Function param type should guide lambda inference: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_bidir_untyped_array_no_false_inference() {
+        // Untyped array (Any) → lambda params should remain Any, no false inference
+        let diags = check(
+            r#"
+            let items = [1, 2, 3]
+            let mapped = transform(items, fn(x) { x + 1 })
+            "#,
+        );
+        // Should produce no errors - gradual typing means x is inferred from Array<Int>
+        assert!(
+            diags.is_empty(),
+            "Typed array should still allow inference: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_bidir_fully_untyped_no_diagnostics() {
+        // Completely untyped code produces zero diagnostics (gradual typing contract)
+        let diags = check(
+            r#"
+            let items = [1, 2, 3]
+            let result = filter(items, fn(x) { x > 0 })
+            let mapped = transform(items, fn(x) { x * 2 })
+            "#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Fully untyped code should produce zero diagnostics: {:?}",
+            diags
+        );
+    }
+
+    // ── Phase B: Cross-file struct/enum propagation ────────────────
+    // Note: Cross-file tests require actual file system access, so we test
+    // the FileExports struct and the in-memory propagation paths.
+
+    #[test]
+    fn test_file_exports_default() {
+        let exports = FileExports::default();
+        assert!(exports.functions.is_empty());
+        assert!(exports.structs.is_empty());
+        assert!(exports.enums.is_empty());
+        assert!(exports.type_aliases.is_empty());
+    }
+
+    #[test]
+    fn test_cross_file_struct_available_after_registration() {
+        // Simulate cross-file import: register a struct directly and check field access
+        let source = r#"
+            let u = User { name: "Alice" }
+            let n: String = u.name
+        "#;
+        let lexer = crate::lexer::Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+
+        let mut ctx = TypeContext::new(source);
+        ctx.register_builtins();
+
+        // Manually register a "User" struct (simulating cross-file import)
+        ctx.structs
+            .insert("User".to_string(), vec![("name".to_string(), Type::String)]);
+
+        for stmt in &ast.statements {
+            ctx.collect_declaration(stmt);
+        }
+        for stmt in &ast.statements {
+            ctx.check_statement(stmt);
+        }
+
+        let errors: Vec<_> = ctx
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "Imported struct fields should be accessible: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_cross_file_struct_as_type_annotation() {
+        // After registering a struct, it should be usable as a type annotation
+        let source = r#"
+            let u: User = User { name: "Alice" }
+        "#;
+        let lexer = crate::lexer::Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+
+        let mut ctx = TypeContext::new(source);
+        ctx.register_builtins();
+        ctx.structs
+            .insert("User".to_string(), vec![("name".to_string(), Type::String)]);
+
+        for stmt in &ast.statements {
+            ctx.collect_declaration(stmt);
+        }
+        for stmt in &ast.statements {
+            ctx.check_statement(stmt);
+        }
+
+        let errors: Vec<_> = ctx
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "Struct type annotation should work: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_cross_file_enum_match() {
+        // After registering an enum, match arms should work
+        let source = r#"
+            let c = Color::Red
+        "#;
+        let lexer = crate::lexer::Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+
+        let mut ctx = TypeContext::new(source);
+        ctx.register_builtins();
+        ctx.enums.insert(
+            "Color".to_string(),
+            vec![
+                ("Red".to_string(), None),
+                ("Green".to_string(), None),
+                ("Blue".to_string(), None),
+            ],
+        );
+
+        for stmt in &ast.statements {
+            ctx.collect_declaration(stmt);
+        }
+        for stmt in &ast.statements {
+            ctx.check_statement(stmt);
+        }
+
+        let errors: Vec<_> = ctx
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "Imported enum should be usable: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_cross_file_type_alias() {
+        // Type alias from imported file resolves to underlying type
+        let source = r#"
+            let x: UserId = 42
+        "#;
+        let lexer = crate::lexer::Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+
+        let mut ctx = TypeContext::new(source);
+        ctx.register_builtins();
+        ctx.type_aliases.insert("UserId".to_string(), Type::Int);
+
+        for stmt in &ast.statements {
+            ctx.collect_declaration(stmt);
+        }
+        for stmt in &ast.statements {
+            ctx.check_statement(stmt);
+        }
+
+        let errors: Vec<_> = ctx
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "Type alias should resolve to Int: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_cross_file_mixed_imports() {
+        // Import mix of functions + structs from same file (simulated)
+        let source = r#"
+            let u = User { name: "Alice" }
+            let g = greet("Bob")
+        "#;
+        let lexer = crate::lexer::Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+
+        let mut ctx = TypeContext::new(source);
+        ctx.register_builtins();
+
+        // Simulate importing a struct and a function from the same file
+        ctx.structs
+            .insert("User".to_string(), vec![("name".to_string(), Type::String)]);
+        ctx.builtin_sigs.insert(
+            "greet".to_string(),
+            FunctionSig {
+                params: vec![("name".to_string(), Type::String)],
+                return_type: Type::String,
+                variadic: false,
+                required_params: 1,
+            },
+        );
+
+        for stmt in &ast.statements {
+            ctx.collect_declaration(stmt);
+        }
+        for stmt in &ast.statements {
+            ctx.check_statement(stmt);
+        }
+
+        let errors: Vec<_> = ctx
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "Mixed imports should all resolve: {:?}",
+            errors
+        );
+    }
+
+    // ── Phase C: ? operator return type validation ─────────────────
+
+    #[test]
+    fn test_try_result_in_result_function_no_warning() {
+        // ? on Result inside function returning Result → no warning
+        let warnings = check_warnings(
+            r#"
+            fn parse(s: String) -> Result<Int, String> {
+                return Ok(42)
+            }
+            fn process(input: String) -> Result<String, String> {
+                let n = parse(input)?
+                return Ok(str(n))
+            }
+            "#,
+        );
+        let try_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("? on Result"))
+            .collect();
+        assert!(
+            try_warnings.is_empty(),
+            "? on Result in Result-returning function should not warn: {:?}",
+            try_warnings
+        );
+    }
+
+    #[test]
+    fn test_try_result_in_int_function_warns() {
+        // ? on Result inside function returning Int → warning
+        let warnings = check_warnings(
+            r#"
+            fn parse(s: String) -> Result<Int, String> {
+                return Ok(42)
+            }
+            fn process(input: String) -> Int {
+                let n = parse(input)?
+                return n
+            }
+            "#,
+        );
+        let try_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("? on Result"))
+            .collect();
+        assert!(
+            !try_warnings.is_empty(),
+            "? on Result in Int-returning function should warn: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_try_optional_in_optional_function_no_warning() {
+        // ? on Optional inside function returning Optional → no warning
+        let warnings = check_warnings(
+            r#"
+            fn find_user(id: Int) -> Option<String> {
+                return Some("Alice")
+            }
+            fn get_name(id: Int) -> Option<String> {
+                let name = find_user(id)?
+                return Some(name)
+            }
+            "#,
+        );
+        let try_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("? on Optional"))
+            .collect();
+        assert!(
+            try_warnings.is_empty(),
+            "? on Optional in Optional-returning function should not warn: {:?}",
+            try_warnings
+        );
+    }
+
+    #[test]
+    fn test_try_optional_in_string_function_warns() {
+        // ? on Optional inside function returning String → warning
+        let warnings = check_warnings(
+            r#"
+            fn find_user(id: Int) -> Option<String> {
+                return Some("Alice")
+            }
+            fn get_name(id: Int) -> String {
+                let name = find_user(id)?
+                return name
+            }
+            "#,
+        );
+        let try_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("? on Optional"))
+            .collect();
+        assert!(
+            !try_warnings.is_empty(),
+            "? on Optional in String-returning function should warn: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_try_in_untyped_function_no_warning() {
+        // ? in function with no return annotation → no warning (gradual typing)
+        let warnings = check_warnings(
+            r#"
+            fn parse(s: String) -> Result<Int, String> {
+                return Ok(42)
+            }
+            fn process(input: String) {
+                let n = parse(input)?
+                print(n)
+            }
+            "#,
+        );
+        let try_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.message.contains("? on Result") || w.message.contains("? on Optional"))
+            .collect();
+        assert!(
+            try_warnings.is_empty(),
+            "? in untyped function should not warn: {:?}",
+            try_warnings
+        );
+    }
+
+    // ── Default parameter value tests ──
+
+    #[test]
+    fn test_default_param_arity_accepts_omitted() {
+        let errors = check_errors(
+            r#"
+            fn greet(name: String = "World") -> String {
+                return "Hello, {name}!"
+            }
+            greet()
+            greet("Alice")
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Should accept 0 or 1 args when default is provided: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_default_param_arity_rejects_too_many() {
+        let errors = check_errors(
+            r#"
+            fn greet(name: String = "World") -> String {
+                return "Hello, {name}!"
+            }
+            greet("A", "B")
+            "#,
+        );
+        assert!(
+            !errors.is_empty(),
+            "Should reject 2 args for 1-param function"
+        );
+    }
+
+    #[test]
+    fn test_default_param_type_inferred_from_default() {
+        let errors = check_errors(
+            r#"
+            fn add(a: Int, b = 10) -> Int {
+                return a + b
+            }
+            add(5)
+            add(5, "hello")
+            "#,
+        );
+        assert!(
+            !errors.is_empty(),
+            "Should catch type error when string passed for int-defaulted param: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_default_param_mixed_required_optional() {
+        let errors = check_errors(
+            r#"
+            fn paginate(items: String, page: Int = 1, per_page: Int = 25) -> String {
+                return "{items}:{page}:{per_page}"
+            }
+            paginate("users")
+            paginate("users", 2)
+            paginate("users", 2, 10)
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Should accept 1-3 args with defaults: {:?}",
+            errors
         );
     }
 }

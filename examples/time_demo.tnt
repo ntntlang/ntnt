@@ -1,16 +1,16 @@
 // Comprehensive Time Module Demo
 // Demonstrates Go-like time handling in NTNT
 
-import { 
-    now, now_millis, to_iso, format, format_in,
+import {
+    now, to_iso, format, format_in,
     year, month, month_name, day, hour, minute, second,
     weekday, weekday_name, day_of_year, is_leap_year,
-    to_timezone, to_utc,
+    to_timezone,
     make_date, make_time, parse_datetime, parse_iso,
     add_days, add_weeks, add_months, add_years, add_hours, add_seconds,
     diff, before, after,
     list_timezones,
-    SECOND, MINUTE, HOUR, DAY, WEEK
+    MINUTE, HOUR, DAY, WEEK
 } from "std/time"
 
 print("=== NTNT Time Module Demo ===\n")

@@ -645,3 +645,205 @@ print(increment(5))
         "Contracts with old() should produce zero type errors"
     );
 }
+
+// ============================================================================
+// Line number accuracy regression tests
+// ============================================================================
+
+#[test]
+fn test_line_numbers_multiple_if_conditions() {
+    // The third if-condition (line 11) has a type issue (Int instead of Bool).
+    // The type checker should NOT report it on line 2 (the first if).
+    let code = r#"
+let x: Int = 10
+if x > 5 {
+    print("big")
+}
+let y: Bool = true
+if y {
+    print("yes")
+}
+let z: Int = 42
+if z {
+    print("truthy")
+}
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+
+    let files = json["files"].as_array().unwrap();
+    if files.is_empty() {
+        return; // No file entries means no issues
+    }
+
+    let issues = files[0]["issues"].as_array().unwrap();
+    let condition_warnings: Vec<&serde_json::Value> = issues
+        .iter()
+        .filter(|issue| {
+            let msg = issue["message"].as_str().unwrap_or("");
+            msg.contains("Condition has type") && msg.contains("instead of Bool")
+        })
+        .collect();
+
+    assert!(
+        !condition_warnings.is_empty(),
+        "Should have at least one condition type warning"
+    );
+
+    // The warning should be near line 11 (the `if z` line), not line 3 (the first `if`)
+    for w in &condition_warnings {
+        if let Some(line) = w["line"].as_i64() {
+            assert!(
+                line >= 10,
+                "Condition warning should be near line 11 (the `if z`), not line {} (first `if`). Warning: {}",
+                line,
+                w["message"].as_str().unwrap_or("")
+            );
+        }
+    }
+}
+
+#[test]
+fn test_line_numbers_multiple_comparisons() {
+    // Two == comparisons; only the second has incompatible types.
+    // The warning should point to the second comparison, not the first.
+    let code = r#"
+fn check(a: Int, b: Int) -> Bool {
+    return a == b
+}
+
+fn mixed(x: Int, y: String) -> Bool {
+    return x == y
+}
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+
+    let files = json["files"].as_array().unwrap();
+    if files.is_empty() {
+        return;
+    }
+
+    let issues = files[0]["issues"].as_array().unwrap();
+    let comparison_warnings: Vec<&serde_json::Value> = issues
+        .iter()
+        .filter(|issue| {
+            let msg = issue["message"].as_str().unwrap_or("");
+            msg.contains("Comparison") && msg.contains("incompatible types")
+        })
+        .collect();
+
+    assert!(
+        !comparison_warnings.is_empty(),
+        "Should have at least one comparison type warning"
+    );
+
+    // The warning should be near line 7 (x == y), not line 3 (a == b)
+    for w in &comparison_warnings {
+        if let Some(line) = w["line"].as_i64() {
+            assert!(
+                line >= 6,
+                "Comparison warning should be near line 7 (x == y), not line {} (a == b). Warning: {}",
+                line,
+                w["message"].as_str().unwrap_or("")
+            );
+        }
+    }
+}
+
+#[test]
+fn test_condition_type_hint_is_actionable() {
+    // An if with an Int condition should produce a hint mentioning "!= 0"
+    let code = r#"
+let count: Int = 5
+if count {
+    print("has items")
+}
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+
+    let files = json["files"].as_array().unwrap();
+    if files.is_empty() {
+        return;
+    }
+
+    let issues = files[0]["issues"].as_array().unwrap();
+    let condition_warnings: Vec<&serde_json::Value> = issues
+        .iter()
+        .filter(|issue| {
+            let msg = issue["message"].as_str().unwrap_or("");
+            msg.contains("Condition has type Int")
+        })
+        .collect();
+
+    assert!(
+        !condition_warnings.is_empty(),
+        "Should have a condition type warning for Int"
+    );
+
+    // The hint should mention "!= 0" as an actionable suggestion
+    let has_hint = condition_warnings.iter().any(|w| {
+        let hint = w["hint"].as_str().unwrap_or("");
+        hint.contains("!= 0")
+    });
+    assert!(
+        has_hint,
+        "Condition type hint for Int should suggest '!= 0'. Warnings: {:?}",
+        condition_warnings
+    );
+}
+
+#[test]
+fn test_comparison_type_hint_suggests_conversion() {
+    // Comparing Int with String should suggest int()/str() conversion
+    let code = r#"
+fn check(x: Int, y: String) -> Bool {
+    return x == y
+}
+"#;
+
+    let (stdout, _stderr, _code) = lint_code(code);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint should output valid JSON");
+
+    let files = json["files"].as_array().unwrap();
+    if files.is_empty() {
+        return;
+    }
+
+    let issues = files[0]["issues"].as_array().unwrap();
+    let comparison_warnings: Vec<&serde_json::Value> = issues
+        .iter()
+        .filter(|issue| {
+            let msg = issue["message"].as_str().unwrap_or("");
+            msg.contains("Comparison") && msg.contains("incompatible types")
+        })
+        .collect();
+
+    assert!(
+        !comparison_warnings.is_empty(),
+        "Should have a comparison type warning"
+    );
+
+    // The hint should mention int() or str() conversion
+    let has_conversion_hint = comparison_warnings.iter().any(|w| {
+        let hint = w["hint"].as_str().unwrap_or("");
+        hint.contains("int(") || hint.contains("str(")
+    });
+    assert!(
+        has_conversion_hint,
+        "Comparison hint should suggest int()/str() conversion. Warnings: {:?}",
+        comparison_warnings
+    );
+}

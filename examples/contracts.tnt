@@ -6,12 +6,12 @@ fn divide(a, b) -> Int
 requires b != 0
 ensures result * b == a
 {
-    return a / b;
+    return a / b
 }
 
 // Safe division - the contract ensures we never divide by zero
-let result = divide(10, 2);
-print("10 / 2 = " + str(result));
+let result = divide(10, 2)
+print("10 / 2 = " + str(result))
 
 // A transfer function with balance checking
 fn transfer(amount, from_balance, to_balance)
@@ -20,16 +20,16 @@ requires from_balance >= amount
 ensures result[0] == from_balance - amount
 ensures result[1] == to_balance + amount
 {
-    let new_from = from_balance - amount;
-    let new_to = to_balance + amount;
-    return [new_from, new_to];
+    let new_from = from_balance - amount
+    let new_to = to_balance + amount
+    return [new_from, new_to]
 }
 
-// Perform a transfer
-let balances = transfer(50, 100, 75);
-print("After transfer:");
-print("  From balance: " + str(balances[0]));
-print("  To balance: " + str(balances[1]));
+// Perform a transfer — destructure the result
+let [from_balance, to_balance] = transfer(50, 100, 75)
+print("After transfer:")
+print("  From balance: " + str(from_balance))
+print("  To balance: " + str(to_balance))
 
 // Struct with invariant (conceptual - full implementation coming)
 struct Account {
@@ -41,4 +41,4 @@ struct Account {
 //     invariant self.balance >= 0
 // }
 
-print("Contract examples completed successfully!");
+print("Contract examples completed successfully!")

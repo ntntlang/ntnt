@@ -53,9 +53,11 @@ The problem is not that NTNT borrows — **every language borrows**. The problem
 
 ## Part 2: Genuine Inconsistencies
 
-### 2.1 Functions vs. Property Access (The Big One)
+### 2.1 Functions vs. Property Access (The Big One) — RESOLVED
 
-The docs say "functions not methods" — use `len(s)` not `s.len()`. But the language actually has both paradigms:
+> **Resolution (2026-02-01):** Adopted "Option C — Dot Reads, Functions Transform" as the canonical paradigm. Dot notation reads properties/fields/static map keys. Free functions transform data. Pipe chains transformations. Updated in AI_AGENT_GUIDE.md, CLAUDE.md, copilot-instructions.md, and SYNTAX_REFERENCE.md.
+
+The docs previously said "functions not methods" — use `len(s)` not `s.len()`. But the language actually has both paradigms:
 
 ```ntnt
 // Function style (stdlib)
@@ -85,12 +87,12 @@ let id = req.params["id"]     // bracket access — what docs recommend
 
 **Impact:** This is the #1 source of potential agent confusion. Every other inconsistency is minor compared to this.
 
-**Recommendation:** Either:
-- (a) Commit fully to free functions: `get_param(req, "id")` instead of `req.params["id"]`
-- (b) Commit fully to methods: `text.split(",")` instead of `split(text, ",")`
-- (c) Keep the current split but make the rules crystal clear and enforce them (fix the `req.params.slug` example)
-
-Option (c) is the least disruptive. Option (b) would make NTNT feel more natural for agents trained on Python/JS/Ruby. Option (a) would make NTNT more Rust-like and consistent.
+**Resolution:** Adopted Option C — "Dot Reads, Functions Transform":
+- Dot notation reads what's already there (properties, fields, static map keys)
+- Free functions compute new values (transformations)
+- Pipe operator chains transformations left-to-right
+- Dot on maps for static keys (`req.params.id`), brackets for dynamic/special keys (`req.headers["content-type"]`)
+- `req.params.slug` is now documented as correct, not wrong
 
 ### 2.2 Two Import Systems
 
@@ -111,21 +113,13 @@ The reason (CSS safety) is sound. But an agent switching between a string and a 
 
 **Recommendation:** This is probably the right trade-off — the CSS safety benefit outweighs the inconsistency cost. But consider whether a different template delimiter (like `<%= %>` or `${ }`) could give CSS safety without the brace-counting problem. The counterargument is that `{{ }}` is familiar to anyone who's used Handlebars/Jinja2/Mustache, which is most web developers and most LLM training data.
 
-### 2.4 Semicolons: Silently Optional
+### 2.4 Semicolons: Silently Optional — RESOLVED
 
-The parser uses `match_token(&[TokenKind::Semicolon])` which returns `bool` but never errors — semicolons are consumed if present and ignored if absent. This is never documented. The example files don't use semicolons. The test files sometimes do.
+**Resolution:** Semicolons are not part of NTNT. The parser still silently consumes them for backward compatibility, but `ntnt lint` now warns on any semicolons found in source code with the `unnecessary_semicolon` rule. All example files have been updated to remove semicolons. The `return` statement parser was updated to use line-based detection for bare returns instead of relying on semicolons for disambiguation.
 
-**Impact:** Agents will produce inconsistent code — some with semicolons, some without, depending on which training examples they weight.
+### 2.5 Ghost Keywords (`approve`, `observe`, `protocol`) — RESOLVED
 
-**Recommendation:** Explicitly state in docs: "Semicolons are optional and not recommended." Or enforce them. The worst option is the current silent ambiguity.
-
-### 2.5 Ghost Keywords (`approve`, `observe`, `protocol`)
-
-These are reserved in the lexer and have AST nodes, but no documentation, no examples, and incomplete implementation. An agent encountering these tokens (e.g., through autocomplete or grammar exploration) will try to use them and fail.
-
-**Impact:** Low in practice (agents read docs, not lexers). But it represents unrealized potential.
-
-**Recommendation:** Either implement them or remove them from the lexer. Reserved-but-unused keywords are technical debt with no carrying value.
+**Resolution:** Removed all three ghost keywords from the lexer, AST, parser, interpreter, and type checker. `approve`, `observe`, and `protocol` are no longer reserved words and can be used as variable/function names in .tnt code.
 
 ### 2.6 `map { }` Verbosity
 
@@ -147,51 +141,92 @@ Notice that arrays don't need a keyword (`[1, 2, 3]` just works), but maps do. T
 
 ## Part 3: What No Language Does Well (Innovation Opportunities)
 
-### 3.1 Intent as Syntax, Not Comments
+### 3.1 `implements` Keyword on Functions
 
-This is NTNT's biggest missed opportunity. Currently:
+**Status:** Under consideration
+
+Currently, `@implements` is a comment annotation invisible to the parser, type checker, and all AST-based tooling. The intent-checking tool scans source text with string matching to find these comments — fragile and disconnected from the language itself.
+
+**Proposed:** Promote `implements` to a keyword on function signatures.
+
+#### Before & After: Code
 
 ```ntnt
-// @implements: feature.homepage          ← a comment string
-fn home_handler(req) {
+// BEFORE (comment annotation)
+// @implements: feature.home
+// @implements: component.success_message
+fn home(req) {
+    return html("<h1>Welcome</h1>")
+}
+
+// AFTER (keyword syntax)
+fn home(req) implements feature.home, component.success_message {
     return html("<h1>Welcome</h1>")
 }
 ```
 
-The `@implements` annotation is invisible to the parser, type checker, and runtime. It is a string that only the intent-checking tool scans for. This is the weakest possible coupling between specification and code.
+Function body is untouched. Multiple features use comma separation instead of stacked comments. Functions without `implements` are implicitly utility/internal — the `@utility`, `@internal`, and `@infrastructure` comment annotations become unnecessary.
 
-**What it could be:**
+#### Composition with Contracts and Types
+
+`implements` slots between return type and contracts:
 
 ```ntnt
-fn home_handler(req) implements feature.homepage {
-    return html("<h1>Welcome</h1>")
+fn create_user(req: Request) -> Response
+    implements feature.create_user
+    requires len(req.body) > 0
+    ensures result.status == 201 || result.status == 400
+{
+    let form = parse_form(req)
+    return json(map { "created": true }, 201)
 }
 ```
 
-Now `implements` is a keyword. The parser knows this function is linked to a feature. The type checker can verify the function's signature matches what the feature expects. The runtime can instrument it. `ntnt lint` can warn about unimplemented features without a separate scanning pass.
+Reading order: name/params/return → what feature → preconditions → body.
 
-**Going further — features as first-class blocks:**
+#### New CLI Capabilities
 
-```ntnt
-feature homepage {
-    id: feature.homepage
-    description: "Landing page with welcome message"
+**`ntnt lint` gains intent cross-referencing** (not possible today):
+```
+$ ntnt lint server.tnt
 
-    scenario "Visitor sees welcome" {
-        when GET /
-        then status 200
-        then body contains "Welcome"
-    }
+⚠ server.tnt (1 warning)
 
-    fn handler(req: Request) -> Response {
-        return html("<h1>Welcome</h1>")
-    }
+  line 3: fn home implements feature.hom — feature.hom not found
+          in server.intent. Did you mean feature.home?
+```
+
+Today, lint works on the AST and can't see `@implements` comments at all. With the keyword in the AST, the linter can catch typos in feature IDs, stale references to renamed features, and references to features that don't exist.
+
+**`ntnt intent coverage` points to functions, not comments:**
+```
+✓ Home Page (feature.home)
+    └─ server.tnt:3 fn home                 ← function line, not comment line
+    └─ also implements: component.success_message
+```
+
+**`ntnt inspect` exposes feature links in JSON:**
+```json
+{
+  "type": "Function",
+  "name": "home",
+  "implements": ["feature.home", "component.success_message"]
 }
 ```
 
-The specification and implementation live together. The compiler can verify that every scenario has a corresponding behavior. No separate `.intent` file needed (though it could still be supported for backward compatibility).
+#### Rust Implementation Impact
 
-This is the single highest-value syntactic innovation available to NTNT. It takes the language's most unique capability and makes it a first-class citizen instead of a sidecar.
+- **src/lexer.rs** — Add `Implements` token + keyword mapping (2 lines)
+- **src/ast.rs** — Add `implements: Vec<String>` field to `Statement::Function`
+- **src/parser.rs** — Parse optional `implements` clause after return type, before contracts
+- **src/intent.rs** — Replace comment-scanning `parse_annotations()` with AST-based extraction
+- **src/interpreter.rs** — No change (runtime doesn't care)
+- **src/typechecker.rs** — No change initially; could later verify feature signatures
+- **All match sites for `Statement::Function`** — Need the new field added (most tedious part)
+
+#### Ruled Out: Feature Blocks
+
+The original proposal included a `feature { }` block that co-locates spec and implementation. This has been ruled out — it wraps code in a non-standard structure and duplicates what `.intent` files already do. The `.intent` file remains the specification format; `implements` is the link between spec and code.
 
 ### 3.2 Declarative Route Blocks
 
@@ -233,13 +268,18 @@ Benefits:
 - **Middleware scope** — middleware can be applied to groups of routes, not just globally
 - **Visual clarity** — the entire API surface is visible in one block
 
-This doesn't remove the existing `get()`/`post()` functions — those remain for programmatic route registration. The `server` block is syntactic sugar that gives the parser deeper understanding.
+**Coexistence with function calls:** The `server` block is syntactic sugar — it compiles down to the same route registrations as `get()`/`post()`/`listen()`. Both forms coexist. Documentation should lead with the `server` block as the default for static route tables (90% of cases) and mention function calls as the escape hatch for dynamic/programmatic route registration (building routes from config, conditional routes at runtime, etc.). No need for special compatibility machinery — just clear docs about when to use which.
 
 ### 3.3 Error Handling: The `otherwise` Pattern
 
-Nested `match` expressions for error handling are NTNT's most verbose pattern:
+**Status:** Planned for implementation — see also ROADMAP.md 7.2 (`?` operator) and 7.10 (guard clauses).
+
+Nested `match` expressions for error handling are NTNT's most verbose pattern. This affects every use case — web handlers, CLI scripts, data processing, anywhere a fallible operation occurs.
+
+#### The Problem
 
 ```ntnt
+// Current: nested match pyramid
 match connect("postgres://...") {
     Ok(db) => {
         match query(db, "SELECT * FROM users", []) {
@@ -255,9 +295,9 @@ match connect("postgres://...") {
 }
 ```
 
-Rust solves this with `?` but that requires compatible error types. Go solves it with `if err != nil` but that is verbose. Neither is great.
+Rust solves this with `?` but that requires compatible error types and `Result` return types. Go solves it with `if err != nil` but that is verbose. Neither is great.
 
-**What NTNT could do:**
+#### The `otherwise` Keyword
 
 ```ntnt
 let db = connect("postgres://...")
@@ -273,9 +313,60 @@ for user in rows {
 
 The `otherwise` keyword handles the `Err`/`None` case inline. The variable `err` is automatically bound to the error value. The happy path stays flat — no nesting.
 
-This is more readable than Rust's `?`, more explicit than exceptions, and more concise than `match`. It is unique to NTNT and plays well with the contract system (contracts validate invariants, `otherwise` handles operational failures).
+#### Web Handler Example
 
-For `Option` types:
+```ntnt
+fn create_user(req) {
+    let data = parse_json(req)
+        otherwise return status(400, "Invalid JSON: {err}")
+
+    let name = data["name"]
+        otherwise return status(400, "Missing field: name")
+
+    let saved = execute(db, "INSERT INTO users (name) VALUES ($1)", [name])
+        otherwise return status(500, "Database error: {err}")
+
+    return json(map { "created": true, "name": name }, 201)
+}
+```
+
+Each failure gets its own status code and message. No `Result` return type needed on the function.
+
+#### CLI Script Example
+
+```ntnt
+import { read_file, write_file } from "std/fs"
+import { split, trim, join } from "std/string"
+
+let content = read_file("data/input.csv")
+    otherwise { print("Cannot read input: {err}"); return }
+
+let lines = split(content, "\n")
+let mut results = []
+
+for line in lines {
+    let fields = split(trim(line), ",")
+    let value = float(fields[2])
+        otherwise { print("Bad number on line: {line}"); continue }
+
+    if value > 100.0 {
+        results = push(results, line)
+    }
+}
+
+write_file("data/filtered.csv", join(results, "\n"))
+    otherwise { print("Cannot write output: {err}"); return }
+
+print("Wrote {len(results)} rows")
+```
+
+Key behaviors in CLI context:
+- `otherwise { ...; return }` — bail out of the script with a message
+- `otherwise { ...; continue }` — skip bad data and keep processing
+- `err` is bound automatically in the otherwise block
+- No exceptions, no try/catch, no wrapping in Result — just handle it and move on
+
+#### `Option` Types
 
 ```ntnt
 let user = find_user(id)
@@ -284,6 +375,58 @@ let user = find_user(id)
 let email = user["email"]
     otherwise return json(map { "user": user, "email": null })
 ```
+
+#### Relationship to `?` Operator (ROADMAP 7.2) and Guard Clauses (7.10)
+
+These three features are complementary, not competing:
+
+| Feature | Best for | Error handling style |
+|---------|----------|---------------------|
+| `otherwise` | Handlers, scripts, top-level code | Handle each error differently, inline |
+| `?` operator | Internal/library functions | Propagate errors to caller |
+| `let-else` (7.10) | Non-Result guards (null checks, validation) | Bail on condition failure |
+
+Typical composition in a web app:
+```ntnt
+// Internal function uses ? to propagate
+fn find_active_user(id: String) -> Result<Map, String> {
+    let user = query(db, "SELECT * FROM users WHERE id = $1", [id])?
+    if user["active"] != true {
+        return Err("User is inactive")
+    }
+    return Ok(user)
+}
+
+// Handler uses otherwise to produce HTTP responses
+fn get_user(req) {
+    let id = req.params["id"]
+        otherwise return status(400, "Missing user ID")
+
+    let user = find_active_user(id)
+        otherwise return status(404, "User not found: {err}")
+
+    return json(user)
+}
+```
+
+CLI script composition:
+```ntnt
+// Utility uses ? to propagate
+fn parse_config(path: String) -> Result<Map, String> {
+    let content = read_file(path)?
+    let config = parse_json(content)?
+    return Ok(config)
+}
+
+// Script uses otherwise to handle and report
+let config = parse_config("config.json")
+    otherwise { print("Config error: {err}"); return }
+
+let db = connect(config["database_url"])
+    otherwise { print("DB connection failed: {err}"); return }
+```
+
+**Implementation priority:** `otherwise` can ship independently — it doesn't depend on the type system machinery that `?` requires (7.2 depends on 7.1 for return type verification). Implementing `otherwise` first gives immediate ergonomic benefit across both web and CLI use cases.
 
 ### 3.4 Ambient Stdlib (No Imports for Standard Functions)
 
@@ -349,7 +492,7 @@ This is refinement types (LiquidHaskell, F*). No mainstream language has made th
 
 | # | Issue | Action | Effort |
 |---|-------|--------|--------|
-| 1 | `req.params.slug` vs `req.params["id"]` | Fix the example code to use bracket notation, or explicitly support both and document when to use which | Small |
+| 1 | ~~`req.params.slug` vs `req.params["id"]`~~ | **DONE** — Adopted "Dot Reads, Functions Transform" paradigm. Both are valid; dot for static keys, brackets for dynamic/special keys. | Done |
 | 2 | Semicolons undocumented | Add to docs: "Semicolons are optional. Omit them." | Small |
 | 3 | `use` declarations in parser | Remove or repurpose. One import syntax only. | Small |
 | 4 | Ghost keywords | Either implement `approve`/`observe`/`protocol` or remove from lexer | Small-Medium |

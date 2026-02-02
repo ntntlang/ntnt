@@ -86,6 +86,9 @@ fn value_to_sql_param(value: &Value) -> SqlParam {
         Value::String(s) => SqlParam::String(s.clone()),
         Value::Bool(b) => SqlParam::Bool(*b),
         Value::Unit => SqlParam::Null,
+        Value::EnumValue {
+            enum_name, variant, ..
+        } if enum_name == "Option" && variant == "None" => SqlParam::Null,
         Value::Array(arr) => {
             // Determine array type from first element
             if arr.is_empty() {
@@ -135,6 +138,15 @@ fn row_to_value(row: &Row) -> Value {
     Value::Map(map)
 }
 
+/// Construct an Option::None value (represents SQL NULL)
+fn sql_none() -> Value {
+    Value::EnumValue {
+        enum_name: "Option".to_string(),
+        variant: "None".to_string(),
+        values: vec![],
+    }
+}
+
 /// Convert a PostgreSQL value to an Intent Value based on type
 fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Type) -> Value {
     use postgres::types::Type;
@@ -143,36 +155,36 @@ fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Ty
         // Boolean
         Type::BOOL => match row.try_get::<_, Option<bool>>(idx) {
             Ok(Some(v)) => Value::Bool(v),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
         // Integers
         Type::INT2 => match row.try_get::<_, Option<i16>>(idx) {
             Ok(Some(v)) => Value::Int(v as i64),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
         Type::INT4 => match row.try_get::<_, Option<i32>>(idx) {
             Ok(Some(v)) => Value::Int(v as i64),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
         Type::INT8 => match row.try_get::<_, Option<i64>>(idx) {
             Ok(Some(v)) => Value::Int(v),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
         // Floats
         Type::FLOAT4 => match row.try_get::<_, Option<f32>>(idx) {
             Ok(Some(v)) => Value::Float(v as f64),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
         Type::FLOAT8 => match row.try_get::<_, Option<f64>>(idx) {
             Ok(Some(v)) => Value::Float(v),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
@@ -187,7 +199,7 @@ fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Ty
                         None => Value::String(v.to_string()),
                     }
                 }
-                Ok(None) => Value::Unit,
+                Ok(None) => sql_none(),
                 Err(_) => Value::Unit,
             }
         }
@@ -196,7 +208,7 @@ fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Ty
         Type::VARCHAR | Type::TEXT | Type::BPCHAR | Type::NAME => {
             match row.try_get::<_, Option<String>>(idx) {
                 Ok(Some(v)) => Value::String(v),
-                Ok(None) => Value::Unit,
+                Ok(None) => sql_none(),
                 Err(_) => Value::Unit,
             }
         }
@@ -204,54 +216,54 @@ fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Ty
         // JSON/JSONB
         Type::JSON | Type::JSONB => match row.try_get::<_, Option<serde_json::Value>>(idx) {
             Ok(Some(v)) => json_to_intent_value(&v),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
         // Date
         Type::DATE => match row.try_get::<_, Option<NaiveDate>>(idx) {
             Ok(Some(v)) => Value::String(v.format("%Y-%m-%d").to_string()),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
         // Time
         Type::TIME => match row.try_get::<_, Option<NaiveTime>>(idx) {
             Ok(Some(v)) => Value::String(v.format("%H:%M:%S").to_string()),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
         // Timestamp without timezone
         Type::TIMESTAMP => match row.try_get::<_, Option<NaiveDateTime>>(idx) {
             Ok(Some(v)) => Value::String(v.format("%Y-%m-%dT%H:%M:%S").to_string()),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
         // Timestamp with timezone
         Type::TIMESTAMPTZ => match row.try_get::<_, Option<DateTime<Utc>>>(idx) {
             Ok(Some(v)) => Value::String(v.to_rfc3339()),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
         // UUID
         Type::UUID => match row.try_get::<_, Option<uuid::Uuid>>(idx) {
             Ok(Some(v)) => Value::String(v.to_string()),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
         // Integer arrays
         Type::INT4_ARRAY => match row.try_get::<_, Option<Vec<i32>>>(idx) {
             Ok(Some(v)) => Value::Array(v.into_iter().map(|i| Value::Int(i as i64)).collect()),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
         Type::INT8_ARRAY => match row.try_get::<_, Option<Vec<i64>>>(idx) {
             Ok(Some(v)) => Value::Array(v.into_iter().map(Value::Int).collect()),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
@@ -259,7 +271,7 @@ fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Ty
         Type::TEXT_ARRAY | Type::VARCHAR_ARRAY => {
             match row.try_get::<_, Option<Vec<String>>>(idx) {
                 Ok(Some(v)) => Value::Array(v.into_iter().map(Value::String).collect()),
-                Ok(None) => Value::Unit,
+                Ok(None) => sql_none(),
                 Err(_) => Value::Unit,
             }
         }
@@ -267,14 +279,14 @@ fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Ty
         // Float arrays
         Type::FLOAT8_ARRAY => match row.try_get::<_, Option<Vec<f64>>>(idx) {
             Ok(Some(v)) => Value::Array(v.into_iter().map(Value::Float).collect()),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
         // Boolean arrays
         Type::BOOL_ARRAY => match row.try_get::<_, Option<Vec<bool>>>(idx) {
             Ok(Some(v)) => Value::Array(v.into_iter().map(Value::Bool).collect()),
-            Ok(None) => Value::Unit,
+            Ok(None) => sql_none(),
             Err(_) => Value::Unit,
         },
 
@@ -300,30 +312,7 @@ fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Ty
 
 /// Convert serde_json::Value to Intent Value (for JSONB support)
 fn json_to_intent_value(json: &serde_json::Value) -> Value {
-    match json {
-        serde_json::Value::Null => Value::Unit,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float(f)
-            } else {
-                Value::Unit
-            }
-        }
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(arr) => {
-            Value::Array(arr.iter().map(json_to_intent_value).collect())
-        }
-        serde_json::Value::Object(obj) => {
-            let mut map = HashMap::new();
-            for (k, v) in obj {
-                map.insert(k.clone(), json_to_intent_value(v));
-            }
-            Value::Map(map)
-        }
-    }
+    crate::stdlib::json::json_to_intent_value(json)
 }
 
 /// Connect to a PostgreSQL database
@@ -437,7 +426,7 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         Ok(None) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
             variant: "Ok".to_string(),
-            values: vec![Value::Unit],
+            values: vec![sql_none()],
         }),
         Err(e) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
@@ -602,6 +591,7 @@ pub fn init() -> HashMap<String, Value> {
     // @since v0.2.0
     // @tags #database
     // @example query(db, "SELECT * FROM users WHERE active = $1", [true]) => Result::Ok([...]) ~ "Query with parameters"
+    // @gotcha SQL NULL column values are returned as None, not Unit
     // @error TypeError ~ "query() requires (connection, sql_string, params_array)" fix: "Provide (Connection, String, Array) arguments"
     module.insert(
         "query".to_string(),
@@ -620,20 +610,22 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt query_one
     // @module std/postgres
-    // @signature query_one(conn: Connection, sql: String, params: Array | Unit) -> Result<Map | Unit, String>
+    // @signature query_one(conn: Connection, sql: String, params: Array | Unit) -> Result<Map | None, String>
     // Execute a SQL query and return at most one row.
     //
     // Behaves like query() but uses PostgreSQL's query_opt internally to
-    // return either a single row Map or Unit (null) when no row matches.
+    // return either a single row Map or None when no row matches.
     // Ideal for lookups by primary key or unique column.
     // @param conn A Connection handle obtained from connect()
     // @param sql The SQL query string with optional $N parameter placeholders
     // @param params An Array of bind parameter values, or Unit for no parameters
-    // @returns Result::Ok containing a row Map or Unit if no match, or Result::Err with a description
+    // @returns Result::Ok containing a row Map or None if no match, or Result::Err with a description
     // @see_also query, execute, connect
     // @since v0.2.0
     // @tags #database
     // @example query_one(db, "SELECT * FROM users WHERE id = $1", [1]) => Result::Ok({...}) ~ "Fetch one row by ID"
+    // @example query_one(db, "SELECT * FROM users WHERE id = $1", [999]) => Result::Ok(None) ~ "No matching row"
+    // @gotcha SQL NULL column values are returned as None, not Unit
     // @error TypeError ~ "query_one() requires (connection, sql_string, params_array)" fix: "Provide (Connection, String, Array) arguments"
     module.insert(
         "query_one".to_string(),

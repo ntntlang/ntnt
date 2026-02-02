@@ -1062,6 +1062,396 @@ for p in parts {
 }
 
 // ============================================================================
+// Regex Capture Groups
+// ============================================================================
+
+#[test]
+fn test_capture_pattern_basic() {
+    let code = r#"
+import { capture_pattern } from "std/string"
+let result = capture_pattern("Bear Lake (1042)", r"(.+) \((\d+)\)")
+match result {
+    Some(groups) => {
+        print(groups[0])
+        print(groups[1])
+        print(groups[2])
+    },
+    None => print("no match")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "capture_pattern should work");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "Bear Lake (1042)");
+    assert_eq!(lines[1], "Bear Lake");
+    assert_eq!(lines[2], "1042");
+}
+
+#[test]
+fn test_capture_pattern_no_match() {
+    let code = r#"
+import { capture_pattern } from "std/string"
+let result = capture_pattern("no numbers here", r"(\d+)-(\d+)")
+match result {
+    Some(groups) => print("matched"),
+    None => print("none")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("none"));
+}
+
+#[test]
+fn test_capture_pattern_date() {
+    let code = r#"
+import { capture_pattern } from "std/string"
+let result = capture_pattern("2024-01-15", r"(\d{4})-(\d{2})-(\d{2})")
+match result {
+    Some(groups) => {
+        print(groups[1])
+        print(groups[2])
+        print(groups[3])
+    },
+    None => print("no match")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "2024");
+    assert_eq!(lines[1], "01");
+    assert_eq!(lines[2], "15");
+}
+
+#[test]
+fn test_capture_pattern_optional_group() {
+    let code = r#"
+import { capture_pattern } from "std/string"
+let result = capture_pattern("foo123", r"(\w+?)(\d+)(\s+)?")
+match result {
+    Some(groups) => {
+        print(len(groups))
+        print(groups[1])
+        print(groups[2])
+        print("[" + groups[3] + "]")
+    },
+    None => print("no match")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "4");
+    assert_eq!(lines[1], "foo");
+    assert_eq!(lines[2], "123");
+    assert_eq!(
+        lines[3], "[]",
+        "Unmatched optional group should be empty string"
+    );
+}
+
+#[test]
+fn test_capture_all_pattern_basic() {
+    let code = r#"
+import { capture_all_pattern } from "std/string"
+let results = capture_all_pattern("2024-01 and 2025-02", r"(\d{4})-(\d{2})")
+print(len(results))
+for groups in results {
+    print(groups[1] + "/" + groups[2])
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "2");
+    assert_eq!(lines[1], "2024/01");
+    assert_eq!(lines[2], "2025/02");
+}
+
+#[test]
+fn test_capture_all_pattern_no_match() {
+    let code = r#"
+import { capture_all_pattern } from "std/string"
+let results = capture_all_pattern("no matches", r"(\d+)-(\d+)")
+print(len(results))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("0"));
+}
+
+#[test]
+fn test_capture_named_pattern_basic() {
+    let code = r#"
+import { capture_named_pattern } from "std/string"
+let result = capture_named_pattern("2024-01-15", r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})")
+match result {
+    Some(m) => {
+        print(m["year"])
+        print(m["month"])
+        print(m["day"])
+    },
+    None => print("no match")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "2024");
+    assert_eq!(lines[1], "01");
+    assert_eq!(lines[2], "15");
+}
+
+#[test]
+fn test_capture_named_pattern_no_match() {
+    let code = r#"
+import { capture_named_pattern } from "std/string"
+let result = capture_named_pattern("no digits", r"(?P<num>\d+)")
+match result {
+    Some(m) => print("matched"),
+    None => print("none")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("none"));
+}
+
+#[test]
+fn test_capture_named_pattern_mixed() {
+    let code = r#"
+import { capture_named_pattern } from "std/string"
+let result = capture_named_pattern("hello 42 world", r"(\w+) (?P<num>\d+) (\w+)")
+match result {
+    Some(m) => {
+        print(m["0"])
+        print(m["1"])
+        print(m["num"])
+        print(m["3"])
+    },
+    None => print("no match")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "hello 42 world");
+    assert_eq!(lines[1], "hello");
+    assert_eq!(lines[2], "42");
+    assert_eq!(lines[3], "world");
+}
+
+// ============================================================================
+// Map Destructuring
+// ============================================================================
+
+#[test]
+fn test_map_destructuring_basic() {
+    let code = r#"
+let data = map { "name": "Alice", "age": 30 }
+let { name, age } = data
+print("{name} is {age}")
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Map destructuring should work");
+    assert!(stdout.contains("Alice is 30"));
+}
+
+#[test]
+fn test_map_destructuring_rename() {
+    let code = r#"
+let data = map { "name": "Alice" }
+let { name: n } = data
+print(n)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("Alice"));
+}
+
+#[test]
+fn test_map_destructuring_nested() {
+    let code = r#"
+let data = map { "user": { "name": "Bob" } }
+let { user: { name } } = data
+print(name)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("Bob"));
+}
+
+#[test]
+fn test_map_destructuring_struct() {
+    let code = r#"
+struct User { name: String }
+let u = User { name: "Eve" }
+let { name } = u
+print(name)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("Eve"));
+}
+
+#[test]
+fn test_map_destructuring_missing_key() {
+    let code = r#"
+let data = map { "name": "Alice" }
+let { missing } = data
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail on missing key");
+    assert!(
+        stderr.contains("Pattern destructuring failed")
+            || stderr.contains("error")
+            || stderr.contains("Error"),
+        "Should report a destructuring error: {stderr}"
+    );
+}
+
+#[test]
+fn test_map_destructuring_in_match() {
+    let code = r#"
+let data = map { "x": 1, "y": 2 }
+match data {
+    { x, y } => print("{x},{y}"),
+    _ => print("no match")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("1,2"));
+}
+
+// ============================================================================
+// Rest/Spread Patterns
+// ============================================================================
+
+#[test]
+fn test_array_exact_destructuring() {
+    let code = r#"
+let [a, b, c] = [1, 2, 3]
+print(b)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(stdout.contains("2"));
+}
+
+#[test]
+fn test_array_rest_pattern() {
+    let code = r#"
+let [first, ...rest] = [1, 2, 3, 4]
+print(first)
+print(len(rest))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Array rest pattern should work");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "3");
+}
+
+#[test]
+fn test_array_rest_empty() {
+    let code = r#"
+let [a, ...rest] = [1]
+print(a)
+print(len(rest))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "0");
+}
+
+#[test]
+fn test_map_rest_pattern() {
+    let code = r#"
+let { name, ...other } = map { "name": "Alice", "age": 30, "city": "NYC" }
+print(name)
+print(other["age"])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Map rest pattern should work");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "Alice");
+    assert_eq!(lines[1], "30");
+}
+
+#[test]
+fn test_array_rest_with_multiple_leading() {
+    let code = r#"
+let [a, b, ...rest] = [10, 20, 30, 40, 50]
+print(a)
+print(b)
+print(len(rest))
+print(rest[0])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "10");
+    assert_eq!(lines[1], "20");
+    assert_eq!(lines[2], "3");
+    assert_eq!(lines[3], "30");
+}
+
+// ============================================================================
+// For-Loop Destructuring
+// ============================================================================
+
+#[test]
+fn test_for_loop_array_destructuring() {
+    let code = r#"
+import { entries } from "std/collections"
+let data = map { "a": 1, "b": 2 }
+for [k, v] in entries(data) {
+    print("{k}={v}")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "For-loop array destructuring should work");
+    // Map order is not guaranteed, so check both are present
+    assert!(stdout.contains("a=1"));
+    assert!(stdout.contains("b=2"));
+}
+
+#[test]
+fn test_for_loop_map_destructuring() {
+    let code = r#"
+let users = [map { "name": "Alice" }, map { "name": "Bob" }]
+for { name } in users {
+    print(name)
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "For-loop map destructuring should work");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "Alice");
+    assert_eq!(lines[1], "Bob");
+}
+
+#[test]
+fn test_for_loop_tuple_destructuring() {
+    let code = r#"
+let pairs = [[1, "one"], [2, "two"], [3, "three"]]
+for [num, word] in pairs {
+    print("{num}: {word}")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1: one");
+    assert_eq!(lines[1], "2: two");
+    assert_eq!(lines[2], "3: three");
+}
+
+// ============================================================================
 // Higher-Order Functions: filter, transform
 // ============================================================================
 
@@ -1841,4 +2231,1254 @@ print(completely_wrong_name)
         "Should NOT suggest anything for distant names: {}",
         stderr
     );
+}
+
+// ===========================================================================
+// ? operator tests
+// ===========================================================================
+
+#[test]
+fn test_try_operator_unwraps_ok() {
+    let code = r#"
+fn get_value() {
+    return Ok(42)
+}
+
+fn main() {
+    let val = get_value()?
+    print(val)
+}
+
+main()
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("42"), "Should print 42: stdout={}", stdout);
+}
+
+#[test]
+fn test_try_operator_unwraps_some() {
+    let code = r#"
+fn find_item() {
+    return Some(99)
+}
+
+fn main() {
+    let val = find_item()?
+    print(val)
+}
+
+main()
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("99"), "Should print 99: stdout={}", stdout);
+}
+
+#[test]
+fn test_try_operator_early_returns_err() {
+    let code = r#"
+fn failing() {
+    return Err("something went wrong")
+}
+
+fn main() {
+    let val = failing()?
+    print("should not reach here")
+    return Ok("done")
+}
+
+let result = main()
+print(result)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        !stdout.contains("should not reach here"),
+        "Should have early-returned: stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Err"),
+        "Should print the Err value: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_try_operator_early_returns_none() {
+    let code = r#"
+fn find_nothing() {
+    return None
+}
+
+fn main() {
+    let val = find_nothing()?
+    print("should not reach here")
+    return Some("done")
+}
+
+let result = main()
+print(result)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        !stdout.contains("should not reach here"),
+        "Should have early-returned: stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("None"),
+        "Should print None: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_try_operator_passthrough_non_result() {
+    let code = r#"
+fn get_number() {
+    return 42
+}
+
+fn main() {
+    let val = get_number()?
+    print(val)
+}
+
+main()
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "Should succeed (passthrough): stderr={}",
+        stderr
+    );
+    assert!(stdout.contains("42"), "Should print 42: stdout={}", stdout);
+}
+
+#[test]
+fn test_try_operator_chained() {
+    let code = r#"
+fn step1() {
+    return Ok(Ok(10))
+}
+
+fn main() {
+    let inner = step1()?
+    let val = inner?
+    print(val)
+}
+
+main()
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("10"), "Should print 10: stdout={}", stdout);
+}
+
+// ===========================================================================
+// otherwise keyword tests
+// ===========================================================================
+
+#[test]
+fn test_otherwise_unwraps_ok() {
+    let code = r#"
+fn main() {
+    let x = Ok(42) otherwise { return "fallback" }
+    print(x)
+}
+
+main()
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("42"), "Should print 42: stdout={}", stdout);
+}
+
+#[test]
+fn test_otherwise_unwraps_some() {
+    let code = r#"
+fn main() {
+    let x = Some("hello") otherwise { return "fallback" }
+    print(x)
+}
+
+main()
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("hello"),
+        "Should print hello: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_otherwise_executes_on_err() {
+    let code = r#"
+fn main() {
+    let x = Err("fail") otherwise {
+        print("error handled: {err}")
+        return "default"
+    }
+    print("should not reach here")
+}
+
+let result = main()
+print("result: {result}")
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("error handled: fail"),
+        "Should print error message with err bound: stdout={}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("should not reach here"),
+        "Should have diverged: stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("result: default"),
+        "Should return default: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_otherwise_executes_on_none() {
+    let code = r#"
+fn main() {
+    let x = None otherwise {
+        return "nothing found"
+    }
+    print("should not reach here")
+}
+
+let result = main()
+print(result)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("nothing found"),
+        "Should print nothing found: stdout={}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("should not reach here"),
+        "Should have diverged: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_otherwise_err_is_bound() {
+    let code = r#"
+fn main() {
+    let x = Err("db connection failed") otherwise {
+        print("caught: {err}")
+        return -1
+    }
+}
+
+main()
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("caught: db connection failed"),
+        "Should have err bound to error value: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_otherwise_non_diverging_block_errors() {
+    let code = r#"
+fn main() {
+    let x = Err("fail") otherwise {
+        print("error")
+    }
+}
+
+main()
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail: non-diverging otherwise");
+    assert!(
+        stderr.contains("otherwise block must diverge"),
+        "Should say must diverge: stderr={}",
+        stderr
+    );
+}
+
+#[test]
+fn test_otherwise_single_expression_form() {
+    let code = r#"
+fn main() {
+    let x = Err("fail") otherwise return "handled"
+    print("should not reach here")
+}
+
+let result = main()
+print(result)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("handled"),
+        "Should print handled: stdout={}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("should not reach here"),
+        "Should have diverged: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_otherwise_with_break_in_loop() {
+    let code = r#"
+let items = [Ok(1), Ok(2), Err("bad"), Ok(4)]
+let mut sum = 0
+
+for item in items {
+    let val = item otherwise {
+        print("breaking on error: {err}")
+        break
+    }
+    sum = sum + val
+}
+
+print("sum: {sum}")
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("breaking on error: bad"),
+        "Should print break message: stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("sum: 3"),
+        "Should sum first two values: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_otherwise_with_continue_in_loop() {
+    let code = r#"
+let items = [Ok(1), Err("skip"), Ok(3), Err("skip2"), Ok(5)]
+let mut sum = 0
+
+for item in items {
+    let val = item otherwise {
+        continue
+    }
+    sum = sum + val
+}
+
+print("sum: {sum}")
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("sum: 9"),
+        "Should sum Ok values (1+3+5=9): stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_otherwise_passthrough_non_result() {
+    let code = r#"
+fn main() {
+    let x = 42 otherwise { return "fallback" }
+    print(x)
+}
+
+main()
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "Should succeed (passthrough): stderr={}",
+        stderr
+    );
+    assert!(stdout.contains("42"), "Should print 42: stdout={}", stdout);
+}
+
+// ============================================================================
+// Anonymous Functions / Closures (Phase 7.3)
+// ============================================================================
+
+#[test]
+fn test_closure_single_expression() {
+    let code = r#"
+let double = fn(x) { x * 2 }
+print(double(5))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("10"),
+        "double(5) should be 10: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_closure_multi_statement() {
+    let code = r#"
+let process = fn(x) {
+    let y = x + 10
+    return y * 2
+}
+print(process(5))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("30"),
+        "process(5) should be 30: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_closure_no_params() {
+    let code = r#"
+let greet = fn() { "hello" }
+print(greet())
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("hello"),
+        "greet() should return hello: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_closure_multiple_params() {
+    let code = r#"
+let add = fn(a, b) { a + b }
+print(add(3, 4))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("7"),
+        "add(3,4) should be 7: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_closure_typed_params() {
+    let code = r#"
+let multiply = fn(a: Int, b: Int) -> Int { a * b }
+print(multiply(6, 7))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("42"),
+        "multiply(6,7) should be 42: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_closure_capture() {
+    let code = r#"
+let n = 10
+let add_n = fn(x) { x + n }
+print(add_n(5))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("15"),
+        "add_n(5) should be 15: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_closure_nested() {
+    let code = r#"
+let make_adder = fn(x) {
+    return fn(y) { x + y }
+}
+let add5 = make_adder(5)
+print(add5(10))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("15"),
+        "add5(10) should be 15: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_closure_with_filter() {
+    let code = r#"
+let nums = [1, -2, 3, -4, 5]
+let positives = filter(nums, fn(x) { x > 0 })
+print(positives)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("1"), "Should contain 1: stdout={}", stdout);
+    assert!(stdout.contains("3"), "Should contain 3: stdout={}", stdout);
+    assert!(stdout.contains("5"), "Should contain 5: stdout={}", stdout);
+    assert!(
+        !stdout.contains("-2"),
+        "Should not contain -2: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_closure_with_transform() {
+    let code = r#"
+let nums = [1, 2, 3]
+let doubled = transform(nums, fn(x) { x * 2 })
+print(doubled)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("2"), "Should contain 2: stdout={}", stdout);
+    assert!(stdout.contains("4"), "Should contain 4: stdout={}", stdout);
+    assert!(stdout.contains("6"), "Should contain 6: stdout={}", stdout);
+}
+
+#[test]
+fn test_closure_immediate_invocation() {
+    let code = r#"
+let result = fn(x) { x + 1 }(5)
+print(result)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("6"),
+        "fn(x){{x+1}}(5) should be 6: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_closure_as_callback() {
+    let code = r#"
+fn run_callback(cb) {
+    cb()
+}
+run_callback(fn() { print("callback executed") })
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("callback executed"),
+        "Should print callback message: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_closure_stored_then_used() {
+    let code = r#"
+let is_positive = fn(x) { x > 0 }
+let data = [-3, -1, 0, 2, 4]
+let result = filter(data, is_positive)
+print(result)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("2"), "Should contain 2: stdout={}", stdout);
+    assert!(stdout.contains("4"), "Should contain 4: stdout={}", stdout);
+}
+
+// ============================================================================
+// get_index — Safe Array Index Access
+// ============================================================================
+
+#[test]
+fn test_get_index_returns_option() {
+    let code = r#"
+import { get_index } from "std/collections"
+let arr = [10, 20, 30]
+print(get_index(arr, 0))
+print(get_index(arr, 2))
+print(get_index(arr, 5))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("Some(10)"),
+        "Index 0 should be Some(10): stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Some(30)"),
+        "Index 2 should be Some(30): stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("None"),
+        "Index 5 should be None: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_get_index_with_default() {
+    let code = r#"
+import { get_index } from "std/collections"
+let arr = [10, 20, 30]
+print(get_index(arr, 1, 0))
+print(get_index(arr, 10, 0))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("20"),
+        "Index 1 with default should be 20: stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("0"),
+        "Index 10 with default should be 0: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_get_index_negative() {
+    let code = r#"
+import { get_index } from "std/collections"
+let arr = [10, 20, 30]
+print(get_index(arr, -1))
+print(get_index(arr, -3))
+print(get_index(arr, -5))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("Some(30)"),
+        "-1 should be Some(30): stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Some(10)"),
+        "-3 should be Some(10): stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("None"),
+        "-5 should be None: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_get_index_with_otherwise() {
+    let code = r#"
+import { get_index } from "std/collections"
+
+fn extract(arr) {
+    let a = get_index(arr, 0) otherwise return "empty"
+    let b = get_index(arr, 1) otherwise return "only one: {a}"
+    return "{a} and {b}"
+}
+
+print(extract([]))
+print(extract(["hello"]))
+print(extract(["hello", "world"]))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("empty"), "Empty array: stdout={}", stdout);
+    assert!(
+        stdout.contains("only one: hello"),
+        "Single element: stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("hello and world"),
+        "Two elements: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_get_index_empty_array() {
+    let code = r#"
+import { get_index } from "std/collections"
+print(get_index([], 0))
+print(get_index([], 0, "default"))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("None"),
+        "Empty array index 0 should be None: stdout={}",
+        stdout
+    );
+    assert!(
+        stdout.contains("default"),
+        "Empty array with default: stdout={}",
+        stdout
+    );
+}
+
+// ============================================================================
+// If-Expressions (Phase 7.14)
+// ============================================================================
+
+#[test]
+fn test_if_expr_true_branch() {
+    let code = r#"
+let x = if true { 1 } else { 2 }
+print(x)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("1"),
+        "True branch should return 1: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_if_expr_false_branch() {
+    let code = r#"
+let x = if false { 1 } else { 2 }
+print(x)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("2"),
+        "False branch should return 2: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_if_expr_with_comparison() {
+    let code = r#"
+let x = if 5 > 3 { "yes" } else { "no" }
+print(x)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("yes"),
+        "5 > 3 should select 'yes': stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_if_expr_else_if_chain() {
+    let code = r#"
+let x = if 0 > 0 { "positive" } else if 0 == 0 { "zero" } else { "negative" }
+print(x)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("zero"),
+        "0 == 0 should select 'zero': stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_if_expr_in_function_call() {
+    let code = r#"
+print(if true { "a" } else { "b" })
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("a"), "Should print 'a': stdout={}", stdout);
+}
+
+#[test]
+fn test_if_expr_nested() {
+    let code = r#"
+let x = if true { if false { 1 } else { 2 } } else { 3 }
+print(x)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("2"),
+        "Nested if should return 2: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_if_expr_with_variables() {
+    let code = r#"
+let n = 10
+let x = if n > 5 { n * 2 } else { n }
+print(x)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("20"),
+        "10 > 5 so n*2 = 20: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_if_expr_string_result() {
+    let code = r#"
+let s = if len("hi") > 0 { "non-empty" } else { "empty" }
+print(s)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("non-empty"),
+        "len('hi') > 0 should select 'non-empty': stdout={}",
+        stdout
+    );
+}
+
+// ============================================================================
+// None/Option Comparison Safety
+// ============================================================================
+
+#[test]
+fn test_none_equality_with_none() {
+    let code = r#"
+print(None == None)
+print(None != None)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "None == None should work: stderr={}", stderr);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true", "None == None should be true");
+    assert_eq!(lines[1], "false", "None != None should be false");
+}
+
+#[test]
+fn test_none_equality_cross_type() {
+    let code = r#"
+print(42 == None)
+print(42 != None)
+print("hello" == None)
+print(true != None)
+print(3.14 == None)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "Cross-type None comparison should work: stderr={}",
+        stderr
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "false", "42 == None should be false");
+    assert_eq!(lines[1], "true", "42 != None should be true");
+    assert_eq!(lines[2], "false", "\"hello\" == None should be false");
+    assert_eq!(lines[3], "true", "true != None should be true");
+    assert_eq!(lines[4], "false", "3.14 == None should be false");
+}
+
+#[test]
+fn test_some_equality() {
+    let code = r#"
+print(Some(1) == Some(1))
+print(Some(1) == Some(2))
+print(Some(1) == None)
+print(Some(1) != None)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Some equality should work: stderr={}", stderr);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true", "Some(1) == Some(1) should be true");
+    assert_eq!(lines[1], "false", "Some(1) == Some(2) should be false");
+    assert_eq!(lines[2], "false", "Some(1) == None should be false");
+    assert_eq!(lines[3], "true", "Some(1) != None should be true");
+}
+
+#[test]
+fn test_result_equality() {
+    let code = r#"
+print(Ok("x") == Ok("x"))
+print(Ok("x") == Ok("y"))
+print(Ok(1) == Err("fail"))
+print(Err("a") == Err("a"))
+print(Err("a") != Err("b"))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "Result equality should work: stderr={}",
+        stderr
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true", "Ok(\"x\") == Ok(\"x\") should be true");
+    assert_eq!(lines[1], "false", "Ok(\"x\") == Ok(\"y\") should be false");
+    assert_eq!(lines[2], "false", "Ok(1) == Err(\"fail\") should be false");
+    assert_eq!(lines[3], "true", "Err(\"a\") == Err(\"a\") should be true");
+    assert_eq!(lines[4], "true", "Err(\"a\") != Err(\"b\") should be true");
+}
+
+#[test]
+fn test_none_comparison_in_loop() {
+    // Simulates the snowgauge pattern: checking array values against None
+    let code = r#"
+let temps = [Some(32.5), None, Some(28.0), None]
+let mut last_valid = None
+for i in 0..len(temps) {
+    if temps[i] != None {
+        last_valid = temps[i]
+    }
+}
+print(last_valid)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "None comparison in loop should work: stderr={}",
+        stderr
+    );
+    assert!(
+        stdout.contains("28"),
+        "Last valid temp should be Some(28.0): stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_null_coalesce_with_option() {
+    let code = r#"
+let a = Some(42) ?? 0
+let b = None ?? 99
+print(a)
+print(b)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Null coalesce should work: stderr={}", stderr);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "42", "Some(42) ?? 0 should be 42");
+    assert_eq!(lines[1], "99", "None ?? 99 should be 99");
+}
+
+// ============================================================================
+// JSON Option Serialization
+// ============================================================================
+
+#[test]
+fn test_json_stringify_none() {
+    let code = r#"
+import { stringify } from "std/json"
+print(stringify(None))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "stringify(None) should work: stderr={}",
+        stderr
+    );
+    assert_eq!(stdout.trim(), "null", "None should serialize to null");
+}
+
+#[test]
+fn test_json_stringify_some() {
+    let code = r#"
+import { stringify } from "std/json"
+print(stringify(Some(42)))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "stringify(Some(42)) should work: stderr={}",
+        stderr
+    );
+    assert_eq!(stdout.trim(), "42", "Some(42) should serialize to 42");
+}
+
+#[test]
+fn test_json_stringify_option_array() {
+    let code = r#"
+import { stringify } from "std/json"
+let arr = [Some(1), None, Some(3)]
+print(stringify(arr))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "stringify option array should work: stderr={}",
+        stderr
+    );
+    assert_eq!(
+        stdout.trim(),
+        "[1,null,3]",
+        "Mixed Option array should serialize correctly"
+    );
+}
+
+// ── Feature 7.16: None/null JSON Serialization ──
+
+#[test]
+fn test_parse_json_null_is_none() {
+    let code = r#"
+import { parse_json } from "std/json"
+let result = parse_json("null")
+match result {
+    Ok(val) => {
+        match val {
+            None => print("GOT_NONE"),
+            _ => print("NOT_NONE")
+        }
+    },
+    Err(e) => print("ERROR: {e}")
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "parse_json null should work: stderr={}",
+        stderr
+    );
+    assert_eq!(
+        stdout.trim(),
+        "GOT_NONE",
+        "parse_json(\"null\") should return None"
+    );
+}
+
+#[test]
+fn test_parse_json_object_with_null() {
+    let code = r#"
+import { parse_json, stringify } from "std/json"
+// Build a JSON string with null value via stringify, then re-parse
+let json_str = stringify(map { "key": None, "val": 42 })
+let result = parse_json(json_str)
+match result {
+    Ok(data) => {
+        match data["key"] {
+            None => print("KEY_IS_NONE"),
+            _ => print("KEY_NOT_NONE")
+        }
+    },
+    Err(e) => print("ERROR: {e}")
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "parse_json object with null should work: stderr={}",
+        stderr
+    );
+    assert_eq!(
+        stdout.trim(),
+        "KEY_IS_NONE",
+        "null value in JSON object should be None"
+    );
+}
+
+#[test]
+fn test_json_null_roundtrip() {
+    let code = r#"
+import { parse_json, stringify } from "std/json"
+let original = map { "x": None, "y": 42 }
+let json_str = stringify(original)
+let parsed = parse_json(json_str)
+match parsed {
+    Ok(data) => {
+        match data["x"] {
+            None => print("ROUNDTRIP_OK"),
+            _ => print("ROUNDTRIP_FAIL")
+        }
+    },
+    Err(e) => print("ERROR: {e}")
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "JSON null roundtrip should work: stderr={}",
+        stderr
+    );
+    assert_eq!(
+        stdout.trim(),
+        "ROUNDTRIP_OK",
+        "None should round-trip through JSON"
+    );
+}
+
+// ── Feature 7.9: Default Parameter Values ──
+
+#[test]
+fn test_default_param_basic() {
+    let code = r#"
+fn greet(name = "World") {
+    return "Hello, {name}!"
+}
+print(greet())
+print(greet("Alice"))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "default param should work: stderr={}", stderr);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "Hello, World!");
+    assert_eq!(lines[1], "Hello, Alice!");
+}
+
+#[test]
+fn test_default_param_multiple() {
+    let code = r#"
+fn paginate(items, page = 1, per_page = 25) {
+    return "items={items} page={page} per_page={per_page}"
+}
+print(paginate("users"))
+print(paginate("users", 2))
+print(paginate("users", 3, 10))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "multiple default params should work: stderr={}",
+        stderr
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "items=users page=1 per_page=25");
+    assert_eq!(lines[1], "items=users page=2 per_page=25");
+    assert_eq!(lines[2], "items=users page=3 per_page=10");
+}
+
+#[test]
+fn test_default_param_prior_param_reference() {
+    let code = r#"
+fn foo(a = 1, b = a + 1) {
+    return "{a},{b}"
+}
+print(foo())
+print(foo(10))
+print(foo(10, 20))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "default referencing prior param should work: stderr={}",
+        stderr
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1,2");
+    assert_eq!(lines[1], "10,11");
+    assert_eq!(lines[2], "10,20");
+}
+
+#[test]
+fn test_default_param_ordering_error() {
+    let code = r#"
+fn bad(a = 1, b) {
+    return a + b
+}
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "required param after default should fail");
+    assert!(
+        stderr.contains("cannot follow a parameter with a default value"),
+        "Should report ordering error: stderr={}",
+        stderr
+    );
+}
+
+#[test]
+fn test_default_param_too_many_args() {
+    let code = r#"
+fn greet(name = "World") {
+    return "Hello, {name}!"
+}
+greet("a", "b")
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "too many args should fail");
+    assert!(
+        stderr.contains("expected") && stderr.contains("got"),
+        "Should report arity error: stderr={}",
+        stderr
+    );
+}
+
+#[test]
+fn test_default_param_with_contract() {
+    let code = r#"
+fn divide(a, b = 1)
+    requires b != 0
+{
+    return a / b
+}
+print(divide(10))
+print(divide(10, 2))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "default param with contract should work: stderr={}",
+        stderr
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "10");
+    assert_eq!(lines[1], "5");
+}
+
+#[test]
+fn test_default_param_lambda() {
+    let code = r#"
+let f = fn(x = 5) { x * 2 }
+print(f())
+print(f(10))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "lambda default param should work: stderr={}",
+        stderr
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "10");
+    assert_eq!(lines[1], "20");
+}
+
+#[test]
+fn test_default_param_with_type_annotation() {
+    let code = r#"
+fn add(a: Int, b: Int = 10) -> Int {
+    return a + b
+}
+print(add(5))
+print(add(5, 20))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "typed default param should work: stderr={}",
+        stderr
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "15");
+    assert_eq!(lines[1], "25");
 }

@@ -403,26 +403,7 @@ fn headers_get_string(req_map: &HashMap<String, Value>, key: &str) -> Option<Str
 
 /// Convert Intent Value to JSON for response serialization
 fn intent_value_to_json(value: &Value) -> serde_json::Value {
-    match value {
-        Value::Int(n) => serde_json::Value::Number((*n).into()),
-        Value::Float(f) => serde_json::Value::Number(
-            serde_json::Number::from_f64(*f).unwrap_or_else(|| serde_json::Number::from(0)),
-        ),
-        Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Array(items) => {
-            serde_json::Value::Array(items.iter().map(intent_value_to_json).collect())
-        }
-        Value::Map(map) => {
-            let obj: serde_json::Map<String, serde_json::Value> = map
-                .iter()
-                .map(|(k, v)| (k.clone(), intent_value_to_json(v)))
-                .collect();
-            serde_json::Value::Object(obj)
-        }
-        Value::Unit => serde_json::Value::Null,
-        _ => serde_json::Value::String(format!("{:?}", value)),
-    }
+    crate::stdlib::json::intent_value_to_json(value)
 }
 
 /// Create a response Value with given status, headers, and body
@@ -877,7 +858,7 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Accepts either a Request map (extracts the `body` field) or a plain String.
     // Returns a Result enum: `Ok(value)` on success with the parsed data, or
-    // `Err(message)` if the JSON is malformed.
+    // `Err(message)` if the JSON is malformed. JSON null values become None.
     // @param req A Request map with a `body` field, or a raw JSON string.
     // @returns Result<Map<String, Any>, String> -- Ok with parsed value, or Err with parse error message.
     // @see_also json, parse_form
@@ -885,6 +866,7 @@ pub fn init() -> HashMap<String, Value> {
     // @tags #http, #server
     // @example parse_json("{\"key\": \"value\"}") => Ok(map { "key": "value" }) ~ "Parse JSON string"
     // @example parse_json("not json") => Err("expected ...") ~ "Returns Err on invalid JSON"
+    // @gotcha JSON null values are parsed as None (not Unit), matching std/json behavior
     // @error TypeError ~ "parse_json() requires a request with body" fix: "Pass a Request map that contains a body field"
     // @error TypeError ~ "parse_json() requires a request map or body string" fix: "Pass a Request map or a String"
     module.insert(

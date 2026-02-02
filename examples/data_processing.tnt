@@ -2,7 +2,7 @@
 // Demonstrates combining std/collections with other modules
 
 import { push, reverse, first, last, slice, concat, is_empty } from "std/collections"
-import { split, join, trim, to_upper } from "std/string"
+import { split, trim, to_upper } from "std/string"
 
 // === Basic Array Operations ===
 print("=== Basic Array Operations ===")
@@ -62,13 +62,14 @@ print("=== Data Pipeline: Process CSV ===")
 
 let csv_data = "  alice,25,engineer  "
 let cleaned = trim(csv_data)
-let fields = split(cleaned, ",")
+
+// Array destructuring extracts fields directly
+let [name, age, job] = split(cleaned, ",")
 
 print("Raw: '" + csv_data + "'")
-print("Fields: " + str(fields))
-print("Name: " + to_upper(fields[0]))
-print("Age: " + fields[1])
-print("Job: " + fields[2])
+print("Name: " + to_upper(name))
+print("Age: " + age)
+print("Job: " + job)
 
 // === Building Collections ===
 print("")

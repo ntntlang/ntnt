@@ -1,0 +1,117 @@
+// Error Handling Examples: ? operator and otherwise keyword
+// Demonstrates NTNT's ergonomic error handling features
+
+// =============================================================================
+// The ? operator: unwrap Ok/Some or early-return Err/None
+// =============================================================================
+
+fn parse_number(s) {
+    if s == "42" {
+        return Ok(42)
+    }
+    if s == "99" {
+        return Ok(99)
+    }
+    return Err("not a recognized number: {s}")
+}
+
+fn add_parsed(a, b) {
+    let x = parse_number(a)?
+    let y = parse_number(b)?
+    return Ok(x + y)
+}
+
+print("--- ? operator ---")
+let result1 = add_parsed("42", "99")
+print("42 + 99 = {result1}")
+
+let result2 = add_parsed("42", "bad")
+print("42 + bad = {result2}")
+
+// =============================================================================
+// otherwise keyword: unwrap or run a diverging block
+// =============================================================================
+
+print("")
+print("--- otherwise keyword ---")
+
+fn safe_divide(a, b) {
+    if b == 0 {
+        return Err("division by zero")
+    }
+    return Ok(a / b)
+}
+
+fn compute() {
+    // Block form with err bound
+    let result = safe_divide(10, 0) otherwise {
+        print("  caught error: {err}")
+        return -1
+    }
+    return result
+}
+
+let val = compute()
+print("compute() returned: {val}")
+
+// Single-expression form
+fn compute2() {
+    let result = safe_divide(10, 2) otherwise return -1
+    return result
+}
+
+print("compute2() returned: {compute2()}")
+
+// =============================================================================
+// otherwise with continue/break in loops
+// =============================================================================
+
+print("")
+print("--- otherwise in loops ---")
+
+let data = [Ok(10), Err("bad"), Ok(20), Err("skip"), Ok(30)]
+
+// Skip errors with continue
+let mut total = 0
+for item in data {
+    let val = item otherwise {
+        continue
+    }
+    total = total + val
+}
+print("Sum (skipping errors): {total}")
+
+// Stop on first error with break
+let mut partial = 0
+for item in data {
+    let val = item otherwise {
+        print("  stopping at error: {err}")
+        break
+    }
+    partial = partial + val
+}
+print("Partial sum (stopped on error): {partial}")
+
+// =============================================================================
+// Option handling
+// =============================================================================
+
+print("")
+print("--- Option handling ---")
+
+fn find_user(id) {
+    if id == 1 {
+        return Some("Alice")
+    }
+    return None
+}
+
+fn greet_user(id) {
+    let name = find_user(id) otherwise {
+        return "User not found"
+    }
+    return "Hello, {name}!"
+}
+
+print(greet_user(1))
+print(greet_user(99))

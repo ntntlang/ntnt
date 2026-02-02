@@ -4,7 +4,7 @@
 
 import { json, html } from "std/http/server"
 import { parse_json, stringify } from "std/json"
-import { push, keys } from "std/collections"
+import { push } from "std/collections"
 
 // =============================================================================
 // In-memory task storage
@@ -118,9 +118,9 @@ fn status(code, response) {
 // @implements: feature.task_details
 fn get_task_handler(req) {
     let id = int(req.params["id"])
-    
+
     for task in tasks {
-        if task["id"] == id {
+        if int(task["id"]) == id {
             return json(task)
         }
     }

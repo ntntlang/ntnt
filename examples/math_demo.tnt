@@ -1,9 +1,9 @@
 // NTNT Math Library Demo - Testing all math functions
-import { sin, cos, tan, asin, acos, atan, atan2 } from "std/math"
+import { sin, cos, tan, atan2 } from "std/math"
 import { log, log10, log2, exp, exp2 } from "std/math"
 import { sinh, cosh, tanh, cbrt, hypot } from "std/math"
 import { degrees, radians, random, random_int, random_range } from "std/math"
-import { PI, E, TAU, INFINITY, is_nan, is_finite, is_infinite } from "std/math"
+import { PI, E, TAU, INFINITY, is_finite, is_infinite } from "std/math"
 
 print("=== NTNT Math Library Test ===")
 print("")

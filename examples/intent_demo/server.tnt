@@ -1,5 +1,4 @@
-import { html, json, text } from "std/http/server"
-import { parse_query } from "std/url"
+import { html, json } from "std/http/server"
 
 // Simple test server for IDD testing
 

@@ -126,9 +126,10 @@ impl Type {
                     value_type: v2,
                 },
             ) => k1.is_compatible(k2) && v1.is_compatible(v2),
-            (Type::Union(types), other) | (other, Type::Union(types)) => {
-                types.iter().any(|t| t.is_compatible(other))
-            }
+            // A union VALUE is compatible with a target only if ALL members fit
+            (Type::Union(types), other) => types.iter().all(|t| t.is_compatible(other)),
+            // A concrete value is compatible with a union TARGET if it matches ANY member
+            (other, Type::Union(types)) => types.iter().any(|t| other.is_compatible(t)),
             (Type::Named(a), Type::Named(b)) => a == b,
             (Type::Tuple(a), Type::Tuple(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.is_compatible(y))
@@ -190,6 +191,30 @@ impl Type {
             Type::Any => "Any".to_string(),
             Type::Never => "Never".to_string(),
         }
+    }
+}
+
+/// Subtract a type from another (for flow-sensitive narrowing).
+/// `subtract_type(Optional<T>, Optional<Any>)` → `T` (remove None possibility)
+/// `subtract_type(Union(A, B), A)` → `B`
+pub fn subtract_type(from: &Type, remove: &Type) -> Type {
+    match (from, remove) {
+        // Remove None possibility from Optional → inner type
+        (Type::Optional(inner), Type::Optional(_)) => (**inner).clone(),
+        // Remove a member from a union
+        (Type::Union(types), _) => {
+            let remaining: Vec<Type> = types
+                .iter()
+                .filter(|t| !t.is_compatible(remove))
+                .cloned()
+                .collect();
+            match remaining.len() {
+                0 => Type::Never,
+                1 => remaining.into_iter().next().unwrap(),
+                _ => Type::Union(remaining),
+            }
+        }
+        _ => from.clone(),
     }
 }
 

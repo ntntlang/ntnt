@@ -13,7 +13,7 @@
 //    export DATABASE_URL="postgres://ntnt:password@localhost/ntnt"
 //    ./target/release/ntnt run examples/postgres_demo.tnt
 
-import { connect, query, query_one, execute, close, begin, commit, rollback } from "std/db/postgres"
+import { connect, query, query_one, execute, close, begin, rollback } from "std/db/postgres"
 import { get_env } from "std/env"
 
 fn main() {

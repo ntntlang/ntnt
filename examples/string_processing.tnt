@@ -4,6 +4,7 @@
 import { split, join, trim, replace, contains } from "std/string"
 import { starts_with, ends_with, to_upper, to_lower } from "std/string"
 import { char_at, substring } from "std/string"
+import { capture_pattern, capture_all_pattern, capture_named_pattern } from "std/string"
 
 // === Text Cleaning ===
 print("=== Text Cleaning ===")
@@ -84,6 +85,39 @@ print("Word: " + word)
 print("First character: " + char_at(word, 0))
 print("Last character: " + char_at(word, 5))
 print("First 3 chars: " + substring(word, 0, 3))
+
+// === Regex Capture Groups ===
+print("")
+print("=== Regex Capture Groups ===")
+
+// Extract date parts with capture_pattern
+let date_str = "Meeting on 2024-01-15 at noon"
+let groups = capture_pattern(date_str, r"(\d{4})-(\d{2})-(\d{2})")
+match groups {
+    Some(g) => {
+        let [_, year, month, day] = g
+        print("Date: {year}/{month}/{day}")
+    },
+    None => print("No date found")
+}
+
+// Extract all prices from text with capture_all_pattern
+let prices = "Items: $12.99, $5.50, and $24.00"
+let all = capture_all_pattern(prices, r"\$(\d+\.\d{2})")
+for groups in all {
+    print("Price: {groups[1]}")
+}
+
+// Named capture groups for structured extraction
+let log_line = "2024-01-15 ERROR: Connection timeout"
+let parts = capture_named_pattern(log_line, r"(?P<date>\S+)\s+(?P<level>\w+):\s+(?P<msg>.*)")
+match parts {
+    Some(m) => {
+        let { date, level, msg } = m
+        print("[" + level + "] " + msg + " (on " + date + ")")
+    },
+    None => print("Could not parse log line")
+}
 
 print("")
 print("String processing demo complete!")

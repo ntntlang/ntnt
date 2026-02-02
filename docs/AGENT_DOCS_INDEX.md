@@ -40,8 +40,8 @@ Regenerate: `ntnt docs --generate`
 
 1. **Map literals require `map` keyword**: `map { "key": "value" }` not `{ "key": "value" }`
 2. **String interpolation uses `{expr}`** not `${expr}`
-3. **Route patterns require raw strings**: `get(r"/users/{id}", handler)`
-4. **Functions not methods**: `len(str)` not `str.len()`
+3. **Route patterns auto-detect params**: `get("/users/{id}", handler)`
+4. **Dot reads, functions transform**: `req.params.id` reads data; `len(str)` transforms data; `str.len()` is wrong
 5. **HTTP routes are global builtins**: Don't import `get`, `post`, `listen`
 
 ### IDD Workflow

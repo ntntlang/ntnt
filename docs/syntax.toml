@@ -29,6 +29,10 @@ description = "Variable declaration (mut for mutable)"
 words = ["if", "else", "match", "for", "in", "while", "loop", "break", "continue", "defer"]
 description = "Control flow statements"
 
+[keywords.error_handling]
+words = ["otherwise"]
+description = "Inline error handling on let bindings — unwraps Ok/Some or runs a diverging block for Err/None"
+
 [keywords.types]
 words = ["type", "struct", "enum", "impl", "trait", "pub", "self"]
 description = "Type system keywords"
@@ -82,6 +86,11 @@ example = "-x, !condition"
 symbols = ["..", "..="]
 description = "Range operators (exclusive and inclusive)"
 example = "0..10 (0-9), 0..=10 (0-10)"
+
+[operators.postfix]
+symbols = ["?"]
+description = "Try operator — unwraps Ok/Some or early-returns Err/None"
+example = "parse_json(req)?"
 
 [operators.member]
 symbols = [".", "[]"]
@@ -144,6 +153,26 @@ examples = ["let user = map { \"name\": \"Alice\" }", "let nested = map { \"a\":
 syntax = "0..10, 0..=10"
 description = "Range literals (exclusive and inclusive)"
 examples = ["for i in 0..10 { }", "for i in 0..=10 { }"]
+
+[literals.closures]
+syntax = "fn(params) { body }"
+description = "Anonymous functions / closures in expression position"
+examples = [
+    "let double = fn(x) { x * 2 }",
+    "filter(nums, fn(x) { x > 0 })",
+    "let add = fn(a: Int, b: Int) -> Int { a + b }",
+    "fn(x) { x + 1 }(5)",
+]
+
+[literals.if_expression]
+syntax = "if cond { expr } else { expr }"
+description = "If-expression returns a value from the selected branch. Else is required."
+examples = [
+    "let x = if a > b { a } else { b }",
+    "let label = if x > 0 { \"positive\" } else if x == 0 { \"zero\" } else { \"negative\" }",
+    "print(if debug { \"verbose\" } else { \"summary\" })",
+    "return if found { json(data) } else { not_found() }",
+]
 
 # =============================================================================
 # ESCAPE SEQUENCES
@@ -366,3 +395,76 @@ example = "_ => \"default\""
 syntax = "name"
 description = "Bind matched value to name"
 example = "Ok(data) => use(data)"
+
+# Destructuring patterns
+[destructuring.map_basic]
+syntax = "let { field1, field2 } = expr"
+description = "Extract map/struct fields into variables"
+example = "let { name, age } = map { \"name\": \"Alice\", \"age\": 30 }"
+
+[destructuring.map_rename]
+syntax = "let { field: alias } = expr"
+description = "Extract map field with a different variable name"
+example = "let { name: n } = map { \"name\": \"Alice\" }"
+
+[destructuring.map_nested]
+syntax = "let { field: { subfield } } = expr"
+description = "Nested map destructuring"
+example = "let { user: { name } } = map { \"user\": { \"name\": \"Bob\" } }"
+
+[destructuring.array]
+syntax = "let [a, b, c] = expr"
+description = "Extract array elements into variables"
+example = "let [a, b, c] = [1, 2, 3]"
+
+[destructuring.array_rest]
+syntax = "let [first, ...rest] = expr"
+description = "Extract leading elements and collect remaining into array"
+example = "let [first, ...rest] = [1, 2, 3, 4]"
+
+[destructuring.map_rest]
+syntax = "let { field, ...rest } = expr"
+description = "Extract named fields and collect remaining into map"
+example = "let { name, ...other } = map { \"name\": \"A\", \"age\": 30 }"
+
+[destructuring.for_loop]
+syntax = "for [a, b] in expr { }"
+description = "Destructure each element during iteration"
+example = "for [k, v] in entries(data) { print(\"{k}={v}\") }"
+
+[destructuring.spread_token]
+syntax = "..."
+description = "Rest/spread operator in destructuring patterns"
+example = "let [head, ...tail] = items"
+
+# =============================================================================
+# FUNCTION PARAMETERS
+# =============================================================================
+
+[function_parameters]
+description = "Function parameter syntax"
+
+[function_parameters.basic]
+syntax = "fn name(a, b) { }"
+description = "Basic parameters (untyped, gradual typing)"
+example = "fn add(a, b) { return a + b }"
+
+[function_parameters.typed]
+syntax = "fn name(a: Int, b: String) -> Bool { }"
+description = "Parameters with type annotations and return type"
+example = "fn greet(name: String) -> String { return \"Hello, {name}!\" }"
+
+[function_parameters.default_values]
+syntax = "fn name(a, b = expr) { }"
+description = "Parameters with default values (must come after required params)"
+example = "fn paginate(items, page = 1, per_page = 25) { }"
+
+[function_parameters.default_typed]
+syntax = "fn name(a: Int, b: Int = 10) -> Int { }"
+description = "Default values with type annotations"
+example = "fn add(a: Int, b: Int = 10) -> Int { return a + b }"
+
+[function_parameters.default_reference]
+syntax = "fn name(a = 0, b = a + 10) { }"
+description = "Default expressions can reference earlier parameters"
+example = "fn make_range(start = 0, end = start + 10) { }"

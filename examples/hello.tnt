@@ -2,49 +2,64 @@
 // This demonstrates basic NTNT language features
 
 // Variable declaration
-let greeting = "Hello, World!";
-print(greeting);
+let greeting = "Hello, World!"
+print(greeting)
 
 // Function definition
 fn greet(name) {
-    return "Hello, " + name + "!";
+    return "Hello, " + name + "!"
 }
 
 // Function call
-let message = greet("NTNT");
-print(message);
+let message = greet("NTNT")
+print(message)
 
 // Arithmetic
-let x = 10;
-let y = 20;
-let sum = x + y;
-print("Sum: " + str(sum));
+let x = 10
+let y = 20
+let sum = x + y
+print("Sum: " + str(sum))
 
 // Control flow
 if sum > 25 {
-    print("Sum is greater than 25");
+    print("Sum is greater than 25")
 } else {
-    print("Sum is 25 or less");
+    print("Sum is 25 or less")
 }
 
 // Loops
-let counter = 0;
+let counter = 0
 while counter < 5 {
-    print("Counter: " + str(counter));
-    counter = counter + 1;
+    print("Counter: " + str(counter))
+    counter = counter + 1
 }
 
 // Arrays
-let numbers = [1, 2, 3, 4, 5];
-print("Array length: " + str(len(numbers)));
-print("First element: " + str(numbers[0]));
+let numbers = [1, 2, 3, 4, 5]
+print("Array length: " + str(len(numbers)))
+print("First element: " + str(numbers[0]))
+
+// Destructuring
+let [first, second, ...rest] = numbers
+print("First: " + str(first) + ", Rest: " + str(rest))
 
 // Factorial function with recursion
 fn factorial(n) {
     if n <= 1 {
-        return 1;
+        return 1
     }
-    return n * factorial(n - 1);
+    return n * factorial(n - 1)
 }
 
-print("Factorial of 5: " + str(factorial(5)));
+print("Factorial of 5: " + str(factorial(5)))
+
+// Closures - anonymous functions
+let double = fn(x) { x * 2 }
+print("Double 7: " + str(double(7)))
+
+// Closures with filter and transform
+let evens = filter(numbers, fn(x) { x % 2 == 0 })
+print("Even numbers: " + str(evens))
+
+let doubled = transform(numbers, fn(x) { x * 2 })
+print("Doubled: " + str(doubled))

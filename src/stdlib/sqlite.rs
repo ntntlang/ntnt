@@ -36,6 +36,9 @@ fn value_to_sqlite(value: &Value) -> rusqlite::types::Value {
         Value::String(s) => rusqlite::types::Value::Text(s.clone()),
         Value::Bool(b) => rusqlite::types::Value::Integer(if *b { 1 } else { 0 }),
         Value::Unit => rusqlite::types::Value::Null,
+        Value::EnumValue {
+            enum_name, variant, ..
+        } if enum_name == "Option" && variant == "None" => rusqlite::types::Value::Null,
         _ => rusqlite::types::Value::Text(format!("{}", value)),
     }
 }
@@ -43,7 +46,11 @@ fn value_to_sqlite(value: &Value) -> rusqlite::types::Value {
 /// Convert a SQLite ValueRef to an Intent Value
 fn sqlite_to_value(val: ValueRef) -> Value {
     match val {
-        ValueRef::Null => Value::Unit,
+        ValueRef::Null => Value::EnumValue {
+            enum_name: "Option".to_string(),
+            variant: "None".to_string(),
+            values: vec![],
+        },
         ValueRef::Integer(i) => Value::Int(i),
         ValueRef::Real(f) => Value::Float(f),
         ValueRef::Text(t) => Value::String(String::from_utf8_lossy(t).to_string()),
@@ -204,7 +211,11 @@ fn sqlite_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> 
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
             variant: "Ok".to_string(),
-            values: vec![Value::Unit],
+            values: vec![Value::EnumValue {
+                enum_name: "Option".to_string(),
+                variant: "None".to_string(),
+                values: vec![],
+            }],
         }),
         Err(e) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
@@ -364,6 +375,7 @@ pub fn init() -> HashMap<String, Value> {
     // @tags #database
     // @example query(db, "SELECT * FROM users", []) => Result::Ok([...]) ~ "Fetch all rows"
     // @example query(db, "SELECT * FROM users WHERE id = ?", [1]) => Result::Ok([...]) ~ "Parameterized query"
+    // @gotcha SQL NULL column values are returned as None, not Unit
     // @error TypeError ~ "query() requires (connection, sql_string, params_array)" fix: "Pass (connection, sql_string, params_array)"
     // @error RuntimeError ~ "Query preparation failed: ..." fix: "Check SQL syntax and table/column names"
     // @error RuntimeError ~ "Failed to lock connection: ..." fix: "Ensure connection is not used concurrently in conflicting ways"
@@ -384,21 +396,22 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt query_one
     // @module std/sqlite
-    // @signature query_one(conn: Connection, sql: String, params: Array) -> Result<Map | Unit, String>
+    // @signature query_one(conn: Connection, sql: String, params: Array) -> Result<Map | None, String>
     // Execute a SELECT query and return a single row.
     //
     // Runs a parameterized SQL query expecting at most one result row.
-    // Returns the row as a map if found, or Unit if no rows match.
+    // Returns the row as a map if found, or None if no rows match.
     // Useful for lookups by primary key or unique constraint.
     // @param conn A connection handle obtained from connect()
     // @param sql SQL query string with optional `?` placeholders
     // @param params Array of parameter values to bind, or unit for no parameters
-    // @returns Result containing a row Map if found, Unit if no match, or an error string on failure
+    // @returns Result containing a row Map if found, None if no match, or an error string on failure
     // @see_also query, execute, connect
     // @since v0.2.0
     // @tags #database
     // @example query_one(db, "SELECT * FROM users WHERE id = ?", [1]) => Result::Ok({...}) ~ "Fetch single row"
-    // @example query_one(db, "SELECT * FROM users WHERE id = ?", [999]) => Result::Ok(unit) ~ "No matching row"
+    // @example query_one(db, "SELECT * FROM users WHERE id = ?", [999]) => Result::Ok(None) ~ "No matching row"
+    // @gotcha SQL NULL column values are returned as None, not Unit
     // @error TypeError ~ "query_one() requires (connection, sql_string, params_array)" fix: "Pass (connection, sql_string, params_array)"
     // @error RuntimeError ~ "Query preparation failed: ..." fix: "Check SQL syntax and table/column names"
     // @error RuntimeError ~ "Failed to lock connection: ..." fix: "Ensure connection is not used concurrently in conflicting ways"
@@ -750,7 +763,7 @@ mod tests {
             _ => panic!("Expected EnumValue"),
         }
 
-        // Query non-existing row returns Unit
+        // Query non-existing row returns None
         let result =
             sqlite_query_one(&conn, "SELECT * FROM test WHERE id = ?", &[Value::Int(999)]).unwrap();
         match result {
@@ -759,8 +772,10 @@ mod tests {
             } => {
                 assert_eq!(variant, "Ok");
                 match &values[0] {
-                    Value::Unit => {}
-                    other => panic!("Expected Unit, got {:?}", other),
+                    Value::EnumValue {
+                        enum_name, variant, ..
+                    } if enum_name == "Option" && variant == "None" => {}
+                    other => panic!("Expected None, got {:?}", other),
                 }
             }
             _ => panic!("Expected EnumValue"),
@@ -915,8 +930,17 @@ mod tests {
         )
         .unwrap();
 
-        // Insert with NULL
-        sqlite_execute(&conn, "INSERT INTO test (name) VALUES (?)", &[Value::Unit]).unwrap();
+        // Insert with NULL (using None)
+        sqlite_execute(
+            &conn,
+            "INSERT INTO test (name) VALUES (?)",
+            &[Value::EnumValue {
+                enum_name: "Option".to_string(),
+                variant: "None".to_string(),
+                values: vec![],
+            }],
+        )
+        .unwrap();
 
         let result = sqlite_query(&conn, "SELECT * FROM test", &[]).unwrap();
         match result {
@@ -927,8 +951,10 @@ mod tests {
                 match &values[0] {
                     Value::Array(rows) => match &rows[0] {
                         Value::Map(map) => match map.get("name") {
-                            Some(Value::Unit) => {}
-                            other => panic!("Expected name=Unit, got {:?}", other),
+                            Some(Value::EnumValue {
+                                enum_name, variant, ..
+                            }) if enum_name == "Option" && variant == "None" => {}
+                            other => panic!("Expected name=None, got {:?}", other),
                         },
                         _ => panic!("Expected Map"),
                     },
@@ -983,7 +1009,15 @@ mod tests {
         }
         match value_to_sqlite(&Value::Unit) {
             rusqlite::types::Value::Null => {}
-            _ => panic!("Expected Null"),
+            _ => panic!("Expected Null for Unit"),
+        }
+        match value_to_sqlite(&Value::EnumValue {
+            enum_name: "Option".to_string(),
+            variant: "None".to_string(),
+            values: vec![],
+        }) {
+            rusqlite::types::Value::Null => {}
+            _ => panic!("Expected Null for None"),
         }
     }
 

@@ -46,7 +46,7 @@ pub enum IntentError {
     #[error("Arity mismatch: function '{name}' expected {expected} arguments, got {got}")]
     ArityMismatch {
         name: String,
-        expected: usize,
+        expected: String,
         got: usize,
     },
 
@@ -288,7 +288,7 @@ mod tests {
             },
             IntentError::ArityMismatch {
                 name: String::new(),
-                expected: 0,
+                expected: "0".to_string(),
                 got: 0,
             },
             IntentError::DivisionByZero,

@@ -3,7 +3,7 @@
 //   Sync mode:  ntnt run examples/benchmark_server.tnt
 //   Async mode: ntnt run examples/benchmark_server.tnt --async
 
-import { json, html, text } from "std/http/server"
+import { json, text } from "std/http/server"
 
 // Simple JSON endpoint
 fn api_hello(req) {

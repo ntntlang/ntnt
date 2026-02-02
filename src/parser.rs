@@ -139,8 +139,6 @@ impl Parser {
             self.export_declaration(attributes)
         } else if self.match_token(&[TokenKind::Pub]) {
             self.pub_declaration(attributes)
-        } else if self.match_token(&[TokenKind::Protocol]) {
-            self.protocol_declaration()
         } else {
             self.statement()
         }
@@ -181,15 +179,17 @@ impl Parser {
     fn let_declaration(&mut self) -> Result<Statement> {
         let mutable = self.match_token(&[TokenKind::Mut]);
 
-        // Check for pattern destructuring: let (a, b) = ...
-        let (name, pattern) =
-            if self.check(&TokenKind::LeftParen) || self.check(&TokenKind::LeftBracket) {
-                let pat = self.parse_pattern()?;
-                ("_destructure".to_string(), Some(pat))
-            } else {
-                let name = self.consume_identifier("Expected variable name")?;
-                (name, None)
-            };
+        // Check for pattern destructuring: let (a, b) = ..., let [a, b] = ..., let { a, b } = ...
+        let (name, pattern) = if self.check(&TokenKind::LeftParen)
+            || self.check(&TokenKind::LeftBracket)
+            || self.check(&TokenKind::LeftBrace)
+        {
+            let pat = self.parse_pattern()?;
+            ("_destructure".to_string(), Some(pat))
+        } else {
+            let name = self.consume_identifier("Expected variable name")?;
+            (name, None)
+        };
 
         let type_annotation = if self.match_token(&[TokenKind::Colon]) {
             Some(self.parse_type()?)
@@ -203,6 +203,22 @@ impl Parser {
             None
         };
 
+        let otherwise = if self.match_token(&[TokenKind::Otherwise]) {
+            if self.match_token(&[TokenKind::LeftBrace]) {
+                // Block form: otherwise { print("error"); return }
+                let block = self.block()?;
+                Some(block)
+            } else {
+                // Single-expression form: otherwise return status(400, "msg")
+                let stmt = self.statement()?;
+                Some(Block {
+                    statements: vec![stmt],
+                })
+            }
+        } else {
+            None
+        };
+
         self.match_token(&[TokenKind::Semicolon]);
 
         Ok(Statement::Let {
@@ -211,6 +227,7 @@ impl Parser {
             type_annotation,
             value,
             pattern,
+            otherwise,
         })
     }
 
@@ -292,6 +309,23 @@ impl Parser {
                 if !self.match_token(&[TokenKind::Comma]) {
                     break;
                 }
+            }
+        }
+
+        // Validate: once a defaulted param is seen, all subsequent must also have defaults
+        let mut seen_default = false;
+        for param in &params {
+            if param.default.is_some() {
+                seen_default = true;
+            } else if seen_default {
+                return Err(IntentError::ParserError {
+                    line: self.current_line(),
+                    column: self.current_column(),
+                    message: format!(
+                        "Required parameter '{}' cannot follow a parameter with a default value",
+                        param.name
+                    ),
+                });
             }
         }
 
@@ -752,26 +786,14 @@ impl Parser {
         self.export_declaration(attributes)
     }
 
-    fn protocol_declaration(&mut self) -> Result<Statement> {
-        let name = self.consume_identifier("Expected protocol name")?;
-
-        self.consume(&TokenKind::LeftBrace, "Expected '{' after protocol name")?;
-
-        // Simplified protocol parsing for now
-        let steps = Vec::new();
-
-        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
-            self.advance(); // Skip for now
-        }
-
-        self.consume(&TokenKind::RightBrace, "Expected '}' after protocol body")?;
-
-        Ok(Statement::Protocol { name, steps })
-    }
-
     fn statement(&mut self) -> Result<Statement> {
         if self.match_token(&[TokenKind::Return]) {
-            let value = if self.check(&TokenKind::Semicolon) || self.check(&TokenKind::RightBrace) {
+            let return_line = self.previous().map(|t| t.line).unwrap_or(0);
+            let next_is_new_line = self.peek().map(|t| t.line != return_line).unwrap_or(true);
+            let value = if next_is_new_line
+                || self.check(&TokenKind::RightBrace)
+                || self.check(&TokenKind::Semicolon)
+            {
                 None
             } else {
                 Some(self.expression()?)
@@ -802,7 +824,18 @@ impl Parser {
     }
 
     fn for_in_statement(&mut self) -> Result<Statement> {
-        let variable = self.consume_identifier("Expected variable name after 'for'")?;
+        let (variable, pattern) = if self.check(&TokenKind::LeftParen)
+            || self.check(&TokenKind::LeftBracket)
+            || self.check(&TokenKind::LeftBrace)
+        {
+            let pat = self.parse_pattern()?;
+            ("_destructure".to_string(), Some(pat))
+        } else {
+            (
+                self.consume_identifier("Expected variable name after 'for'")?,
+                None,
+            )
+        };
 
         self.consume(&TokenKind::In, "Expected 'in' after for variable")?;
 
@@ -813,6 +846,7 @@ impl Parser {
 
         Ok(Statement::ForIn {
             variable,
+            pattern,
             iterable,
             body,
         })
@@ -1156,6 +1190,8 @@ impl Parser {
                     object: Box::new(expr),
                     index: Box::new(index),
                 };
+            } else if self.match_token(&[TokenKind::Question]) {
+                expr = Expression::Try(Box::new(expr));
             } else {
                 break;
             }
@@ -1499,6 +1535,46 @@ impl Parser {
         // Match expression
         if self.match_token(&[TokenKind::Match]) {
             return self.match_expression();
+        }
+
+        // If expression: if cond { expr } else { expr }
+        if self.match_token(&[TokenKind::If]) {
+            let condition = self.expression()?;
+            self.consume(&TokenKind::LeftBrace, "Expected '{' after if condition")?;
+            let then_branch = self.expression()?;
+            self.consume(&TokenKind::RightBrace, "Expected '}' after then branch")?;
+            self.consume(&TokenKind::Else, "If-expressions require an else branch")?;
+            let else_branch = if self.check(&TokenKind::If) {
+                // else if — primary() will match If and recurse
+                self.primary()?
+            } else {
+                self.consume(&TokenKind::LeftBrace, "Expected '{' after else")?;
+                let expr = self.expression()?;
+                self.consume(&TokenKind::RightBrace, "Expected '}' after else branch")?;
+                expr
+            };
+            return Ok(Expression::IfExpr {
+                condition: Box::new(condition),
+                then_branch: Box::new(then_branch),
+                else_branch: Box::new(else_branch),
+            });
+        }
+
+        // Anonymous function / closure: fn(params) { body }
+        if self.match_token(&[TokenKind::Fn]) {
+            self.consume(&TokenKind::LeftParen, "Expected '(' after 'fn'")?;
+            let params = self.parse_parameters()?;
+            self.consume(&TokenKind::RightParen, "Expected ')' after parameters")?;
+
+            // Optional return type annotation: fn(x: Int) -> String { ... }
+            if self.match_token(&[TokenKind::Arrow]) {
+                let _return_type = self.parse_type()?;
+            }
+
+            self.consume(&TokenKind::LeftBrace, "Expected '{' before closure body")?;
+            let body = self.block()?;
+
+            return Ok(Expression::Lambda { params, body });
         }
 
         // Provide a helpful error message showing what token was found
@@ -1873,11 +1949,51 @@ impl Parser {
             }
         }
 
-        // Array pattern: [pat1, pat2, ...]
+        // Map pattern: { name, age } or { name: n, age: a } or { name, ...rest }
+        if self.match_token(&[TokenKind::LeftBrace]) {
+            let mut fields = Vec::new();
+            let mut rest = None;
+            if !self.check(&TokenKind::RightBrace) {
+                loop {
+                    // Check for rest pattern: ...name
+                    if self.match_token(&[TokenKind::DotDotDot]) {
+                        let rest_name =
+                            self.consume_identifier("Expected identifier after '...'")?;
+                        rest = Some(rest_name);
+                        self.match_token(&[TokenKind::Comma]); // optional trailing comma
+                        break;
+                    }
+                    let field_name =
+                        self.consume_identifier("Expected field name in map pattern")?;
+                    let field_pattern = if self.match_token(&[TokenKind::Colon]) {
+                        self.parse_pattern()?
+                    } else {
+                        Pattern::Variable(field_name.clone())
+                    };
+                    fields.push((field_name, field_pattern));
+                    if !self.match_token(&[TokenKind::Comma]) {
+                        break;
+                    }
+                }
+            }
+            self.consume(&TokenKind::RightBrace, "Expected '}' after map pattern")?;
+            return Ok(Pattern::Map { fields, rest });
+        }
+
+        // Array pattern: [pat1, pat2, ...] or [first, ...rest]
         if self.match_token(&[TokenKind::LeftBracket]) {
             let mut patterns = Vec::new();
+            let mut rest = None;
             if !self.check(&TokenKind::RightBracket) {
                 loop {
+                    // Check for rest pattern: ...name
+                    if self.match_token(&[TokenKind::DotDotDot]) {
+                        let rest_name =
+                            self.consume_identifier("Expected identifier after '...'")?;
+                        rest = Some(rest_name);
+                        self.match_token(&[TokenKind::Comma]); // optional trailing comma
+                        break;
+                    }
                     patterns.push(self.parse_pattern()?);
                     if !self.match_token(&[TokenKind::Comma]) {
                         break;
@@ -1885,7 +2001,10 @@ impl Parser {
                 }
             }
             self.consume(&TokenKind::RightBracket, "Expected ']' after array pattern")?;
-            return Ok(Pattern::Array(patterns));
+            return Ok(Pattern::Array {
+                elements: patterns,
+                rest,
+            });
         }
 
         // Tuple pattern: (pat1, pat2, ...)

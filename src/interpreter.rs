@@ -2669,11 +2669,72 @@ impl Interpreter {
                 type_annotation: _,
                 value,
                 pattern,
+                otherwise,
             } => {
                 let val = if let Some(expr) = value {
                     self.eval_expression(expr)?
                 } else {
                     Value::Unit
+                };
+
+                // Propagate early returns from ? operator
+                if let Value::Return(_) = &val {
+                    return Ok(val);
+                }
+
+                // Handle otherwise clause for Result/Option unwrapping
+                let val = if let Some(otherwise_block) = otherwise {
+                    match &val {
+                        Value::EnumValue {
+                            enum_name,
+                            variant,
+                            values,
+                        } => match (enum_name.as_str(), variant.as_str()) {
+                            ("Result", "Ok") | ("Option", "Some") => {
+                                // Unwrap the inner value
+                                values.first().cloned().unwrap_or(Value::Unit)
+                            }
+                            ("Result", "Err") | ("Option", "None") => {
+                                // Extract error value for binding as `err`
+                                let err_val = values.first().cloned().unwrap_or(Value::Unit);
+
+                                // Create scope with `err` bound, execute otherwise block
+                                let previous = Rc::clone(&self.environment);
+                                self.environment = Rc::new(RefCell::new(Environment::with_parent(
+                                    Rc::clone(&previous),
+                                )));
+                                self.environment
+                                    .borrow_mut()
+                                    .define("err".to_string(), err_val);
+
+                                let mut result = Value::Unit;
+                                for s in &otherwise_block.statements {
+                                    result = self.eval_statement(s)?;
+                                    match result {
+                                        Value::Return(_) | Value::Break | Value::Continue => break,
+                                        _ => {}
+                                    }
+                                }
+                                self.environment = previous;
+
+                                // Otherwise block must diverge
+                                match result {
+                                    Value::Return(_) | Value::Break | Value::Continue => {
+                                        return Ok(result)
+                                    }
+                                    _ => {
+                                        return Err(IntentError::RuntimeError(
+                                            "otherwise block must diverge (use return, break, or continue)".to_string(),
+                                        ))
+                                    }
+                                }
+                            }
+                            _ => val, // Not a Result/Option variant, bind as-is
+                        },
+                        _ => val, // Not an EnumValue, bind as-is (gradual typing)
+                    }
+                } else {
+                    val
                 };
 
                 // Handle pattern destructuring
@@ -2872,11 +2933,6 @@ impl Interpreter {
                 Ok(Value::Unit)
             }
 
-            Statement::Protocol { .. } => {
-                // TODO: Implement protocol support
-                Ok(Value::Unit)
-            }
-
             Statement::Intent {
                 description: _,
                 target,
@@ -2931,6 +2987,7 @@ impl Interpreter {
 
             Statement::ForIn {
                 variable,
+                pattern,
                 iterable,
                 body,
             } => {
@@ -2964,8 +3021,12 @@ impl Interpreter {
                     self.environment =
                         Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
 
-                    // Bind the loop variable
-                    self.environment.borrow_mut().define(variable.clone(), item);
+                    // Bind the loop variable (with optional pattern destructuring)
+                    if let Some(pat) = pattern {
+                        self.bind_pattern(pat, &item)?;
+                    } else {
+                        self.environment.borrow_mut().define(variable.clone(), item);
+                    }
 
                     // Execute the loop body
                     result = self.eval_block(body)?;
@@ -3708,9 +3769,7 @@ impl Interpreter {
             Expression::Lambda { params, body } => Ok(Value::Function {
                 name: "<lambda>".to_string(),
                 params: params.clone(),
-                body: Block {
-                    statements: vec![Statement::Return(Some(body.as_ref().clone()))],
-                },
+                body: body.clone(),
                 closure: Rc::clone(&self.environment),
                 contract: None,
                 type_params: vec![],
@@ -3849,11 +3908,32 @@ impl Interpreter {
                 ))
             }
 
-            Expression::Await(_) | Expression::Try(_) => {
-                // TODO: Implement async/try
+            Expression::Await(_) => {
+                // TODO: Implement async
                 Err(IntentError::RuntimeError(
-                    "Async/Try not yet implemented".to_string(),
+                    "Async/Await not yet implemented".to_string(),
                 ))
+            }
+
+            Expression::Try(inner) => {
+                let value = self.eval_expression(inner)?;
+                match &value {
+                    Value::EnumValue {
+                        enum_name,
+                        variant,
+                        values,
+                    } => match (enum_name.as_str(), variant.as_str()) {
+                        ("Result", "Ok") | ("Option", "Some") => {
+                            Ok(values.first().cloned().unwrap_or(Value::Unit))
+                        }
+                        ("Result", "Err") | ("Option", "None") => {
+                            // Early-return the original value (Err/None) from the enclosing function
+                            Ok(Value::Return(Box::new(value)))
+                        }
+                        _ => Ok(value), // Not a Result/Option variant, pass through
+                    },
+                    _ => Ok(value), // Not an EnumValue at all, pass through (gradual typing)
+                }
             }
 
             Expression::MapLiteral(pairs) => {
@@ -4482,18 +4562,29 @@ impl Interpreter {
                 Ok(None)
             }
 
-            Pattern::Array(patterns) => {
+            Pattern::Array { elements, rest } => {
                 if let Value::Array(values) = value {
-                    if values.len() != patterns.len() {
+                    // With rest: need at least elements.len() items
+                    // Without rest: need exactly elements.len() items
+                    if rest.is_some() {
+                        if values.len() < elements.len() {
+                            return Ok(None);
+                        }
+                    } else if values.len() != elements.len() {
                         return Ok(None);
                     }
                     let mut bindings = vec![];
-                    for (pat, val) in patterns.iter().zip(values.iter()) {
+                    for (pat, val) in elements.iter().zip(values.iter()) {
                         if let Some(b) = self.match_pattern(pat, val)? {
                             bindings.extend(b);
                         } else {
                             return Ok(None);
                         }
+                    }
+                    // Bind rest variable to remaining elements
+                    if let Some(rest_name) = rest {
+                        let remaining: Vec<Value> = values[elements.len()..].to_vec();
+                        bindings.push((rest_name.clone(), Value::Array(remaining)));
                     }
                     return Ok(Some(bindings));
                 }
@@ -4524,6 +4615,43 @@ impl Interpreter {
                     return Ok(Some(bindings));
                 }
                 Ok(None)
+            }
+
+            Pattern::Map { fields, rest } => {
+                // Match against both Map and Struct values
+                let field_map: Option<&std::collections::HashMap<String, Value>> = match value {
+                    Value::Map(m) => Some(m),
+                    Value::Struct { fields: sf, .. } => Some(sf),
+                    _ => None,
+                };
+                if let Some(map) = field_map {
+                    let mut bindings = vec![];
+                    let mut matched_keys = std::collections::HashSet::new();
+                    for (key, pat) in fields {
+                        if let Some(val) = map.get(key) {
+                            if let Some(b) = self.match_pattern(pat, val)? {
+                                bindings.extend(b);
+                                matched_keys.insert(key.clone());
+                            } else {
+                                return Ok(None);
+                            }
+                        } else {
+                            return Ok(None);
+                        }
+                    }
+                    // Bind rest variable to remaining key-value pairs
+                    if let Some(rest_name) = rest {
+                        let remaining: HashMap<String, Value> = map
+                            .iter()
+                            .filter(|(k, _)| !matched_keys.contains(*k))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        bindings.push((rest_name.clone(), Value::Map(remaining)));
+                    }
+                    Ok(Some(bindings))
+                } else {
+                    Ok(None)
+                }
             }
 
             Pattern::Variant {
@@ -4647,10 +4775,19 @@ impl Interpreter {
                 contract,
                 type_params: _, // Generic type params - for future type checking
             } => {
-                if args.len() != params.len() {
+                // Count required params (those without defaults)
+                let required_count = params.iter().filter(|p| p.default.is_none()).count();
+                let total_count = params.len();
+
+                if args.len() < required_count || args.len() > total_count {
+                    let expected = if required_count == total_count {
+                        format!("{}", total_count)
+                    } else {
+                        format!("{} to {}", required_count, total_count)
+                    };
                     return Err(IntentError::ArityMismatch {
                         name: name.clone(),
-                        expected: params.len(),
+                        expected,
                         got: args.len(),
                     });
                 }
@@ -4658,16 +4795,24 @@ impl Interpreter {
                 // Create new environment with closure as parent
                 let func_env = Rc::new(RefCell::new(Environment::with_parent(closure)));
 
-                // Bind parameters
-                for (param, arg) in params.iter().zip(args.iter()) {
-                    func_env
-                        .borrow_mut()
-                        .define(param.name.clone(), arg.clone());
-                }
-
-                // Save current environment and switch to function's environment
+                // Bind parameters: provided args first, then evaluate defaults
+                // We need to evaluate defaults in func_env so they can reference earlier params
                 let previous = Rc::clone(&self.environment);
                 self.environment = Rc::clone(&func_env);
+
+                for (i, param) in params.iter().enumerate() {
+                    let value = if i < args.len() {
+                        args[i].clone()
+                    } else if let Some(ref default_expr) = param.default {
+                        self.eval_expression(default_expr)?
+                    } else {
+                        // Should not reach here due to arity check above
+                        Value::Unit
+                    };
+                    func_env.borrow_mut().define(param.name.clone(), value);
+                }
+
+                // Environment is already set to func_env for contract checking and body execution
 
                 // Track deferred statements for this function call
                 let deferred_count_before = self.deferred_statements.len();
@@ -4760,7 +4905,7 @@ impl Interpreter {
                 if args.len() != arity && arity != 0 {
                     return Err(IntentError::ArityMismatch {
                         name: fn_name.clone(),
-                        expected: arity,
+                        expected: format!("{}", arity),
                         got: args.len(),
                     });
                 }
@@ -4775,7 +4920,7 @@ impl Interpreter {
                 if args.len() != arity {
                     return Err(IntentError::ArityMismatch {
                         name: format!("{}::{}", enum_name, variant),
-                        expected: arity,
+                        expected: format!("{}", arity),
                         got: args.len(),
                     });
                 }
@@ -5506,7 +5651,61 @@ impl Interpreter {
         Ok(())
     }
 
+    fn values_equal(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::String(a), Value::String(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Unit, Value::Unit) => true,
+            (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
+            (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
+            (Value::Array(a), Value::Array(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(x, y)| Self::values_equal(x, y))
+            }
+            (
+                Value::EnumValue {
+                    enum_name: en1,
+                    variant: v1,
+                    values: vals1,
+                },
+                Value::EnumValue {
+                    enum_name: en2,
+                    variant: v2,
+                    values: vals2,
+                },
+            ) => {
+                en1 == en2
+                    && v1 == v2
+                    && vals1.len() == vals2.len()
+                    && vals1
+                        .iter()
+                        .zip(vals2.iter())
+                        .all(|(x, y)| Self::values_equal(x, y))
+            }
+            _ => false, // Different types → not equal
+        }
+    }
+
     fn eval_binary_op(&self, op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value> {
+        // Handle EnumValue equality (None/Some/Ok/Err comparisons)
+        if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            let lhs_is_enum = matches!(&lhs, Value::EnumValue { .. });
+            let rhs_is_enum = matches!(&rhs, Value::EnumValue { .. });
+
+            if lhs_is_enum || rhs_is_enum {
+                let equal = Self::values_equal(&lhs, &rhs);
+                return match op {
+                    BinaryOp::Eq => Ok(Value::Bool(equal)),
+                    BinaryOp::Ne => Ok(Value::Bool(!equal)),
+                    _ => unreachable!(),
+                };
+            }
+        }
+
         match (op, lhs, rhs) {
             // Integer arithmetic
             (BinaryOp::Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),

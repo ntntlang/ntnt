@@ -5,48 +5,48 @@
 // Option Type
 // ===========================================
 
-print("=== Option Type ===");
+print("=== Option Type ===")
 
-let some_value = Some(42);
-let no_value = None;
+let some_value = Some(42)
+let no_value = None
 
-print("some_value is_some: ");
-print(is_some(some_value));
+print("some_value is_some: ")
+print(is_some(some_value))
 
-print("no_value is_none: ");
-print(is_none(no_value));
+print("no_value is_none: ")
+print(is_none(no_value))
 
-print("unwrap some_value: ");
-print(unwrap(some_value));
+print("unwrap some_value: ")
+print(unwrap(some_value))
 
-print("unwrap_or no_value with default 0: ");
-print(unwrap_or(no_value, 0));
+print("unwrap_or no_value with default 0: ")
+print(unwrap_or(no_value, 0))
 
 // ===========================================
 // Result Type
 // ===========================================
 
-print("");
-print("=== Result Type ===");
+print("")
+print("=== Result Type ===")
 
-let success = Ok(100);
-let failure = Err("something went wrong");
+let success = Ok(100)
+let failure = Err("something went wrong")
 
-print("success is_ok: ");
-print(is_ok(success));
+print("success is_ok: ")
+print(is_ok(success))
 
-print("failure is_err: ");
-print(is_err(failure));
+print("failure is_err: ")
+print(is_err(failure))
 
-print("unwrap success: ");
-print(unwrap(success));
+print("unwrap success: ")
+print(unwrap(success))
 
 // ===========================================
 // Match Expressions with Option
 // ===========================================
 
-print("");
-print("=== Match with Option ===");
+print("")
+print("=== Match with Option ===")
 
 fn describe_option(opt) {
     match opt {
@@ -55,18 +55,18 @@ fn describe_option(opt) {
     }
 }
 
-print("describe_option(Some(21)): ");
-print(describe_option(Some(21)));
+print("describe_option(Some(21)): ")
+print(describe_option(Some(21)))
 
-print("describe_option(None): ");
-print(describe_option(None));
+print("describe_option(None): ")
+print(describe_option(None))
 
 // ===========================================
 // Match Expressions with Result
 // ===========================================
 
-print("");
-print("=== Match with Result ===");
+print("")
+print("=== Match with Result ===")
 
 fn handle_result(r) {
     match r {
@@ -75,23 +75,23 @@ fn handle_result(r) {
     }
 }
 
-print("handle_result(Ok(99)): ");
-print(handle_result(Ok(99)));
+print("handle_result(Ok(99)): ")
+print(handle_result(Ok(99)))
 
-print("handle_result(Err(\"error\")): ");
-print(handle_result(Err("error")));
+print("handle_result(Err(\"error\")): ")
+print(handle_result(Err("error")))
 
 // ===========================================
 // Match on Literals
 // ===========================================
 
-print("");
-print("=== Match on Literals ===");
+print("")
+print("=== Match on Literals ===")
 
 fn day_name(n) {
     match n {
         1 => "Monday",
-        2 => "Tuesday", 
+        2 => "Tuesday",
         3 => "Wednesday",
         4 => "Thursday",
         5 => "Friday",
@@ -101,21 +101,21 @@ fn day_name(n) {
     }
 }
 
-print("day_name(3): ");
-print(day_name(3));
+print("day_name(3): ")
+print(day_name(3))
 
-print("day_name(7): ");
-print(day_name(7));
+print("day_name(7): ")
+print(day_name(7))
 
-print("day_name(10): ");
-print(day_name(10));
+print("day_name(10): ")
+print(day_name(10))
 
 // ===========================================
 // User-Defined Enums
 // ===========================================
 
-print("");
-print("=== User-Defined Enums ===");
+print("")
+print("=== User-Defined Enums ===")
 
 enum Color {
     Red,
@@ -131,16 +131,16 @@ fn color_code(c) {
     }
 }
 
-let my_color = Color::Green;
-print("color_code(Color::Green): ");
-print(color_code(my_color));
+let my_color = Color::Green
+print("color_code(Color::Green): ")
+print(color_code(my_color))
 
 // ===========================================
 // Enums with Data
 // ===========================================
 
-print("");
-print("=== Enums with Data ===");
+print("")
+print("=== Enums with Data ===")
 
 enum Shape {
     Circle(Float),
@@ -154,72 +154,107 @@ fn area(shape) {
     }
 }
 
-let circle = Shape::Circle(5.0);
-let rect = Shape::Rectangle(4.0, 6.0);
+let circle = Shape::Circle(5.0)
+let rect = Shape::Rectangle(4.0, 6.0)
 
-print("area(Circle(5.0)): ");
-print(area(circle));
+print("area(Circle(5.0)): ")
+print(area(circle))
 
-print("area(Rectangle(4.0, 6.0)): ");
-print(area(rect));
+print("area(Rectangle(4.0, 6.0)): ")
+print(area(rect))
 
 // ===========================================
 // Safe Division with Option
 // ===========================================
 
-print("");
-print("=== Safe Division ===");
+print("")
+print("=== Safe Division ===")
 
 fn safe_divide(a, b) {
     if b == 0 {
-        return None;
+        return None
     }
-    return Some(a / b);
+    return Some(a / b)
 }
 
 fn divide_and_describe(a, b) {
-    let result = safe_divide(a, b);
+    let result = safe_divide(a, b)
     match result {
         Some(v) => v,
         None => -999
     }
 }
 
-print("divide_and_describe(10, 2): ");
-print(divide_and_describe(10, 2));
+print("divide_and_describe(10, 2): ")
+print(divide_and_describe(10, 2))
 
-print("divide_and_describe(10, 0): ");
-print(divide_and_describe(10, 0));
+print("divide_and_describe(10, 0): ")
+print(divide_and_describe(10, 0))
 
 // ===========================================
 // Generic Functions
 // ===========================================
 
-print("");
-print("=== Generic Functions ===");
+print("")
+print("=== Generic Functions ===")
 
 fn identity<T>(x: T) -> T {
-    return x;
+    return x
 }
 
-print("identity(42): ");
-print(identity(42));
+print("identity(42): ")
+print(identity(42))
 
-print("identity(\"hello\"): ");
-print(identity("hello"));
+print("identity(\"hello\"): ")
+print(identity("hello"))
 
 // ===========================================
 // Type Aliases
 // ===========================================
 
-print("");
-print("=== Type Aliases ===");
+print("")
+print("=== Type Aliases ===")
 
-type UserId = Int;
+type UserId = Int
 
-let user_id: UserId = 12345;
-print("user_id: ");
-print(user_id);
+let user_id: UserId = 12345
+print("user_id: ")
+print(user_id)
 
-print("");
-print("=== All Pattern Matching Examples Complete! ===");
+// ===========================================
+// Map Destructuring in Match
+// ===========================================
+
+print("")
+print("=== Map Destructuring ===")
+
+let person = map { "name": "Alice", "age": 30, "city": "Portland" }
+
+// Destructure in let binding
+let { name, age } = person
+print("Name: " + name + ", Age: " + str(age))
+
+// Destructure with rename
+let { city: hometown } = person
+print("Hometown: " + hometown)
+
+// Destructure in match
+fn describe(data) {
+    match data {
+        { name, age } => "name={name}, age={age}",
+        _ => "unknown"
+    }
+}
+print("describe: " + describe(person))
+
+// Rest pattern: extract one field, collect the rest
+let { name: n, ...rest } = person
+print("Extracted: " + n + ", Rest: " + str(rest))
+
+// Array destructuring with rest
+let items = [10, 20, 30, 40, 50]
+let [first, second, ...tail] = items
+print("First: " + str(first) + ", Second: " + str(second) + ", Tail length: " + str(len(tail)))
+
+print("")
+print("=== All Pattern Matching Examples Complete! ===")

@@ -929,7 +929,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param pattern A regular expression pattern to match against
     // @param repl The replacement string for each match
     // Replaces all regex matches with replacement.
-    // @see_also matches_pattern, find_pattern, split_pattern, replace
+    // @see_also matches_pattern, find_pattern, split_pattern, capture_pattern, replace
     // @since v0.2.0
     // @tags #pure
     // @example replace_pattern("a1b2", "\\d", "X") => "aXbX" ~ "Replace digits with X"
@@ -995,7 +995,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param s The string to search within
     // @param pattern A regular expression pattern to find
     // Returns first regex match or None.
-    // @see_also find_all_pattern, matches_pattern
+    // @see_also find_all_pattern, matches_pattern, capture_pattern
     // @since v0.2.0
     // @tags #pure
     // @example find_pattern("ab12cd", "\\d+") => Some("12") ~ "Find first digit sequence"
@@ -1037,7 +1037,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param s The string to search within
     // @param pattern A regular expression pattern to find all occurrences of
     // Returns all regex matches.
-    // @see_also find_pattern, matches_pattern
+    // @see_also find_pattern, matches_pattern, capture_all_pattern
     // @since v0.2.0
     // @tags #pure
     // @example find_all_pattern("a1b2", "\\d") => ["1", "2"] ~ "Find all digits"
@@ -1098,6 +1098,177 @@ pub fn init() -> HashMap<String, Value> {
                 },
                 _ => Err(IntentError::TypeError(
                     "split_pattern() requires two strings".to_string(),
+                )),
+            },
+        },
+    );
+
+    // @ntnt capture_pattern
+    // @module std/string
+    // @signature capture_pattern(s: String, pattern: String) -> Option<Array<String>>
+    // @param s The string to search within
+    // @param pattern A regular expression pattern with capture groups
+    // Returns first match with capture groups, or None if no match.
+    //
+    // Returns an array where index 0 is the full match and subsequent indices
+    // are the capture groups. Unmatched optional groups produce empty strings.
+    // @returns Option containing array of [full_match, group1, group2, ...] or None
+    // @see_also capture_all_pattern, capture_named_pattern, find_pattern
+    // @since v0.3.10
+    // @tags #pure
+    // @example capture_pattern("2024-01-15", r"(\d{4})-(\d{2})-(\d{2})") => Some(["2024-01-15", "2024", "01", "15"]) ~ "Extract date parts"
+    // @example capture_pattern("no match", r"(\d+)") => None ~ "Returns None when no match"
+    // @error RuntimeError ~ "Invalid regex pattern" fix: "Check regex syntax"
+    module.insert(
+        "capture_pattern".to_string(),
+        Value::NativeFunction {
+            name: "capture_pattern".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
+                    Ok(re) => match re.captures(s) {
+                        Some(caps) => {
+                            let groups: Vec<Value> = caps
+                                .iter()
+                                .map(|m| {
+                                    Value::String(
+                                        m.map(|m| m.as_str().to_string()).unwrap_or_default(),
+                                    )
+                                })
+                                .collect();
+                            Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "Some".to_string(),
+                                values: vec![Value::Array(groups)],
+                            })
+                        }
+                        None => Ok(Value::EnumValue {
+                            enum_name: "Option".to_string(),
+                            variant: "None".to_string(),
+                            values: vec![],
+                        }),
+                    },
+                    Err(e) => Err(IntentError::RuntimeError(format!(
+                        "Invalid regex pattern: {}",
+                        e
+                    ))),
+                },
+                _ => Err(IntentError::TypeError(
+                    "capture_pattern() requires two strings".to_string(),
+                )),
+            },
+        },
+    );
+
+    // @ntnt capture_all_pattern
+    // @module std/string
+    // @signature capture_all_pattern(s: String, pattern: String) -> Array<Array<String>>
+    // @param s The string to search within
+    // @param pattern A regular expression pattern with capture groups
+    // Returns all matches with capture groups.
+    //
+    // Each inner array has the full match at index 0 followed by capture groups.
+    // Returns an empty array if there are no matches.
+    // @returns Array of arrays, each containing [full_match, group1, group2, ...]
+    // @see_also capture_pattern, capture_named_pattern, find_all_pattern
+    // @since v0.3.10
+    // @tags #pure
+    // @example capture_all_pattern("2024-01 and 2025-02", r"(\d{4})-(\d{2})") => [["2024-01", "2024", "01"], ["2025-02", "2025", "02"]] ~ "Extract multiple date pairs"
+    // @example capture_all_pattern("no match", r"(\d+)") => [] ~ "Returns empty array when no matches"
+    // @error RuntimeError ~ "Invalid regex pattern" fix: "Check regex syntax"
+    module.insert(
+        "capture_all_pattern".to_string(),
+        Value::NativeFunction {
+            name: "capture_all_pattern".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
+                    Ok(re) => {
+                        let all_matches: Vec<Value> = re
+                            .captures_iter(s)
+                            .map(|caps| {
+                                let groups: Vec<Value> = caps
+                                    .iter()
+                                    .map(|m| {
+                                        Value::String(
+                                            m.map(|m| m.as_str().to_string()).unwrap_or_default(),
+                                        )
+                                    })
+                                    .collect();
+                                Value::Array(groups)
+                            })
+                            .collect();
+                        Ok(Value::Array(all_matches))
+                    }
+                    Err(e) => Err(IntentError::RuntimeError(format!(
+                        "Invalid regex pattern: {}",
+                        e
+                    ))),
+                },
+                _ => Err(IntentError::TypeError(
+                    "capture_all_pattern() requires two strings".to_string(),
+                )),
+            },
+        },
+    );
+
+    // @ntnt capture_named_pattern
+    // @module std/string
+    // @signature capture_named_pattern(s: String, pattern: String) -> Option<Map<String, String>>
+    // @param s The string to search within
+    // @param pattern A regular expression pattern with named capture groups using (?P<name>...) syntax
+    // Returns first match with named capture groups as a map, or None if no match.
+    //
+    // Named groups become map keys. Unnamed groups use their numeric index as
+    // a string key ("0" for full match, "1", "2", etc.). Unmatched optional
+    // groups produce empty string values.
+    // @returns Option containing map of group names to matched strings, or None
+    // @see_also capture_pattern, capture_all_pattern, find_pattern
+    // @since v0.3.10
+    // @tags #pure
+    // @example capture_named_pattern("2024-01-15", r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})") => Some({"0": "2024-01-15", "year": "2024", "month": "01", "day": "15"}) ~ "Named groups as map keys"
+    // @example capture_named_pattern("no match", r"(?P<num>\d+)") => None ~ "Returns None when no match"
+    // @error RuntimeError ~ "Invalid regex pattern" fix: "Check regex syntax"
+    module.insert(
+        "capture_named_pattern".to_string(),
+        Value::NativeFunction {
+            name: "capture_named_pattern".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
+                    Ok(re) => match re.captures(s) {
+                        Some(caps) => {
+                            let mut map = std::collections::HashMap::new();
+                            for (i, name) in re.capture_names().enumerate() {
+                                let value = caps
+                                    .get(i)
+                                    .map(|m| m.as_str().to_string())
+                                    .unwrap_or_default();
+                                let key = match name {
+                                    Some(n) => n.to_string(),
+                                    None => i.to_string(),
+                                };
+                                map.insert(key, Value::String(value));
+                            }
+                            Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "Some".to_string(),
+                                values: vec![Value::Map(map)],
+                            })
+                        }
+                        None => Ok(Value::EnumValue {
+                            enum_name: "Option".to_string(),
+                            variant: "None".to_string(),
+                            values: vec![],
+                        }),
+                    },
+                    Err(e) => Err(IntentError::RuntimeError(format!(
+                        "Invalid regex pattern: {}",
+                        e
+                    ))),
+                },
+                _ => Err(IntentError::TypeError(
+                    "capture_named_pattern() requires two strings".to_string(),
                 )),
             },
         },

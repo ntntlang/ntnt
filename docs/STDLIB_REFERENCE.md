@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.3.9
+> Last updated: v0.3.10
 
 ## Table of Contents
 
@@ -1166,6 +1166,7 @@ import { push, pop, first } from "std/collections"
 | [`concat`](#concat) | Concatenates two arrays into a new array. |
 | [`entries`](#entries) | Returns an array of [key, value] pairs from the map. |
 | [`first`](#first) | Returns the first element of an array. |
+| [`get_index`](#getindex) | Gets an element from an array by index with safe access. |
 | [`get_key`](#getkey) | Gets a value from a map by key with safe access. |
 | [`has_key`](#haskey) | Returns true if the map contains the specified key. |
 | [`is_empty`](#isempty) | Returns true if the array or string is empty. |
@@ -1273,6 +1274,44 @@ first([], 0)  // => 0  // Default returned for empty array
 **See also:** `last`, `push`, `pop`, `slice`
 
 *Since v0.1.0*
+
+---
+
+#### `get_index`
+
+```ntnt
+get_index(arr: Array, index: Int, default?: Any) -> Option<Any> | Any
+```
+
+Gets an element from an array by index with safe access.
+
+Without a default, returns Option: Some(value) if the index is valid, None if out of bounds. With a default, returns the element directly or the default value if the index is out of bounds. Supports negative indexing: -1 is the last element, -2 is second-to-last, etc.
+
+**Parameters:**
+
+- `arr` — The source array
+- `index` — The index to access (supports negative indexing)
+- `default` — (optional) Value to return if the index is out of bounds
+
+**Returns:** The element as Option, or the value/default directly
+
+**Examples:**
+
+```ntnt
+get_index([10, 20, 30], 1)  // => Some(20)  // Index found, wrapped in Option
+get_index([10, 20, 30], 5)  // => None  // Out of bounds returns None
+get_index([10, 20, 30], 1, 0)  // => 20  // With default, returns value directly
+get_index([10, 20, 30], 5, 0)  // => 0  // Out of bounds returns default
+get_index([10, 20, 30], -1)  // => Some(30)  // Negative index from end
+```
+
+**Errors:**
+
+- **TypeError**: get_index() requires an array and integer index — *Fix: Pass an array and an integer index*
+
+**See also:** `first`, `last`, `get_key`, `slice`
+
+*Since v0.4.0*
 
 ---
 
@@ -3257,7 +3296,7 @@ parse_json(req: Request | String) -> Result<Map<String, Any>, String>
 
 Parse a request body (or raw string) as JSON.
 
-Accepts either a Request map (extracts the `body` field) or a plain String. Returns a Result enum: `Ok(value)` on success with the parsed data, or `Err(message)` if the JSON is malformed.
+Accepts either a Request map (extracts the `body` field) or a plain String. Returns a Result enum: `Ok(value)` on success with the parsed data, or `Err(message)` if the JSON is malformed. JSON null values become None.
 
 **Parameters:**
 
@@ -3276,6 +3315,10 @@ parse_json("not json")  // => Err("expected ...")  // Returns Err on invalid JSO
 
 - **TypeError**: parse_json() requires a request with body — *Fix: Pass a Request map that contains a body field*
 - **TypeError**: parse_json() requires a request map or body string — *Fix: Pass a Request map or a String*
+
+**Gotchas:**
+
+- JSON null values are parsed as None (not Unit), matching std/json behavior
 
 **See also:** `json`, `parse_form`
 
@@ -3478,7 +3521,7 @@ parse_json(json_str: String) -> Result<Any, String>
 
 Parses a JSON string into a value.
 
-Returns Ok with the parsed value on success, or Err with a descriptive parse error message. Supports all JSON types: objects become Maps, arrays become Arrays, numbers become Int or Float.
+Returns Ok with the parsed value on success, or Err with a descriptive parse error message. Supports all JSON types: objects become Maps, arrays become Arrays, numbers become Int or Float, and null becomes None.
 
 **Parameters:**
 
@@ -3490,11 +3533,16 @@ Returns Ok with the parsed value on success, or Err with a descriptive parse err
 
 ```ntnt
 parse_json("{\"key\": \"value\"}")  // => Ok(map { "key": "value" })  // Parse JSON object
+parse_json("null")  // => Ok(None)  // JSON null becomes None
 ```
 
 **Errors:**
 
 - **TypeError**: parse_json() requires a JSON string — *Fix: Pass a string argument*
+
+**Gotchas:**
+
+- JSON null is parsed as None (not Unit), enabling round-trip with stringify(None) → "null"
 
 **See also:** `stringify`, `stringify_pretty`
 
@@ -3510,7 +3558,7 @@ stringify(value: Any) -> String
 
 Converts a value to a compact JSON string.
 
-Maps, arrays, strings, numbers, booleans, and null are serialized to their JSON equivalents. Structs are serialized as JSON objects.
+Maps, arrays, strings, numbers, booleans, and Unit are serialized to their JSON equivalents. Structs are serialized as JSON objects. Option values are unwrapped: None becomes null, Some(v) becomes v.
 
 **Parameters:**
 
@@ -3522,7 +3570,13 @@ Maps, arrays, strings, numbers, booleans, and null are serialized to their JSON 
 
 ```ntnt
 stringify(map { "key": "value" })  // => "{\"key\":\"value\"}"  // Compact JSON
+stringify(None)  // => "null"  // None serializes to null
+stringify(Some(42))  // => "42"  // Some unwraps to inner value
 ```
+
+**Gotchas:**
+
+- Both None and Unit serialize to JSON null
 
 **See also:** `stringify_pretty`, `parse_json`
 
@@ -3537,6 +3591,8 @@ stringify_pretty(value: Any) -> String
 ```
 
 Converts a value to a pretty-printed JSON string with indentation.
+
+Behaves identically to stringify() but formats the output with newlines and 2-space indentation for readability. None becomes null, Some(v) becomes v.
 
 **Parameters:**
 
@@ -4896,6 +4952,10 @@ query(db, "SELECT * FROM users WHERE active = $1", [true])  // => Result::Ok([..
 
 - **TypeError**: query() requires (connection, sql_string, params_array) — *Fix: Provide (Connection, String, Array) arguments*
 
+**Gotchas:**
+
+- SQL NULL column values are returned as None, not Unit
+
 **See also:** `query_one`, `execute`, `connect`
 
 *Since v0.2.0*
@@ -4905,12 +4965,12 @@ query(db, "SELECT * FROM users WHERE active = $1", [true])  // => Result::Ok([..
 #### `query_one`
 
 ```ntnt
-query_one(conn: Connection, sql: String, params: Array | Unit) -> Result<Map | Unit, String>
+query_one(conn: Connection, sql: String, params: Array | Unit) -> Result<Map | None, String>
 ```
 
 Execute a SQL query and return at most one row.
 
-Behaves like query() but uses PostgreSQL's query_opt internally to return either a single row Map or Unit (null) when no row matches. Ideal for lookups by primary key or unique column.
+Behaves like query() but uses PostgreSQL's query_opt internally to return either a single row Map or None when no row matches. Ideal for lookups by primary key or unique column.
 
 **Parameters:**
 
@@ -4918,17 +4978,22 @@ Behaves like query() but uses PostgreSQL's query_opt internally to return either
 - `sql` — The SQL query string with optional $N parameter placeholders
 - `params` — An Array of bind parameter values, or Unit for no parameters
 
-**Returns:** Result::Ok containing a row Map or Unit if no match, or Result::Err with a description
+**Returns:** Result::Ok containing a row Map or None if no match, or Result::Err with a description
 
 **Examples:**
 
 ```ntnt
 query_one(db, "SELECT * FROM users WHERE id = $1", [1])  // => Result::Ok({...})  // Fetch one row by ID
+query_one(db, "SELECT * FROM users WHERE id = $1", [999])  // => Result::Ok(None)  // No matching row
 ```
 
 **Errors:**
 
 - **TypeError**: query_one() requires (connection, sql_string, params_array) — *Fix: Provide (Connection, String, Array) arguments*
+
+**Gotchas:**
+
+- SQL NULL column values are returned as None, not Unit
 
 **See also:** `query`, `execute`, `connect`
 
@@ -5190,6 +5255,10 @@ query(db, "SELECT * FROM users WHERE id = ?", [1])  // => Result::Ok([...])  // 
 - **RuntimeError**: Query preparation failed: ... — *Fix: Check SQL syntax and table/column names*
 - **RuntimeError**: Failed to lock connection: ... — *Fix: Ensure connection is not used concurrently in conflicting ways*
 
+**Gotchas:**
+
+- SQL NULL column values are returned as None, not Unit
+
 **See also:** `query_one`, `execute`, `connect`
 
 *Since v0.2.0*
@@ -5199,12 +5268,12 @@ query(db, "SELECT * FROM users WHERE id = ?", [1])  // => Result::Ok([...])  // 
 #### `query_one`
 
 ```ntnt
-query_one(conn: Connection, sql: String, params: Array) -> Result<Map | Unit, String>
+query_one(conn: Connection, sql: String, params: Array) -> Result<Map | None, String>
 ```
 
 Execute a SELECT query and return a single row.
 
-Runs a parameterized SQL query expecting at most one result row. Returns the row as a map if found, or Unit if no rows match. Useful for lookups by primary key or unique constraint.
+Runs a parameterized SQL query expecting at most one result row. Returns the row as a map if found, or None if no rows match. Useful for lookups by primary key or unique constraint.
 
 **Parameters:**
 
@@ -5212,13 +5281,13 @@ Runs a parameterized SQL query expecting at most one result row. Returns the row
 - `sql` — SQL query string with optional `?` placeholders
 - `params` — Array of parameter values to bind, or unit for no parameters
 
-**Returns:** Result containing a row Map if found, Unit if no match, or an error string on failure
+**Returns:** Result containing a row Map if found, None if no match, or an error string on failure
 
 **Examples:**
 
 ```ntnt
 query_one(db, "SELECT * FROM users WHERE id = ?", [1])  // => Result::Ok({...})  // Fetch single row
-query_one(db, "SELECT * FROM users WHERE id = ?", [999])  // => Result::Ok(unit)  // No matching row
+query_one(db, "SELECT * FROM users WHERE id = ?", [999])  // => Result::Ok(None)  // No matching row
 ```
 
 **Errors:**
@@ -5226,6 +5295,10 @@ query_one(db, "SELECT * FROM users WHERE id = ?", [999])  // => Result::Ok(unit)
 - **TypeError**: query_one() requires (connection, sql_string, params_array) — *Fix: Pass (connection, sql_string, params_array)*
 - **RuntimeError**: Query preparation failed: ... — *Fix: Check SQL syntax and table/column names*
 - **RuntimeError**: Failed to lock connection: ... — *Fix: Ensure connection is not used concurrently in conflicting ways*
+
+**Gotchas:**
+
+- SQL NULL column values are returned as None, not Unit
 
 **See also:** `query`, `execute`, `connect`
 
@@ -5280,6 +5353,9 @@ import { split, join, concat } from "std/string"
 | Function | Description |
 |----------|-------------|
 | [`capitalize`](#capitalize) | Capitalizes the first character, lowercases the rest. |
+| [`capture_all_pattern`](#captureallpattern) | Returns all matches with capture groups. |
+| [`capture_named_pattern`](#capturenamedpattern) | Returns first match with named capture groups as a map, or None if no match. |
+| [`capture_pattern`](#capturepattern) | Returns first match with capture groups, or None if no match. |
 | [`center`](#center) | Centers string with padding on both sides. |
 | [`char_at`](#charat) | Returns character at index. |
 | [`chars`](#chars) | Splits string into array of characters. |
@@ -5358,6 +5434,108 @@ capitalize("hello")  // => "Hello"  // Capitalize first letter
 **See also:** `title`, `to_upper`
 
 *Since v0.1.0*
+
+---
+
+#### `capture_all_pattern`
+
+```ntnt
+capture_all_pattern(s: String, pattern: String) -> Array<Array<String>>
+```
+
+Returns all matches with capture groups.
+
+Each inner array has the full match at index 0 followed by capture groups. Returns an empty array if there are no matches.
+
+**Parameters:**
+
+- `s` — The string to search within
+- `pattern` — A regular expression pattern with capture groups
+
+**Returns:** Array of arrays, each containing [full_match, group1, group2, ...]
+
+**Examples:**
+
+```ntnt
+capture_all_pattern("2024-01 and 2025-02", r"(\d{4})-(\d{2})")  // => [["2024-01", "2024", "01"], ["2025-02", "2025", "02"]]  // Extract multiple date pairs
+capture_all_pattern("no match", r"(\d+)")  // => []  // Returns empty array when no matches
+```
+
+**Errors:**
+
+- **RuntimeError**: Invalid regex pattern — *Fix: Check regex syntax*
+
+**See also:** `capture_pattern`, `capture_named_pattern`, `find_all_pattern`
+
+*Since v0.3.10*
+
+---
+
+#### `capture_named_pattern`
+
+```ntnt
+capture_named_pattern(s: String, pattern: String) -> Option<Map<String, String>>
+```
+
+Returns first match with named capture groups as a map, or None if no match.
+
+Named groups become map keys. Unnamed groups use their numeric index as a string key ("0" for full match, "1", "2", etc.). Unmatched optional groups produce empty string values.
+
+**Parameters:**
+
+- `s` — The string to search within
+- `pattern` — A regular expression pattern with named capture groups using (?P<name>...) syntax
+
+**Returns:** Option containing map of group names to matched strings, or None
+
+**Examples:**
+
+```ntnt
+capture_named_pattern("2024-01-15", r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})")  // => Some({"0": "2024-01-15", "year": "2024", "month": "01", "day": "15"})  // Named groups as map keys
+capture_named_pattern("no match", r"(?P<num>\d+)")  // => None  // Returns None when no match
+```
+
+**Errors:**
+
+- **RuntimeError**: Invalid regex pattern — *Fix: Check regex syntax*
+
+**See also:** `capture_pattern`, `capture_all_pattern`, `find_pattern`
+
+*Since v0.3.10*
+
+---
+
+#### `capture_pattern`
+
+```ntnt
+capture_pattern(s: String, pattern: String) -> Option<Array<String>>
+```
+
+Returns first match with capture groups, or None if no match.
+
+Returns an array where index 0 is the full match and subsequent indices are the capture groups. Unmatched optional groups produce empty strings.
+
+**Parameters:**
+
+- `s` — The string to search within
+- `pattern` — A regular expression pattern with capture groups
+
+**Returns:** Option containing array of [full_match, group1, group2, ...] or None
+
+**Examples:**
+
+```ntnt
+capture_pattern("2024-01-15", r"(\d{4})-(\d{2})-(\d{2})")  // => Some(["2024-01-15", "2024", "01", "15"])  // Extract date parts
+capture_pattern("no match", r"(\d+)")  // => None  // Returns None when no match
+```
+
+**Errors:**
+
+- **RuntimeError**: Invalid regex pattern — *Fix: Check regex syntax*
+
+**See also:** `capture_all_pattern`, `capture_named_pattern`, `find_pattern`
+
+*Since v0.3.10*
 
 ---
 
@@ -5565,7 +5743,7 @@ find_all_pattern("a1b2", "\\d")  // => ["1", "2"]  // Find all digits
 
 - **RuntimeError**: Invalid regex pattern — *Fix: Check regex syntax*
 
-**See also:** `find_pattern`, `matches_pattern`
+**See also:** `find_pattern`, `matches_pattern`, `capture_all_pattern`
 
 *Since v0.2.0*
 
@@ -5594,7 +5772,7 @@ find_pattern("ab12cd", "\\d+")  // => Some("12")  // Find first digit sequence
 
 - **RuntimeError**: Invalid regex pattern — *Fix: Check regex syntax*
 
-**See also:** `find_all_pattern`, `matches_pattern`
+**See also:** `find_all_pattern`, `matches_pattern`, `capture_pattern`
 
 *Since v0.2.0*
 
@@ -6232,7 +6410,7 @@ replace_pattern("a1b2", "\\d", "X")  // => "aXbX"  // Replace digits with X
 
 - **RuntimeError**: Invalid regex pattern — *Fix: Check regex syntax*
 
-**See also:** `matches_pattern`, `find_pattern`, `split_pattern`, `replace`
+**See also:** `matches_pattern`, `find_pattern`, `split_pattern`, `capture_pattern`, `replace`
 
 *Since v0.2.0*
 

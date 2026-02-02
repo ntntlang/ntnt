@@ -528,5 +528,92 @@ pub fn init() -> HashMap<String, Value> {
         },
     });
 
+    // @ntnt get_index
+    // @module std/collections
+    // @signature get_index(arr: Array, index: Int, default?: Any) -> Option<Any> | Any
+    // Gets an element from an array by index with safe access.
+    //
+    // Without a default, returns Option: Some(value) if the index is valid,
+    // None if out of bounds. With a default, returns the element directly or
+    // the default value if the index is out of bounds. Supports negative
+    // indexing: -1 is the last element, -2 is second-to-last, etc.
+    // @param arr The source array
+    // @param index The index to access (supports negative indexing)
+    // @param default (optional) Value to return if the index is out of bounds
+    // @returns The element as Option, or the value/default directly
+    // @see_also first, last, get_key, slice
+    // @since v0.4.0
+    // @tags #pure, #deterministic
+    // @example get_index([10, 20, 30], 1) => Some(20) ~ "Index found, wrapped in Option"
+    // @example get_index([10, 20, 30], 5) => None ~ "Out of bounds returns None"
+    // @example get_index([10, 20, 30], 1, 0) => 20 ~ "With default, returns value directly"
+    // @example get_index([10, 20, 30], 5, 0) => 0 ~ "Out of bounds returns default"
+    // @example get_index([10, 20, 30], -1) => Some(30) ~ "Negative index from end"
+    // @error TypeError ~ "get_index() requires an array and integer index" fix: "Pass an array and an integer index"
+    module.insert("get_index".to_string(), Value::NativeFunction {
+        name: "get_index".to_string(),
+        arity: 0, // Variable arity: 2 or 3 arguments
+        func: |args| {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(IntentError::TypeError(
+                    "get_index() requires 2 or 3 arguments: get_index(arr, index) or get_index(arr, index, default)".to_string()
+                ));
+            }
+
+            let arr = match &args[0] {
+                Value::Array(arr) => arr,
+                _ => {
+                    return Err(IntentError::TypeError(
+                        "get_index() requires an array as first argument".to_string(),
+                    ))
+                }
+            };
+
+            let index = match &args[1] {
+                Value::Int(i) => *i,
+                _ => {
+                    return Err(IntentError::TypeError(
+                        "get_index() requires an integer as second argument".to_string(),
+                    ))
+                }
+            };
+
+            // Resolve negative indices
+            let resolved = if index < 0 {
+                let pos = arr.len() as i64 + index;
+                if pos < 0 { None } else { Some(pos as usize) }
+            } else {
+                Some(index as usize)
+            };
+
+            let element = resolved.and_then(|i| arr.get(i));
+
+            match element {
+                Some(value) => {
+                    if args.len() == 3 {
+                        Ok(value.clone())
+                    } else {
+                        Ok(Value::EnumValue {
+                            enum_name: "Option".to_string(),
+                            variant: "Some".to_string(),
+                            values: vec![value.clone()],
+                        })
+                    }
+                }
+                None => {
+                    if args.len() == 3 {
+                        Ok(args[2].clone())
+                    } else {
+                        Ok(Value::EnumValue {
+                            enum_name: "Option".to_string(),
+                            variant: "None".to_string(),
+                            values: vec![],
+                        })
+                    }
+                }
+            }
+        },
+    });
+
     module
 }
