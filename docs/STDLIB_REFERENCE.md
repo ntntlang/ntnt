@@ -2,11 +2,12 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.3.10
+> Last updated: v0.3.11
 
 ## Table of Contents
 
 - [Global Builtins](#global-builtins)
+- [std/auth](#stdauth)
 - [std/collections](#stdcollections)
 - [std/concurrent](#stdconcurrent)
 - [std/crypto](#stdcrypto)
@@ -16,6 +17,8 @@
 - [std/http](#stdhttp)
 - [std/http/server](#stdhttpserver)
 - [std/json](#stdjson)
+- [std/kv](#stdkv)
+- [std/log](#stdlog)
 - [std/math](#stdmath)
 - [std/path](#stdpath)
 - [std/postgres](#stdpostgres)
@@ -40,6 +43,7 @@ These functions are available everywhere without importing.
 | [`ceil(x: Int | Float)`](#ceil) | Rounds up to the nearest integer. |
 | [`clamp(x: Int | Float, min_val: Int | Float, max_val: Int | Float)`](#clamp) | Constrains a value between a minimum and maximum. |
 | [`delete(pattern: String, handler: Function)`](#delete) | Registers a DELETE route handler. |
+| [`enable_cors(options?: Map)`](#enablecors) | Enable CORS (Cross-Origin Resource Sharing) for the HTTP server. |
 | [`float(x: Int | Float | String)`](#float) | Converts a value to float. |
 | [`floor(x: Int | Float)`](#floor) | Rounds down to the nearest integer. |
 | [`get(pattern: String, handler: Function)`](#get) | Registers a GET route handler. |
@@ -307,6 +311,37 @@ delete("/users/{id}", fn(req) { return json(map { "deleted": true }) })  // => U
 **See also:** `get`, `post`, `put`, `patch`, `listen`
 
 *Since v0.1.0*
+
+---
+
+#### `enable_cors`
+
+```ntnt
+enable_cors(options?: Map) -> Unit
+```
+
+Enable CORS (Cross-Origin Resource Sharing) for the HTTP server.
+
+Configures the server to automatically handle CORS preflight (OPTIONS) requests and add appropriate CORS headers to all responses. Must be called before `listen()`.
+
+Options map: - `origins`: String or Array<String> of allowed origins (default: ["*"]) - `methods`: Array<String> of allowed HTTP methods (default: standard methods) - `headers`: Array<String> of allowed request headers - `credentials`: Bool to allow credentials (default: false) - `max_age`: Int preflight cache duration in seconds (default: 86400)
+
+**Parameters:**
+
+- `options` — Optional configuration map
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+enable_cors()  // Enable CORS with defaults (allow all origins)
+enable_cors(map { "origins": ["https://example.com"], "credentials": true })  // Restrict to specific origin
+```
+
+**See also:** `listen`, `get`, `post`
+
+*Since v0.3.11*
 
 ---
 
@@ -1151,6 +1186,1008 @@ unwrap_or(Err("fail"), "fallback")  // => "fallback"  // Default returned for Er
 
 ---
 
+## std/auth
+
+Full OAuth 2.0 and OIDC authentication with JWT support
+
+```ntnt
+import { oauth, oauth_discover, oauth_client_credentials } from "std/auth"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`auth_callback_handler`](#authcallbackhandler) | Handle OAuth callback - exchanges code for tokens, creates session. |
+| [`auth_logout_handler`](#authlogouthandler) | Handle logout - clears the session and redirects. |
+| [`auth_me_handler`](#authmehandler) | Return current user as JSON for SPAs. |
+| [`auth_start_handler`](#authstarthandler) | Handle OAuth login start - redirects to the provider's authorization page. |
+| [`cleanup_sessions`](#cleanupsessions) | Clean up expired sessions and OAuth states from the session store. |
+| [`create_session_from_oauth`](#createsessionfromoauth) | Create a session from OAuth user info and tokens. |
+| [`csrf_field`](#csrffield) | Get an HTML hidden input field with the CSRF token. |
+| [`csrf_token`](#csrftoken) | Get the CSRF token for the current session. |
+| [`enable_auth`](#enableauth) | Initialize the authentication system with OAuth providers. |
+| [`generate_totp_secret`](#generatetotpsecret) | Generate a new TOTP secret for MFA setup. |
+| [`get_session`](#getsession) | Get the current session from the request. |
+| [`get_session_data`](#getsessiondata) | Get custom data stored in the current session. |
+| [`get_totp_uri`](#gettotpuri) | Generate an otpauth:// URI for QR codes. |
+| [`get_user`](#getuser) | Get the current authenticated user from the request. |
+| [`get_user_sessions`](#getusersessions) | Get all active sessions for the current user. |
+| [`hash_password`](#hashpassword) | Hash a password using bcrypt. |
+| [`jwt_decode`](#jwtdecode) | Decode a JWT token WITHOUT verifying the signature. |
+| [`jwt_sign`](#jwtsign) | Create a signed JWT token from claims. |
+| [`jwt_verify`](#jwtverify) | Verify a JWT token and return its claims. |
+| [`logout_all_sessions`](#logoutallsessions) | Log out all sessions for the current user. |
+| [`logout_user`](#logoutuser) | Log out the current user and return a redirect response. |
+| [`oauth`](#oauth) | Create an OAuth provider configuration. |
+| [`oauth_client_credentials`](#oauthclientcredentials) | Get an access token using client credentials grant (M2M authentication). |
+| [`oauth_discover`](#oauthdiscover) | Create an OAuth provider using OIDC Discovery. |
+| [`oauth_exchange`](#oauthexchange) | Exchange OAuth authorization code for tokens and user info. |
+| [`oauth_introspect`](#oauthintrospect) | Introspect a token using the provider's introspection endpoint (RFC 7662). |
+| [`oauth_refresh`](#oauthrefresh) | Refresh the access token for the current session. |
+| [`oauth_start`](#oauthstart) | Generate an OAuth authorization URL for manual flow control. |
+| [`oauth_validate_token`](#oauthvalidatetoken) | Validate an incoming bearer token (for APIs acting as resource servers). |
+| [`set_session_data`](#setsessiondata) | Store custom data in the current session. |
+| [`verify_csrf`](#verifycsrf) | Verify a CSRF token against the session's token. |
+| [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
+| [`verify_totp`](#verifytotp) | Verify a TOTP code against a secret. |
+
+#### `auth_callback_handler`
+
+```ntnt
+auth_callback_handler(req: Request) -> Response
+```
+
+Handle OAuth callback - exchanges code for tokens, creates session.
+
+Use with a route like GET /auth/{provider}/callback. Reads state and code from query params, validates CSRF, exchanges code for tokens, and creates a user session.
+
+**Parameters:**
+
+- `req` — The HTTP request with query params state and code
+
+**Returns:** Redirect response to after_login URL with session cookie
+
+**Examples:**
+
+```ntnt
+get("/auth/{provider}/callback", auth_callback_handler)  // Wire up callback route
+```
+
+**See also:** `enable_auth`, `auth_start_handler`
+
+*Since v0.3.11*
+
+---
+
+#### `auth_logout_handler`
+
+```ntnt
+auth_logout_handler(req: Request) -> Response
+```
+
+Handle logout - clears the session and redirects.
+
+Use with a route like POST /auth/logout. Clears the session cookie and redirects to after_logout URL.
+
+**Parameters:**
+
+- `req` — The HTTP request
+
+**Returns:** Redirect response to after_logout URL
+
+**Examples:**
+
+```ntnt
+post("/auth/logout", auth_logout_handler)  // Wire up logout route
+```
+
+**See also:** `enable_auth`, `get_user`
+
+*Since v0.3.11*
+
+---
+
+#### `auth_me_handler`
+
+```ntnt
+auth_me_handler(req: Request) -> Response
+```
+
+Return current user as JSON for SPAs.
+
+Use with a route like GET /auth/me. Returns the current user's session data as JSON, or 401 if not authenticated.
+
+**Parameters:**
+
+- `req` — The HTTP request
+
+**Returns:** JSON response with user data or 401
+
+**Examples:**
+
+```ntnt
+get("/auth/me", auth_me_handler)  // Wire up user endpoint
+```
+
+**See also:** `get_user`, `enable_auth`
+
+*Since v0.3.11*
+
+---
+
+#### `auth_start_handler`
+
+```ntnt
+auth_start_handler(req: Request) -> Response
+```
+
+Handle OAuth login start - redirects to the provider's authorization page.
+
+Use with a route like GET /auth/{provider}. Reads the provider name from req.params.provider and generates the OAuth authorization URL with PKCE/nonce.
+
+**Parameters:**
+
+- `req` — The HTTP request with route param {provider}
+
+**Returns:** Redirect response to OAuth provider
+
+**Examples:**
+
+```ntnt
+get("/auth/{provider}", auth_start_handler)  // Wire up login routes
+```
+
+**See also:** `enable_auth`, `auth_callback_handler`
+
+*Since v0.3.11*
+
+---
+
+#### `cleanup_sessions`
+
+```ntnt
+cleanup_sessions() -> Result<Int, String>
+```
+
+Clean up expired sessions and OAuth states from the session store.
+
+Call this periodically (e.g., via a cron job or scheduled task) to remove expired sessions and OAuth states from the database. For Redis, sessions use TTL so they expire automatically, but this will scan for any orphaned entries.
+
+**Returns:** Result containing the number of expired sessions removed, or error
+
+**Examples:**
+
+```ntnt
+cleanup_sessions()  // Remove expired sessions
+```
+
+**See also:** `enable_auth`
+
+*Since v0.3.11*
+
+---
+
+#### `create_session_from_oauth`
+
+```ntnt
+create_session_from_oauth(provider_name: String, user_info: Map, tokens?: Map) -> Result<Map, String>
+```
+
+Create a session from OAuth user info and tokens.
+
+Use this after oauth_exchange to create a session. Returns the session info and Set-Cookie header value.
+
+**Parameters:**
+
+- `provider_name` — Name of the provider (for user_id prefix)
+- `user_info` — User info map from oauth_exchange
+- `tokens` — Optional tokens map from oauth_exchange
+
+**Returns:** Ok(map with session_id, user_id, cookie) or Err on failure
+
+**Examples:**
+
+```ntnt
+create_session_from_oauth("github", user_info, tokens)  // => Ok({session_id: "...", cookie: "..."})  // Create session
+```
+
+**See also:** `oauth_exchange`, `get_session`
+
+*Since v0.3.11*
+
+---
+
+#### `csrf_field`
+
+```ntnt
+csrf_field(req: Request) -> String
+```
+
+Get an HTML hidden input field with the CSRF token.
+
+Returns a ready-to-use hidden input element for forms. Use this to easily include CSRF protection in your forms without manual formatting.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** HTML string like `<input type="hidden" name="_csrf" value="..."/>`
+
+**Examples:**
+
+```ntnt
+csrf_field(req)  // Get hidden input for form
+```
+
+**See also:** `csrf_token`, `verify_csrf`
+
+*Since v0.3.11*
+
+---
+
+#### `csrf_token`
+
+```ntnt
+csrf_token(req: Request) -> Option<String>
+```
+
+Get the CSRF token for the current session.
+
+Use this token in forms to protect against Cross-Site Request Forgery. Include the token as a hidden field named "_csrf" and verify it with verify_csrf().
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the CSRF token string, or None if not authenticated
+
+**Examples:**
+
+```ntnt
+csrf_token(req)  // Get token for form
+```
+
+**See also:** `verify_csrf`, `csrf_field`
+
+*Since v0.3.11*
+
+---
+
+#### `enable_auth`
+
+```ntnt
+enable_auth(providers: [Provider], options?: Map) -> Unit
+```
+
+Initialize the authentication system with OAuth providers.
+
+Stores provider configurations for use by auth handlers. After calling this, you can use auth_start_handler, auth_callback_handler, and auth_logout_handler with routes to enable OAuth login.
+
+Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
+
+**Parameters:**
+
+- `providers` — Array of provider configs created by oauth() or oauth_discover()
+- `options` — Optional map with keys: session_secret, session_ttl, after_login, after_logout, session_store
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+// Initialize auth with GitHub
+let github = oauth("github", get_env("GITHUB_ID"), get_env("GITHUB_SECRET"))
+enable_auth([github], map { "session_secret": "my-secret" })
+enable_auth([github], map { "session_store": "sqlite:./sessions.db" })  // SQLite sessions
+enable_auth([github], map { "session_store": "redis://localhost:6379" })  // Redis sessions
+```
+
+**See also:** `oauth`, `oauth_discover`, `auth_start_handler`
+
+*Since v0.3.11*
+
+---
+
+#### `generate_totp_secret`
+
+```ntnt
+generate_totp_secret() -> String
+```
+
+Generate a new TOTP secret for MFA setup.
+
+Creates a random base32-encoded secret suitable for TOTP authentication. Use this secret with get_totp_uri() to generate a QR code for authenticator apps.
+
+**Returns:** Base32-encoded TOTP secret
+
+**Examples:**
+
+```ntnt
+generate_totp_secret()  // => "JBSWY3DPEHPK3PXP..."  // Generate secret
+```
+
+**See also:** `get_totp_uri`, `verify_totp`
+
+*Since v0.3.11*
+
+---
+
+#### `get_session`
+
+```ntnt
+get_session(req: Request) -> Option<Session>
+```
+
+Get the current session from the request.
+
+Returns the full session object including user, timestamps, tokens, and custom data.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the Session map or None
+
+**Examples:**
+
+```ntnt
+get_session(req)  // Get full session data
+```
+
+**See also:** `get_user`, `logout_user`, `oauth_refresh`
+
+*Since v0.3.11*
+
+---
+
+#### `get_session_data`
+
+```ntnt
+get_session_data(req: Request) -> Option<Map>
+```
+
+Get custom data stored in the current session.
+
+Returns the custom data map stored via set_session_data, or None if no session or no custom data. Use this to store and retrieve user roles, permissions, preferences, or other application-specific data.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the custom data Map or None
+
+**Examples:**
+
+```ntnt
+get_session_data(req)  // Get user roles and preferences
+```
+
+**See also:** `set_session_data`, `get_session`, `get_user`
+
+*Since v0.3.11*
+
+---
+
+#### `get_totp_uri`
+
+```ntnt
+get_totp_uri(secret: String, email: String, issuer: String) -> Result<String, String>
+```
+
+Generate an otpauth:// URI for QR codes.
+
+Creates a URI that can be encoded as a QR code for authenticator apps like Google Authenticator or Authy.
+
+**Parameters:**
+
+- `secret` — TOTP secret (base32 encoded)
+- `email` — User's email for the account label
+- `issuer` — App name shown in authenticator
+
+**Returns:** Ok(uri) on success, Err(message) on failure
+
+**Examples:**
+
+```ntnt
+get_totp_uri(secret, "user@example.com", "MyApp")  // => Ok("otpauth://...")  // Get URI for QR
+```
+
+**See also:** `generate_totp_secret`, `verify_totp`
+
+*Since v0.3.11*
+
+---
+
+#### `get_user`
+
+```ntnt
+get_user(req: Request) -> Option<User>
+```
+
+Get the current authenticated user from the request.
+
+Returns Some(user) if authenticated, None if not. Use with `otherwise` for concise auth checks in handlers.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the User map or None
+
+**Examples:**
+
+```ntnt
+get_user(req) otherwise return redirect("/login")  // Require auth
+```
+
+**See also:** `get_session`, `logout_user`
+
+*Since v0.3.11*
+
+---
+
+#### `get_user_sessions`
+
+```ntnt
+get_user_sessions(req: Request) -> Result<Array<SessionInfo>, String>
+```
+
+Get all active sessions for the current user.
+
+Returns an array of session info objects, each containing id, provider, created_at, expires_at, and is_current (boolean indicating if it's the current session). Useful for "manage your sessions" UI.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Result containing array of session info, or error
+
+**Examples:**
+
+```ntnt
+get_user_sessions(req)  // List all user's active sessions
+```
+
+**See also:** `logout_all_sessions`, `get_session`
+
+*Since v0.3.11*
+
+---
+
+#### `hash_password`
+
+```ntnt
+hash_password(password: String) -> Result<String, String>
+```
+
+Hash a password using bcrypt.
+
+Utility function to hash passwords for custom storage or verification. Uses bcrypt with default cost factor.
+
+**Parameters:**
+
+- `password` — The password to hash
+
+**Returns:** Ok(hash) on success, Err(message) on failure
+
+**Examples:**
+
+```ntnt
+hash_password("mypassword")  // => Ok("$2b$12$...")  // Hash a password
+```
+
+**See also:** `verify_password`
+
+*Since v0.3.11*
+
+---
+
+#### `jwt_decode`
+
+```ntnt
+jwt_decode(token: String) -> Result<Map, String>
+```
+
+Decode a JWT token WITHOUT verifying the signature.
+
+Use this only for debugging or when you need to inspect token contents before verification. Never trust the claims from this function for auth.
+
+**Parameters:**
+
+- `token` — The JWT token string
+
+**Returns:** Result containing map with "header" and "payload" keys, or error
+
+**Examples:**
+
+```ntnt
+jwt_decode(token)  // Inspect token without verification
+```
+
+**See also:** `jwt_sign`, `jwt_verify`
+
+*Since v0.3.11*
+
+---
+
+#### `jwt_sign`
+
+```ntnt
+jwt_sign(claims: Map, secret: String, options?: Map) -> Result<String, String>
+```
+
+Create a signed JWT token from claims.
+
+Signs the claims using HS256 algorithm and returns the JWT string. Optional options map can include: exp (expiration as unix timestamp), iat (issued-at, defaults to now), sub (subject), iss (issuer), aud (audience).
+
+**Parameters:**
+
+- `claims` — The payload claims as a map
+- `secret` — The signing secret (should be at least 32 bytes)
+- `options` — Optional map with exp, iat, sub, iss, aud
+
+**Returns:** Result containing the JWT string, or error message
+
+**Examples:**
+
+```ntnt
+jwt_sign(map { "user_id": 123 }, secret)  // Create a token
+jwt_sign(map { "user_id": 123 }, secret, map { "exp": now() + 3600 })  // Token with 1hr expiry
+```
+
+**See also:** `jwt_verify`, `jwt_decode`
+
+*Since v0.3.11*
+
+---
+
+#### `jwt_verify`
+
+```ntnt
+jwt_verify(token: String, secret: String) -> Result<Map, String>
+```
+
+Verify a JWT token and return its claims.
+
+Validates the signature and expiration, then returns the claims as a map. Returns Err if the token is invalid, expired, or has wrong signature.
+
+**Parameters:**
+
+- `token` — The JWT token string
+- `secret` — The signing secret used to create the token
+
+**Returns:** Result containing the claims map, or error message
+
+**Examples:**
+
+```ntnt
+jwt_verify(token, secret)  // Verify and get claims
+```
+
+**See also:** `jwt_sign`, `jwt_decode`
+
+*Since v0.3.11*
+
+---
+
+#### `logout_all_sessions`
+
+```ntnt
+logout_all_sessions(req: Request, keep_current: Bool) -> Result<Int, String>
+```
+
+Log out all sessions for the current user.
+
+Deletes all sessions for the user. If keep_current is true, keeps the current session active (useful for "log out everywhere else"). Returns the number of sessions that were deleted.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+- `keep_current` — If true, keep the current session active
+
+**Returns:** Result containing number of sessions deleted, or error
+
+**Examples:**
+
+```ntnt
+logout_all_sessions(req, true)  // Log out everywhere except here
+logout_all_sessions(req, false)  // Log out from all devices
+```
+
+**See also:** `get_user_sessions`, `logout_user`
+
+*Since v0.3.11*
+
+---
+
+#### `logout_user`
+
+```ntnt
+logout_user(req: Request) -> Response
+```
+
+Log out the current user and return a redirect response.
+
+Clears the session and returns a redirect to the configured success_url (default: "/") with the session cookie cleared.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Redirect response with session cookie cleared
+
+**Examples:**
+
+```ntnt
+logout_user(req)  // Log out and redirect to home
+```
+
+**See also:** `get_user`, `get_session`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth`
+
+```ntnt
+oauth(provider: String, client_id: String, client_secret: String, options?: Map) -> Provider
+```
+
+Create an OAuth provider configuration.
+
+Supports built-in providers (google, github, facebook, microsoft, discord, twitter, linkedin, apple) with sensible defaults, or custom providers with full configuration. Supports OIDC (ID tokens, nonce validation) and PKCE.
+
+**Parameters:**
+
+- `provider` — Provider name (e.g., "google", "github") or custom name
+- `client_id` — OAuth client ID (or config map for custom providers)
+- `client_secret` — OAuth client secret (omit for PKCE public clients)
+- `options` — Optional map: scopes, use_pkce, access_type, prompt
+
+**Returns:** Provider configuration to pass to enable_auth()
+
+**Examples:**
+
+```ntnt
+oauth("google", "client_id", "client_secret")  // => Provider  // Google OAuth with defaults
+oauth("github", "id", "secret", map { "scopes": ["repo"] })  // => Provider  // GitHub with custom scopes
+oauth("google", "id", "secret", map { "use_pkce": true })  // => Provider  // Google with PKCE
+```
+
+**See also:** `enable_auth`, `get_user`, `oauth_pkce`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_client_credentials`
+
+```ntnt
+oauth_client_credentials(token_url: String, client_id: String, client_secret: String, scopes: [String]) -> Result<Map, String>
+```
+
+Get an access token using client credentials grant (M2M authentication).
+
+Used for server-to-server API calls where no user is involved.
+
+**Parameters:**
+
+- `token_url` — The token endpoint URL
+- `client_id` — OAuth client ID
+- `client_secret` — OAuth client secret
+- `scopes` — Array of scopes to request
+
+**Returns:** Result containing token response map or error
+
+**Examples:**
+
+```ntnt
+oauth_client_credentials("https://oauth.example.com/token", "id", "secret", ["api.read"])  // => Ok({access_token: "...", ...})  // Get M2M token
+```
+
+**See also:** `oauth`, `oauth_refresh`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_discover`
+
+```ntnt
+oauth_discover(issuer: String, client_id: String, client_secret?: String, options?: Map) -> Result<Provider, String>
+```
+
+Create an OAuth provider using OIDC Discovery.
+
+Automatically fetches configuration from the issuer's .well-known/openid-configuration endpoint. Useful for Okta, Auth0, Keycloak, and other OIDC providers.
+
+**Parameters:**
+
+- `issuer` — The OIDC issuer URL (e.g., "https://mycompany.okta.com")
+- `client_id` — OAuth client ID
+- `client_secret` — OAuth client secret (optional for PKCE)
+- `options` — Optional map: scopes, use_pkce
+
+**Returns:** Result containing Provider or error message
+
+**Examples:**
+
+```ntnt
+oauth_discover("https://mycompany.okta.com", "client_id", "secret")  // => Ok(Provider)  // Okta with auto-discovery
+```
+
+**See also:** `oauth`, `enable_auth`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_exchange`
+
+```ntnt
+oauth_exchange(provider: Map, code: String, state: String, redirect_uri: String) -> Result<Map, String>
+```
+
+Exchange OAuth authorization code for tokens and user info.
+
+Use this after receiving the callback with code and state parameters. Returns tokens and user info - you decide what to do with them (create session, etc).
+
+**Parameters:**
+
+- `provider` — Provider config from oauth()
+- `code` — Authorization code from callback
+- `state` — State parameter from callback (for CSRF validation)
+- `redirect_uri` — Same redirect_uri used in oauth_start
+
+**Returns:** Ok(map with tokens and user_info) or Err on failure
+
+**Examples:**
+
+```ntnt
+oauth_exchange(github, code, state, redirect_uri)  // => Ok({access_token: "...", user_info: {...}})  // Exchange code
+```
+
+**See also:** `oauth_start`, `create_session_from_oauth`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_introspect`
+
+```ntnt
+oauth_introspect(introspection_url: String, token: String, client_id: String, client_secret: String) -> Result<Map, String>
+```
+
+Introspect a token using the provider's introspection endpoint (RFC 7662).
+
+Calls the authorization server to validate the token. More reliable than local validation but adds network latency.
+
+**Parameters:**
+
+- `introspection_url` — The introspection endpoint URL
+- `token` — The token to introspect
+- `client_id` — OAuth client ID
+- `client_secret` — OAuth client secret
+
+**Returns:** Result containing introspection response or error
+
+**Examples:**
+
+```ntnt
+oauth_introspect("https://auth.example.com/introspect", token, "id", "secret")  // Introspect token
+```
+
+**See also:** `oauth_validate_token`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_refresh`
+
+```ntnt
+oauth_refresh(req: Request) -> Result<Map, String>
+```
+
+Refresh the access token for the current session.
+
+Uses the stored refresh token to get a new access token. Updates the session with new tokens. Requires enable_auth() with store_tokens: true.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Result containing new token info or error
+
+**Examples:**
+
+```ntnt
+oauth_refresh(req)  // => Ok({access_token: "...", expires_in: 3600})  // Refresh tokens
+```
+
+**See also:** `get_session`, `oauth`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_start`
+
+```ntnt
+oauth_start(provider: Map, redirect_uri: String) -> Result<String, String>
+```
+
+Generate an OAuth authorization URL for manual flow control.
+
+Use this when you want to control the OAuth flow manually instead of using auth_start_handler. Returns the authorization URL with state parameter for CSRF protection.
+
+**Parameters:**
+
+- `provider` — Provider config from oauth()
+- `redirect_uri` — Your callback URL
+
+**Returns:** Ok(auth_url) to redirect user to, Err on failure
+
+**Examples:**
+
+```ntnt
+oauth_start(github, "https://myapp.com/callback")  // => Ok("https://github.com/...")  // Get auth URL
+```
+
+**See also:** `oauth_exchange`, `oauth`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_validate_token`
+
+```ntnt
+oauth_validate_token(token: String, options: Map) -> Result<Map, String>
+```
+
+Validate an incoming bearer token (for APIs acting as resource servers).
+
+Decodes and validates the token claims without calling the provider. For full validation, use oauth_introspect().
+
+**Parameters:**
+
+- `token` — The bearer token to validate
+- `options` — Map with issuer, audience for validation
+
+**Returns:** Result containing token claims or error
+
+**Examples:**
+
+```ntnt
+oauth_validate_token(token, map { "issuer": "https://...", "audience": "my-api" })  // Validate bearer token
+```
+
+**See also:** `oauth_introspect`, `jwt_verify`
+
+*Since v0.3.11*
+
+---
+
+#### `set_session_data`
+
+```ntnt
+set_session_data(req: Request, data: Map) -> Result<Unit, String>
+```
+
+Store custom data in the current session.
+
+Use this to store user roles, permissions, preferences, or other application-specific data that should persist across requests. Data is stored as JSON in the session.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+- `data` — The custom data map to store
+
+**Returns:** Result indicating success or error message
+
+**Examples:**
+
+```ntnt
+set_session_data(req, map { "roles": ["admin"], "theme": "dark" })  // Store user preferences
+```
+
+**See also:** `get_session_data`, `get_session`
+
+*Since v0.3.11*
+
+---
+
+#### `verify_csrf`
+
+```ntnt
+verify_csrf(req: Request, token: String) -> Bool
+```
+
+Verify a CSRF token against the session's token.
+
+Returns true if the token matches the session's CSRF token, false otherwise. Use this in POST/PUT/DELETE handlers to validate the "_csrf" form field.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+- `token` — The CSRF token from the form submission
+
+**Returns:** true if valid, false if invalid or not authenticated
+
+**Examples:**
+
+```ntnt
+verify_csrf(req, form["_csrf"])  // Validate form submission
+```
+
+**See also:** `csrf_token`, `csrf_field`
+
+*Since v0.3.11*
+
+---
+
+#### `verify_password`
+
+```ntnt
+verify_password(password: String, hash: String) -> Bool
+```
+
+Verify a password against a bcrypt hash.
+
+Utility function to verify passwords hashed with hash_password.
+
+**Parameters:**
+
+- `password` — The password to verify
+- `hash` — The bcrypt hash to verify against
+
+**Returns:** true if password matches hash, false otherwise
+
+**Examples:**
+
+```ntnt
+verify_password("mypassword", stored_hash)  // => true  // Verify password
+```
+
+**See also:** `hash_password`
+
+*Since v0.3.11*
+
+---
+
+#### `verify_totp`
+
+```ntnt
+verify_totp(secret: String, code: String) -> Bool
+```
+
+Verify a TOTP code against a secret.
+
+Checks if the provided 6-digit code is valid for the given secret. Allows for 30-second time window drift.
+
+**Parameters:**
+
+- `secret` — TOTP secret (base32 encoded)
+- `code` — 6-digit code from authenticator app
+
+**Returns:** true if code is valid, false otherwise
+
+**Examples:**
+
+```ntnt
+verify_totp(secret, "123456")  // => true  // Verify 2FA code
+```
+
+**See also:** `generate_totp_secret`, `get_totp_uri`
+
+*Since v0.3.11*
+
+---
+
 ## std/collections
 
 Higher-order collection operations: transform, filter, reduce, sort, and group
@@ -1861,14 +2898,52 @@ import { sha256, sha256_bytes, hmac_sha256 } from "std/crypto"
 
 | Function | Description |
 |----------|-------------|
+| [`hash_password`](#hashpassword) | Hash a password using bcrypt with configurable cost factor. |
 | [`hex_decode`](#hexdecode) | Decodes hex string to byte array. Returns Err for invalid hex. |
 | [`hex_encode`](#hexencode) | Encodes bytes or string as hex. |
 | [`hmac_sha256`](#hmacsha256) | HMAC-SHA256 message authentication code as hex string. |
+| [`is_valid_hash`](#isvalidhash) | Check if a string is a valid bcrypt hash format. |
 | [`random_bytes`](#randombytes) | Generates n cryptographically secure random bytes. Size limit 0-1048576. |
 | [`random_hex`](#randomhex) | Generates n random bytes as hex string (2n chars). |
 | [`sha256`](#sha256) | SHA-256 hash as hex string. Accepts string or byte array. |
 | [`sha256_bytes`](#sha256bytes) | SHA-256 hash as byte array. Returns array of 32 integers (0-255). |
 | [`uuid`](#uuid) | Generates a random UUID v4 string. |
+| [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
+
+#### `hash_password`
+
+```ntnt
+hash_password(password: String, cost?: Int) -> Result<String, String>
+```
+
+Hash a password using bcrypt with configurable cost factor.
+
+Returns a bcrypt hash string that can be stored in the database. The hash includes the salt, so no separate salt storage is needed. The default cost of 12 provides good security for most applications. Higher costs are more secure but slower — each increment doubles the time.
+
+**Parameters:**
+
+- `password` — The plaintext password to hash
+- `cost` — Work factor (10-31). Default 12. Higher = slower but more secure.
+
+**Returns:** Ok(hash_string) on success, Err(message) on failure
+
+**Examples:**
+
+```ntnt
+hash_password("secret123")  // => Ok("$2b$12$...")  // Hash with default cost
+hash_password("secret123", 10)  // => Ok("$2b$10$...")  // Hash with minimum cost (faster but still secure)
+hash_password("secret123", 14)  // => Ok("$2b$14$...")  // Hash with higher cost (more secure)
+```
+
+**Errors:**
+
+- **InvalidCost**: Cost must be between 10 and 31 — *Fix: Use a cost value of 10 or higher (OWASP minimum)*
+
+**See also:** `verify_password`, `is_valid_hash`
+
+*Since v0.4.0*
+
+---
 
 #### `hex_decode`
 
@@ -1941,6 +3016,37 @@ hmac_sha256("secret", "message")  // Returns HMAC-SHA256 as 64-char hex string
 **See also:** `sha256`
 
 *Since v0.2.0*
+
+---
+
+#### `is_valid_hash`
+
+```ntnt
+is_valid_hash(hash: String) -> Bool
+```
+
+Check if a string is a valid bcrypt hash format.
+
+This is useful for migrations or validating data before calling verify_password. Does NOT verify the hash is correct — only that it has valid bcrypt structure.
+
+**Parameters:**
+
+- `hash` — The string to check
+
+**Returns:** true if the string matches bcrypt hash format, false otherwise
+
+**Examples:**
+
+```ntnt
+is_valid_hash("$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.V")  // => true  // Valid bcrypt hash
+is_valid_hash("not-a-hash")  // => false  // Plain string
+is_valid_hash("")  // => false  // Empty string
+is_valid_hash("$2a$10$N9qo8uLOickgx2ZMRZoMye")  // => false  // Truncated hash
+```
+
+**See also:** `hash_password`, `verify_password`
+
+*Since v0.4.0*
 
 ---
 
@@ -2055,6 +3161,37 @@ uuid()  // => "550e8400-e29b-41d4-a716-446655440000"  // Random UUID v4
 ```
 
 *Since v0.2.0*
+
+---
+
+#### `verify_password`
+
+```ntnt
+verify_password(password: String, hash: String) -> Result<Bool, String>
+```
+
+Verify a password against a bcrypt hash.
+
+Returns Ok(true) if the password matches, Ok(false) if it doesn't match, or Err if the hash is malformed.
+
+**Parameters:**
+
+- `password` — The plaintext password to verify
+- `hash` — The bcrypt hash to verify against
+
+**Returns:** Ok(true) if match, Ok(false) if no match, Err(message) if hash is invalid
+
+**Examples:**
+
+```ntnt
+verify_password("secret123", "$2b$12$...valid_hash...")  // => Ok(true)  // Correct password
+verify_password("wrong", "$2b$12$...valid_hash...")  // => Ok(false)  // Wrong password
+verify_password("secret", "not-a-hash")  // => Err("...")  // Invalid hash format
+```
+
+**See also:** `hash_password`, `is_valid_hash`
+
+*Since v0.4.0*
 
 ---
 
@@ -3115,17 +4252,58 @@ import { text, html, json } from "std/http/server"
 
 | Function | Description |
 |----------|-------------|
+| [`delete_cookie`](#deletecookie) | Build a Set-Cookie header value that deletes a cookie. |
 | [`error`](#error) | Create an HTTP 500 Internal Server Error response. |
+| [`get_cookie`](#getcookie) | Get a specific cookie value from a request. |
+| [`get_cookies`](#getcookies) | Get all cookies from a request as a map. |
 | [`html`](#html) | Create an HTML HTTP response. |
 | [`json`](#json) | Create a JSON HTTP response. |
 | [`not_found`](#notfound) | Create an HTTP 404 Not Found response. |
 | [`parse_form`](#parseform) | Parse a request body (or raw string) as URL-encoded form data. |
 | [`parse_json`](#parsejson) | Parse a request body (or raw string) as JSON. |
+| [`parse_multipart`](#parsemultipart) | Parse a multipart/form-data request body. |
 | [`redirect`](#redirect) | Create an HTTP 302 redirect response. |
+| [`redirect_safe`](#redirectsafe) | Create a safe HTTP 302 redirect response that prevents open redirect attacks. |
 | [`response`](#response) | Create a fully custom HTTP response. |
+| [`save_upload`](#saveupload) | Save an uploaded file to disk. |
+| [`set_cookie`](#setcookie) | Build a Set-Cookie header value string. |
 | [`static_file`](#staticfile) | Create a cacheable HTTP response for static assets. |
 | [`status`](#status) | Create a plain-text HTTP response with an explicit status code. |
 | [`text`](#text) | Create a plain-text HTTP response with status 200. |
+| [`with_cookie`](#withcookie) | Add a Set-Cookie header to a response. |
+
+#### `delete_cookie`
+
+```ntnt
+delete_cookie(name: String, options?: Map) -> String
+```
+
+Build a Set-Cookie header value that deletes a cookie.
+
+Returns a Set-Cookie header string with Max-Age=0 to instruct the browser to delete the cookie. The options map can specify `path` and `domain` to ensure the correct cookie is deleted.
+
+**Parameters:**
+
+- `name` — The name of the cookie to delete.
+- `options` — Optional map with `path` and `domain` to match the original cookie.
+
+**Returns:** A Set-Cookie header value string that deletes the cookie.
+
+**Examples:**
+
+```ntnt
+delete_cookie("session")  // => "session=; Path=/; Max-Age=0"  // Delete cookie
+```
+
+**Errors:**
+
+- **TypeError**: delete_cookie() requires 1 or 2 arguments — *Fix: Pass cookie name and optional options*
+
+**See also:** `set_cookie`, `with_cookie`
+
+*Since v0.3.11*
+
+---
 
 #### `error`
 
@@ -3156,6 +4334,72 @@ error("Something went wrong")  // => Response { status: 500, body: "Something we
 **See also:** `not_found`, `status`, `text`, `html`, `json`, `response`
 
 *Since v0.1.0*
+
+---
+
+#### `get_cookie`
+
+```ntnt
+get_cookie(req: Request, name: String) -> Option<String>
+```
+
+Get a specific cookie value from a request.
+
+Parses the request's Cookie header and returns the value of the named cookie wrapped in Some, or None if the cookie is not present.
+
+**Parameters:**
+
+- `req` — The Request map containing headers.
+- `name` — The name of the cookie to retrieve.
+
+**Returns:** Some(value) if the cookie exists, None otherwise.
+
+**Examples:**
+
+```ntnt
+get_cookie(req, "session")  // => Some("abc123")  // Get existing cookie
+get_cookie(req, "missing")  // => None  // Cookie not found
+```
+
+**Errors:**
+
+- **TypeError**: get_cookie() requires a request map and cookie name — *Fix: Pass a Request and String*
+
+**See also:** `get_cookies`, `set_cookie`, `with_cookie`
+
+*Since v0.3.11*
+
+---
+
+#### `get_cookies`
+
+```ntnt
+get_cookies(req: Request) -> Map<String, String>
+```
+
+Get all cookies from a request as a map.
+
+Parses the request's Cookie header and returns all cookie name-value pairs as a Map. Returns an empty map if no cookies are present.
+
+**Parameters:**
+
+- `req` — The Request map containing headers.
+
+**Returns:** A Map<String, String> of cookie names to values.
+
+**Examples:**
+
+```ntnt
+get_cookies(req)  // => map { "session": "abc", "theme": "dark" }  // All cookies
+```
+
+**Errors:**
+
+- **TypeError**: get_cookies() requires a request map — *Fix: Pass a Request map*
+
+**See also:** `get_cookie`, `set_cookie`, `with_cookie`
+
+*Since v0.3.11*
 
 ---
 
@@ -3326,6 +4570,44 @@ parse_json("not json")  // => Err("expected ...")  // Returns Err on invalid JSO
 
 ---
 
+#### `parse_multipart`
+
+```ntnt
+parse_multipart(req: Request) -> Result<Map<String, Any>, String>
+```
+
+Parse a multipart/form-data request body.
+
+Extracts fields and files from a multipart request. Text fields are returned as String values. File fields are returned as Maps with: `filename` (String), `content_type` (String), `size` (Int), and `data` (String - may be lossy for binary files).
+
+Note: Binary file data passes through String conversion and may be lossy. For binary files, use `save_upload()` to write directly to disk.
+
+**Parameters:**
+
+- `req` — The Request map with Content-Type header and body.
+
+**Returns:** Ok(Map) with field names as keys, or Err(String) on parse failure.
+
+**Examples:**
+
+```ntnt
+let fields = parse_multipart(req)?
+let name = fields["name"]
+let file = fields["document"]
+print("Uploaded: {file[\"filename\"]}, {file[\"size\"]} bytes")
+```
+
+**Errors:**
+
+- **TypeError**: parse_multipart() requires a request map — *Fix: Pass a Request map*
+- **ParseError**: Invalid multipart boundary — *Fix: Ensure Content-Type header includes boundary*
+
+**See also:** `save_upload`, `parse_form`
+
+*Since v0.3.11*
+
+---
+
 #### `redirect`
 
 ```ntnt
@@ -3335,6 +4617,8 @@ redirect(url: String) -> Response
 Create an HTTP 302 redirect response.
 
 Returns a Response map with status 302 and a `Location` header set to the provided URL. The body is empty.
+
+WARNING: This function does NOT validate the URL. If user input flows into this function, attackers can redirect users to malicious sites (open redirect). Use `redirect_safe()` instead when the URL comes from user input.
 
 **Parameters:**
 
@@ -3352,9 +4636,50 @@ redirect("/dashboard")  // => Response { status: 302, headers: { "location": "/d
 
 - **TypeError**: redirect() requires a URL string — *Fix: Pass a String URL as the argument*
 
-**See also:** `text`, `html`, `json`, `status`, `response`
+**Gotchas:**
+
+- Does not validate URLs - use redirect_safe() for user-provided URLs
+
+**See also:** `redirect_safe`, `text`, `html`, `json`, `status`, `response`
 
 *Since v0.1.0*
+
+---
+
+#### `redirect_safe`
+
+```ntnt
+redirect_safe(url: String, fallback?: String) -> Response
+```
+
+Create a safe HTTP 302 redirect response that prevents open redirect attacks.
+
+Only allows redirects to relative paths (e.g., /dashboard, ./page, ../back). Rejects absolute URLs, protocol-relative URLs (//evil.com), and dangerous schemes (javascript:, data:, etc.). If the URL is unsafe, redirects to the fallback URL (default: "/").
+
+Use this function instead of `redirect()` when the URL comes from user input (e.g., query parameters, form fields, database values).
+
+**Parameters:**
+
+- `url` — The URL to redirect to (must be a relative path for safety).
+- `fallback` — Optional fallback URL if the provided URL is unsafe (default: "/").
+
+**Returns:** A Response map with status 302, a Location header, and an empty body.
+
+**Examples:**
+
+```ntnt
+redirect_safe("/dashboard")  // => Response { status: 302, headers: { "location": "/dashboard" } }  // Safe relative redirect
+redirect_safe("https://evil.com")  // => Response { status: 302, headers: { "location": "/" } }  // Unsafe URL redirects to fallback
+redirect_safe("//evil.com/path", "/home")  // => Response { status: 302, headers: { "location": "/home" } }  // Protocol-relative URL rejected
+```
+
+**Errors:**
+
+- **TypeError**: redirect_safe() requires a URL string — *Fix: Pass a String URL as the first argument*
+
+**See also:** `redirect`, `text`, `html`, `json`, `status`, `response`
+
+*Since v0.3.11*
 
 ---
 
@@ -3391,6 +4716,79 @@ response(200, map { "X-Custom": "value" }, "OK")  // => Response { status: 200 }
 **See also:** `text`, `html`, `json`, `status`, `redirect`, `static_file`
 
 *Since v0.1.0*
+
+---
+
+#### `save_upload`
+
+```ntnt
+save_upload(file_field: Map, path: String) -> Result<Int, String>
+```
+
+Save an uploaded file to disk.
+
+Writes the file data from a parsed multipart field to the specified path. Returns the number of bytes written on success. Parent directories are created automatically if they don't exist.
+
+Security: Paths are validated to prevent directory traversal attacks. Relative paths are resolved from the current working directory. Paths containing `..` are rejected for security.
+
+**Parameters:**
+
+- `file_field` — The file field Map from parse_multipart() with a `data` key.
+- `path` — The filesystem path to save the file to (relative or absolute).
+
+**Returns:** Ok(Int) bytes written, or Err(String) on failure.
+
+**Examples:**
+
+```ntnt
+save_upload(fields["photo"], "uploads/photo.jpg")  // => Ok(1024)  // Save to relative path
+```
+
+**Errors:**
+
+- **TypeError**: save_upload() requires a file map and path — *Fix: Pass a file field and String path*
+- **SecurityError**: Path traversal not allowed — *Fix: Use a path without '..' components*
+
+**See also:** `parse_multipart`
+
+*Since v0.3.11*
+
+---
+
+#### `set_cookie`
+
+```ntnt
+set_cookie(name: String, value: String, options?: Map) -> String
+```
+
+Build a Set-Cookie header value string.
+
+Constructs a properly formatted Set-Cookie header value with the given name, value, and optional attributes. The returned string can be used as a header value directly or with the `with_cookie` helper.
+
+Options map supports: - `path` (String): Cookie path scope (default: "/") - `domain` (String): Cookie domain scope - `max_age` (Int): Max age in seconds - `secure` (Bool): Only send over HTTPS - `http_only` (Bool): Not accessible via JavaScript - `same_site` (String): "Strict", "Lax", or "None" - `expires` (String): Expiration date (RFC 7231 format) - `partitioned` (Bool): CHIPS partitioned cookie
+
+**Parameters:**
+
+- `name` — The cookie name.
+- `value` — The cookie value.
+- `options` — Optional map of cookie attributes.
+
+**Returns:** A Set-Cookie header value string.
+
+**Examples:**
+
+```ntnt
+set_cookie("session", "abc123")  // => "session=abc123; Path=/"  // Basic cookie
+set_cookie("token", "xyz", map { "http_only": true, "secure": true })  // => "token=xyz; Path=/; HttpOnly; Secure"  // Secure cookie
+```
+
+**Errors:**
+
+- **TypeError**: set_cookie() requires 2 or 3 arguments — *Fix: Pass name, value, and optional options map*
+
+**See also:** `get_cookie`, `get_cookies`, `delete_cookie`, `with_cookie`
+
+*Since v0.3.11*
 
 ---
 
@@ -3494,6 +4892,42 @@ text("Hello, World!")  // => Response { status: 200, body: "Hello, World!" }  //
 **See also:** `html`, `json`, `status`, `redirect`, `response`
 
 *Since v0.1.0*
+
+---
+
+#### `with_cookie`
+
+```ntnt
+with_cookie(response: Response, name: String, value: String, options?: Map) -> Response
+```
+
+Add a Set-Cookie header to a response.
+
+Returns a new Response with the Set-Cookie header added. If the response already has Set-Cookie headers, the new cookie is appended (using an array for multiple Set-Cookie headers). This is the ergonomic way to set cookies without manually building headers.
+
+**Parameters:**
+
+- `response` — The Response map to add the cookie to.
+- `name` — The cookie name.
+- `value` — The cookie value.
+- `options` — Optional map of cookie attributes (same as set_cookie).
+
+**Returns:** A new Response map with the Set-Cookie header added.
+
+**Examples:**
+
+```ntnt
+with_cookie(json(data), "session", "abc123")  // Add cookie to JSON response
+with_cookie(html(page), "theme", "dark", map { "max_age": 86400 })  // Cookie with options
+```
+
+**Errors:**
+
+- **TypeError**: with_cookie() requires 3 or 4 arguments — *Fix: Pass response, name, value, and optional options*
+
+**See also:** `set_cookie`, `delete_cookie`, `get_cookie`
+
+*Since v0.3.11*
 
 ---
 
@@ -3609,6 +5043,457 @@ stringify_pretty(map { "a": 1 })  // Pretty-printed with newlines and indentatio
 **See also:** `stringify`, `parse_json`
 
 *Since v0.1.0*
+
+---
+
+## std/kv
+
+Key-value store with SQLite and Redis/Valkey backends
+
+```ntnt
+import { open, get, set } from "std/kv"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`del`](#del) | Delete a key from the KV store. |
+| [`expire`](#expire) | Set a TTL (time-to-live) on an existing key. |
+| [`flush`](#flush) | Delete all keys from the KV store. |
+| [`get`](#get) | Get a value by key from the KV store. |
+| [`has`](#has) | Check if a key exists in the KV store. |
+| [`list`](#list) | List keys in the KV store, optionally filtered by prefix. |
+| [`open`](#open) | Open a KV store connection. |
+| [`set`](#set) | Set a key-value pair in the KV store. |
+| [`ttl`](#ttl) | Get the remaining TTL (time-to-live) for a key in seconds. |
+
+#### `del`
+
+```ntnt
+del(kv: KVStore, key: String) -> Result<Bool, String>
+```
+
+Delete a key from the KV store.
+
+Returns true if the key existed and was deleted, false if it didn't exist.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to delete
+
+**Returns:** Result containing true if deleted, false if not found
+
+**Examples:**
+
+```ntnt
+del(cache, "user:123")  // Delete a key
+```
+
+---
+
+#### `expire`
+
+```ntnt
+expire(kv: KVStore, key: String, seconds: Int) -> Result<Bool, String>
+```
+
+Set a TTL (time-to-live) on an existing key.
+
+Returns true if the key exists and TTL was set, false if key doesn't exist.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to set expiration on
+- `seconds` — Number of seconds until expiration
+
+**Returns:** Result containing true if TTL was set, false if key not found
+
+**Examples:**
+
+```ntnt
+expire(cache, "user:123", 600)  // Expire in 10 minutes
+```
+
+---
+
+#### `flush`
+
+```ntnt
+flush(kv: KVStore) -> Result<Unit, String>
+```
+
+Delete all keys from the KV store.
+
+Use with caution - this removes all data. Useful for tests and resets.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+
+**Returns:** Result indicating success or error
+
+**Examples:**
+
+```ntnt
+flush(cache)  // Clear all cached data
+```
+
+---
+
+#### `get`
+
+```ntnt
+get(kv: KVStore, key: String) -> Result<Option<Any>, String>
+```
+
+Get a value by key from the KV store.
+
+Returns None if the key doesn't exist or has expired. Values are automatically deserialized to their original type.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to retrieve
+
+**Returns:** Result containing Some(value) or None if not found
+
+**Examples:**
+
+```ntnt
+get(cache, "user:123")  // Get user by key
+get(cache, "session:abc")  // Get session data
+```
+
+---
+
+#### `has`
+
+```ntnt
+has(kv: KVStore, key: String) -> Result<Bool, String>
+```
+
+Check if a key exists in the KV store.
+
+Returns false for expired keys.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to check
+
+**Returns:** Result containing true if exists, false otherwise
+
+**Examples:**
+
+```ntnt
+has(cache, "user:123")  // Check if key exists
+```
+
+---
+
+#### `list`
+
+```ntnt
+list(kv: KVStore, prefix?: String) -> Result<Array<String>, String>
+```
+
+List keys in the KV store, optionally filtered by prefix.
+
+Without a prefix, returns all keys (use sparingly on large stores).
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `prefix` — Optional prefix to filter keys
+
+**Returns:** Result containing array of matching key names
+
+**Examples:**
+
+```ntnt
+list(cache, "user:")  // List all user keys
+list(cache, "session:")  // List all session keys
+list(cache)  // List all keys
+```
+
+---
+
+#### `open`
+
+```ntnt
+open(url: String) -> Result<KVStore, String>
+```
+
+Open a KV store connection.
+
+For SQLite (bundled, zero-config), pass a file path or ":memory:". For Redis/Valkey (production), pass a URL like "redis://host:6379".
+
+**Parameters:**
+
+- `url` — Connection string: file path for SQLite, redis:// or valkey:// URL for Redis/Valkey
+
+**Returns:** Result containing the KV store handle or an error message
+
+**Examples:**
+
+```ntnt
+open("cache.db")  // Open SQLite KV store
+open(":memory:")  // Open in-memory SQLite KV store
+open("redis://localhost:6379")  // Open Redis connection
+open("valkey://localhost:6379/0")  // Open Valkey connection with database 0
+```
+
+---
+
+#### `set`
+
+```ntnt
+set(kv: KVStore, key: String, value: Any, opts?: Map) -> Result<Unit, String>
+```
+
+Set a key-value pair in the KV store.
+
+Values are automatically serialized. Maps and arrays are stored as JSON. Setting a value to None deletes the key.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to set
+- `value` — The value to store (string, int, float, bool, map, or array)
+- `opts` — Optional map with "ttl" key for expiration in seconds
+
+**Returns:** Result indicating success or error
+
+**Examples:**
+
+```ntnt
+set(cache, "user:123", map { "name": "Alice" })  // Set without TTL
+set(cache, "session:abc", token, map { "ttl": 3600 })  // Set with 1 hour TTL
+```
+
+---
+
+#### `ttl`
+
+```ntnt
+ttl(kv: KVStore, key: String) -> Result<Option<Int>, String>
+```
+
+Get the remaining TTL (time-to-live) for a key in seconds.
+
+Returns None if the key doesn't exist or has no expiration set.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to check TTL for
+
+**Returns:** Result containing Some(seconds) or None
+
+**Examples:**
+
+```ntnt
+ttl(cache, "session:abc")  // Get remaining TTL
+```
+
+---
+
+## std/log
+
+Structured logging with configurable levels and JSON context
+
+```ntnt
+import { log_debug, log_info, log_warn } from "std/log"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`log_debug`](#logdebug) | Log a message at DEBUG level. |
+| [`log_error`](#logerror) | Log a message at ERROR level. |
+| [`log_info`](#loginfo) | Log a message at INFO level. |
+| [`log_warn`](#logwarn) | Log a message at WARN level. |
+| [`request_logger`](#requestlogger) | Create a request logging middleware function. |
+| [`set_log_level`](#setloglevel) | Set the global log level. |
+
+#### `log_debug`
+
+```ntnt
+log_debug(message: String, data?: Any) -> Unit
+```
+
+Log a message at DEBUG level.
+
+Debug logs are for detailed diagnostic information during development. They are hidden by default (log level is INFO). Use `set_log_level("debug")` to enable. Output goes to stderr in the format: `2026-02-02T10:30:00Z [DEBUG] message {"context":"data"}`
+
+**Parameters:**
+
+- `message` — The log message.
+- `data` — Optional context data to serialize as JSON.
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+log_debug("Processing request", map { "id": 123 })  // Debug with context
+log_debug("Checkpoint reached")  // Simple debug message
+```
+
+**See also:** `log_info`, `log_warn`, `log_error`, `set_log_level`
+
+*Since v0.3.11*
+
+---
+
+#### `log_error`
+
+```ntnt
+log_error(message: String, data?: Any) -> Unit
+```
+
+Log a message at ERROR level.
+
+Error logs are for serious problems that may prevent normal operation. Output goes to stderr in the format: `2026-02-02T10:30:00Z [ERROR] message {"context":"data"}`
+
+**Parameters:**
+
+- `message` — The log message.
+- `data` — Optional context data to serialize as JSON.
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+log_error("Database connection failed", map { "host": "db.example.com" })  // Error with context
+log_error("Critical failure")  // Simple error message
+```
+
+**See also:** `log_debug`, `log_info`, `log_warn`, `set_log_level`
+
+*Since v0.3.11*
+
+---
+
+#### `log_info`
+
+```ntnt
+log_info(message: String, data?: Any) -> Unit
+```
+
+Log a message at INFO level.
+
+Info logs are for general operational information. This is the default log level. Output goes to stderr in the format: `2026-02-02T10:30:00Z [INFO] message {"context":"data"}`
+
+**Parameters:**
+
+- `message` — The log message.
+- `data` — Optional context data to serialize as JSON.
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+log_info("Server started", map { "port": 8080 })  // Info with context
+log_info("User logged in")  // Simple info message
+```
+
+**See also:** `log_debug`, `log_warn`, `log_error`, `set_log_level`
+
+*Since v0.3.11*
+
+---
+
+#### `log_warn`
+
+```ntnt
+log_warn(message: String, data?: Any) -> Unit
+```
+
+Log a message at WARN level.
+
+Warn logs are for potentially harmful situations or unexpected behavior that doesn't prevent operation. Output goes to stderr in the format: `2026-02-02T10:30:00Z [WARN] message {"context":"data"}`
+
+**Parameters:**
+
+- `message` — The log message.
+- `data` — Optional context data to serialize as JSON.
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+log_warn("Rate limit approaching", map { "current": 95, "max": 100 })  // Warning with context
+log_warn("Deprecated API called")  // Simple warning
+```
+
+**See also:** `log_debug`, `log_info`, `log_error`, `set_log_level`
+
+*Since v0.3.11*
+
+---
+
+#### `request_logger`
+
+```ntnt
+request_logger() -> Function
+```
+
+Create a request logging middleware function.
+
+Returns a function suitable for use with `use_middleware()` that logs incoming HTTP requests at INFO level. Logs the HTTP method and path for each request.
+
+**Returns:** A middleware function that logs requests.
+
+**Examples:**
+
+```ntnt
+use_middleware(request_logger())  // Log all incoming requests
+```
+
+**See also:** `log_info`, `use_middleware`
+
+*Since v0.3.11*
+
+---
+
+#### `set_log_level`
+
+```ntnt
+set_log_level(level: String) -> Unit
+```
+
+Set the global log level.
+
+Controls which log messages are output. Messages below the set level are silently ignored. Valid levels: "debug", "info", "warn", "error". Default is "info".
+
+**Parameters:**
+
+- `level` — The log level name: "debug", "info", "warn", or "error".
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+set_log_level("debug")  // Enable debug logging
+set_log_level("error")  // Only show errors
+```
+
+**Errors:**
+
+- **TypeError**: Invalid log level — *Fix: Use 'debug', 'info', 'warn', or 'error'*
+
+**See also:** `log_debug`, `log_info`, `log_warn`, `log_error`
+
+*Since v0.3.11*
 
 ---
 

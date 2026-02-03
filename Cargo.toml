@@ -1,6 +1,6 @@
 [package]
 name = "ntnt"
-version = "0.3.10"
+version = "0.3.11"
 edition = "2021"
 authors = ["NTNT Language Team"]
 description = "NTNT (Intent) - A programming language designed for AI-driven development"
@@ -32,10 +32,12 @@ rustyline = "13.0"
 # Crypto
 sha2 = "0.10"
 hmac = "0.12"
+bcrypt = "0.15"
 uuid = { version = "1.6", features = ["v4"] }
 rand = "0.8"
 hex = "0.4"
 base64 = "0.21"
+totp-rs = { version = "5.5", features = ["gen_secret", "otpauth"] }
 
 # Regex for pattern matching
 regex = "1.10"
@@ -70,6 +72,12 @@ rust_decimal = { version = "1.36", features = ["db-postgres"] }
 chrono = "0.4"
 chrono-tz = "0.10.4"
 
+# Redis/Valkey KV store
+redis = "0.27"
+
+# JWT for auth
+jsonwebtoken = "9"
+
 [build-dependencies]
 # Doc comment scanner (build.rs extracts /// @ntnt blocks)
 serde = { version = "1.0", features = ["derive"] }
@@ -87,6 +95,7 @@ path = "src/main.rs"
 
 [features]
 default = []
+redis-tests = []  # Enable to run Redis integration tests (requires running Redis server)
 
 [profile.release]
 opt-level = 3

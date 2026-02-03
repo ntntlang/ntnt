@@ -1,6 +1,6 @@
 <!-- NTNT coding guide sections are sourced from docs/AI_AGENT_GUIDE.md -->
 <!-- To update NTNT coding instructions, edit AI_AGENT_GUIDE.md and copy to all agent files -->
-<!-- Last synced: 2026-02-01 -->
+<!-- Last synced: 2026-02-03 -->
 
 # NTNT Language - GitHub Copilot Instructions
 
@@ -669,6 +669,48 @@ get("/health", fn(req) { json(map { "ok": true }) })
 req.json       // Use parse_json(req) — a transform function
 req.form       // Use parse_form(req) — a transform function
 ```
+
+### Declarative Server Block Syntax
+
+For cleaner route definitions, use the `server` block syntax:
+
+```ntnt
+import { json, html } from "std/http/server"
+
+fn home(req) { return html("<h1>Welcome</h1>") }
+fn get_user(req) { return json(map { "id": req.params.id }) }
+fn create_user(req) { return json(map { "created": true }, 201) }
+fn admin_dashboard(req) { return html("<h1>Admin</h1>") }
+fn logger(req) { print("Request: {req.method} {req.path}") }
+
+server 8080 {
+    static "/assets" from "./public"
+    cors map { "origins": ["*"] }
+    middleware [logger]
+
+    GET / -> home
+    GET /users/{id: Int} -> get_user
+    POST /users -> create_user
+
+    group "/admin" {
+        middleware [require_admin]
+        GET / -> admin_dashboard
+    }
+}
+```
+
+**Key features:**
+- **Typed route parameters**: `{id: Int}` validates the parameter is an integer, returning 400 Bad Request on type mismatch
+- **Route groups**: `group "/prefix" { ... }` groups routes with a common prefix
+- **Directives**: `static`, `cors`, `middleware` configure server behavior
+- **Route conflict detection**: Ambiguous routes like `GET /users/{id}` and `GET /users/{name}` are detected at startup
+
+**Typed parameters:**
+| Type | Validation |
+|------|------------|
+| `Int` | Must be a valid integer |
+| `Float` | Must be a valid float |
+| (none) | String (no validation) |
 
 ### Environment Variables
 

@@ -3658,6 +3658,42 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
         | Statement::TypeAlias { .. }
         | Statement::Use { .. }
         | Statement::Import { .. } => {}
+        // Server block contains expressions in port, directives, routes, and groups
+        Statement::Server {
+            port,
+            directives,
+            routes,
+            groups,
+        } => {
+            collect_from_expr(port, names);
+            for directive in directives {
+                match directive {
+                    ntnt::ast::ServerDirective::Cors(expr)
+                    | ntnt::ast::ServerDirective::Middleware(expr) => {
+                        collect_from_expr(expr, names);
+                    }
+                    ntnt::ast::ServerDirective::Static { .. } => {}
+                }
+            }
+            for route in routes {
+                collect_from_expr(&route.handler, names);
+            }
+            fn collect_from_groups(
+                groups: &[ntnt::ast::ServerGroup],
+                names: &mut std::collections::HashSet<String>,
+            ) {
+                for group in groups {
+                    for mw in &group.middleware {
+                        collect_from_expr(mw, names);
+                    }
+                    for route in &group.routes {
+                        collect_from_expr(&route.handler, names);
+                    }
+                    collect_from_groups(&group.groups, names);
+                }
+            }
+            collect_from_groups(groups, names);
+        }
     }
 }
 

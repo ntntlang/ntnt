@@ -172,6 +172,34 @@ pub enum Statement {
         description: String,
         target: Box<Statement>,
     },
+
+    /// Server block: declarative route definitions
+    ///
+    /// ```ntnt
+    /// server 8080 {
+    ///     static "/assets" from "./public"
+    ///     cors map { "origins": ["*"] }
+    ///     middleware [logger]
+    ///
+    ///     GET /users/{id: Int} -> get_user
+    ///     POST /users -> create_user
+    ///
+    ///     group "/admin" {
+    ///         middleware [require_admin]
+    ///         GET / -> admin_dashboard
+    ///     }
+    /// }
+    /// ```
+    Server {
+        /// Port expression (usually integer literal)
+        port: Expression,
+        /// Top-level directives (static, cors, middleware)
+        directives: Vec<ServerDirective>,
+        /// Top-level routes
+        routes: Vec<ServerRoute>,
+        /// Nested route groups
+        groups: Vec<ServerGroup>,
+    },
 }
 
 /// Expression nodes
@@ -518,6 +546,55 @@ pub enum Pattern {
 pub struct Attribute {
     pub name: String,
     pub args: Vec<Expression>,
+}
+
+// =============================================================================
+// Server Block Types
+// =============================================================================
+
+/// Typed route parameter: {id: Int} or {name}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypedRouteParam {
+    pub name: String,
+    /// Type annotation: "Int", "Float", "String" (None defaults to String)
+    pub param_type: Option<String>,
+}
+
+/// Route in a server block: GET /users/{id: Int} -> handler
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerRoute {
+    /// HTTP method: "GET", "POST", "PUT", "PATCH", "DELETE"
+    pub method: String,
+    /// Route pattern: "/users/{id: Int}"
+    pub pattern: String,
+    /// Extracted typed parameters
+    pub params: Vec<TypedRouteParam>,
+    /// Handler function (identifier or lambda)
+    pub handler: Expression,
+}
+
+/// Server block directive
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ServerDirective {
+    /// Static file serving: static "/prefix" from "./dir"
+    Static { prefix: String, directory: String },
+    /// CORS configuration: cors map { "origins": ["*"] }
+    Cors(Expression),
+    /// Middleware: middleware [fn1, fn2]
+    Middleware(Expression),
+}
+
+/// Route group with prefix: group "/admin" { ... }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerGroup {
+    /// URL prefix for all routes in this group
+    pub prefix: String,
+    /// Middleware specific to this group
+    pub middleware: Vec<Expression>,
+    /// Routes in this group
+    pub routes: Vec<ServerRoute>,
+    /// Nested groups
+    pub groups: Vec<ServerGroup>,
 }
 
 impl Program {

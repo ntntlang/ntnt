@@ -42,7 +42,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Union types
 - [x] Effect annotations foundation
 - [x] Module system with imports/exports
-- [x] Standard library: std/string, std/math, std/collections, std/env, std/fs, std/path, std/json, std/time, std/crypto, std/url, std/http
+- [x] Standard library: std/string, std/math, std/collections, std/env, std/fs, std/path, std/json, std/time, std/crypto, std/url, std/http, std/auth, std/kv, std/log
 - [x] Traits with default implementations
 - [x] For-in loops and ranges
 - [x] Defer statement
@@ -1140,6 +1140,191 @@ stringify(data)  // {"name":"Alice","phone":null}
 - [x] Round-trip: `parse_json(stringify(map { "x": None }))` preserves `None`
 - [x] Consistent NULL→None across all modules: `std/json`, `std/db/sqlite`, `std/db/postgres`, `std/http/server`
 
+### 7.17 Web Application Essentials ✅
+
+**Priority:** High — these are the last-mile features blocking real web application development.
+
+Added 17 stdlib functions across 3 modules plus 1 global builtin to enable building production web applications:
+
+**Password Hashing (`std/crypto`):**
+- [x] `hash_password(password, cost?)` — bcrypt hashing with configurable cost (default 12)
+- [x] `verify_password(password, hash)` — verify password against bcrypt hash
+- [x] `is_valid_hash(hash)` — check if string is a valid bcrypt hash
+
+**Cookie Management (`std/http/server`):**
+- [x] `set_cookie(name, value, options?)` — build Set-Cookie header string
+- [x] `get_cookie(req, name)` — get single cookie from request
+- [x] `get_cookies(req)` — get all cookies as map
+- [x] `delete_cookie(name, options?)` — build cookie deletion header
+- [x] `with_cookie(resp, name, value, options?)` — add cookie to response
+- [x] Multi-value header support (arrays emit multiple headers with same name)
+
+**Structured Logging (`std/log` — new module):**
+- [x] `log_debug(message, data?)` — debug level logging
+- [x] `log_info(message, data?)` — info level logging
+- [x] `log_warn(message, data?)` — warning level logging
+- [x] `log_error(message, data?)` — error level logging
+- [x] `set_log_level(level)` — set global log level
+- [x] `request_logger()` — middleware function for request logging
+
+**CORS (global builtin):**
+- [x] `enable_cors(options?)` — configure CORS with origins, methods, headers, credentials
+- [x] Automatic OPTIONS preflight handling
+- [x] CORS headers applied to all responses
+
+**File Uploads (`std/http/server`):**
+- [x] `parse_multipart(req)` — parse multipart/form-data requests
+- [x] `save_upload(file_field, path)` — save uploaded file to disk
+
+### 7.18 Security Hardening ✅
+
+**Goal:** Make NTNT inherently secure by default — no configuration required for safe defaults.
+
+**Environment Variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NTNT_MAX_BODY_SIZE` | `10MB` | Maximum request body size (supports KB/MB/GB suffixes) |
+| `NTNT_SECURITY_HEADERS` | `true` | Add security headers to all responses |
+| `NTNT_DETAILED_ERRORS` | dev: `true`, prod: `false` | Show detailed error messages |
+| `NTNT_SSRF_PROTECTION` | `true` | Block requests to private IPs and cloud metadata |
+| `NTNT_ALLOW_LOCALHOST` | dev: `true`, prod: `false` | Allow fetch() to localhost |
+| `NTNT_ALLOW_PRIVATE_IPS` | `false` | Allow fetch() to private IP ranges |
+| `NTNT_BLOCKED_HOSTS` | `` | Comma-separated list of blocked hostnames |
+
+**Request Body Limits:**
+- [x] Configurable max body size via `NTNT_MAX_BODY_SIZE`
+- [x] Content-Length header checked before reading
+- [x] Returns 413 Payload Too Large with helpful message
+
+**Security Headers (automatic on all responses):**
+- [x] `X-Content-Type-Options: nosniff` — prevent MIME sniffing
+- [x] `X-Frame-Options: DENY` — prevent clickjacking
+- [x] `X-XSS-Protection: 1; mode=block` — legacy XSS filter
+- [x] `Referrer-Policy: strict-origin-when-cross-origin` — control referrer leakage
+- [x] Server header hidden in production mode
+
+**Open Redirect Protection:**
+- [x] `redirect_safe(url, fallback?)` — safe redirect that rejects absolute URLs
+- [x] Blocks protocol-relative URLs (`//evil.com`)
+- [x] Blocks dangerous schemes (`javascript:`, `data:`, etc.)
+
+**SSRF Protection (fetch, download):**
+- [x] Blocks private IP ranges (10.x, 172.16-31.x, 192.168.x)
+- [x] Blocks loopback addresses (127.x, ::1)
+- [x] Blocks cloud metadata endpoints (169.254.169.254, etc.)
+- [x] Blocks link-local addresses
+- [x] DNS resolution validation before request
+
+**Path Traversal Protection:**
+- [x] Static file serving rejects `..` patterns
+- [x] URL-encoded traversal patterns detected and blocked
+- [x] `save_upload()` validates destination paths
+- [x] Filename sanitization on multipart uploads
+
+**Cookie Security (production defaults):**
+- [x] `Secure: true` by default in production
+- [x] `SameSite: Lax` by default in production
+- [x] `HttpOnly: true` for session/auth cookies in production
+- [x] Cookie value encoding prevents header injection
+
+**Error Message Handling:**
+- [x] Production mode returns generic error messages
+- [x] Development mode shows full details
+- [x] Configurable via `NTNT_DETAILED_ERRORS`
+
+**Password Hashing:**
+- [x] Minimum bcrypt cost raised to 10 (OWASP compliance)
+
+### 7.19 OAuth/OIDC Authentication (`std/auth`) ✅
+
+**Goal:** Full OAuth 2.0 and OIDC support with progressive disclosure — simple things simple, complex things possible.
+
+**Supported OAuth Flows:**
+- [x] Authorization Code (server-side apps)
+- [x] Authorization Code + PKCE (SPAs, mobile, CLI)
+- [x] Client Credentials (machine-to-machine)
+- [x] Refresh Token (long-lived sessions)
+
+**OIDC Support:**
+- [x] ID token extraction and validation
+- [x] Nonce for replay attack protection
+- [x] OIDC Discovery (`oauth_discover()` auto-configures from issuer)
+- [x] ID token claims as user info source (fixes Apple Sign In)
+- [x] Issuer and audience validation
+
+**Progressive Disclosure API:**
+
+```ntnt
+import { oauth, get_user, get_session, oauth_discover } from "std/auth"
+
+// One line for common cases
+enable_auth(oauth("google", client_id, client_secret))
+
+// With PKCE (for SPAs/mobile)
+enable_auth(oauth("google", id, secret, map { "use_pkce": true }))
+
+// OIDC Discovery (Okta, Auth0, Keycloak)
+let provider = oauth_discover("https://mycompany.okta.com", client_id, client_secret)?
+enable_auth(provider)
+
+// M2M authentication (server-to-server)
+let token = oauth_client_credentials(token_url, client_id, client_secret, ["api.read"])?
+
+// API acting as resource server
+let claims = oauth_validate_token(req.headers["authorization"], map {
+    "issuer": "https://accounts.google.com",
+    "audience": "my-api-client-id"
+})?
+```
+
+**Built-in Providers (8 fully configured + 2 discovery-based):**
+- [x] Google (OIDC, PKCE)
+- [x] GitHub (OAuth2)
+- [x] Facebook (PKCE)
+- [x] Microsoft (OIDC, PKCE)
+- [x] Discord (PKCE)
+- [x] Twitter (OAuth 2.0, PKCE required)
+- [x] LinkedIn (OIDC)
+- [x] Apple (OIDC, uses ID token)
+- [x] Okta (via `oauth_discover()`)
+- [x] Auth0 (via `oauth_discover()`)
+
+**Core Functions (12 total):**
+- [x] `oauth(provider, client_id, client_secret, options?)` — create provider configuration
+- [x] `oauth_discover(issuer, client_id, secret?)` — auto-configure from OIDC discovery
+- [x] `oauth_client_credentials(token_url, id, secret, scopes)` — M2M token grant
+- [x] `oauth_refresh(req)` — refresh access token using stored refresh token
+- [x] `oauth_validate_token(token, options)` — validate incoming bearer tokens
+- [x] `oauth_introspect(url, token, id, secret)` — token introspection (RFC 7662)
+- [x] `get_user(req)` — get authenticated user from request
+- [x] `get_session(req)` — get full session with tokens and data
+- [x] `logout_user(req)` — clear session and redirect
+
+**JWT Support:**
+- [x] `jwt_sign(payload, secret, options?)` — create signed JWT (HS256)
+- [x] `jwt_verify(token, secret, options?)` — verify and decode JWT
+- [x] `jwt_decode(token)` — decode without verification
+
+**Auto-Registered Routes:**
+- [x] `GET /auth/{provider}` — start OAuth flow (with OIDC nonce, PKCE)
+- [x] `GET /auth/callback` — handle callback, validate ID token
+- [x] `POST /auth/logout` — clear session
+
+**Security Features:**
+- [x] CSRF protection via OAuth state parameter
+- [x] OIDC nonce validation (replay attack protection)
+- [x] PKCE for public clients (code verifier/challenge)
+- [x] ID token issuer/audience/expiry validation
+- [x] HttpOnly, Secure, SameSite cookies
+
+**Developer Experience:**
+- [x] Typo suggestions for provider names (Levenshtein distance)
+- [x] Sensible defaults for each provider's scopes
+- [x] In-memory session storage (zero-config, works out of box)
+- [x] Provider-specific user info extraction (id, email, name, picture)
+- [x] Token storage in session (opt-in via `store_tokens: true`)
+
 **Phase 7 Deliverables:**
 
 - ✅ Semicolons removed from language (lint warning `unnecessary_semicolon`, examples cleaned up, return parser updated)
@@ -1159,6 +1344,8 @@ stringify(data)  // {"name":"Alice","phone":null}
 - ✅ If-expressions (conditional ternary returning a value)
 - ✅ Regex capture groups (`capture_pattern`, `capture_all_pattern`, `capture_named_pattern`)
 - ✅ None/null JSON serialization (consistent NULL→None across json, sqlite, postgres, http_server)
+- ✅ Web application essentials (password hashing, cookies, logging, CORS, file uploads)
+- ✅ OAuth authentication (`std/auth` with 8 providers, JWT support, zero-config)
 - ~~Guard clauses (`let-else`)~~ — superseded by `otherwise` (7.2.1)
 - Intent file Meta section cleanup (7.11 — pending)
 - Import error quality (7.13 — pending)
