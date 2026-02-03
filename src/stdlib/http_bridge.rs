@@ -114,8 +114,8 @@ impl BridgeRequest {
 pub struct BridgeResponse {
     /// HTTP status code
     pub status: u16,
-    /// Response headers
-    pub headers: HashMap<String, String>,
+    /// Response headers (Vec allows multiple headers with same name, e.g., Set-Cookie)
+    pub headers: Vec<(String, String)>,
     /// Response body
     pub body: String,
 }
@@ -135,11 +135,23 @@ impl BridgeResponse {
                     _ => String::new(),
                 };
 
-                let mut headers = HashMap::new();
+                // Flatten headers - arrays become multiple entries with same key (e.g., Set-Cookie)
+                let mut headers = Vec::new();
                 if let Some(Value::Map(h)) = map.get("headers") {
                     for (k, v) in h {
-                        if let Value::String(val) = v {
-                            headers.insert(k.clone(), val.clone());
+                        match v {
+                            Value::String(val) => {
+                                headers.push((k.clone(), val.clone()));
+                            }
+                            Value::Array(arr) => {
+                                // Array values emit multiple headers with same key
+                                for item in arr {
+                                    if let Value::String(val) = item {
+                                        headers.push((k.clone(), val.clone()));
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -152,7 +164,7 @@ impl BridgeResponse {
             }
             _ => BridgeResponse {
                 status: 500,
-                headers: HashMap::new(),
+                headers: Vec::new(),
                 body: "Handler did not return a valid response".to_string(),
             },
         }
@@ -160,14 +172,12 @@ impl BridgeResponse {
 
     /// Create an error response
     pub fn error(status: u16, message: &str) -> Self {
-        let mut headers = HashMap::new();
-        headers.insert(
-            "content-type".to_string(),
-            "text/plain; charset=utf-8".to_string(),
-        );
         BridgeResponse {
             status,
-            headers,
+            headers: vec![(
+                "content-type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            )],
             body: message.to_string(),
         }
     }
@@ -303,10 +313,45 @@ mod tests {
 
         assert_eq!(response.status, 201);
         assert_eq!(response.body, "{\"id\":1}");
-        assert_eq!(
-            response.headers.get("content-type"),
-            Some(&"application/json".to_string())
+        assert!(response
+            .headers
+            .contains(&("content-type".to_string(), "application/json".to_string())));
+    }
+
+    #[test]
+    fn test_bridge_response_array_headers() {
+        // Test that array header values become multiple headers (for Set-Cookie)
+        let mut headers = HashMap::new();
+        headers.insert(
+            "set-cookie".to_string(),
+            Value::Array(vec![
+                Value::String("session=abc123; Path=/".to_string()),
+                Value::String("theme=dark; Path=/".to_string()),
+            ]),
         );
+
+        let mut map = HashMap::new();
+        map.insert("status".to_string(), Value::Int(200));
+        map.insert("body".to_string(), Value::String("OK".to_string()));
+        map.insert("headers".to_string(), Value::Map(headers));
+
+        let value = Value::Map(map);
+        let response = BridgeResponse::from_value(&value);
+
+        // Should have 2 set-cookie headers
+        let set_cookie_count = response
+            .headers
+            .iter()
+            .filter(|(k, _)| k == "set-cookie")
+            .count();
+        assert_eq!(set_cookie_count, 2);
+        assert!(response.headers.contains(&(
+            "set-cookie".to_string(),
+            "session=abc123; Path=/".to_string()
+        )));
+        assert!(response
+            .headers
+            .contains(&("set-cookie".to_string(), "theme=dark; Path=/".to_string())));
     }
 
     #[test]
@@ -326,7 +371,7 @@ mod tests {
             if let Some(req) = rx.recv().await {
                 let response = BridgeResponse {
                     status: 200,
-                    headers: HashMap::new(),
+                    headers: Vec::new(),
                     body: format!("Echo: {}", req.request.path),
                 };
                 let _ = req.reply_tx.send(response);

@@ -112,6 +112,10 @@ pub enum TokenKind {
     Async,
     Await,
 
+    // Server block keywords
+    Server, // "server"
+    Group,  // "group"
+
     // Operators
     Plus,    // +
     Minus,   // -
@@ -1142,6 +1146,10 @@ impl<'a> Lexer<'a> {
             "intent" => TokenKind::Intent,
             "async" => TokenKind::Async,
             "await" => TokenKind::Await,
+
+            // Server block keywords
+            "server" => TokenKind::Server,
+            "group" => TokenKind::Group,
 
             // Literals
             "true" => TokenKind::Bool(true),

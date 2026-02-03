@@ -17,6 +17,7 @@ pub mod http_bridge;
 pub mod http_server;
 pub mod http_server_async;
 pub mod json;
+pub mod log;
 pub mod math;
 pub mod path;
 pub mod postgres;
@@ -53,6 +54,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/concurrent".to_string(), concurrent::init());
     modules.insert("std/csv".to_string(), csv::init());
     modules.insert("std/template".to_string(), template::init());
+    modules.insert("std/log".to_string(), log::init());
 
     modules
 }

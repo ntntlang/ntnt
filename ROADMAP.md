@@ -1140,6 +1140,102 @@ stringify(data)  // {"name":"Alice","phone":null}
 - [x] Round-trip: `parse_json(stringify(map { "x": None }))` preserves `None`
 - [x] Consistent NULL→None across all modules: `std/json`, `std/db/sqlite`, `std/db/postgres`, `std/http/server`
 
+### 7.17 Web Application Essentials ✅
+
+**Priority:** High — these are the last-mile features blocking real web application development.
+
+Added 17 stdlib functions across 3 modules plus 1 global builtin to enable building production web applications:
+
+**Password Hashing (`std/crypto`):**
+- [x] `hash_password(password, cost?)` — bcrypt hashing with configurable cost (default 12)
+- [x] `verify_password(password, hash)` — verify password against bcrypt hash
+- [x] `is_valid_hash(hash)` — check if string is a valid bcrypt hash
+
+**Cookie Management (`std/http/server`):**
+- [x] `set_cookie(name, value, options?)` — build Set-Cookie header string
+- [x] `get_cookie(req, name)` — get single cookie from request
+- [x] `get_cookies(req)` — get all cookies as map
+- [x] `delete_cookie(name, options?)` — build cookie deletion header
+- [x] `with_cookie(resp, name, value, options?)` — add cookie to response
+- [x] Multi-value header support (arrays emit multiple headers with same name)
+
+**Structured Logging (`std/log` — new module):**
+- [x] `log_debug(message, data?)` — debug level logging
+- [x] `log_info(message, data?)` — info level logging
+- [x] `log_warn(message, data?)` — warning level logging
+- [x] `log_error(message, data?)` — error level logging
+- [x] `set_log_level(level)` — set global log level
+- [x] `request_logger()` — middleware function for request logging
+
+**CORS (global builtin):**
+- [x] `enable_cors(options?)` — configure CORS with origins, methods, headers, credentials
+- [x] Automatic OPTIONS preflight handling
+- [x] CORS headers applied to all responses
+
+**File Uploads (`std/http/server`):**
+- [x] `parse_multipart(req)` — parse multipart/form-data requests
+- [x] `save_upload(file_field, path)` — save uploaded file to disk
+
+### 7.18 Security Hardening ✅
+
+**Goal:** Make NTNT inherently secure by default — no configuration required for safe defaults.
+
+**Environment Variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NTNT_MAX_BODY_SIZE` | `10MB` | Maximum request body size (supports KB/MB/GB suffixes) |
+| `NTNT_SECURITY_HEADERS` | `true` | Add security headers to all responses |
+| `NTNT_DETAILED_ERRORS` | dev: `true`, prod: `false` | Show detailed error messages |
+| `NTNT_SSRF_PROTECTION` | `true` | Block requests to private IPs and cloud metadata |
+| `NTNT_ALLOW_LOCALHOST` | dev: `true`, prod: `false` | Allow fetch() to localhost |
+| `NTNT_ALLOW_PRIVATE_IPS` | `false` | Allow fetch() to private IP ranges |
+| `NTNT_BLOCKED_HOSTS` | `` | Comma-separated list of blocked hostnames |
+
+**Request Body Limits:**
+- [x] Configurable max body size via `NTNT_MAX_BODY_SIZE`
+- [x] Content-Length header checked before reading
+- [x] Returns 413 Payload Too Large with helpful message
+
+**Security Headers (automatic on all responses):**
+- [x] `X-Content-Type-Options: nosniff` — prevent MIME sniffing
+- [x] `X-Frame-Options: DENY` — prevent clickjacking
+- [x] `X-XSS-Protection: 1; mode=block` — legacy XSS filter
+- [x] `Referrer-Policy: strict-origin-when-cross-origin` — control referrer leakage
+- [x] Server header hidden in production mode
+
+**Open Redirect Protection:**
+- [x] `redirect_safe(url, fallback?)` — safe redirect that rejects absolute URLs
+- [x] Blocks protocol-relative URLs (`//evil.com`)
+- [x] Blocks dangerous schemes (`javascript:`, `data:`, etc.)
+
+**SSRF Protection (fetch, download):**
+- [x] Blocks private IP ranges (10.x, 172.16-31.x, 192.168.x)
+- [x] Blocks loopback addresses (127.x, ::1)
+- [x] Blocks cloud metadata endpoints (169.254.169.254, etc.)
+- [x] Blocks link-local addresses
+- [x] DNS resolution validation before request
+
+**Path Traversal Protection:**
+- [x] Static file serving rejects `..` patterns
+- [x] URL-encoded traversal patterns detected and blocked
+- [x] `save_upload()` validates destination paths
+- [x] Filename sanitization on multipart uploads
+
+**Cookie Security (production defaults):**
+- [x] `Secure: true` by default in production
+- [x] `SameSite: Lax` by default in production
+- [x] `HttpOnly: true` for session/auth cookies in production
+- [x] Cookie value encoding prevents header injection
+
+**Error Message Handling:**
+- [x] Production mode returns generic error messages
+- [x] Development mode shows full details
+- [x] Configurable via `NTNT_DETAILED_ERRORS`
+
+**Password Hashing:**
+- [x] Minimum bcrypt cost raised to 10 (OWASP compliance)
+
 **Phase 7 Deliverables:**
 
 - ✅ Semicolons removed from language (lint warning `unnecessary_semicolon`, examples cleaned up, return parser updated)
@@ -1159,6 +1255,7 @@ stringify(data)  // {"name":"Alice","phone":null}
 - ✅ If-expressions (conditional ternary returning a value)
 - ✅ Regex capture groups (`capture_pattern`, `capture_all_pattern`, `capture_named_pattern`)
 - ✅ None/null JSON serialization (consistent NULL→None across json, sqlite, postgres, http_server)
+- ✅ Web application essentials (password hashing, cookies, logging, CORS, file uploads)
 - ~~Guard clauses (`let-else`)~~ — superseded by `otherwise` (7.2.1)
 - Intent file Meta section cleanup (7.11 — pending)
 - Import error quality (7.13 — pending)

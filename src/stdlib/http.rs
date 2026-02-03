@@ -27,11 +27,206 @@ use reqwest::header::{AUTHORIZATION, COOKIE, SET_COOKIE};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, IntentError>;
+
+// =============================================================================
+// SSRF Protection Configuration
+// =============================================================================
+
+/// SSRF protection configuration loaded from environment variables
+#[derive(Debug, Clone)]
+struct SsrfConfig {
+    /// Whether SSRF protection is enabled (default: true)
+    enabled: bool,
+    /// Allow localhost requests (default: false in production, true in development)
+    allow_localhost: bool,
+    /// Allow private IP ranges (default: false)
+    allow_private: bool,
+    /// Additional blocked hosts (comma-separated in env var)
+    blocked_hosts: Vec<String>,
+}
+
+impl Default for SsrfConfig {
+    fn default() -> Self {
+        let production_mode = std::env::var("NTNT_ENV")
+            .map(|v| v == "production" || v == "prod")
+            .unwrap_or(false);
+
+        SsrfConfig {
+            enabled: std::env::var("NTNT_SSRF_PROTECTION")
+                .map(|v| v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(true), // Enabled by default
+            allow_localhost: std::env::var("NTNT_ALLOW_LOCALHOST")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(!production_mode), // Allow in dev, block in prod
+            allow_private: std::env::var("NTNT_ALLOW_PRIVATE_IPS")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false), // Blocked by default
+            blocked_hosts: std::env::var("NTNT_BLOCKED_HOSTS")
+                .map(|v| v.split(',').map(|s| s.trim().to_lowercase()).collect())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Global SSRF configuration (loaded once from environment)
+static SSRF_CONFIG: OnceLock<SsrfConfig> = OnceLock::new();
+
+fn get_ssrf_config() -> &'static SsrfConfig {
+    SSRF_CONFIG.get_or_init(SsrfConfig::default)
+}
+
+/// Check if an IP address is private/internal
+fn is_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => {
+            // Loopback (127.0.0.0/8)
+            ipv4.is_loopback()
+            // Private ranges
+            || ipv4.is_private()
+            // Link-local (169.254.0.0/16) - includes AWS metadata endpoint
+            || ipv4.is_link_local()
+            // Documentation (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24)
+            || is_documentation_ipv4(ipv4)
+            // Broadcast
+            || ipv4.is_broadcast()
+            // Unspecified (0.0.0.0)
+            || ipv4.is_unspecified()
+        }
+        IpAddr::V6(ipv6) => {
+            // Loopback (::1)
+            ipv6.is_loopback()
+            // Unspecified (::)
+            || ipv6.is_unspecified()
+            // IPv4-mapped addresses (check the embedded IPv4)
+            || ipv6.to_ipv4_mapped().map(|v4| is_private_ip(&IpAddr::V4(v4))).unwrap_or(false)
+            // Unique local (fc00::/7)
+            || is_unique_local_ipv6(ipv6)
+            // Link-local (fe80::/10)
+            || is_link_local_ipv6(ipv6)
+        }
+    }
+}
+
+fn is_documentation_ipv4(ip: &Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    // TEST-NET-1: 192.0.2.0/24
+    (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+    // TEST-NET-2: 198.51.100.0/24
+    || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+    // TEST-NET-3: 203.0.113.0/24
+    || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+}
+
+fn is_unique_local_ipv6(ip: &Ipv6Addr) -> bool {
+    // fc00::/7 - unique local addresses
+    let segments = ip.segments();
+    (segments[0] & 0xfe00) == 0xfc00
+}
+
+fn is_link_local_ipv6(ip: &Ipv6Addr) -> bool {
+    // fe80::/10 - link-local addresses
+    let segments = ip.segments();
+    (segments[0] & 0xffc0) == 0xfe80
+}
+
+/// Validate a URL for SSRF protection
+/// Returns Ok(()) if the URL is safe to fetch, or Err with a description if blocked
+fn validate_url_for_ssrf(url: &str) -> std::result::Result<(), String> {
+    let config = get_ssrf_config();
+
+    // If protection is disabled, allow everything
+    if !config.enabled {
+        return Ok(());
+    }
+
+    // Parse the URL
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(u) => u,
+        Err(_) => return Err("Invalid URL format".to_string()),
+    };
+
+    // Only allow http and https schemes
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("Blocked URL scheme: {}", scheme)),
+    }
+
+    // Get the host
+    let host = match parsed.host_str() {
+        Some(h) => h.to_lowercase(),
+        None => return Err("URL has no host".to_string()),
+    };
+
+    // Check blocked hosts list
+    if config
+        .blocked_hosts
+        .iter()
+        .any(|blocked| host == *blocked || host.ends_with(&format!(".{}", blocked)))
+    {
+        return Err(format!("Host '{}' is blocked", host));
+    }
+
+    // Block cloud metadata endpoints explicitly (common SSRF targets)
+    let metadata_hosts = [
+        "169.254.169.254",          // AWS, GCP, Azure metadata
+        "metadata.google.internal", // GCP
+        "metadata.goog",            // GCP
+        "169.254.170.2",            // AWS ECS task metadata
+        "fd00:ec2::254",            // AWS IPv6 metadata
+    ];
+    if metadata_hosts.iter().any(|&m| host == m) {
+        return Err("Cloud metadata endpoint blocked for security".to_string());
+    }
+
+    // Resolve the hostname to IP addresses and check each one
+    let port = parsed
+        .port()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+    let socket_addrs = format!("{}:{}", host, port);
+
+    // Try to resolve DNS
+    let addrs: Vec<IpAddr> = match socket_addrs.to_socket_addrs() {
+        Ok(iter) => iter.map(|s| s.ip()).collect(),
+        Err(_) => {
+            // DNS resolution failed - might be a blocked internal hostname
+            // In production, block; in dev with allow_localhost, permit
+            if config.allow_localhost {
+                return Ok(());
+            }
+            return Err(format!("Could not resolve hostname: {}", host));
+        }
+    };
+
+    // Check all resolved IPs
+    for ip in &addrs {
+        let is_loopback = ip.is_loopback();
+        let is_private = is_private_ip(ip);
+
+        // Check localhost
+        if is_loopback && !config.allow_localhost {
+            return Err(format!(
+                "Localhost requests blocked ({}). Set NTNT_ALLOW_LOCALHOST=true to allow.",
+                ip
+            ));
+        }
+
+        // Check private IPs
+        if is_private && !is_loopback && !config.allow_private {
+            return Err(format!(
+                "Private IP address blocked ({}). Set NTNT_ALLOW_PRIVATE_IPS=true to allow.",
+                ip
+            ));
+        }
+    }
+
+    Ok(())
+}
 
 /// Cached raw response data (thread-safe, no Value references)
 #[derive(Clone)]
@@ -356,6 +551,15 @@ fn response_to_value(
 
 /// Simple HTTP GET request
 fn http_get(url: &str) -> Result<Value> {
+    // SSRF protection: validate URL before making request
+    if let Err(reason) = validate_url_for_ssrf(url) {
+        return Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            values: vec![Value::String(format!("SSRF protection: {}", reason))],
+        });
+    }
+
     let client = reqwest::blocking::Client::new();
     match client.get(url).send() {
         Ok(response) => {
@@ -399,6 +603,15 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
             ))
         }
     };
+
+    // SSRF protection: validate URL before making request
+    if let Err(reason) = validate_url_for_ssrf(&url) {
+        return Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            values: vec![Value::String(format!("SSRF protection: {}", reason))],
+        });
+    }
 
     let method = match opts.get("method") {
         Some(Value::String(m)) => m.to_uppercase(),
@@ -559,6 +772,15 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
 
 /// Download a file from URL
 fn http_download(url: &str, file_path: &str) -> Result<Value> {
+    // SSRF protection: validate URL before making request
+    if let Err(reason) = validate_url_for_ssrf(url) {
+        return Ok(Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            values: vec![Value::String(format!("SSRF protection: {}", reason))],
+        });
+    }
+
     let path = Path::new(file_path);
 
     // Create parent directories if they don't exist

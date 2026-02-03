@@ -139,6 +139,8 @@ impl Parser {
             self.export_declaration(attributes)
         } else if self.match_token(&[TokenKind::Pub]) {
             self.pub_declaration(attributes)
+        } else if self.match_token(&[TokenKind::Server]) {
+            self.server_declaration()
         } else {
             self.statement()
         }
@@ -784,6 +786,342 @@ impl Parser {
     fn pub_declaration(&mut self, attributes: Vec<Attribute>) -> Result<Statement> {
         // pub is just syntactic sugar for export
         self.export_declaration(attributes)
+    }
+
+    // =========================================================================
+    // Server Block Parsing
+    // =========================================================================
+
+    /// Check if current token is an identifier with the given name
+    fn check_identifier_name(&self, name: &str) -> bool {
+        if let Some(token) = self.peek() {
+            if let TokenKind::Identifier(ref ident) = token.kind {
+                return ident == name;
+            }
+        }
+        false
+    }
+
+    /// Match and consume an identifier with the given name
+    fn match_identifier_name(&mut self, name: &str) -> bool {
+        if self.check_identifier_name(name) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Parse a server block: `server PORT { ... }`
+    fn server_declaration(&mut self) -> Result<Statement> {
+        // Parse port expression
+        let port = self.expression()?;
+
+        self.consume(&TokenKind::LeftBrace, "Expected '{' after server port")?;
+
+        let mut directives = Vec::new();
+        let mut routes = Vec::new();
+        let mut groups = Vec::new();
+
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            // Check for directives (using identifier matching for context-sensitive keywords)
+            if self.match_identifier_name("static") {
+                directives.push(self.parse_static_directive()?);
+            } else if self.match_identifier_name("cors") {
+                directives.push(self.parse_cors_directive()?);
+            } else if self.match_identifier_name("middleware") {
+                directives.push(self.parse_middleware_directive()?);
+            } else if self.match_token(&[TokenKind::Group]) {
+                groups.push(self.parse_server_group()?);
+            } else if self.is_http_method() {
+                routes.push(self.parse_server_route()?);
+            } else {
+                let found = self.peek().map(|t| t.lexeme.clone()).unwrap_or_default();
+                return Err(IntentError::ParserError {
+                    line: self.current_line(),
+                    column: self.current_column(),
+                    message: format!(
+                        "Expected route (GET, POST, etc.), directive (static, cors, middleware), or group in server block, found '{}'",
+                        found
+                    ),
+                });
+            }
+        }
+
+        self.consume(&TokenKind::RightBrace, "Expected '}' after server block")?;
+
+        Ok(Statement::Server {
+            port,
+            directives,
+            routes,
+            groups,
+        })
+    }
+
+    /// Check if current token is an HTTP method identifier
+    fn is_http_method(&self) -> bool {
+        if let Some(token) = self.peek() {
+            if let TokenKind::Identifier(ref name) = token.kind {
+                let upper = name.to_uppercase();
+                return matches!(
+                    upper.as_str(),
+                    "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS"
+                );
+            }
+        }
+        false
+    }
+
+    /// Parse a route: `GET /users/{id: Int} -> handler`
+    fn parse_server_route(&mut self) -> Result<ServerRoute> {
+        // Parse HTTP method
+        let method = self.consume_identifier("Expected HTTP method")?;
+        let method = method.to_uppercase();
+
+        // Parse route pattern (starts with /)
+        let pattern = self.parse_route_pattern()?;
+
+        // Extract typed parameters from the pattern
+        let params = Self::extract_typed_params(&pattern);
+
+        // Parse arrow and handler
+        self.consume(&TokenKind::Arrow, "Expected '->' after route pattern")?;
+        let handler = self.expression()?;
+
+        Ok(ServerRoute {
+            method,
+            pattern,
+            params,
+            handler,
+        })
+    }
+
+    /// Parse a route pattern like `/users/{id: Int}`
+    fn parse_route_pattern(&mut self) -> Result<String> {
+        let mut pattern = String::new();
+
+        // Expect forward slash
+        if self.match_token(&[TokenKind::Slash]) {
+            pattern.push('/');
+        } else {
+            return Err(IntentError::ParserError {
+                line: self.current_line(),
+                column: self.current_column(),
+                message: "Expected '/' at start of route pattern".to_string(),
+            });
+        }
+
+        // Parse path segments
+        loop {
+            // Check for parameter: {name} or {name: Type}
+            if self.match_token(&[TokenKind::LeftBrace]) {
+                pattern.push('{');
+                let param_name = self.consume_identifier("Expected parameter name")?;
+                pattern.push_str(&param_name);
+
+                // Check for type annotation
+                if self.match_token(&[TokenKind::Colon]) {
+                    pattern.push(':');
+                    pattern.push(' ');
+                    let type_name = self.consume_identifier("Expected type name")?;
+                    pattern.push_str(&type_name);
+                }
+
+                self.consume(&TokenKind::RightBrace, "Expected '}' after parameter")?;
+                pattern.push('}');
+            } else if self.check_identifier() {
+                // Static segment
+                let segment = self.consume_identifier("Expected path segment")?;
+                pattern.push_str(&segment);
+            } else {
+                // End of pattern
+                break;
+            }
+
+            // Check for more segments
+            if self.match_token(&[TokenKind::Slash]) {
+                pattern.push('/');
+            } else {
+                break;
+            }
+        }
+
+        Ok(pattern)
+    }
+
+    /// Extract typed parameters from a route pattern string
+    fn extract_typed_params(pattern: &str) -> Vec<TypedRouteParam> {
+        let mut params = Vec::new();
+        let mut chars = pattern.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '{' {
+                let mut name = String::new();
+                let mut param_type = None;
+
+                // Read until : or }
+                while let Some(&c) = chars.peek() {
+                    if c == ':' || c == '}' {
+                        break;
+                    }
+                    name.push(c);
+                    chars.next();
+                }
+
+                // Check for type
+                if chars.peek() == Some(&':') {
+                    chars.next(); // consume :
+                                  // Skip whitespace
+                    while chars.peek() == Some(&' ') {
+                        chars.next();
+                    }
+                    let mut type_name = String::new();
+                    while let Some(&c) = chars.peek() {
+                        if c == '}' {
+                            break;
+                        }
+                        type_name.push(c);
+                        chars.next();
+                    }
+                    param_type = Some(type_name.trim().to_string());
+                }
+
+                // Skip closing brace
+                if chars.peek() == Some(&'}') {
+                    chars.next();
+                }
+
+                params.push(TypedRouteParam {
+                    name: name.trim().to_string(),
+                    param_type,
+                });
+            }
+        }
+
+        params
+    }
+
+    /// Parse static directive: `static "/prefix" from "./dir"`
+    fn parse_static_directive(&mut self) -> Result<ServerDirective> {
+        // Parse prefix string
+        let prefix = if let Some(token) = self.peek() {
+            if let TokenKind::String(ref s) = token.kind {
+                let s = s.clone();
+                self.advance();
+                s
+            } else {
+                return Err(IntentError::ParserError {
+                    line: self.current_line(),
+                    column: self.current_column(),
+                    message: "Expected string for static prefix".to_string(),
+                });
+            }
+        } else {
+            return Err(IntentError::ParserError {
+                line: self.current_line(),
+                column: self.current_column(),
+                message: "Expected string for static prefix".to_string(),
+            });
+        };
+
+        // Expect 'from'
+        self.consume(&TokenKind::From, "Expected 'from' after static prefix")?;
+
+        // Parse directory string
+        let directory = if let Some(token) = self.peek() {
+            if let TokenKind::String(ref s) = token.kind {
+                let s = s.clone();
+                self.advance();
+                s
+            } else {
+                return Err(IntentError::ParserError {
+                    line: self.current_line(),
+                    column: self.current_column(),
+                    message: "Expected string for static directory".to_string(),
+                });
+            }
+        } else {
+            return Err(IntentError::ParserError {
+                line: self.current_line(),
+                column: self.current_column(),
+                message: "Expected string for static directory".to_string(),
+            });
+        };
+
+        Ok(ServerDirective::Static { prefix, directory })
+    }
+
+    /// Parse cors directive: `cors map { ... }` or `cors expr`
+    fn parse_cors_directive(&mut self) -> Result<ServerDirective> {
+        let config = self.expression()?;
+        Ok(ServerDirective::Cors(config))
+    }
+
+    /// Parse middleware directive: `middleware [fn1, fn2]` or `middleware expr`
+    fn parse_middleware_directive(&mut self) -> Result<ServerDirective> {
+        let middleware = self.expression()?;
+        Ok(ServerDirective::Middleware(middleware))
+    }
+
+    /// Parse a route group: `group "/prefix" { ... }`
+    fn parse_server_group(&mut self) -> Result<ServerGroup> {
+        // Parse prefix string
+        let prefix = if let Some(token) = self.peek() {
+            if let TokenKind::String(ref s) = token.kind {
+                let s = s.clone();
+                self.advance();
+                s
+            } else {
+                return Err(IntentError::ParserError {
+                    line: self.current_line(),
+                    column: self.current_column(),
+                    message: "Expected string for group prefix".to_string(),
+                });
+            }
+        } else {
+            return Err(IntentError::ParserError {
+                line: self.current_line(),
+                column: self.current_column(),
+                message: "Expected string for group prefix".to_string(),
+            });
+        };
+
+        self.consume(&TokenKind::LeftBrace, "Expected '{' after group prefix")?;
+
+        let mut middleware = Vec::new();
+        let mut routes = Vec::new();
+        let mut groups = Vec::new();
+
+        while !self.check(&TokenKind::RightBrace) && !self.is_at_end() {
+            if self.match_identifier_name("middleware") {
+                // Parse middleware expression and add to list
+                let mw_expr = self.expression()?;
+                middleware.push(mw_expr);
+            } else if self.match_token(&[TokenKind::Group]) {
+                groups.push(self.parse_server_group()?);
+            } else if self.is_http_method() {
+                routes.push(self.parse_server_route()?);
+            } else {
+                let found = self.peek().map(|t| t.lexeme.clone()).unwrap_or_default();
+                return Err(IntentError::ParserError {
+                    line: self.current_line(),
+                    column: self.current_column(),
+                    message: format!(
+                        "Expected route, middleware, or nested group in group block, found '{}'",
+                        found
+                    ),
+                });
+            }
+        }
+
+        self.consume(&TokenKind::RightBrace, "Expected '}' after group block")?;
+
+        Ok(ServerGroup {
+            prefix,
+            middleware,
+            routes,
+            groups,
+        })
     }
 
     fn statement(&mut self) -> Result<Statement> {
@@ -2258,5 +2596,185 @@ mod tests {
     fn test_arithmetic() {
         let program = parse("1 + 2 * 3").unwrap();
         assert_eq!(program.statements.len(), 1);
+    }
+
+    // =========================================================================
+    // Server Block Tests
+    // =========================================================================
+
+    #[test]
+    fn test_server_block_basic() {
+        let program = parse(
+            r#"
+            server 8080 {
+                GET / -> home
+            }
+        "#,
+        )
+        .unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0] {
+            Statement::Server { port, routes, .. } => {
+                match port {
+                    Expression::Integer(p) => assert_eq!(*p, 8080),
+                    _ => panic!("Expected integer port"),
+                }
+                assert_eq!(routes.len(), 1);
+                assert_eq!(routes[0].method, "GET");
+                assert_eq!(routes[0].pattern, "/");
+            }
+            _ => panic!("Expected Server statement"),
+        }
+    }
+
+    #[test]
+    fn test_server_block_typed_route_params() {
+        let program = parse(
+            r#"
+            server 8080 {
+                GET /users/{id: Int} -> get_user
+                GET /products/{name} -> get_product
+            }
+        "#,
+        )
+        .unwrap();
+        match &program.statements[0] {
+            Statement::Server { routes, .. } => {
+                assert_eq!(routes.len(), 2);
+                // Check typed param
+                assert_eq!(routes[0].params.len(), 1);
+                assert_eq!(routes[0].params[0].name, "id");
+                assert_eq!(routes[0].params[0].param_type, Some("Int".to_string()));
+                // Check untyped param
+                assert_eq!(routes[1].params.len(), 1);
+                assert_eq!(routes[1].params[0].name, "name");
+                assert_eq!(routes[1].params[0].param_type, None);
+            }
+            _ => panic!("Expected Server statement"),
+        }
+    }
+
+    #[test]
+    fn test_server_block_static_directive() {
+        let program = parse(
+            r#"
+            server 8080 {
+                static "/assets" from "./public"
+                GET / -> home
+            }
+        "#,
+        )
+        .unwrap();
+        match &program.statements[0] {
+            Statement::Server { directives, .. } => {
+                assert_eq!(directives.len(), 1);
+                match &directives[0] {
+                    ServerDirective::Static { prefix, directory } => {
+                        assert_eq!(prefix, "/assets");
+                        assert_eq!(directory, "./public");
+                    }
+                    _ => panic!("Expected Static directive"),
+                }
+            }
+            _ => panic!("Expected Server statement"),
+        }
+    }
+
+    #[test]
+    fn test_server_block_group() {
+        let program = parse(
+            r#"
+            server 8080 {
+                group "/admin" {
+                    GET / -> admin_home
+                    GET /users -> admin_users
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        match &program.statements[0] {
+            Statement::Server { groups, .. } => {
+                assert_eq!(groups.len(), 1);
+                assert_eq!(groups[0].prefix, "/admin");
+                assert_eq!(groups[0].routes.len(), 2);
+                assert_eq!(groups[0].routes[0].method, "GET");
+                assert_eq!(groups[0].routes[0].pattern, "/");
+            }
+            _ => panic!("Expected Server statement"),
+        }
+    }
+
+    #[test]
+    fn test_server_block_cors() {
+        let program = parse(
+            r#"
+            server 8080 {
+                cors map { "origins": ["*"] }
+                GET / -> home
+            }
+        "#,
+        )
+        .unwrap();
+        match &program.statements[0] {
+            Statement::Server { directives, .. } => {
+                assert_eq!(directives.len(), 1);
+                match &directives[0] {
+                    ServerDirective::Cors(_) => {}
+                    _ => panic!("Expected Cors directive"),
+                }
+            }
+            _ => panic!("Expected Server statement"),
+        }
+    }
+
+    #[test]
+    fn test_server_block_middleware() {
+        let program = parse(
+            r#"
+            server 8080 {
+                middleware [logger]
+                GET / -> home
+            }
+        "#,
+        )
+        .unwrap();
+        match &program.statements[0] {
+            Statement::Server { directives, .. } => {
+                assert_eq!(directives.len(), 1);
+                match &directives[0] {
+                    ServerDirective::Middleware(_) => {}
+                    _ => panic!("Expected Middleware directive"),
+                }
+            }
+            _ => panic!("Expected Server statement"),
+        }
+    }
+
+    #[test]
+    fn test_server_block_http_methods() {
+        let program = parse(
+            r#"
+            server 8080 {
+                GET /get -> handle_get
+                POST /post -> handle_post
+                PUT /put -> handle_put
+                PATCH /patch -> handle_patch
+                DELETE /delete -> handle_delete
+            }
+        "#,
+        )
+        .unwrap();
+        match &program.statements[0] {
+            Statement::Server { routes, .. } => {
+                assert_eq!(routes.len(), 5);
+                assert_eq!(routes[0].method, "GET");
+                assert_eq!(routes[1].method, "POST");
+                assert_eq!(routes[2].method, "PUT");
+                assert_eq!(routes[3].method, "PATCH");
+                assert_eq!(routes[4].method, "DELETE");
+            }
+            _ => panic!("Expected Server statement"),
+        }
     }
 }

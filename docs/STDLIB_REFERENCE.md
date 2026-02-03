@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.3.10
+> Last updated: v0.3.11
 
 ## Table of Contents
 
@@ -16,6 +16,7 @@
 - [std/http](#stdhttp)
 - [std/http/server](#stdhttpserver)
 - [std/json](#stdjson)
+- [std/log](#stdlog)
 - [std/math](#stdmath)
 - [std/path](#stdpath)
 - [std/postgres](#stdpostgres)
@@ -40,6 +41,7 @@ These functions are available everywhere without importing.
 | [`ceil(x: Int | Float)`](#ceil) | Rounds up to the nearest integer. |
 | [`clamp(x: Int | Float, min_val: Int | Float, max_val: Int | Float)`](#clamp) | Constrains a value between a minimum and maximum. |
 | [`delete(pattern: String, handler: Function)`](#delete) | Registers a DELETE route handler. |
+| [`enable_cors(options?: Map)`](#enablecors) | Enable CORS (Cross-Origin Resource Sharing) for the HTTP server. |
 | [`float(x: Int | Float | String)`](#float) | Converts a value to float. |
 | [`floor(x: Int | Float)`](#floor) | Rounds down to the nearest integer. |
 | [`get(pattern: String, handler: Function)`](#get) | Registers a GET route handler. |
@@ -307,6 +309,37 @@ delete("/users/{id}", fn(req) { return json(map { "deleted": true }) })  // => U
 **See also:** `get`, `post`, `put`, `patch`, `listen`
 
 *Since v0.1.0*
+
+---
+
+#### `enable_cors`
+
+```ntnt
+enable_cors(options?: Map) -> Unit
+```
+
+Enable CORS (Cross-Origin Resource Sharing) for the HTTP server.
+
+Configures the server to automatically handle CORS preflight (OPTIONS) requests and add appropriate CORS headers to all responses. Must be called before `listen()`.
+
+Options map: - `origins`: String or Array<String> of allowed origins (default: ["*"]) - `methods`: Array<String> of allowed HTTP methods (default: standard methods) - `headers`: Array<String> of allowed request headers - `credentials`: Bool to allow credentials (default: false) - `max_age`: Int preflight cache duration in seconds (default: 86400)
+
+**Parameters:**
+
+- `options` — Optional configuration map
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+enable_cors()  // Enable CORS with defaults (allow all origins)
+enable_cors(map { "origins": ["https://example.com"], "credentials": true })  // Restrict to specific origin
+```
+
+**See also:** `listen`, `get`, `post`
+
+*Since v0.3.11*
 
 ---
 
@@ -1861,14 +1894,52 @@ import { sha256, sha256_bytes, hmac_sha256 } from "std/crypto"
 
 | Function | Description |
 |----------|-------------|
+| [`hash_password`](#hashpassword) | Hash a password using bcrypt with configurable cost factor. |
 | [`hex_decode`](#hexdecode) | Decodes hex string to byte array. Returns Err for invalid hex. |
 | [`hex_encode`](#hexencode) | Encodes bytes or string as hex. |
 | [`hmac_sha256`](#hmacsha256) | HMAC-SHA256 message authentication code as hex string. |
+| [`is_valid_hash`](#isvalidhash) | Check if a string is a valid bcrypt hash format. |
 | [`random_bytes`](#randombytes) | Generates n cryptographically secure random bytes. Size limit 0-1048576. |
 | [`random_hex`](#randomhex) | Generates n random bytes as hex string (2n chars). |
 | [`sha256`](#sha256) | SHA-256 hash as hex string. Accepts string or byte array. |
 | [`sha256_bytes`](#sha256bytes) | SHA-256 hash as byte array. Returns array of 32 integers (0-255). |
 | [`uuid`](#uuid) | Generates a random UUID v4 string. |
+| [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
+
+#### `hash_password`
+
+```ntnt
+hash_password(password: String, cost?: Int) -> Result<String, String>
+```
+
+Hash a password using bcrypt with configurable cost factor.
+
+Returns a bcrypt hash string that can be stored in the database. The hash includes the salt, so no separate salt storage is needed. The default cost of 12 provides good security for most applications. Higher costs are more secure but slower — each increment doubles the time.
+
+**Parameters:**
+
+- `password` — The plaintext password to hash
+- `cost` — Work factor (10-31). Default 12. Higher = slower but more secure.
+
+**Returns:** Ok(hash_string) on success, Err(message) on failure
+
+**Examples:**
+
+```ntnt
+hash_password("secret123")  // => Ok("$2b$12$...")  // Hash with default cost
+hash_password("secret123", 10)  // => Ok("$2b$10$...")  // Hash with minimum cost (faster but still secure)
+hash_password("secret123", 14)  // => Ok("$2b$14$...")  // Hash with higher cost (more secure)
+```
+
+**Errors:**
+
+- **InvalidCost**: Cost must be between 10 and 31 — *Fix: Use a cost value of 10 or higher (OWASP minimum)*
+
+**See also:** `verify_password`, `is_valid_hash`
+
+*Since v0.4.0*
+
+---
 
 #### `hex_decode`
 
@@ -1941,6 +2012,37 @@ hmac_sha256("secret", "message")  // Returns HMAC-SHA256 as 64-char hex string
 **See also:** `sha256`
 
 *Since v0.2.0*
+
+---
+
+#### `is_valid_hash`
+
+```ntnt
+is_valid_hash(hash: String) -> Bool
+```
+
+Check if a string is a valid bcrypt hash format.
+
+This is useful for migrations or validating data before calling verify_password. Does NOT verify the hash is correct — only that it has valid bcrypt structure.
+
+**Parameters:**
+
+- `hash` — The string to check
+
+**Returns:** true if the string matches bcrypt hash format, false otherwise
+
+**Examples:**
+
+```ntnt
+is_valid_hash("$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/X4.V")  // => true  // Valid bcrypt hash
+is_valid_hash("not-a-hash")  // => false  // Plain string
+is_valid_hash("")  // => false  // Empty string
+is_valid_hash("$2a$10$N9qo8uLOickgx2ZMRZoMye")  // => false  // Truncated hash
+```
+
+**See also:** `hash_password`, `verify_password`
+
+*Since v0.4.0*
 
 ---
 
@@ -2055,6 +2157,37 @@ uuid()  // => "550e8400-e29b-41d4-a716-446655440000"  // Random UUID v4
 ```
 
 *Since v0.2.0*
+
+---
+
+#### `verify_password`
+
+```ntnt
+verify_password(password: String, hash: String) -> Result<Bool, String>
+```
+
+Verify a password against a bcrypt hash.
+
+Returns Ok(true) if the password matches, Ok(false) if it doesn't match, or Err if the hash is malformed.
+
+**Parameters:**
+
+- `password` — The plaintext password to verify
+- `hash` — The bcrypt hash to verify against
+
+**Returns:** Ok(true) if match, Ok(false) if no match, Err(message) if hash is invalid
+
+**Examples:**
+
+```ntnt
+verify_password("secret123", "$2b$12$...valid_hash...")  // => Ok(true)  // Correct password
+verify_password("wrong", "$2b$12$...valid_hash...")  // => Ok(false)  // Wrong password
+verify_password("secret", "not-a-hash")  // => Err("...")  // Invalid hash format
+```
+
+**See also:** `hash_password`, `is_valid_hash`
+
+*Since v0.4.0*
 
 ---
 
@@ -3115,17 +3248,58 @@ import { text, html, json } from "std/http/server"
 
 | Function | Description |
 |----------|-------------|
+| [`delete_cookie`](#deletecookie) | Build a Set-Cookie header value that deletes a cookie. |
 | [`error`](#error) | Create an HTTP 500 Internal Server Error response. |
+| [`get_cookie`](#getcookie) | Get a specific cookie value from a request. |
+| [`get_cookies`](#getcookies) | Get all cookies from a request as a map. |
 | [`html`](#html) | Create an HTML HTTP response. |
 | [`json`](#json) | Create a JSON HTTP response. |
 | [`not_found`](#notfound) | Create an HTTP 404 Not Found response. |
 | [`parse_form`](#parseform) | Parse a request body (or raw string) as URL-encoded form data. |
 | [`parse_json`](#parsejson) | Parse a request body (or raw string) as JSON. |
+| [`parse_multipart`](#parsemultipart) | Parse a multipart/form-data request body. |
 | [`redirect`](#redirect) | Create an HTTP 302 redirect response. |
+| [`redirect_safe`](#redirectsafe) | Create a safe HTTP 302 redirect response that prevents open redirect attacks. |
 | [`response`](#response) | Create a fully custom HTTP response. |
+| [`save_upload`](#saveupload) | Save an uploaded file to disk. |
+| [`set_cookie`](#setcookie) | Build a Set-Cookie header value string. |
 | [`static_file`](#staticfile) | Create a cacheable HTTP response for static assets. |
 | [`status`](#status) | Create a plain-text HTTP response with an explicit status code. |
 | [`text`](#text) | Create a plain-text HTTP response with status 200. |
+| [`with_cookie`](#withcookie) | Add a Set-Cookie header to a response. |
+
+#### `delete_cookie`
+
+```ntnt
+delete_cookie(name: String, options?: Map) -> String
+```
+
+Build a Set-Cookie header value that deletes a cookie.
+
+Returns a Set-Cookie header string with Max-Age=0 to instruct the browser to delete the cookie. The options map can specify `path` and `domain` to ensure the correct cookie is deleted.
+
+**Parameters:**
+
+- `name` — The name of the cookie to delete.
+- `options` — Optional map with `path` and `domain` to match the original cookie.
+
+**Returns:** A Set-Cookie header value string that deletes the cookie.
+
+**Examples:**
+
+```ntnt
+delete_cookie("session")  // => "session=; Path=/; Max-Age=0"  // Delete cookie
+```
+
+**Errors:**
+
+- **TypeError**: delete_cookie() requires 1 or 2 arguments — *Fix: Pass cookie name and optional options*
+
+**See also:** `set_cookie`, `with_cookie`
+
+*Since v0.3.11*
+
+---
 
 #### `error`
 
@@ -3156,6 +3330,72 @@ error("Something went wrong")  // => Response { status: 500, body: "Something we
 **See also:** `not_found`, `status`, `text`, `html`, `json`, `response`
 
 *Since v0.1.0*
+
+---
+
+#### `get_cookie`
+
+```ntnt
+get_cookie(req: Request, name: String) -> Option<String>
+```
+
+Get a specific cookie value from a request.
+
+Parses the request's Cookie header and returns the value of the named cookie wrapped in Some, or None if the cookie is not present.
+
+**Parameters:**
+
+- `req` — The Request map containing headers.
+- `name` — The name of the cookie to retrieve.
+
+**Returns:** Some(value) if the cookie exists, None otherwise.
+
+**Examples:**
+
+```ntnt
+get_cookie(req, "session")  // => Some("abc123")  // Get existing cookie
+get_cookie(req, "missing")  // => None  // Cookie not found
+```
+
+**Errors:**
+
+- **TypeError**: get_cookie() requires a request map and cookie name — *Fix: Pass a Request and String*
+
+**See also:** `get_cookies`, `set_cookie`, `with_cookie`
+
+*Since v0.3.11*
+
+---
+
+#### `get_cookies`
+
+```ntnt
+get_cookies(req: Request) -> Map<String, String>
+```
+
+Get all cookies from a request as a map.
+
+Parses the request's Cookie header and returns all cookie name-value pairs as a Map. Returns an empty map if no cookies are present.
+
+**Parameters:**
+
+- `req` — The Request map containing headers.
+
+**Returns:** A Map<String, String> of cookie names to values.
+
+**Examples:**
+
+```ntnt
+get_cookies(req)  // => map { "session": "abc", "theme": "dark" }  // All cookies
+```
+
+**Errors:**
+
+- **TypeError**: get_cookies() requires a request map — *Fix: Pass a Request map*
+
+**See also:** `get_cookie`, `set_cookie`, `with_cookie`
+
+*Since v0.3.11*
 
 ---
 
@@ -3326,6 +3566,44 @@ parse_json("not json")  // => Err("expected ...")  // Returns Err on invalid JSO
 
 ---
 
+#### `parse_multipart`
+
+```ntnt
+parse_multipart(req: Request) -> Result<Map<String, Any>, String>
+```
+
+Parse a multipart/form-data request body.
+
+Extracts fields and files from a multipart request. Text fields are returned as String values. File fields are returned as Maps with: `filename` (String), `content_type` (String), `size` (Int), and `data` (String - may be lossy for binary files).
+
+Note: Binary file data passes through String conversion and may be lossy. For binary files, use `save_upload()` to write directly to disk.
+
+**Parameters:**
+
+- `req` — The Request map with Content-Type header and body.
+
+**Returns:** Ok(Map) with field names as keys, or Err(String) on parse failure.
+
+**Examples:**
+
+```ntnt
+let fields = parse_multipart(req)?
+let name = fields["name"]
+let file = fields["document"]
+print("Uploaded: {file[\"filename\"]}, {file[\"size\"]} bytes")
+```
+
+**Errors:**
+
+- **TypeError**: parse_multipart() requires a request map — *Fix: Pass a Request map*
+- **ParseError**: Invalid multipart boundary — *Fix: Ensure Content-Type header includes boundary*
+
+**See also:** `save_upload`, `parse_form`
+
+*Since v0.3.11*
+
+---
+
 #### `redirect`
 
 ```ntnt
@@ -3335,6 +3613,8 @@ redirect(url: String) -> Response
 Create an HTTP 302 redirect response.
 
 Returns a Response map with status 302 and a `Location` header set to the provided URL. The body is empty.
+
+WARNING: This function does NOT validate the URL. If user input flows into this function, attackers can redirect users to malicious sites (open redirect). Use `redirect_safe()` instead when the URL comes from user input.
 
 **Parameters:**
 
@@ -3352,9 +3632,50 @@ redirect("/dashboard")  // => Response { status: 302, headers: { "location": "/d
 
 - **TypeError**: redirect() requires a URL string — *Fix: Pass a String URL as the argument*
 
-**See also:** `text`, `html`, `json`, `status`, `response`
+**Gotchas:**
+
+- Does not validate URLs - use redirect_safe() for user-provided URLs
+
+**See also:** `redirect_safe`, `text`, `html`, `json`, `status`, `response`
 
 *Since v0.1.0*
+
+---
+
+#### `redirect_safe`
+
+```ntnt
+redirect_safe(url: String, fallback?: String) -> Response
+```
+
+Create a safe HTTP 302 redirect response that prevents open redirect attacks.
+
+Only allows redirects to relative paths (e.g., /dashboard, ./page, ../back). Rejects absolute URLs, protocol-relative URLs (//evil.com), and dangerous schemes (javascript:, data:, etc.). If the URL is unsafe, redirects to the fallback URL (default: "/").
+
+Use this function instead of `redirect()` when the URL comes from user input (e.g., query parameters, form fields, database values).
+
+**Parameters:**
+
+- `url` — The URL to redirect to (must be a relative path for safety).
+- `fallback` — Optional fallback URL if the provided URL is unsafe (default: "/").
+
+**Returns:** A Response map with status 302, a Location header, and an empty body.
+
+**Examples:**
+
+```ntnt
+redirect_safe("/dashboard")  // => Response { status: 302, headers: { "location": "/dashboard" } }  // Safe relative redirect
+redirect_safe("https://evil.com")  // => Response { status: 302, headers: { "location": "/" } }  // Unsafe URL redirects to fallback
+redirect_safe("//evil.com/path", "/home")  // => Response { status: 302, headers: { "location": "/home" } }  // Protocol-relative URL rejected
+```
+
+**Errors:**
+
+- **TypeError**: redirect_safe() requires a URL string — *Fix: Pass a String URL as the first argument*
+
+**See also:** `redirect`, `text`, `html`, `json`, `status`, `response`
+
+*Since v0.3.11*
 
 ---
 
@@ -3391,6 +3712,79 @@ response(200, map { "X-Custom": "value" }, "OK")  // => Response { status: 200 }
 **See also:** `text`, `html`, `json`, `status`, `redirect`, `static_file`
 
 *Since v0.1.0*
+
+---
+
+#### `save_upload`
+
+```ntnt
+save_upload(file_field: Map, path: String) -> Result<Int, String>
+```
+
+Save an uploaded file to disk.
+
+Writes the file data from a parsed multipart field to the specified path. Returns the number of bytes written on success. Parent directories are created automatically if they don't exist.
+
+Security: Paths are validated to prevent directory traversal attacks. Relative paths are resolved from the current working directory. Paths containing `..` are rejected for security.
+
+**Parameters:**
+
+- `file_field` — The file field Map from parse_multipart() with a `data` key.
+- `path` — The filesystem path to save the file to (relative or absolute).
+
+**Returns:** Ok(Int) bytes written, or Err(String) on failure.
+
+**Examples:**
+
+```ntnt
+save_upload(fields["photo"], "uploads/photo.jpg")  // => Ok(1024)  // Save to relative path
+```
+
+**Errors:**
+
+- **TypeError**: save_upload() requires a file map and path — *Fix: Pass a file field and String path*
+- **SecurityError**: Path traversal not allowed — *Fix: Use a path without '..' components*
+
+**See also:** `parse_multipart`
+
+*Since v0.3.11*
+
+---
+
+#### `set_cookie`
+
+```ntnt
+set_cookie(name: String, value: String, options?: Map) -> String
+```
+
+Build a Set-Cookie header value string.
+
+Constructs a properly formatted Set-Cookie header value with the given name, value, and optional attributes. The returned string can be used as a header value directly or with the `with_cookie` helper.
+
+Options map supports: - `path` (String): Cookie path scope (default: "/") - `domain` (String): Cookie domain scope - `max_age` (Int): Max age in seconds - `secure` (Bool): Only send over HTTPS - `http_only` (Bool): Not accessible via JavaScript - `same_site` (String): "Strict", "Lax", or "None" - `expires` (String): Expiration date (RFC 7231 format) - `partitioned` (Bool): CHIPS partitioned cookie
+
+**Parameters:**
+
+- `name` — The cookie name.
+- `value` — The cookie value.
+- `options` — Optional map of cookie attributes.
+
+**Returns:** A Set-Cookie header value string.
+
+**Examples:**
+
+```ntnt
+set_cookie("session", "abc123")  // => "session=abc123; Path=/"  // Basic cookie
+set_cookie("token", "xyz", map { "http_only": true, "secure": true })  // => "token=xyz; Path=/; HttpOnly; Secure"  // Secure cookie
+```
+
+**Errors:**
+
+- **TypeError**: set_cookie() requires 2 or 3 arguments — *Fix: Pass name, value, and optional options map*
+
+**See also:** `get_cookie`, `get_cookies`, `delete_cookie`, `with_cookie`
+
+*Since v0.3.11*
 
 ---
 
@@ -3494,6 +3888,42 @@ text("Hello, World!")  // => Response { status: 200, body: "Hello, World!" }  //
 **See also:** `html`, `json`, `status`, `redirect`, `response`
 
 *Since v0.1.0*
+
+---
+
+#### `with_cookie`
+
+```ntnt
+with_cookie(response: Response, name: String, value: String, options?: Map) -> Response
+```
+
+Add a Set-Cookie header to a response.
+
+Returns a new Response with the Set-Cookie header added. If the response already has Set-Cookie headers, the new cookie is appended (using an array for multiple Set-Cookie headers). This is the ergonomic way to set cookies without manually building headers.
+
+**Parameters:**
+
+- `response` — The Response map to add the cookie to.
+- `name` — The cookie name.
+- `value` — The cookie value.
+- `options` — Optional map of cookie attributes (same as set_cookie).
+
+**Returns:** A new Response map with the Set-Cookie header added.
+
+**Examples:**
+
+```ntnt
+with_cookie(json(data), "session", "abc123")  // Add cookie to JSON response
+with_cookie(html(page), "theme", "dark", map { "max_age": 86400 })  // Cookie with options
+```
+
+**Errors:**
+
+- **TypeError**: with_cookie() requires 3 or 4 arguments — *Fix: Pass response, name, value, and optional options*
+
+**See also:** `set_cookie`, `delete_cookie`, `get_cookie`
+
+*Since v0.3.11*
 
 ---
 
@@ -3609,6 +4039,202 @@ stringify_pretty(map { "a": 1 })  // Pretty-printed with newlines and indentatio
 **See also:** `stringify`, `parse_json`
 
 *Since v0.1.0*
+
+---
+
+## std/log
+
+Structured logging with configurable levels and JSON context
+
+```ntnt
+import { log_debug, log_info, log_warn } from "std/log"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`log_debug`](#logdebug) | Log a message at DEBUG level. |
+| [`log_error`](#logerror) | Log a message at ERROR level. |
+| [`log_info`](#loginfo) | Log a message at INFO level. |
+| [`log_warn`](#logwarn) | Log a message at WARN level. |
+| [`request_logger`](#requestlogger) | Create a request logging middleware function. |
+| [`set_log_level`](#setloglevel) | Set the global log level. |
+
+#### `log_debug`
+
+```ntnt
+log_debug(message: String, data?: Any) -> Unit
+```
+
+Log a message at DEBUG level.
+
+Debug logs are for detailed diagnostic information during development. They are hidden by default (log level is INFO). Use `set_log_level("debug")` to enable. Output goes to stderr in the format: `2026-02-02T10:30:00Z [DEBUG] message {"context":"data"}`
+
+**Parameters:**
+
+- `message` — The log message.
+- `data` — Optional context data to serialize as JSON.
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+log_debug("Processing request", map { "id": 123 })  // Debug with context
+log_debug("Checkpoint reached")  // Simple debug message
+```
+
+**See also:** `log_info`, `log_warn`, `log_error`, `set_log_level`
+
+*Since v0.3.11*
+
+---
+
+#### `log_error`
+
+```ntnt
+log_error(message: String, data?: Any) -> Unit
+```
+
+Log a message at ERROR level.
+
+Error logs are for serious problems that may prevent normal operation. Output goes to stderr in the format: `2026-02-02T10:30:00Z [ERROR] message {"context":"data"}`
+
+**Parameters:**
+
+- `message` — The log message.
+- `data` — Optional context data to serialize as JSON.
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+log_error("Database connection failed", map { "host": "db.example.com" })  // Error with context
+log_error("Critical failure")  // Simple error message
+```
+
+**See also:** `log_debug`, `log_info`, `log_warn`, `set_log_level`
+
+*Since v0.3.11*
+
+---
+
+#### `log_info`
+
+```ntnt
+log_info(message: String, data?: Any) -> Unit
+```
+
+Log a message at INFO level.
+
+Info logs are for general operational information. This is the default log level. Output goes to stderr in the format: `2026-02-02T10:30:00Z [INFO] message {"context":"data"}`
+
+**Parameters:**
+
+- `message` — The log message.
+- `data` — Optional context data to serialize as JSON.
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+log_info("Server started", map { "port": 8080 })  // Info with context
+log_info("User logged in")  // Simple info message
+```
+
+**See also:** `log_debug`, `log_warn`, `log_error`, `set_log_level`
+
+*Since v0.3.11*
+
+---
+
+#### `log_warn`
+
+```ntnt
+log_warn(message: String, data?: Any) -> Unit
+```
+
+Log a message at WARN level.
+
+Warn logs are for potentially harmful situations or unexpected behavior that doesn't prevent operation. Output goes to stderr in the format: `2026-02-02T10:30:00Z [WARN] message {"context":"data"}`
+
+**Parameters:**
+
+- `message` — The log message.
+- `data` — Optional context data to serialize as JSON.
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+log_warn("Rate limit approaching", map { "current": 95, "max": 100 })  // Warning with context
+log_warn("Deprecated API called")  // Simple warning
+```
+
+**See also:** `log_debug`, `log_info`, `log_error`, `set_log_level`
+
+*Since v0.3.11*
+
+---
+
+#### `request_logger`
+
+```ntnt
+request_logger() -> Function
+```
+
+Create a request logging middleware function.
+
+Returns a function suitable for use with `use_middleware()` that logs incoming HTTP requests at INFO level. Logs the HTTP method and path for each request.
+
+**Returns:** A middleware function that logs requests.
+
+**Examples:**
+
+```ntnt
+use_middleware(request_logger())  // Log all incoming requests
+```
+
+**See also:** `log_info`, `use_middleware`
+
+*Since v0.3.11*
+
+---
+
+#### `set_log_level`
+
+```ntnt
+set_log_level(level: String) -> Unit
+```
+
+Set the global log level.
+
+Controls which log messages are output. Messages below the set level are silently ignored. Valid levels: "debug", "info", "warn", "error". Default is "info".
+
+**Parameters:**
+
+- `level` — The log level name: "debug", "info", "warn", or "error".
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+set_log_level("debug")  // Enable debug logging
+set_log_level("error")  // Only show errors
+```
+
+**Errors:**
+
+- **TypeError**: Invalid log level — *Fix: Use 'debug', 'info', 'warn', or 'error'*
+
+**See also:** `log_debug`, `log_info`, `log_warn`, `log_error`
+
+*Since v0.3.11*
 
 ---
 

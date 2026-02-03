@@ -427,7 +427,12 @@ impl Interpreter {
                 // In unit test mode, skip all server-related functions
                 matches!(
                     name,
-                    "listen" | "serve_static" | "routes" | "use_middleware" | "on_shutdown"
+                    "listen"
+                        | "serve_static"
+                        | "routes"
+                        | "use_middleware"
+                        | "on_shutdown"
+                        | "enable_cors"
                 )
             }
         }
@@ -1987,6 +1992,42 @@ impl Interpreter {
                 },
             },
         );
+
+        // @ntnt enable_cors
+        // @signature enable_cors(options?: Map) -> Unit
+        // Enable CORS (Cross-Origin Resource Sharing) for the HTTP server.
+        //
+        // Configures the server to automatically handle CORS preflight (OPTIONS)
+        // requests and add appropriate CORS headers to all responses. Must be
+        // called before `listen()`.
+        //
+        // Options map:
+        // - `origins`: String or Array<String> of allowed origins (default: ["*"])
+        // - `methods`: Array<String> of allowed HTTP methods (default: standard methods)
+        // - `headers`: Array<String> of allowed request headers
+        // - `credentials`: Bool to allow credentials (default: false)
+        // - `max_age`: Int preflight cache duration in seconds (default: 86400)
+        // @param options Optional configuration map
+        // @returns Unit
+        // @tags #server, #cors, #http
+        // @see_also listen, get, post
+        // @since v0.3.11
+        // @example enable_cors() ~ "Enable CORS with defaults (allow all origins)"
+        // @example enable_cors(map { "origins": ["https://example.com"], "credentials": true }) ~ "Restrict to specific origin"
+        self.environment.borrow_mut().define(
+            "enable_cors".to_string(),
+            Value::NativeFunction {
+                name: "enable_cors".to_string(),
+                arity: 0, // Variadic: 0-1 args
+                func: |_args| {
+                    // Placeholder - actual implementation is in eval_call
+                    Err(IntentError::RuntimeError(
+                        "enable_cors() must be called directly, not stored in a variable"
+                            .to_string(),
+                    ))
+                },
+            },
+        );
     }
 
     /// Define standard library functions that are always available
@@ -3058,6 +3099,16 @@ impl Interpreter {
                 self.deferred_statements.push(expr.clone());
                 Ok(Value::Unit)
             }
+
+            Statement::Server {
+                port,
+                directives,
+                routes,
+                groups,
+            } => {
+                // Evaluate server block by desugaring to existing builtins
+                self.eval_server_block(port, directives, routes, groups)
+            }
         }
     }
 
@@ -3293,6 +3344,29 @@ impl Interpreter {
                         }
                         let handler = self.eval_expression(&arguments[0])?;
                         self.server_state.add_shutdown_handler(handler);
+                        return Ok(Value::Unit);
+                    }
+
+                    // Special handling for enable_cors(options?)
+                    if name == "enable_cors" && arguments.len() <= 1 {
+                        if self.should_skip_server_call("enable_cors") {
+                            return Ok(Value::Unit);
+                        }
+                        let options = if arguments.is_empty() {
+                            HashMap::new()
+                        } else {
+                            match self.eval_expression(&arguments[0])? {
+                                Value::Map(m) => m,
+                                _ => {
+                                    return Err(IntentError::TypeError(
+                                        "enable_cors() options must be a map".to_string(),
+                                    ))
+                                }
+                            }
+                        };
+                        let cors_config =
+                            crate::stdlib::http_server::CorsConfig::from_value(&options);
+                        self.server_state.enable_cors(cors_config);
                         return Ok(Value::Unit);
                     }
 
@@ -5050,9 +5124,73 @@ impl Interpreter {
             let url = request.url().to_string();
             let path = url.split('?').next().unwrap_or(&url).to_string();
 
-            // First, try to find a matching route
-            if let Some((mut handler, route_params, route_index)) =
-                self.server_state.find_route(&method, &path)
+            // Get request Origin header for CORS
+            let request_origin = request
+                .headers()
+                .iter()
+                .find(|h| h.field.as_str().to_ascii_lowercase() == "origin")
+                .map(|h| h.value.as_str().to_string());
+
+            // Handle CORS preflight (OPTIONS) requests
+            if method == "OPTIONS" {
+                if let Some(cors_config) = self.server_state.get_cors_config() {
+                    let preflight_response =
+                        cors_config.create_preflight_response(request_origin.as_deref());
+                    // Process the request to get the http_request handle
+                    if let Ok((_, http_request)) =
+                        http_server::process_request(request, HashMap::new())
+                    {
+                        let _ = http_server::send_response(http_request, &preflight_response);
+                    }
+                    continue;
+                }
+            }
+
+            // First, try to find a matching route (with typed parameter validation)
+            let route_result = self.server_state.find_route_typed(&method, &path);
+
+            // Handle typed parameter validation failure with 400 Bad Request
+            if let crate::stdlib::http_server::RouteMatchResult::TypeMismatch {
+                param_name,
+                expected,
+                got,
+            } = &route_result
+            {
+                // Clone values for use in response
+                let error_msg = format!(
+                    "Bad Request: Parameter '{}' must be type {}, got '{}'",
+                    param_name, expected, got
+                );
+                #[allow(clippy::single_match)]
+                match http_server::process_request(request, HashMap::new()) {
+                    Ok((_, http_request)) => {
+                        let bad_request = http_server::create_error_response(400, &error_msg);
+                        // Apply CORS headers if enabled
+                        let bad_request = if let Some(cors_config) =
+                            self.server_state.get_cors_config()
+                        {
+                            if let Value::Map(mut resp_map) = bad_request {
+                                cors_config
+                                    .apply_to_response(&mut resp_map, request_origin.as_deref());
+                                Value::Map(resp_map)
+                            } else {
+                                bad_request
+                            }
+                        } else {
+                            bad_request
+                        };
+                        let _ = http_server::send_response(http_request, &bad_request);
+                    }
+                    Err(_) => {}
+                }
+                continue;
+            }
+
+            if let crate::stdlib::http_server::RouteMatchResult::Matched {
+                mut handler,
+                params: route_params,
+                route_index,
+            } = route_result
             {
                 // Hot-reload check: if file, its imports, or lib modules changed, reload the handler
                 if lib_modules_changed || self.server_state.needs_reload(route_index) {
@@ -5151,6 +5289,21 @@ impl Interpreter {
                             }
                         };
 
+                        // Apply CORS headers if enabled
+                        let final_response = if let Some(cors_config) =
+                            self.server_state.get_cors_config()
+                        {
+                            if let Value::Map(mut resp_map) = final_response {
+                                cors_config
+                                    .apply_to_response(&mut resp_map, request_origin.as_deref());
+                                Value::Map(resp_map)
+                            } else {
+                                final_response
+                            }
+                        } else {
+                            final_response
+                        };
+
                         // Send the response (only once)
                         if let Err(e) = http_server::send_response(http_request, &final_response) {
                             eprintln!("Error sending response: {}", e);
@@ -5183,6 +5336,17 @@ impl Interpreter {
                         404,
                         &format!("Not Found: {} {}", method, path_clone),
                     );
+                    // Apply CORS headers if enabled
+                    let not_found = if let Some(cors_config) = self.server_state.get_cors_config() {
+                        if let Value::Map(mut resp_map) = not_found {
+                            cors_config.apply_to_response(&mut resp_map, request_origin.as_deref());
+                            Value::Map(resp_map)
+                        } else {
+                            not_found
+                        }
+                    } else {
+                        not_found
+                    };
                     let _ = http_server::send_response(http_request, &not_found);
                 }
                 Err(_) => {}
@@ -5336,8 +5500,52 @@ impl Interpreter {
                     let method = &request.method;
                     let path = &request.path;
 
-                    if let Some((mut handler, route_params, route_index)) =
-                        self.server_state.find_route(method, path)
+                    // Get request Origin header for CORS
+                    let request_origin = request.headers.get("origin").cloned();
+
+                    // Handle CORS preflight (OPTIONS) requests
+                    if method == "OPTIONS" {
+                        if let Some(cors_config) = self.server_state.get_cors_config() {
+                            let preflight_response =
+                                cors_config.create_preflight_response(request_origin.as_deref());
+                            let bridge_response = BridgeResponse::from_value(&preflight_response);
+                            let _ = reply_tx.send(bridge_response);
+                            continue;
+                        }
+                    }
+
+                    // Try to find a matching route with typed param validation
+                    let route_result = self.server_state.find_route_typed(method, path);
+
+                    // Handle typed parameter validation failure with 400 Bad Request
+                    if let crate::stdlib::http_server::RouteMatchResult::TypeMismatch {
+                        ref param_name,
+                        ref expected,
+                        ref got,
+                    } = route_result
+                    {
+                        let error_msg = format!(
+                            "Bad Request: Parameter '{}' must be type {}, got '{}'",
+                            param_name, expected, got
+                        );
+                        let mut bad_request =
+                            crate::stdlib::http_server::create_error_response(400, &error_msg);
+                        // Apply CORS headers if enabled
+                        if let Some(cors_config) = self.server_state.get_cors_config() {
+                            if let Value::Map(ref mut resp_map) = bad_request {
+                                cors_config.apply_to_response(resp_map, request_origin.as_deref());
+                            }
+                        }
+                        let bridge_response = BridgeResponse::from_value(&bad_request);
+                        let _ = reply_tx.send(bridge_response);
+                        continue;
+                    }
+
+                    if let crate::stdlib::http_server::RouteMatchResult::Matched {
+                        mut handler,
+                        params: route_params,
+                        route_index,
+                    } = route_result
                     {
                         // Hot-reload check: if route file, its imports, or lib modules changed, reload the handler
                         if lib_modules_changed || self.server_state.needs_reload(route_index) {
@@ -5427,12 +5635,59 @@ impl Interpreter {
                             }
                         };
 
+                        // Apply CORS headers if enabled
+                        let final_response = if let Some(cors_config) =
+                            self.server_state.get_cors_config()
+                        {
+                            if let Value::Map(mut resp_map) = final_response {
+                                cors_config
+                                    .apply_to_response(&mut resp_map, request_origin.as_deref());
+                                Value::Map(resp_map)
+                            } else {
+                                final_response
+                            }
+                        } else {
+                            final_response
+                        };
+
                         // Convert to BridgeResponse and send back
                         let bridge_response = BridgeResponse::from_value(&final_response);
                         let _ = reply_tx.send(bridge_response);
                     } else {
-                        // No route found
-                        let _ = reply_tx.send(BridgeResponse::not_found());
+                        // No route found - apply CORS headers if enabled
+                        let not_found_response = if let Some(cors_config) =
+                            self.server_state.get_cors_config()
+                        {
+                            let preflight =
+                                cors_config.create_preflight_response(request_origin.as_deref());
+                            // Merge CORS headers into 404 response
+                            let mut not_found = crate::stdlib::http_server::create_error_response(
+                                404,
+                                &format!("Not Found: {} {}", method, path),
+                            );
+                            if let (Value::Map(ref mut nf_map), Value::Map(cors_map)) =
+                                (&mut not_found, preflight)
+                            {
+                                if let Some(Value::Map(cors_headers)) = cors_map.get("headers") {
+                                    let headers = nf_map
+                                        .entry("headers".to_string())
+                                        .or_insert_with(|| Value::Map(HashMap::new()));
+                                    if let Value::Map(h) = headers {
+                                        for (k, v) in cors_headers {
+                                            h.insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            not_found
+                        } else {
+                            crate::stdlib::http_server::create_error_response(
+                                404,
+                                &format!("Not Found: {} {}", method, path),
+                            )
+                        };
+                        let bridge_response = BridgeResponse::from_value(&not_found_response);
+                        let _ = reply_tx.send(bridge_response);
                     }
                 }
                 None => {
@@ -5812,6 +6067,203 @@ impl Interpreter {
                     _ => println!("  {} = {}", key, value),
                 }
             }
+        }
+    }
+
+    // =========================================================================
+    // Server Block Evaluation
+    // =========================================================================
+
+    /// Evaluate a server block by desugaring to existing route registration calls
+    fn eval_server_block(
+        &mut self,
+        port: &Expression,
+        directives: &[ServerDirective],
+        routes: &[ServerRoute],
+        groups: &[ServerGroup],
+    ) -> Result<Value> {
+        use crate::ast::ServerDirective;
+
+        // Skip server block evaluation in unit test mode
+        if self.should_skip_server_call("listen") {
+            return Ok(Value::Unit);
+        }
+
+        // 1. Process directives (static, cors, middleware)
+        for directive in directives {
+            match directive {
+                ServerDirective::Static { prefix, directory } => {
+                    // Desugar to: serve_static(prefix, directory)
+                    let resolved_dir = self.resolve_path_relative_to_script(directory);
+                    self.server_state
+                        .add_static_dir(prefix.clone(), resolved_dir);
+                }
+                ServerDirective::Cors(config_expr) => {
+                    // Desugar to: enable_cors(config)
+                    let config_val = self.eval_expression(config_expr)?;
+                    if let Value::Map(options) = config_val {
+                        let cors_config =
+                            crate::stdlib::http_server::CorsConfig::from_value(&options);
+                        self.server_state.enable_cors(cors_config);
+                    } else {
+                        return Err(IntentError::TypeError(
+                            "cors directive expects a map".to_string(),
+                        ));
+                    }
+                }
+                ServerDirective::Middleware(mw_expr) => {
+                    // Desugar to: use_middleware(fn) or use_middleware([fn1, fn2])
+                    let mw_val = self.eval_expression(mw_expr)?;
+                    match mw_val {
+                        Value::Array(fns) => {
+                            for f in fns {
+                                self.server_state.add_middleware(f);
+                            }
+                        }
+                        Value::Function { .. } | Value::NativeFunction { .. } => {
+                            self.server_state.add_middleware(mw_val);
+                        }
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "middleware directive expects a function or array of functions"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Register routes
+        for route in routes {
+            self.eval_server_route(route, "")?;
+        }
+
+        // 3. Process groups (recursive)
+        for group in groups {
+            self.eval_server_group(group, "")?;
+        }
+
+        // 4. Start server
+        let port_val = self.eval_expression(port)?;
+        let port_num = match port_val {
+            Value::Int(p) => p as u16,
+            _ => {
+                return Err(IntentError::TypeError(
+                    "Server port must be an integer".to_string(),
+                ))
+            }
+        };
+
+        // Use the existing listen mechanism
+        self.start_http_server(port_num)
+    }
+
+    /// Evaluate a single server route
+    fn eval_server_route(&mut self, route: &ServerRoute, prefix: &str) -> Result<()> {
+        let full_pattern = format!("{}{}", prefix, route.pattern);
+        let handler = self.eval_expression(&route.handler)?;
+
+        // Ensure handler is a function
+        match &handler {
+            Value::Function { .. } | Value::NativeFunction { .. } => {}
+            _ => {
+                return Err(IntentError::TypeError(format!(
+                    "Route handler must be a function, got {}",
+                    handler.type_name()
+                )));
+            }
+        }
+
+        // Build typed route with parameter info
+        let segments =
+            crate::stdlib::http_server::parse_pattern_with_types(&full_pattern, &route.params);
+
+        // Check for route conflicts before adding
+        if let Some(conflicting_pattern) = self
+            .server_state
+            .detect_route_conflict(&route.method, &segments)
+        {
+            return Err(IntentError::RuntimeError(format!(
+                "Route conflict: {} {} conflicts with existing route {}. Routes with the same method and parameter positions are ambiguous.",
+                route.method, full_pattern, conflicting_pattern
+            )));
+        }
+
+        let compiled_route = crate::stdlib::http_server::Route {
+            method: route.method.clone(),
+            pattern: full_pattern,
+            segments,
+        };
+
+        // Register the route
+        let source = crate::stdlib::http_server::RouteSource {
+            file_path: self.current_file.clone(),
+            mtime: self
+                .current_file
+                .as_ref()
+                .and_then(|f| std::fs::metadata(f).ok().and_then(|m| m.modified().ok())),
+            imported_files: std::collections::HashMap::new(),
+        };
+
+        self.server_state
+            .routes
+            .push((compiled_route, handler, source));
+        Ok(())
+    }
+
+    /// Evaluate a server group (with prefix and optional middleware)
+    fn eval_server_group(&mut self, group: &ServerGroup, parent_prefix: &str) -> Result<()> {
+        let full_prefix = format!("{}{}", parent_prefix, group.prefix);
+
+        // Evaluate and register group-level middleware
+        // Note: In a full implementation, we'd need to scope middleware to just this group
+        // For now, we add them to the global middleware stack
+        for mw_expr in &group.middleware {
+            let mw_val = self.eval_expression(mw_expr)?;
+            match mw_val {
+                Value::Array(fns) => {
+                    for f in fns {
+                        self.server_state.add_middleware(f);
+                    }
+                }
+                Value::Function { .. } | Value::NativeFunction { .. } => {
+                    self.server_state.add_middleware(mw_val);
+                }
+                _ => {
+                    return Err(IntentError::TypeError(
+                        "Group middleware expects a function or array of functions".to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Register routes in this group
+        for route in &group.routes {
+            self.eval_server_route(route, &full_prefix)?;
+        }
+
+        // Process nested groups
+        for nested in &group.groups {
+            self.eval_server_group(nested, &full_prefix)?;
+        }
+
+        Ok(())
+    }
+
+    /// Start the HTTP server (delegates to existing mechanism)
+    fn start_http_server(&mut self, port: u16) -> Result<Value> {
+        // Check execution mode
+        if self.execution_mode == ExecutionMode::HotReload {
+            // In hot-reload mode, skip re-binding the port
+            return Ok(Value::Unit);
+        }
+
+        // Use sync server for test mode (intent check), async for production
+        if self.test_mode.is_some() {
+            self.run_http_server(port)
+        } else {
+            self.run_async_http_server(port)
         }
     }
 }

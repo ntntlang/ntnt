@@ -24,13 +24,147 @@ use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
 use crate::stdlib::json::json_to_intent_value;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::SystemTime;
+
+// =============================================================================
+// Security Configuration
+// =============================================================================
+
+/// Security configuration loaded from environment variables
+#[derive(Debug, Clone)]
+pub struct SecurityConfig {
+    /// Maximum request body size in bytes (default: 10MB)
+    pub max_body_size: usize,
+    /// Whether to add security headers to all responses (default: true)
+    pub security_headers: bool,
+    /// Whether running in production mode (default: false)
+    pub production_mode: bool,
+    /// Whether to show detailed error messages (default: true in dev, false in prod)
+    pub detailed_errors: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        let production_mode = std::env::var("NTNT_ENV")
+            .map(|v| v == "production" || v == "prod")
+            .unwrap_or(false);
+
+        SecurityConfig {
+            max_body_size: std::env::var("NTNT_MAX_BODY_SIZE")
+                .ok()
+                .and_then(|s| parse_size(&s))
+                .unwrap_or(10 * 1024 * 1024), // 10MB default
+            security_headers: std::env::var("NTNT_SECURITY_HEADERS")
+                .map(|v| v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(true), // Enabled by default
+            production_mode,
+            detailed_errors: std::env::var("NTNT_DETAILED_ERRORS")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(!production_mode), // Detailed in dev, generic in prod
+        }
+    }
+}
+
+/// Parse a size string like "10MB", "1GB", "500KB" into bytes
+fn parse_size(s: &str) -> Option<usize> {
+    let s = s.trim().to_uppercase();
+    if let Some(num) = s.strip_suffix("GB") {
+        num.trim()
+            .parse::<usize>()
+            .ok()
+            .map(|n| n * 1024 * 1024 * 1024)
+    } else if let Some(num) = s.strip_suffix("MB") {
+        num.trim().parse::<usize>().ok().map(|n| n * 1024 * 1024)
+    } else if let Some(num) = s.strip_suffix("KB") {
+        num.trim().parse::<usize>().ok().map(|n| n * 1024)
+    } else if let Some(num) = s.strip_suffix('B') {
+        num.trim().parse::<usize>().ok()
+    } else {
+        s.parse::<usize>().ok()
+    }
+}
+
+/// Global security configuration (loaded once from environment)
+static SECURITY_CONFIG: OnceLock<SecurityConfig> = OnceLock::new();
+
+/// Get the global security configuration
+pub fn get_security_config() -> &'static SecurityConfig {
+    SECURITY_CONFIG.get_or_init(SecurityConfig::default)
+}
+
+/// Default security headers added to all responses
+pub fn get_default_security_headers() -> HashMap<String, Value> {
+    let mut headers = HashMap::new();
+
+    // Prevent MIME type sniffing
+    headers.insert(
+        "x-content-type-options".to_string(),
+        Value::String("nosniff".to_string()),
+    );
+
+    // Prevent clickjacking (can be overridden by app if needed for iframes)
+    headers.insert(
+        "x-frame-options".to_string(),
+        Value::String("DENY".to_string()),
+    );
+
+    // Control referrer information
+    headers.insert(
+        "referrer-policy".to_string(),
+        Value::String("strict-origin-when-cross-origin".to_string()),
+    );
+
+    // Prevent XSS in older browsers
+    headers.insert(
+        "x-xss-protection".to_string(),
+        Value::String("1; mode=block".to_string()),
+    );
+
+    // Don't expose server software in production (overridden below)
+    // Note: We don't add Server header here - let tiny_http's default or none
+
+    headers
+}
+
+/// Apply security headers to a response map
+pub fn apply_security_headers(response: &mut HashMap<String, Value>) {
+    let config = get_security_config();
+    if !config.security_headers {
+        return;
+    }
+
+    let security_headers = get_default_security_headers();
+
+    // Get existing headers or create new map
+    let headers = match response.get_mut("headers") {
+        Some(Value::Map(h)) => h,
+        _ => {
+            response.insert("headers".to_string(), Value::Map(HashMap::new()));
+            match response.get_mut("headers") {
+                Some(Value::Map(h)) => h,
+                _ => return,
+            }
+        }
+    };
+
+    // Add security headers only if not already set (allow app to override)
+    for (key, value) in security_headers {
+        if !headers.contains_key(&key) {
+            headers.insert(key, value);
+        }
+    }
+}
 
 /// Represents a route segment - either static text or a parameter
 #[derive(Debug, Clone)]
 pub enum RouteSegment {
     Static(String),
-    Param(String),
+    Param {
+        name: String,
+        /// Type constraint: "Int", "Float", or None (defaults to String)
+        param_type: Option<String>,
+    },
 }
 
 /// A compiled route with its pattern parsed into segments
@@ -49,32 +183,287 @@ pub struct RouteSource {
     pub imported_files: HashMap<String, SystemTime>, // Tracked imports for this route
 }
 
+/// CORS (Cross-Origin Resource Sharing) configuration
+#[derive(Debug, Clone)]
+pub struct CorsConfig {
+    pub origins: Vec<String>, // Allowed origins (["*"] for wildcard)
+    pub methods: Vec<String>, // Allowed HTTP methods
+    pub headers: Vec<String>, // Allowed request headers
+    pub credentials: bool,    // Whether to allow credentials
+    pub max_age: i64,         // Preflight cache duration in seconds
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        CorsConfig {
+            origins: vec!["*".to_string()],
+            methods: vec![
+                "GET".to_string(),
+                "POST".to_string(),
+                "PUT".to_string(),
+                "DELETE".to_string(),
+                "PATCH".to_string(),
+                "OPTIONS".to_string(),
+            ],
+            headers: vec![
+                "Content-Type".to_string(),
+                "Authorization".to_string(),
+                "Accept".to_string(),
+            ],
+            credentials: false,
+            max_age: 86400,
+        }
+    }
+}
+
+impl CorsConfig {
+    /// Create CORS config from an options map
+    pub fn from_value(options: &HashMap<String, Value>) -> Self {
+        let mut config = CorsConfig::default();
+
+        // Parse origins
+        if let Some(origins) = options.get("origins") {
+            match origins {
+                Value::String(s) => {
+                    config.origins = vec![s.clone()];
+                }
+                Value::Array(arr) => {
+                    config.origins = arr
+                        .iter()
+                        .filter_map(|v| {
+                            if let Value::String(s) = v {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                }
+                _ => {}
+            }
+        }
+
+        // Parse methods
+        if let Some(Value::Array(methods)) = options.get("methods") {
+            config.methods = methods
+                .iter()
+                .filter_map(|v| {
+                    if let Value::String(s) = v {
+                        Some(s.to_uppercase())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+
+        // Parse headers
+        if let Some(Value::Array(headers)) = options.get("headers") {
+            config.headers = headers
+                .iter()
+                .filter_map(|v| {
+                    if let Value::String(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+
+        // Parse credentials
+        if let Some(Value::Bool(creds)) = options.get("credentials") {
+            config.credentials = *creds;
+        }
+
+        // Parse max_age
+        if let Some(Value::Int(age)) = options.get("max_age") {
+            config.max_age = *age;
+        }
+
+        config
+    }
+
+    /// Check if the given origin is allowed
+    pub fn is_origin_allowed(&self, origin: &str) -> bool {
+        if self.origins.iter().any(|o| o == "*") {
+            return true;
+        }
+        self.origins.iter().any(|o| o == origin)
+    }
+
+    /// Get the Access-Control-Allow-Origin header value for the given request origin
+    pub fn get_allow_origin(&self, request_origin: Option<&str>) -> Option<String> {
+        match request_origin {
+            Some(origin) if self.is_origin_allowed(origin) => {
+                // If credentials are enabled, we must return the specific origin, not *
+                if self.credentials {
+                    Some(origin.to_string())
+                } else if self.origins.iter().any(|o| o == "*") {
+                    Some("*".to_string())
+                } else {
+                    Some(origin.to_string())
+                }
+            }
+            None if !self.credentials && self.origins.iter().any(|o| o == "*") => {
+                Some("*".to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// Apply CORS headers to a response Value
+    pub fn apply_to_response(
+        &self,
+        response: &mut HashMap<String, Value>,
+        request_origin: Option<&str>,
+    ) {
+        let mut headers = match response.get("headers") {
+            Some(Value::Map(h)) => h.clone(),
+            _ => HashMap::new(),
+        };
+
+        // Access-Control-Allow-Origin
+        if let Some(allow_origin) = self.get_allow_origin(request_origin) {
+            headers.insert(
+                "access-control-allow-origin".to_string(),
+                Value::String(allow_origin),
+            );
+        }
+
+        // Access-Control-Allow-Methods
+        headers.insert(
+            "access-control-allow-methods".to_string(),
+            Value::String(self.methods.join(", ")),
+        );
+
+        // Access-Control-Allow-Headers
+        headers.insert(
+            "access-control-allow-headers".to_string(),
+            Value::String(self.headers.join(", ")),
+        );
+
+        // Access-Control-Allow-Credentials
+        if self.credentials {
+            headers.insert(
+                "access-control-allow-credentials".to_string(),
+                Value::String("true".to_string()),
+            );
+        }
+
+        // Access-Control-Max-Age
+        headers.insert(
+            "access-control-max-age".to_string(),
+            Value::String(self.max_age.to_string()),
+        );
+
+        response.insert("headers".to_string(), Value::Map(headers));
+    }
+
+    /// Create a preflight (OPTIONS) response
+    pub fn create_preflight_response(&self, request_origin: Option<&str>) -> Value {
+        let mut headers = HashMap::new();
+
+        // Access-Control-Allow-Origin
+        if let Some(allow_origin) = self.get_allow_origin(request_origin) {
+            headers.insert(
+                "access-control-allow-origin".to_string(),
+                Value::String(allow_origin),
+            );
+        }
+
+        // Access-Control-Allow-Methods
+        headers.insert(
+            "access-control-allow-methods".to_string(),
+            Value::String(self.methods.join(", ")),
+        );
+
+        // Access-Control-Allow-Headers
+        headers.insert(
+            "access-control-allow-headers".to_string(),
+            Value::String(self.headers.join(", ")),
+        );
+
+        // Access-Control-Allow-Credentials
+        if self.credentials {
+            headers.insert(
+                "access-control-allow-credentials".to_string(),
+                Value::String("true".to_string()),
+            );
+        }
+
+        // Access-Control-Max-Age
+        headers.insert(
+            "access-control-max-age".to_string(),
+            Value::String(self.max_age.to_string()),
+        );
+
+        create_response_value(204, headers, String::new())
+    }
+}
+
+/// Result of route lookup with type information
+#[derive(Debug, Clone)]
+pub enum RouteMatchResult {
+    /// Route matched successfully
+    Matched {
+        handler: Value,
+        params: HashMap<String, String>,
+        route_index: usize,
+    },
+    /// Route pattern matched but typed param validation failed
+    TypeMismatch {
+        param_name: String,
+        expected: String,
+        got: String,
+    },
+    /// No route matched
+    NotFound,
+}
+
 /// Server state stored in the interpreter
 #[derive(Debug, Clone)]
 pub struct ServerState {
     pub routes: Vec<(Route, Value, RouteSource)>, // Routes with handlers and source info
-    pub static_dirs: Vec<(String, String)>,       // (url_prefix, filesystem_path)
-    pub middleware: Vec<Value>,                   // Middleware functions to run before handlers
-    pub hot_reload: bool,                         // Whether hot-reload is enabled
-    pub shutdown_handlers: Vec<Value>,            // Functions to call on server shutdown
+    /// Route index for O(1) lookup by (method, segment_count) -> route indices
+    route_index: HashMap<(String, usize), Vec<usize>>,
+    pub static_dirs: Vec<(String, String)>, // (url_prefix, filesystem_path)
+    pub middleware: Vec<Value>,             // Middleware functions to run before handlers
+    pub hot_reload: bool,                   // Whether hot-reload is enabled
+    pub shutdown_handlers: Vec<Value>,      // Functions to call on server shutdown
+    pub cors_config: Option<CorsConfig>,    // Optional CORS configuration
 }
 
 impl ServerState {
     pub fn new() -> Self {
         ServerState {
             routes: Vec::new(),
+            route_index: HashMap::new(),
             static_dirs: Vec::new(),
             middleware: Vec::new(),
             hot_reload: true, // Enable hot-reload by default in dev
             shutdown_handlers: Vec::new(),
+            cors_config: None,
         }
     }
 
     pub fn clear(&mut self) {
         self.routes.clear();
+        self.route_index.clear();
         self.static_dirs.clear();
         self.middleware.clear();
         self.shutdown_handlers.clear();
+        // Note: cors_config is NOT cleared - it's typically configured once at startup
+    }
+
+    /// Enable CORS with the given configuration
+    pub fn enable_cors(&mut self, config: CorsConfig) {
+        self.cors_config = Some(config);
+    }
+
+    /// Get the CORS configuration if enabled
+    pub fn get_cors_config(&self) -> Option<&CorsConfig> {
+        self.cors_config.as_ref()
     }
 
     pub fn add_shutdown_handler(&mut self, handler: Value) {
@@ -90,6 +479,60 @@ impl ServerState {
         self.add_route_with_source(method, pattern, handler, None, HashMap::new());
     }
 
+    /// Detect if a new route would conflict with existing routes
+    ///
+    /// Two routes conflict if:
+    /// - Same method
+    /// - Same number of segments
+    /// - At each position: either both are params (ambiguous) or static segments match
+    ///
+    /// Returns Some(conflicting_pattern) if a conflict is detected, None otherwise.
+    pub fn detect_route_conflict(
+        &self,
+        method: &str,
+        new_segments: &[RouteSegment],
+    ) -> Option<String> {
+        for (route, _, _) in &self.routes {
+            if route.method != method {
+                continue;
+            }
+
+            if route.segments.len() != new_segments.len() {
+                continue;
+            }
+
+            let mut all_match = true;
+            let mut has_ambiguous_params = false;
+
+            for (existing, new) in route.segments.iter().zip(new_segments.iter()) {
+                match (existing, new) {
+                    // Two statics - must be equal
+                    (RouteSegment::Static(a), RouteSegment::Static(b)) => {
+                        if a != b {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                    // Both params - ambiguous!
+                    (RouteSegment::Param { .. }, RouteSegment::Param { .. }) => {
+                        has_ambiguous_params = true;
+                    }
+                    // One static, one param - OK, static takes priority
+                    _ => {
+                        all_match = false;
+                        break;
+                    }
+                }
+            }
+
+            if all_match && has_ambiguous_params {
+                return Some(route.pattern.clone());
+            }
+        }
+
+        None
+    }
+
     /// Add a route with source file info for hot-reload
     pub fn add_route_with_source(
         &mut self,
@@ -99,10 +542,12 @@ impl ServerState {
         file_path: Option<String>,
         imported_files: HashMap<String, SystemTime>,
     ) {
+        let segments = parse_route_pattern(pattern);
+        let segment_count = segments.len();
         let route = Route {
             method: method.to_string(),
             pattern: pattern.to_string(),
-            segments: parse_route_pattern(pattern),
+            segments,
         };
 
         // Get file mtime if path provided
@@ -115,7 +560,14 @@ impl ServerState {
             mtime,
             imported_files,
         };
+
+        // Add to flat routes list (index is the position)
+        let route_idx = self.routes.len();
         self.routes.push((route, handler, source));
+
+        // Add to route index for fast lookup by (method, segment_count)
+        let key = (method.to_string(), segment_count);
+        self.route_index.entry(key).or_default().push(route_idx);
     }
 
     pub fn route_count(&self) -> usize {
@@ -128,14 +580,59 @@ impl ServerState {
         method: &str,
         path: &str,
     ) -> Option<(Value, HashMap<String, String>, usize)> {
-        for (index, (route, handler, _source)) in self.routes.iter().enumerate() {
-            if route.method == method {
-                if let Some(params) = match_route(path, route) {
-                    return Some((handler.clone(), params, index));
+        match self.find_route_typed(method, path) {
+            RouteMatchResult::Matched {
+                handler,
+                params,
+                route_index,
+            } => Some((handler, params, route_index)),
+            _ => None,
+        }
+    }
+
+    /// Find a route with detailed type validation result
+    ///
+    /// Uses indexed lookup by (method, segment_count) for O(1) partitioning,
+    /// then linear search within the partition (typically 1-5 routes).
+    pub fn find_route_typed(&self, method: &str, path: &str) -> RouteMatchResult {
+        // Count path segments to narrow down candidates
+        let segment_count = path.split('/').filter(|s| !s.is_empty()).count();
+        let key = (method.to_string(), segment_count);
+
+        // Look up candidate routes by (method, segment_count)
+        let candidate_indices = match self.route_index.get(&key) {
+            Some(indices) => indices,
+            None => return RouteMatchResult::NotFound,
+        };
+
+        // Search only the candidates (typically 1-5 routes vs all routes)
+        for &index in candidate_indices {
+            let (route, handler, _source) = &self.routes[index];
+            match match_route_typed(path, route) {
+                MatchResult::Matched(params) => {
+                    return RouteMatchResult::Matched {
+                        handler: handler.clone(),
+                        params,
+                        route_index: index,
+                    };
+                }
+                MatchResult::TypeMismatch {
+                    param_name,
+                    expected,
+                    got,
+                } => {
+                    return RouteMatchResult::TypeMismatch {
+                        param_name,
+                        expected,
+                        got,
+                    };
+                }
+                MatchResult::NoMatch => {
+                    // Continue looking for a match
                 }
             }
         }
-        None
+        RouteMatchResult::NotFound
     }
 
     /// Check if a route needs reloading based on file mtime or imported files
@@ -226,19 +723,37 @@ impl ServerState {
                     relative
                 };
 
+                // Security: reject any path traversal attempts before even constructing the path
+                // Check for ".." in the relative path (could be encoded or normalized)
+                if relative.contains("..") || relative.contains('\0') {
+                    return None; // Path traversal attempt - reject
+                }
+
+                // Also check for encoded traversal patterns
+                let decoded =
+                    urlencoding::decode(&relative).unwrap_or_else(|_| relative.clone().into());
+                if decoded.contains("..") {
+                    return None; // Encoded path traversal attempt - reject
+                }
+
                 // Construct full filesystem path
                 let full_path = std::path::Path::new(directory).join(&relative);
 
                 // Security: ensure we're not escaping the directory (path traversal)
+                // Use canonicalize when file exists for the strongest guarantee
                 if let Ok(canonical) = full_path.canonicalize() {
                     if let Ok(base_canonical) = std::path::Path::new(directory).canonicalize() {
                         if canonical.starts_with(&base_canonical) {
                             return Some((canonical.to_string_lossy().to_string(), relative));
                         }
                     }
+                    // File exists but is outside the base directory - reject
+                    return None;
                 }
 
-                // If canonicalize fails (file doesn't exist), try the raw path
+                // File doesn't exist - still return the path for 404 handling
+                // but only if we've already validated no traversal patterns above
+                // The path is safe because we rejected ".." and null bytes
                 return Some((full_path.to_string_lossy().to_string(), relative));
             }
         }
@@ -264,7 +779,18 @@ fn parse_route_pattern(pattern: &str) -> Vec<RouteSegment> {
         .filter(|s| !s.is_empty())
         .map(|segment| {
             if segment.starts_with('{') && segment.ends_with('}') {
-                RouteSegment::Param(segment[1..segment.len() - 1].to_string())
+                let inner = &segment[1..segment.len() - 1];
+                // Check for type annotation: {name: Type}
+                if let Some(colon_pos) = inner.find(':') {
+                    let name = inner[..colon_pos].trim().to_string();
+                    let param_type = Some(inner[colon_pos + 1..].trim().to_string());
+                    RouteSegment::Param { name, param_type }
+                } else {
+                    RouteSegment::Param {
+                        name: inner.to_string(),
+                        param_type: None,
+                    }
+                }
             } else {
                 RouteSegment::Static(segment.to_string())
             }
@@ -272,12 +798,72 @@ fn parse_route_pattern(pattern: &str) -> Vec<RouteSegment> {
         .collect()
 }
 
-/// Match a URL path against a route, returning extracted parameters if matched
-fn match_route(path: &str, route: &Route) -> Option<HashMap<String, String>> {
+/// Parse a route pattern with typed parameter info from AST
+pub fn parse_pattern_with_types(
+    pattern: &str,
+    typed_params: &[crate::ast::TypedRouteParam],
+) -> Vec<RouteSegment> {
+    use std::collections::HashMap;
+
+    // Build a map of param name -> type for lookup
+    let type_map: HashMap<&str, Option<&str>> = typed_params
+        .iter()
+        .map(|p| (p.name.as_str(), p.param_type.as_deref()))
+        .collect();
+
+    pattern
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|segment| {
+            if segment.starts_with('{') && segment.ends_with('}') {
+                let inner = &segment[1..segment.len() - 1];
+                // Extract just the name (strip any inline type annotation)
+                let name = if let Some(colon_pos) = inner.find(':') {
+                    inner[..colon_pos].trim()
+                } else {
+                    inner.trim()
+                };
+
+                // Look up type from the typed_params or use inline annotation
+                let param_type = if let Some(Some(t)) = type_map.get(name) {
+                    Some((*t).to_string())
+                } else if let Some(colon_pos) = inner.find(':') {
+                    Some(inner[colon_pos + 1..].trim().to_string())
+                } else {
+                    None
+                };
+
+                RouteSegment::Param {
+                    name: name.to_string(),
+                    param_type,
+                }
+            } else {
+                RouteSegment::Static(segment.to_string())
+            }
+        })
+        .collect()
+}
+
+/// Match result indicating success or typed parameter failure
+pub enum MatchResult {
+    /// Route matched, returns extracted parameters
+    Matched(HashMap<String, String>),
+    /// Route pattern matched but typed param validation failed (return 400)
+    TypeMismatch {
+        param_name: String,
+        expected: String,
+        got: String,
+    },
+    /// Route pattern did not match
+    NoMatch,
+}
+
+/// Match a URL path with type validation, returning detailed result
+pub fn match_route_typed(path: &str, route: &Route) -> MatchResult {
     let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     if path_segments.len() != route.segments.len() {
-        return None;
+        return MatchResult::NoMatch;
     }
 
     let mut params = HashMap::new();
@@ -286,16 +872,41 @@ fn match_route(path: &str, route: &Route) -> Option<HashMap<String, String>> {
         match route_seg {
             RouteSegment::Static(expected) => {
                 if path_seg != expected {
-                    return None;
+                    return MatchResult::NoMatch;
                 }
             }
-            RouteSegment::Param(name) => {
+            RouteSegment::Param { name, param_type } => {
+                // Validate type if specified
+                if let Some(type_name) = param_type {
+                    match type_name.as_str() {
+                        "Int" => {
+                            if path_seg.parse::<i64>().is_err() {
+                                return MatchResult::TypeMismatch {
+                                    param_name: name.clone(),
+                                    expected: "Int".to_string(),
+                                    got: path_seg.to_string(),
+                                };
+                            }
+                        }
+                        "Float" => {
+                            if path_seg.parse::<f64>().is_err() {
+                                return MatchResult::TypeMismatch {
+                                    param_name: name.clone(),
+                                    expected: "Float".to_string(),
+                                    got: path_seg.to_string(),
+                                };
+                            }
+                        }
+                        // String type (or unknown) - always matches
+                        _ => {}
+                    }
+                }
                 params.insert(name.clone(), path_seg.to_string());
             }
         }
     }
 
-    Some(params)
+    MatchResult::Matched(params)
 }
 
 /// Convert a tiny_http Request to an Intent Value
@@ -637,13 +1248,18 @@ pub fn init() -> HashMap<String, Value> {
     //
     // Returns a Response map with status 302 and a `Location` header set to
     // the provided URL. The body is empty.
+    //
+    // WARNING: This function does NOT validate the URL. If user input flows into
+    // this function, attackers can redirect users to malicious sites (open redirect).
+    // Use `redirect_safe()` instead when the URL comes from user input.
     // @param url The URL to redirect the client to (absolute or relative path).
     // @returns A Response map with status 302, a Location header, and an empty body.
-    // @see_also text, html, json, status, response
+    // @see_also redirect_safe, text, html, json, status, response
     // @since v0.1.0
     // @tags #http, #server
     // @example redirect("/dashboard") => Response { status: 302, headers: { "location": "/dashboard" } } ~ "Redirect response"
     // @error TypeError ~ "redirect() requires a URL string" fix: "Pass a String URL as the argument"
+    // @gotcha Does not validate URLs - use redirect_safe() for user-provided URLs
     module.insert(
         "redirect".to_string(),
         Value::NativeFunction {
@@ -658,6 +1274,73 @@ pub fn init() -> HashMap<String, Value> {
                 _ => Err(IntentError::TypeError(
                     "redirect() requires a URL string".to_string(),
                 )),
+            },
+        },
+    );
+
+    // @ntnt redirect_safe
+    // @module std/http/server
+    // @signature redirect_safe(url: String, fallback?: String) -> Response
+    // Create a safe HTTP 302 redirect response that prevents open redirect attacks.
+    //
+    // Only allows redirects to relative paths (e.g., /dashboard, ./page, ../back).
+    // Rejects absolute URLs, protocol-relative URLs (//evil.com), and dangerous
+    // schemes (javascript:, data:, etc.). If the URL is unsafe, redirects to the
+    // fallback URL (default: "/").
+    //
+    // Use this function instead of `redirect()` when the URL comes from user input
+    // (e.g., query parameters, form fields, database values).
+    // @param url The URL to redirect to (must be a relative path for safety).
+    // @param fallback Optional fallback URL if the provided URL is unsafe (default: "/").
+    // @returns A Response map with status 302, a Location header, and an empty body.
+    // @see_also redirect, text, html, json, status, response
+    // @since v0.3.11
+    // @tags #http, #server, #security
+    // @example redirect_safe("/dashboard") => Response { status: 302, headers: { "location": "/dashboard" } } ~ "Safe relative redirect"
+    // @example redirect_safe("https://evil.com") => Response { status: 302, headers: { "location": "/" } } ~ "Unsafe URL redirects to fallback"
+    // @example redirect_safe("//evil.com/path", "/home") => Response { status: 302, headers: { "location": "/home" } } ~ "Protocol-relative URL rejected"
+    // @error TypeError ~ "redirect_safe() requires a URL string" fix: "Pass a String URL as the first argument"
+    module.insert(
+        "redirect_safe".to_string(),
+        Value::NativeFunction {
+            name: "redirect_safe".to_string(),
+            arity: 0, // Variadic: 1 or 2 args
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::TypeError(
+                        "redirect_safe() requires 1 or 2 arguments (url, optional fallback)"
+                            .to_string(),
+                    ));
+                }
+
+                let url = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "redirect_safe() requires a URL string".to_string(),
+                        ))
+                    }
+                };
+
+                let fallback = if args.len() == 2 {
+                    match &args[1] {
+                        Value::String(s) => s.clone(),
+                        _ => "/".to_string(),
+                    }
+                } else {
+                    "/".to_string()
+                };
+
+                // Use the safe URL or fallback
+                let safe_url = if is_safe_redirect_url(&url) {
+                    url
+                } else {
+                    fallback
+                };
+
+                let mut headers = HashMap::new();
+                headers.insert("location".to_string(), Value::String(safe_url));
+                Ok(create_response_value(302, headers, String::new()))
             },
         },
     );
@@ -982,7 +1665,923 @@ pub fn init() -> HashMap<String, Value> {
     // Note: new_server, get, post, put, delete, patch, and listen are handled
     // specially in the interpreter because they need access to interpreter state
 
+    // ============================================================================
+    // Cookie Management Functions
+    // ============================================================================
+
+    // @ntnt set_cookie
+    // @module std/http/server
+    // @signature set_cookie(name: String, value: String, options?: Map) -> String
+    // Build a Set-Cookie header value string.
+    //
+    // Constructs a properly formatted Set-Cookie header value with the given
+    // name, value, and optional attributes. The returned string can be used
+    // as a header value directly or with the `with_cookie` helper.
+    //
+    // Options map supports:
+    // - `path` (String): Cookie path scope (default: "/")
+    // - `domain` (String): Cookie domain scope
+    // - `max_age` (Int): Max age in seconds
+    // - `secure` (Bool): Only send over HTTPS
+    // - `http_only` (Bool): Not accessible via JavaScript
+    // - `same_site` (String): "Strict", "Lax", or "None"
+    // - `expires` (String): Expiration date (RFC 7231 format)
+    // - `partitioned` (Bool): CHIPS partitioned cookie
+    // @param name The cookie name.
+    // @param value The cookie value.
+    // @param options Optional map of cookie attributes.
+    // @returns A Set-Cookie header value string.
+    // @see_also get_cookie, get_cookies, delete_cookie, with_cookie
+    // @since v0.3.11
+    // @tags #http, #server, #cookies
+    // @example set_cookie("session", "abc123") => "session=abc123; Path=/" ~ "Basic cookie"
+    // @example set_cookie("token", "xyz", map { "http_only": true, "secure": true }) => "token=xyz; Path=/; HttpOnly; Secure" ~ "Secure cookie"
+    // @error TypeError ~ "set_cookie() requires 2 or 3 arguments" fix: "Pass name, value, and optional options map"
+    module.insert(
+        "set_cookie".to_string(),
+        Value::NativeFunction {
+            name: "set_cookie".to_string(),
+            arity: 0, // Variadic: 2-3 args
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::TypeError(
+                        "set_cookie() requires 2 or 3 arguments (name, value, optional options)"
+                            .to_string(),
+                    ));
+                }
+
+                let name = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "set_cookie() name must be a string".to_string(),
+                        ))
+                    }
+                };
+
+                // Validate cookie name (RFC 6265)
+                if !is_valid_cookie_name(&name) {
+                    return Err(IntentError::TypeError(
+                        "set_cookie() name contains invalid characters (must be alphanumeric, -, _, or .)".to_string(),
+                    ));
+                }
+
+                let value = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "set_cookie() value must be a string".to_string(),
+                        ))
+                    }
+                };
+
+                let options = if args.len() == 3 {
+                    match &args[2] {
+                        Value::Map(m) => m.clone(),
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "set_cookie() options must be a map".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    HashMap::new()
+                };
+
+                let cookie_str = build_cookie_string(&name, &value, &options);
+                Ok(Value::String(cookie_str))
+            },
+        },
+    );
+
+    // @ntnt get_cookie
+    // @module std/http/server
+    // @signature get_cookie(req: Request, name: String) -> Option<String>
+    // Get a specific cookie value from a request.
+    //
+    // Parses the request's Cookie header and returns the value of the named
+    // cookie wrapped in Some, or None if the cookie is not present.
+    // @param req The Request map containing headers.
+    // @param name The name of the cookie to retrieve.
+    // @returns Some(value) if the cookie exists, None otherwise.
+    // @see_also get_cookies, set_cookie, with_cookie
+    // @since v0.3.11
+    // @tags #http, #server, #cookies
+    // @example get_cookie(req, "session") => Some("abc123") ~ "Get existing cookie"
+    // @example get_cookie(req, "missing") => None ~ "Cookie not found"
+    // @error TypeError ~ "get_cookie() requires a request map and cookie name" fix: "Pass a Request and String"
+    module.insert(
+        "get_cookie".to_string(),
+        Value::NativeFunction {
+            name: "get_cookie".to_string(),
+            arity: 2,
+            func: |args| {
+                let headers = match &args[0] {
+                    Value::Map(map) => match map.get("headers") {
+                        Some(Value::Map(h)) => h.clone(),
+                        _ => HashMap::new(),
+                    },
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "get_cookie() requires a request map".to_string(),
+                        ))
+                    }
+                };
+
+                let name = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "get_cookie() name must be a string".to_string(),
+                        ))
+                    }
+                };
+
+                // Get cookie header (case-insensitive)
+                let cookie_header = headers
+                    .iter()
+                    .find(|(k, _)| k.to_lowercase() == "cookie")
+                    .and_then(|(_, v)| {
+                        if let Value::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    });
+
+                match cookie_header {
+                    Some(header) => {
+                        let cookies = parse_cookie_header(&header);
+                        match cookies.get(&name) {
+                            Some(value) => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "Some".to_string(),
+                                values: vec![Value::String(value.clone())],
+                            }),
+                            None => Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                values: vec![],
+                            }),
+                        }
+                    }
+                    None => Ok(Value::EnumValue {
+                        enum_name: "Option".to_string(),
+                        variant: "None".to_string(),
+                        values: vec![],
+                    }),
+                }
+            },
+        },
+    );
+
+    // @ntnt get_cookies
+    // @module std/http/server
+    // @signature get_cookies(req: Request) -> Map<String, String>
+    // Get all cookies from a request as a map.
+    //
+    // Parses the request's Cookie header and returns all cookie name-value
+    // pairs as a Map. Returns an empty map if no cookies are present.
+    // @param req The Request map containing headers.
+    // @returns A Map<String, String> of cookie names to values.
+    // @see_also get_cookie, set_cookie, with_cookie
+    // @since v0.3.11
+    // @tags #http, #server, #cookies
+    // @example get_cookies(req) => map { "session": "abc", "theme": "dark" } ~ "All cookies"
+    // @error TypeError ~ "get_cookies() requires a request map" fix: "Pass a Request map"
+    module.insert(
+        "get_cookies".to_string(),
+        Value::NativeFunction {
+            name: "get_cookies".to_string(),
+            arity: 1,
+            func: |args| {
+                let headers = match &args[0] {
+                    Value::Map(map) => match map.get("headers") {
+                        Some(Value::Map(h)) => h.clone(),
+                        _ => HashMap::new(),
+                    },
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "get_cookies() requires a request map".to_string(),
+                        ))
+                    }
+                };
+
+                // Get cookie header (case-insensitive)
+                let cookie_header = headers
+                    .iter()
+                    .find(|(k, _)| k.to_lowercase() == "cookie")
+                    .and_then(|(_, v)| {
+                        if let Value::String(s) = v {
+                            Some(s.clone())
+                        } else {
+                            None
+                        }
+                    });
+
+                let cookies: HashMap<String, Value> = match cookie_header {
+                    Some(header) => parse_cookie_header(&header)
+                        .into_iter()
+                        .map(|(k, v)| (k, Value::String(v)))
+                        .collect(),
+                    None => HashMap::new(),
+                };
+
+                Ok(Value::Map(cookies))
+            },
+        },
+    );
+
+    // @ntnt delete_cookie
+    // @module std/http/server
+    // @signature delete_cookie(name: String, options?: Map) -> String
+    // Build a Set-Cookie header value that deletes a cookie.
+    //
+    // Returns a Set-Cookie header string with Max-Age=0 to instruct the browser
+    // to delete the cookie. The options map can specify `path` and `domain` to
+    // ensure the correct cookie is deleted.
+    // @param name The name of the cookie to delete.
+    // @param options Optional map with `path` and `domain` to match the original cookie.
+    // @returns A Set-Cookie header value string that deletes the cookie.
+    // @see_also set_cookie, with_cookie
+    // @since v0.3.11
+    // @tags #http, #server, #cookies
+    // @example delete_cookie("session") => "session=; Path=/; Max-Age=0" ~ "Delete cookie"
+    // @error TypeError ~ "delete_cookie() requires 1 or 2 arguments" fix: "Pass cookie name and optional options"
+    module.insert(
+        "delete_cookie".to_string(),
+        Value::NativeFunction {
+            name: "delete_cookie".to_string(),
+            arity: 0, // Variadic: 1-2 args
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::TypeError(
+                        "delete_cookie() requires 1 or 2 arguments (name, optional options)"
+                            .to_string(),
+                    ));
+                }
+
+                let name = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "delete_cookie() name must be a string".to_string(),
+                        ))
+                    }
+                };
+
+                let mut options = if args.len() == 2 {
+                    match &args[1] {
+                        Value::Map(m) => m.clone(),
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "delete_cookie() options must be a map".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    HashMap::new()
+                };
+
+                // Set max_age to 0 to delete the cookie
+                options.insert("max_age".to_string(), Value::Int(0));
+
+                let cookie_str = build_cookie_string(&name, "", &options);
+                Ok(Value::String(cookie_str))
+            },
+        },
+    );
+
+    // @ntnt with_cookie
+    // @module std/http/server
+    // @signature with_cookie(response: Response, name: String, value: String, options?: Map) -> Response
+    // Add a Set-Cookie header to a response.
+    //
+    // Returns a new Response with the Set-Cookie header added. If the response
+    // already has Set-Cookie headers, the new cookie is appended (using an array
+    // for multiple Set-Cookie headers). This is the ergonomic way to set cookies
+    // without manually building headers.
+    // @param response The Response map to add the cookie to.
+    // @param name The cookie name.
+    // @param value The cookie value.
+    // @param options Optional map of cookie attributes (same as set_cookie).
+    // @returns A new Response map with the Set-Cookie header added.
+    // @see_also set_cookie, delete_cookie, get_cookie
+    // @since v0.3.11
+    // @tags #http, #server, #cookies
+    // @example with_cookie(json(data), "session", "abc123") ~ "Add cookie to JSON response"
+    // @example with_cookie(html(page), "theme", "dark", map { "max_age": 86400 }) ~ "Cookie with options"
+    // @error TypeError ~ "with_cookie() requires 3 or 4 arguments" fix: "Pass response, name, value, and optional options"
+    module.insert(
+        "with_cookie".to_string(),
+        Value::NativeFunction {
+            name: "with_cookie".to_string(),
+            arity: 0, // Variadic: 3-4 args
+            func: |args| {
+                if args.len() < 3 || args.len() > 4 {
+                    return Err(IntentError::TypeError(
+                        "with_cookie() requires 3 or 4 arguments (response, name, value, optional options)"
+                            .to_string(),
+                    ));
+                }
+
+                let mut response = match &args[0] {
+                    Value::Map(m) => m.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "with_cookie() response must be a map".to_string(),
+                        ))
+                    }
+                };
+
+                let name = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "with_cookie() name must be a string".to_string(),
+                        ))
+                    }
+                };
+
+                let value = match &args[2] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "with_cookie() value must be a string".to_string(),
+                        ))
+                    }
+                };
+
+                let options = if args.len() == 4 {
+                    match &args[3] {
+                        Value::Map(m) => m.clone(),
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "with_cookie() options must be a map".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    HashMap::new()
+                };
+
+                let cookie_str = build_cookie_string(&name, &value, &options);
+
+                // Get or create headers map
+                let mut headers = match response.get("headers") {
+                    Some(Value::Map(h)) => h.clone(),
+                    _ => HashMap::new(),
+                };
+
+                // Handle existing set-cookie header (may need to convert to array)
+                let set_cookie_key = "set-cookie".to_string();
+                match headers.get(&set_cookie_key) {
+                    Some(Value::Array(arr)) => {
+                        // Already an array, append to it
+                        let mut new_arr = arr.clone();
+                        new_arr.push(Value::String(cookie_str));
+                        headers.insert(set_cookie_key, Value::Array(new_arr));
+                    }
+                    Some(Value::String(existing)) => {
+                        // Convert single value to array
+                        headers.insert(
+                            set_cookie_key,
+                            Value::Array(vec![
+                                Value::String(existing.clone()),
+                                Value::String(cookie_str),
+                            ]),
+                        );
+                    }
+                    _ => {
+                        // No existing cookie, just set as string
+                        headers.insert(set_cookie_key, Value::String(cookie_str));
+                    }
+                }
+
+                response.insert("headers".to_string(), Value::Map(headers));
+                Ok(Value::Map(response))
+            },
+        },
+    );
+
+    // ============================================================================
+    // Multipart Form Parsing Functions
+    // ============================================================================
+
+    // @ntnt parse_multipart
+    // @module std/http/server
+    // @signature parse_multipart(req: Request) -> Result<Map<String, Any>, String>
+    // Parse a multipart/form-data request body.
+    //
+    // Extracts fields and files from a multipart request. Text fields are returned
+    // as String values. File fields are returned as Maps with: `filename` (String),
+    // `content_type` (String), `size` (Int), and `data` (String - may be lossy for
+    // binary files).
+    //
+    // Note: Binary file data passes through String conversion and may be lossy.
+    // For binary files, use `save_upload()` to write directly to disk.
+    // @param req The Request map with Content-Type header and body.
+    // @returns Ok(Map) with field names as keys, or Err(String) on parse failure.
+    // @see_also save_upload, parse_form
+    // @since v0.3.11
+    // @tags #http, #server, #file-upload
+    // @example
+    //   let fields = parse_multipart(req)?
+    //   let name = fields["name"]
+    //   let file = fields["document"]
+    //   print("Uploaded: {file[\"filename\"]}, {file[\"size\"]} bytes")
+    // @error TypeError ~ "parse_multipart() requires a request map" fix: "Pass a Request map"
+    // @error ParseError ~ "Invalid multipart boundary" fix: "Ensure Content-Type header includes boundary"
+    module.insert(
+        "parse_multipart".to_string(),
+        Value::NativeFunction {
+            name: "parse_multipart".to_string(),
+            arity: 1,
+            func: |args| {
+                let (content_type, body) = match &args[0] {
+                    Value::Map(map) => {
+                        let body = match map.get("body") {
+                            Some(Value::String(b)) => b.clone(),
+                            _ => {
+                                return Ok(Value::EnumValue {
+                                    enum_name: "Result".to_string(),
+                                    variant: "Err".to_string(),
+                                    values: vec![Value::String("Request has no body".to_string())],
+                                })
+                            }
+                        };
+
+                        let content_type = match map.get("headers") {
+                            Some(Value::Map(headers)) => {
+                                // Look for content-type header (case-insensitive)
+                                headers
+                                    .iter()
+                                    .find(|(k, _)| k.to_lowercase() == "content-type")
+                                    .and_then(|(_, v)| {
+                                        if let Value::String(s) = v {
+                                            Some(s.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or_default()
+                            }
+                            _ => String::new(),
+                        };
+
+                        (content_type, body)
+                    }
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "parse_multipart() requires a request map".to_string(),
+                        ))
+                    }
+                };
+
+                // Extract boundary from Content-Type
+                let boundary = content_type.split(';').find_map(|part| {
+                    let trimmed = part.trim();
+                    if trimmed.starts_with("boundary=") {
+                        Some(
+                            trimmed
+                                .trim_start_matches("boundary=")
+                                .trim_matches('"')
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    }
+                });
+
+                let boundary = match boundary {
+                    Some(b) => b,
+                    None => {
+                        return Ok(Value::EnumValue {
+                            enum_name: "Result".to_string(),
+                            variant: "Err".to_string(),
+                            values: vec![Value::String(
+                                "Invalid multipart: no boundary found in Content-Type".to_string(),
+                            )],
+                        })
+                    }
+                };
+
+                // Parse multipart body
+                match parse_multipart_body(&body, &boundary) {
+                    Ok(fields) => Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Ok".to_string(),
+                        values: vec![Value::Map(fields)],
+                    }),
+                    Err(e) => Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Err".to_string(),
+                        values: vec![Value::String(e)],
+                    }),
+                }
+            },
+        },
+    );
+
+    // @ntnt save_upload
+    // @module std/http/server
+    // @signature save_upload(file_field: Map, path: String) -> Result<Int, String>
+    // Save an uploaded file to disk.
+    //
+    // Writes the file data from a parsed multipart field to the specified path.
+    // Returns the number of bytes written on success. Parent directories are
+    // created automatically if they don't exist.
+    //
+    // Security: Paths are validated to prevent directory traversal attacks.
+    // Relative paths are resolved from the current working directory.
+    // Paths containing `..` are rejected for security.
+    // @param file_field The file field Map from parse_multipart() with a `data` key.
+    // @param path The filesystem path to save the file to (relative or absolute).
+    // @returns Ok(Int) bytes written, or Err(String) on failure.
+    // @see_also parse_multipart
+    // @since v0.3.11
+    // @tags #http, #server, #file-upload, #filesystem
+    // @example save_upload(fields["photo"], "uploads/photo.jpg") => Ok(1024) ~ "Save to relative path"
+    // @error TypeError ~ "save_upload() requires a file map and path" fix: "Pass a file field and String path"
+    // @error SecurityError ~ "Path traversal not allowed" fix: "Use a path without '..' components"
+    module.insert(
+        "save_upload".to_string(),
+        Value::NativeFunction {
+            name: "save_upload".to_string(),
+            arity: 2,
+            func: |args| {
+                let data = match &args[0] {
+                    Value::Map(map) => match map.get("data") {
+                        Some(Value::String(d)) => d.clone(),
+                        _ => {
+                            return Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String("File field has no data".to_string())],
+                            })
+                        }
+                    },
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "save_upload() first argument must be a file map".to_string(),
+                        ))
+                    }
+                };
+
+                let path = match &args[1] {
+                    Value::String(p) => p.clone(),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "save_upload() second argument must be a path string".to_string(),
+                        ))
+                    }
+                };
+
+                // Security: Validate path to prevent directory traversal
+                if let Err(e) = validate_upload_path(&path) {
+                    return Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Err".to_string(),
+                        values: vec![Value::String(e)],
+                    });
+                }
+
+                // Create parent directories if they don't exist (convenience)
+                let path_obj = std::path::Path::new(&path);
+                if let Some(parent) = path_obj.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            return Ok(Value::EnumValue {
+                                enum_name: "Result".to_string(),
+                                variant: "Err".to_string(),
+                                values: vec![Value::String(format!(
+                                    "Failed to create directory: {}",
+                                    e
+                                ))],
+                            });
+                        }
+                    }
+                }
+
+                // Write file to disk
+                match std::fs::write(&path, data.as_bytes()) {
+                    Ok(()) => Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Ok".to_string(),
+                        values: vec![Value::Int(data.len() as i64)],
+                    }),
+                    Err(e) => Ok(Value::EnumValue {
+                        enum_name: "Result".to_string(),
+                        variant: "Err".to_string(),
+                        values: vec![Value::String(format!("Failed to save file: {}", e))],
+                    }),
+                }
+            },
+        },
+    );
+
     module
+}
+
+/// Parse a multipart/form-data body into fields
+fn parse_multipart_body(
+    body: &str,
+    boundary: &str,
+) -> std::result::Result<HashMap<String, Value>, String> {
+    let mut fields = HashMap::new();
+    let delimiter = format!("--{}", boundary);
+    let end_delimiter = format!("--{}--", boundary);
+
+    // Split body by boundary
+    let parts: Vec<&str> = body.split(&delimiter).collect();
+
+    for part in parts {
+        let part = part.trim();
+
+        // Skip empty parts and the final delimiter
+        if part.is_empty() || part == "--" || part.starts_with("--") {
+            continue;
+        }
+
+        // Split headers from content (separated by \r\n\r\n or \n\n)
+        let (headers_section, content) = if let Some(pos) = part.find("\r\n\r\n") {
+            (&part[..pos], &part[pos + 4..])
+        } else if let Some(pos) = part.find("\n\n") {
+            (&part[..pos], &part[pos + 2..])
+        } else {
+            continue;
+        };
+
+        // Remove trailing boundary marker from content
+        let content = content
+            .trim_end_matches(&end_delimiter)
+            .trim_end_matches("\r\n")
+            .trim_end_matches('\n');
+
+        // Parse Content-Disposition header
+        let mut name: Option<String> = None;
+        let mut filename: Option<String> = None;
+        let mut content_type: Option<String> = None;
+
+        for line in headers_section.lines() {
+            let line = line.trim();
+            if line.to_lowercase().starts_with("content-disposition:") {
+                let disposition = &line["content-disposition:".len()..];
+                // Parse name="value" pairs
+                for part in disposition.split(';') {
+                    let part = part.trim();
+                    if part.starts_with("name=") {
+                        name = Some(part["name=".len()..].trim_matches('"').to_string());
+                    } else if part.starts_with("filename=") {
+                        // Sanitize filename to prevent path traversal and injection
+                        let raw_filename = part["filename=".len()..].trim_matches('"');
+                        filename = Some(sanitize_filename(raw_filename));
+                    }
+                }
+            } else if line.to_lowercase().starts_with("content-type:") {
+                content_type = Some(line["content-type:".len()..].trim().to_string());
+            }
+        }
+
+        // Add field to result
+        if let Some(field_name) = name {
+            if let Some(fname) = filename {
+                // File field
+                let mut file_map = HashMap::new();
+                file_map.insert("filename".to_string(), Value::String(fname));
+                file_map.insert(
+                    "content_type".to_string(),
+                    Value::String(
+                        content_type.unwrap_or_else(|| "application/octet-stream".to_string()),
+                    ),
+                );
+                file_map.insert("size".to_string(), Value::Int(content.len() as i64));
+                file_map.insert("data".to_string(), Value::String(content.to_string()));
+                fields.insert(field_name, Value::Map(file_map));
+            } else {
+                // Text field
+                fields.insert(field_name, Value::String(content.to_string()));
+            }
+        }
+    }
+
+    Ok(fields)
+}
+
+/// Validate an upload path to prevent directory traversal attacks
+/// Returns Ok(()) if the path is safe, Err(message) if not
+fn validate_upload_path(path: &str) -> std::result::Result<(), String> {
+    // Reject empty paths
+    if path.is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
+
+    // Reject paths containing ".." (directory traversal)
+    // Check both raw string and normalized path components
+    if path.contains("..") {
+        return Err("Path traversal ('..') not allowed for security".to_string());
+    }
+
+    // Reject null bytes (could truncate path in some systems)
+    if path.contains('\0') {
+        return Err("Path contains null byte".to_string());
+    }
+
+    // Normalize the path and check for traversal attempts
+    let path_obj = std::path::Path::new(path);
+    for component in path_obj.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err("Path traversal ('..') not allowed for security".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Sanitize a filename from multipart upload
+/// Removes path components and dangerous characters for security
+fn sanitize_filename(filename: &str) -> String {
+    // Extract just the filename (no path components)
+    let name = std::path::Path::new(filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(filename);
+
+    // Remove null bytes and other dangerous characters
+    let sanitized: String = name
+        .chars()
+        .filter(|&c| {
+            c != '\0'
+                && c != '/'
+                && c != '\\'
+                && c != ':'
+                && c != '*'
+                && c != '?'
+                && c != '"'
+                && c != '<'
+                && c != '>'
+                && c != '|'
+        })
+        .collect();
+
+    // If empty after sanitization, use a default name
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        "unnamed_file".to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Validate a cookie name per RFC 6265
+/// Cookie names must be tokens: no CTLs, spaces, or separators
+fn is_valid_cookie_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    // RFC 6265 token: exclude CTLs (0-31, 127) and separators
+    const SEPARATORS: &[char] = &[
+        '(', ')', '<', '>', '@', ',', ';', ':', '\\', '"', '/', '[', ']', '?', '=', '{', '}', ' ',
+        '\t',
+    ];
+    name.chars().all(|c| {
+        let code = c as u32;
+        code > 31 && code < 127 && !SEPARATORS.contains(&c)
+    })
+}
+
+/// Sanitize a cookie value by URL-encoding unsafe characters
+/// Also strips CR/LF to prevent header injection
+fn sanitize_cookie_value(value: &str) -> String {
+    // First, strip any CR or LF characters (header injection prevention)
+    let stripped: String = value.chars().filter(|&c| c != '\r' && c != '\n').collect();
+
+    // URL-encode characters that are unsafe in cookie values
+    // Per RFC 6265, cookie values should exclude CTLs, whitespace, quotes, comma, semicolon, backslash
+    let mut result = String::with_capacity(stripped.len());
+    for c in stripped.chars() {
+        match c {
+            // Safe characters - pass through
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '.' | '_' | '~' => result.push(c),
+            // Encode everything else
+            _ => {
+                for byte in c.to_string().as_bytes() {
+                    result.push_str(&format!("%{:02X}", byte));
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Build a Set-Cookie header string from name, value, and options
+///
+/// In production mode (NTNT_ENV=production), cookies get secure defaults:
+/// - Secure: true (unless explicitly set to false)
+/// - SameSite: Lax (unless explicitly set)
+/// - HttpOnly: true for session/auth cookies (unless explicitly set to false)
+///
+/// These defaults can be overridden by explicitly setting the options.
+fn build_cookie_string(name: &str, value: &str, options: &HashMap<String, Value>) -> String {
+    let config = get_security_config();
+
+    // Sanitize the cookie value to prevent injection attacks
+    let safe_value = sanitize_cookie_value(value);
+    let mut parts = vec![format!("{}={}", name, safe_value)];
+
+    // Path (default: "/")
+    let path = match options.get("path") {
+        Some(Value::String(p)) => p.clone(),
+        _ => "/".to_string(),
+    };
+    parts.push(format!("Path={}", path));
+
+    // Domain
+    if let Some(Value::String(domain)) = options.get("domain") {
+        parts.push(format!("Domain={}", domain));
+    }
+
+    // Max-Age
+    if let Some(Value::Int(max_age)) = options.get("max_age") {
+        parts.push(format!("Max-Age={}", max_age));
+    }
+
+    // Expires
+    if let Some(Value::String(expires)) = options.get("expires") {
+        parts.push(format!("Expires={}", expires));
+    }
+
+    // HttpOnly - default to true in production for session/auth-related cookies
+    let http_only = match options.get("http_only") {
+        Some(Value::Bool(b)) => *b,
+        Some(_) => false, // Non-bool value treated as not set
+        None => {
+            // In production, default HttpOnly to true for session-like cookie names
+            if config.production_mode {
+                let lower_name = name.to_lowercase();
+                lower_name.contains("session")
+                    || lower_name.contains("token")
+                    || lower_name.contains("auth")
+                    || lower_name.contains("csrf")
+                    || lower_name.contains("jwt")
+            } else {
+                false
+            }
+        }
+    };
+    if http_only {
+        parts.push("HttpOnly".to_string());
+    }
+
+    // Secure - default to true in production (unless explicitly false)
+    let secure = match options.get("secure") {
+        Some(Value::Bool(b)) => *b,
+        Some(_) => false,               // Non-bool value treated as not set
+        None => config.production_mode, // Default true in production
+    };
+    if secure {
+        parts.push("Secure".to_string());
+    }
+
+    // SameSite - default to Lax in production
+    match options.get("same_site") {
+        Some(Value::String(same_site)) => {
+            parts.push(format!("SameSite={}", same_site));
+        }
+        Some(_) => {
+            // Non-string value: use production default if applicable
+            if config.production_mode {
+                parts.push("SameSite=Lax".to_string());
+            }
+        }
+        None => {
+            // In production, default to Lax for CSRF protection
+            if config.production_mode {
+                parts.push("SameSite=Lax".to_string());
+            }
+        }
+    }
+
+    // Partitioned (CHIPS)
+    if let Some(Value::Bool(true)) = options.get("partitioned") {
+        parts.push("Partitioned".to_string());
+    }
+
+    parts.join("; ")
+}
+
+/// Parse a Cookie header string into a map of name-value pairs
+fn parse_cookie_header(header: &str) -> HashMap<String, String> {
+    let mut cookies = HashMap::new();
+    for part in header.split(';') {
+        let trimmed = part.trim();
+        if let Some((name, value)) = trimmed.split_once('=') {
+            cookies.insert(name.trim().to_string(), value.trim().to_string());
+        }
+    }
+    cookies
 }
 
 /// Start the HTTP server - this is called from the interpreter
@@ -1004,28 +2603,65 @@ pub fn start_server_with_timeout(
 }
 
 /// Read request body and create request Value
+/// Enforces the configured max body size limit (NTNT_MAX_BODY_SIZE, default 10MB)
 pub fn process_request(
     mut request: tiny_http::Request,
     params: HashMap<String, String>,
 ) -> Result<(Value, tiny_http::Request)> {
-    // Read the request body
-    let mut body = String::new();
-    if let Err(e) = request.as_reader().read_to_string(&mut body) {
-        return Err(IntentError::RuntimeError(format!(
-            "Failed to read request body: {}",
-            e
-        )));
+    let config = get_security_config();
+    let max_size = config.max_body_size;
+
+    // Check Content-Length header first for early rejection
+    if let Some(content_length) = request
+        .headers()
+        .iter()
+        .find(|h| h.field.as_str().to_ascii_lowercase() == "content-length")
+        .and_then(|h| h.value.as_str().parse::<usize>().ok())
+    {
+        if content_length > max_size {
+            return Err(IntentError::RuntimeError(format!(
+                "Request body too large: {} bytes exceeds limit of {} bytes. \
+                 Configure with NTNT_MAX_BODY_SIZE environment variable.",
+                content_length, max_size
+            )));
+        }
+    }
+
+    // Read the request body with size limit using take()
+    use std::io::Read;
+    let mut body_string = String::new();
+    let mut limited_reader = request.as_reader().take((max_size + 1) as u64);
+
+    match limited_reader.read_to_string(&mut body_string) {
+        Ok(n) => {
+            if n > max_size {
+                return Err(IntentError::RuntimeError(format!(
+                    "Request body too large: {} bytes exceeds limit of {} bytes. \
+                     Configure with NTNT_MAX_BODY_SIZE environment variable.",
+                    n, max_size
+                )));
+            }
+        }
+        Err(e) => {
+            return Err(IntentError::RuntimeError(format!(
+                "Failed to read request body: {}",
+                e
+            )));
+        }
     }
 
     // Create request value
-    let req_value = request_to_value(&request, params, body);
+    let req_value = request_to_value(&request, params, body_string);
 
     Ok((req_value, request))
 }
 
 /// Send a response back to the client
+/// Automatically adds security headers (configurable via NTNT_SECURITY_HEADERS=false)
 pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()> {
-    let (status, headers, body) = match response {
+    let config = get_security_config();
+
+    let (status, mut headers, body) = match response {
         Value::Map(map) => {
             let status = match map.get("status") {
                 Some(Value::Int(s)) => *s as u16,
@@ -1047,15 +2683,41 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
         _ => return Err(IntentError::TypeError("Response must be a map".to_string())),
     };
 
+    // Add security headers if enabled (apps can override by setting headers explicitly)
+    if config.security_headers {
+        let security_headers = get_default_security_headers();
+        for (key, value) in security_headers {
+            // Only add if not already set by the application
+            if !headers.contains_key(&key) {
+                headers.insert(key, value);
+            }
+        }
+    }
+
     // Build tiny_http response
     let mut response_builder = tiny_http::Response::from_string(body).with_status_code(status);
 
-    // Add headers
+    // Add headers (arrays emit multiple headers with same name, e.g., Set-Cookie)
     for (key, value) in headers {
-        if let Value::String(v) = value {
-            if let Ok(header) = tiny_http::Header::from_bytes(key.as_bytes(), v.as_bytes()) {
-                response_builder = response_builder.with_header(header);
+        match value {
+            Value::String(v) => {
+                if let Ok(header) = tiny_http::Header::from_bytes(key.as_bytes(), v.as_bytes()) {
+                    response_builder = response_builder.with_header(header);
+                }
             }
+            Value::Array(arr) => {
+                // Array values emit multiple headers with same key
+                for item in arr {
+                    if let Value::String(v) = item {
+                        if let Ok(header) =
+                            tiny_http::Header::from_bytes(key.as_bytes(), v.as_bytes())
+                        {
+                            response_builder = response_builder.with_header(header);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1064,9 +2726,13 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
         response_builder = response_builder.with_header(header);
     }
 
-    // Add server identifier
-    if let Ok(header) = tiny_http::Header::from_bytes("Server".as_bytes(), "ntnt-http".as_bytes()) {
-        response_builder = response_builder.with_header(header);
+    // Only add server identifier in development mode
+    if !config.production_mode {
+        if let Ok(header) =
+            tiny_http::Header::from_bytes("Server".as_bytes(), "ntnt-http".as_bytes())
+        {
+            response_builder = response_builder.with_header(header);
+        }
     }
 
     request
@@ -1075,13 +2741,77 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
 }
 
 /// Create an error response
+/// In production mode (NTNT_ENV=production), error details are hidden unless
+/// NTNT_DETAILED_ERRORS=true is explicitly set.
 pub fn create_error_response(status: i64, message: &str) -> Value {
+    let config = get_security_config();
+
+    // In production, hide error details unless explicitly enabled
+    let body = if config.detailed_errors {
+        message.to_string()
+    } else {
+        // Generic messages for common status codes
+        match status {
+            400 => "Bad Request".to_string(),
+            401 => "Unauthorized".to_string(),
+            403 => "Forbidden".to_string(),
+            404 => "Not Found".to_string(),
+            405 => "Method Not Allowed".to_string(),
+            413 => "Payload Too Large".to_string(),
+            429 => "Too Many Requests".to_string(),
+            500 => "Internal Server Error".to_string(),
+            502 => "Bad Gateway".to_string(),
+            503 => "Service Unavailable".to_string(),
+            _ => format!("Error {}", status),
+        }
+    };
+
     let mut headers = HashMap::new();
     headers.insert(
         "content-type".to_string(),
         Value::String("text/plain; charset=utf-8".to_string()),
     );
-    create_response_value(status, headers, message.to_string())
+    create_response_value(status, headers, body)
+}
+
+/// Check if a URL is safe for redirects (prevents open redirect vulnerabilities)
+/// Returns true for:
+/// - Relative paths (/foo, ./bar, ../baz)
+/// - Same-origin URLs (protocol-relative URLs are rejected for safety)
+/// Returns false for:
+/// - Absolute URLs to external domains
+/// - Protocol-relative URLs (//evil.com)
+/// - javascript:, data:, and other dangerous schemes
+pub fn is_safe_redirect_url(url: &str) -> bool {
+    let url = url.trim();
+
+    // Empty URL is safe (will redirect to current page)
+    if url.is_empty() {
+        return true;
+    }
+
+    // Reject protocol-relative URLs (//evil.com/path)
+    if url.starts_with("//") {
+        return false;
+    }
+
+    // Reject dangerous schemes
+    let lower = url.to_lowercase();
+    if lower.starts_with("javascript:")
+        || lower.starts_with("data:")
+        || lower.starts_with("vbscript:")
+        || lower.starts_with("file:")
+    {
+        return false;
+    }
+
+    // If it starts with a scheme (http://, https://, etc.), it's absolute
+    if url.contains("://") {
+        return false;
+    }
+
+    // Relative paths are safe (/path, ./path, ../path, path)
+    true
 }
 
 /// Get MIME type based on file extension
@@ -1255,6 +2985,14 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
 mod tests {
     use super::*;
 
+    // Helper to wrap match_route_typed for backward-compatible test assertions
+    fn match_route(path: &str, route: &Route) -> Option<HashMap<String, String>> {
+        match match_route_typed(path, route) {
+            MatchResult::Matched(params) => Some(params),
+            _ => None,
+        }
+    }
+
     // Helper functions to check Value types without PartialEq
     fn assert_value_string(v: &Value, expected: &str) {
         match v {
@@ -1325,7 +3063,7 @@ mod tests {
             _ => panic!("Expected static segment"),
         }
         match &segments[1] {
-            RouteSegment::Param(p) => assert_eq!(p, "id"),
+            RouteSegment::Param { name, .. } => assert_eq!(name, "id"),
             _ => panic!("Expected param segment"),
         }
     }
@@ -1339,7 +3077,7 @@ mod tests {
             _ => panic!("Expected static segment"),
         }
         match &segments[1] {
-            RouteSegment::Param(p) => assert_eq!(p, "user_id"),
+            RouteSegment::Param { name, .. } => assert_eq!(name, "user_id"),
             _ => panic!("Expected param segment"),
         }
         match &segments[2] {
@@ -1347,7 +3085,7 @@ mod tests {
             _ => panic!("Expected static segment"),
         }
         match &segments[3] {
-            RouteSegment::Param(p) => assert_eq!(p, "post_id"),
+            RouteSegment::Param { name, .. } => assert_eq!(name, "post_id"),
             _ => panic!("Expected param segment"),
         }
     }

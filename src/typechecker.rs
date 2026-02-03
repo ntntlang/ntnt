@@ -1057,7 +1057,8 @@ impl TypeContext {
             | Statement::Export { .. }
             | Statement::Module { .. }
             | Statement::Intent { .. }
-            | Statement::Defer(_) => {}
+            | Statement::Defer(_)
+            | Statement::Server { .. } => {}
         }
     }
 
