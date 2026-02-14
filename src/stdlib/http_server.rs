@@ -937,12 +937,14 @@ pub fn request_to_value(
     };
     req_map.insert("query".to_string(), Value::String(query.clone()));
 
-    // Parse query params into a map
+    // Parse query params into a map (URL-decode values)
     let mut query_params: HashMap<String, Value> = HashMap::new();
     if !query.is_empty() {
         for pair in query.split('&') {
             if let Some((key, value)) = pair.split_once('=') {
-                query_params.insert(key.to_string(), Value::String(value.to_string()));
+                // URL-decode the value to handle encoded characters like %2F -> /
+                let decoded_value = urlencoding::decode(value).unwrap_or_else(|_| value.into()).to_string();
+                query_params.insert(key.to_string(), Value::String(decoded_value));
             }
         }
     }

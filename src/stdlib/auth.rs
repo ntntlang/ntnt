@@ -201,6 +201,7 @@ pub struct AuthConfig {
     pub providers: Vec<ProviderConfig>,
     pub success_url: String,
     pub failure_url: String,
+    pub logout_url: String,
     pub cookie_name: String,
     pub cookie_secure: bool,
     pub cookie_same_site: String,
@@ -216,6 +217,7 @@ impl Default for AuthConfig {
             providers: Vec::new(),
             success_url: "/".to_string(),
             failure_url: "/".to_string(),
+            logout_url: "/".to_string(),
             cookie_name: "ntnt_session".to_string(),
             cookie_secure: true,
             cookie_same_site: "lax".to_string(),
@@ -3604,7 +3606,7 @@ pub fn handle_auth_logout(args: &[Value]) -> Result<Value> {
         if config.cookie_secure { "; Secure" } else { "" }
     );
 
-    Ok(redirect_response(&config.success_url, Some(&cookie)))
+    Ok(redirect_response(&config.logout_url, Some(&cookie)))
 }
 
 // ============================================================================
@@ -5151,7 +5153,7 @@ pub fn init() -> HashMap<String, Value> {
     // @signature logout_user(req: Request) -> Response
     // Log out the current user and return a redirect response.
     //
-    // Clears the session and returns a redirect to the configured success_url
+    // Clears the session and returns a redirect to the configured logout_url
     // (default: "/") with the session cookie cleared.
     // @param req The HTTP request object
     // @returns Redirect response with session cookie cleared
@@ -5184,7 +5186,7 @@ pub fn init() -> HashMap<String, Value> {
                     if config.cookie_secure { "; Secure" } else { "" }
                 );
 
-                Ok(redirect_response(&config.success_url, Some(&cookie)))
+                Ok(redirect_response(&config.logout_url, Some(&cookie)))
             },
         },
     );
@@ -5296,6 +5298,15 @@ pub fn init() -> HashMap<String, Value> {
 
                 let failure_url = options
                     .as_ref()
+                    .and_then(|o| o.get("after_failure"))
+                    .and_then(|v| match v {
+                        Value::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "/".to_string());
+
+                let logout_url = options
+                    .as_ref()
                     .and_then(|o| o.get("after_logout"))
                     .and_then(|v| match v {
                         Value::String(s) => Some(s.clone()),
@@ -5381,6 +5392,7 @@ pub fn init() -> HashMap<String, Value> {
                     providers,
                     success_url,
                     failure_url,
+                    logout_url,
                     cookie_name: "ntnt_session".to_string(),
                     cookie_secure,
                     cookie_same_site: "Lax".to_string(),

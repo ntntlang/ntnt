@@ -24,14 +24,21 @@ import { load_env, get_env } from "std/env"
 // Load environment variables from .env file (in same directory as this script)
 load_env("examples/auth_demo/.env")
 
-// Configure GitHub OAuth from environment (with fallback defaults for demo)
+// Configure GitHub OAuth from environment
 let github_id = match get_env("GITHUB_CLIENT_ID") {
     Some(id) => id,
-    None => "Ov23lix63RebjXR73xiD"
+    None => {
+        print("ERROR: GITHUB_CLIENT_ID not set. Add it to examples/auth_demo/.env")
+        print("  See: https://github.com/settings/developers to create an OAuth app")
+        ""
+    }
 }
 let github_secret = match get_env("GITHUB_CLIENT_SECRET") {
     Some(s) => s,
-    None => "6f723026deae220c09da7a1f91463fe35dac2dde"
+    None => {
+        print("ERROR: GITHUB_CLIENT_SECRET not set. Add it to examples/auth_demo/.env")
+        ""
+    }
 }
 let github = oauth("github", github_id, github_secret)
 
@@ -52,12 +59,17 @@ let after_logout = match get_env("AUTH_AFTER_LOGOUT") {
     Some(s) => s,
     None => "/"
 }
+let after_failure = match get_env("AUTH_AFTER_FAILURE") {
+    Some(s) => s,
+    None => "/?error=auth_failed"
+}
 
 // Enable auth with GitHub provider
 enable_auth([github], map {
     "session_secret": session_secret,
     "after_login": after_login,
     "after_logout": after_logout,
+    "after_failure": after_failure,
     "session_store": session_store
 })
 
