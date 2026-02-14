@@ -4316,7 +4316,8 @@ fn generate_stdlib_markdown_from_json(output_dir: &std::path::Path) -> anyhow::R
             .signature
             .as_ref()
             .map(|s| s.split("->").next().unwrap_or(s).trim().to_string())
-            .unwrap_or_else(|| entry.name.clone());
+            .unwrap_or_else(|| entry.name.clone())
+            .replace('|', "\\|");
         let anchor = github_anchor(&entry.name);
         let desc = entry.summary.replace('|', "\\|");
         md.push_str(&format!(
