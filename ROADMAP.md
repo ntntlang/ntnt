@@ -2803,7 +2803,51 @@ pub fn main() {
 }
 ```
 
+### 7.20 Nested Assignment (Deep Mutation)
+
+**Goal:** Support assigning to nested structures like `array[i]["key"] = value` and `map["a"]["b"] = value`, which currently fails with "Invalid assignment target".
+
+**Motivation:** This was hit repeatedly while building a real app (Larri Dashboard) using `std/auth`. Any app that stores data in arrays of maps (users, tasks, sessions) needs to update individual fields without rebuilding the entire object. The current workaround — reconstructing the map and replacing the array element — is verbose and error-prone.
+
+**Current behavior:**
+```ntnt
+let users = load_users()
+users[0]["role"] = "admin"  // ❌ Runtime error: Invalid assignment target
+```
+
+**Workaround (painful):**
+```ntnt
+let user = users[0]
+let updated = map {
+    "id": user["id"],
+    "email": user["email"],
+    "role": "admin",
+    // ... copy every other field manually
+}
+let new_users = []
+let i = 0
+for u in users {
+    if i == 0 { new_users = new_users + [updated] } else { new_users = new_users + [u] }
+    i = i + 1
+}
+```
+
+**Desired behavior:**
+```ntnt
+users[0]["role"] = "admin"           // ✅ Nested index + key assignment
+users[0]["profile"]["name"] = "Bob"  // ✅ Arbitrary depth
+task["tags"][2] = "updated"          // ✅ Map → array nesting
+```
+
+**Implementation notes:**
+- The interpreter's assignment handling needs to walk nested `Index` / `FieldAccess` chains
+- Each intermediate step must resolve to a mutable reference
+- Arrays and maps both need to support being the "parent" at any level
+- Should work with `let mut` variables (or all variables if NTNT stays default-mutable)
+
+**Priority:** High — this is the most common "papercut" when building real NTNT web apps with data persistence.
+
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: January 2026 (v0.3.8 — Active: Phase 7 Language Ergonomics & Documentation)_
+_Last updated: February 2026 (v0.3.11 — Active: Phase 7 Language Ergonomics & Documentation)_
