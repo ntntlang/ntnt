@@ -744,7 +744,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         "set".to_string(),
         Value::NativeFunction {
             name: "set".to_string(),
-            arity: 4,
+            arity: 0,  // variadic: 3-4 args (kv, key, value, opts?)
             func: |args| {
                 if args.len() < 3 || args.len() > 4 {
                     return Err(IntentError::TypeError(
@@ -934,7 +934,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         "list".to_string(),
         Value::NativeFunction {
             name: "list".to_string(),
-            arity: 2,
+            arity: 0,  // variadic: 1-2 args (kv, prefix?)
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::TypeError(
