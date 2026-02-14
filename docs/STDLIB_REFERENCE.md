@@ -36,39 +36,39 @@ These functions are available everywhere without importing.
 | [`Err(error: Any)`](#err) | Wraps a value in Result::Err. |
 | [`Ok(value: Any)`](#ok) | Wraps a value in Result::Ok. |
 | [`Some(value: Any)`](#some) | Wraps a value in Option::Some. |
-| [`abs(x: Int | Float)`](#abs) | Returns the absolute value of a number. |
+| [`abs(x: Int \| Float)`](#abs) | Returns the absolute value of a number. |
 | [`assert(condition: Bool)`](#assert) | Asserts a condition is truthy, throws ContractViolation if not. |
-| [`ceil(x: Int | Float)`](#ceil) | Rounds up to the nearest integer. |
-| [`clamp(x: Int | Float, min_val: Int | Float, max_val: Int | Float)`](#clamp) | Constrains a value between a minimum and maximum. |
+| [`ceil(x: Int \| Float)`](#ceil) | Rounds up to the nearest integer. |
+| [`clamp(x: Int \| Float, min_val: Int \| Float, max_val: Int \| Float)`](#clamp) | Constrains a value between a minimum and maximum. |
 | [`delete(pattern: String, handler: Function)`](#delete) | Registers a DELETE route handler. |
 | [`enable_cors(options?: Map)`](#enablecors) | Enable CORS (Cross-Origin Resource Sharing) for the HTTP server. |
-| [`float(x: Int | Float | String)`](#float) | Converts a value to float. |
-| [`floor(x: Int | Float)`](#floor) | Rounds down to the nearest integer. |
+| [`float(x: Int \| Float \| String)`](#float) | Converts a value to float. |
+| [`floor(x: Int \| Float)`](#floor) | Rounds down to the nearest integer. |
 | [`get(pattern: String, handler: Function)`](#get) | Registers a GET route handler. |
-| [`int(x: Int | Float | String | Bool)`](#int) | Converts a value to integer. |
+| [`int(x: Int \| Float \| String \| Bool)`](#int) | Converts a value to integer. |
 | [`is_err(res: Result<Any, Any>)`](#iserr) | Checks if a Result is Err. |
 | [`is_none(opt: Option<Any>)`](#isnone) | Checks if an Option is None. |
 | [`is_ok(res: Result<Any, Any>)`](#isok) | Checks if a Result is Ok. |
 | [`is_some(opt: Option<Any>)`](#issome) | Checks if an Option is Some. |
-| [`len(x: String | Array | Map)`](#len) | Returns the length of a string, array, or map. |
+| [`len(x: String \| Array \| Map)`](#len) | Returns the length of a string, array, or map. |
 | [`listen(port: Int)`](#listen) | Starts an HTTP server on the given port. |
-| [`max(a: Int | Float, b: Int | Float)`](#max) | Returns the larger of two numbers. |
-| [`min(a: Int | Float, b: Int | Float)`](#min) | Returns the smaller of two numbers. |
+| [`max(a: Int \| Float, b: Int \| Float)`](#max) | Returns the larger of two numbers. |
+| [`min(a: Int \| Float, b: Int \| Float)`](#min) | Returns the smaller of two numbers. |
 | [`new_server()`](#newserver) | Resets the server, clearing all registered routes. |
 | [`patch(pattern: String, handler: Function)`](#patch) | Registers a PATCH route handler. |
 | [`post(pattern: String, handler: Function)`](#post) | Registers a POST route handler. |
-| [`pow(base: Int | Float, exp: Int | Float)`](#pow) | Raises base to the power of exponent. |
+| [`pow(base: Int \| Float, exp: Int \| Float)`](#pow) | Raises base to the power of exponent. |
 | [`print(value: Any)`](#print) | Prints values to stdout, one per line. |
 | [`push(arr: Array, item: Any)`](#push) | Appends an item to an array, returns a new array. |
 | [`put(pattern: String, handler: Function)`](#put) | Registers a PUT route handler. |
-| [`round(x: Int | Float, decimals?: Int)`](#round) | Rounds to the nearest integer, or to N decimal places. |
-| [`sign(x: Int | Float)`](#sign) | Returns the sign of a number: -1, 0, or 1. |
-| [`sqrt(x: Int | Float)`](#sqrt) | Returns the square root of a number. |
+| [`round(x: Int \| Float, decimals?: Int)`](#round) | Rounds to the nearest integer, or to N decimal places. |
+| [`sign(x: Int \| Float)`](#sign) | Returns the sign of a number: -1, 0, or 1. |
+| [`sqrt(x: Int \| Float)`](#sqrt) | Returns the square root of a number. |
 | [`str(x: Any)`](#str) | Converts any value to its string representation. |
-| [`trunc(x: Int | Float)`](#trunc) | Truncates a number toward zero. |
+| [`trunc(x: Int \| Float)`](#trunc) | Truncates a number toward zero. |
 | [`type(x: Any)`](#type) | Returns the type name of a value as a string. |
-| [`unwrap(x: Option<Any> | Result<Any, Any>)`](#unwrap) | Extracts the value from Some or Ok, panics on None or Err. |
-| [`unwrap_or(x: Option<Any> | Result<Any, Any>, default: Any)`](#unwrapor) | Extracts the value from Some or Ok, returns default on None or Err. |
+| [`unwrap(x: Option<Any> \| Result<Any, Any>)`](#unwrap) | Extracts the value from Some or Ok, panics on None or Err. |
+| [`unwrap_or(x: Option<Any> \| Result<Any, Any>, default: Any)`](#unwrapor) | Extracts the value from Some or Ok, returns default on None or Err. |
 
 #### `Err`
 
