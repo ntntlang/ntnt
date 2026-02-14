@@ -2847,6 +2847,29 @@ task["tags"][2] = "updated"          // ✅ Map → array nesting
 
 **Priority:** High — this is the most common "papercut" when building real NTNT web apps with data persistence.
 
+### 7.21 Nested `{{#if}}` Blocks in Templates
+
+**Goal:** Support nested `{{#if}}` conditionals inside template strings and external template files.
+
+**Motivation:** Hit while building the Larri Dashboard nav component. The template engine correctly handles a single `{{#if}}` block, but any `{{#if}}` nested inside another `{{#if}}` renders as literal text instead of being evaluated.
+
+**Current behavior:**
+```html
+{{#if is_admin}}
+  <a class="{{#if admin_active}} active{{/if}}" href="/admin">Admin</a>
+{{/if}}
+```
+Renders the inner `{{#if admin_active}}` and `{{/if}}` as visible text in the HTML output.
+
+**Desired behavior:**
+Both levels of `{{#if}}` should evaluate. Nesting should work to arbitrary depth, matching the behavior users expect from any template engine.
+
+**Root cause:** The lexer's `find_matching_end()` and `parse_if_block_content()` in `src/lexer.rs` don't account for nested blocks when scanning for the closing `{{/if}}` tag — the first `{{/if}}` encountered closes the outer block, leaving the inner block's closing tag as literal text.
+
+**Workaround:** Pre-compute all conditional values in the data map and use only simple `{{var}}` interpolation in templates. This works but defeats the purpose of having `{{#if}}` in templates.
+
+**Priority:** Medium — templates are usable with the workaround, but nested conditionals are a basic expectation of any template system.
+
 ---
 
 _This roadmap is a living document updated as implementation progresses._
