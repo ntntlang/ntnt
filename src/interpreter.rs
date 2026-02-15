@@ -218,6 +218,7 @@ impl fmt::Display for Value {
 #[derive(Debug, Clone)]
 pub struct Environment {
     values: HashMap<String, Value>,
+    mutable_vars: std::collections::HashSet<String>,
     parent: Option<Rc<RefCell<Environment>>>,
 }
 
@@ -225,6 +226,7 @@ impl Environment {
     pub fn new() -> Self {
         Environment {
             values: HashMap::new(),
+            mutable_vars: std::collections::HashSet::new(),
             parent: None,
         }
     }
@@ -232,12 +234,28 @@ impl Environment {
     pub fn with_parent(parent: Rc<RefCell<Environment>>) -> Self {
         Environment {
             values: HashMap::new(),
+            mutable_vars: std::collections::HashSet::new(),
             parent: Some(parent),
         }
     }
 
     pub fn define(&mut self, name: String, value: Value) {
         self.values.insert(name, value);
+    }
+
+    pub fn define_mutable(&mut self, name: String, value: Value) {
+        self.values.insert(name.clone(), value);
+        self.mutable_vars.insert(name);
+    }
+
+    pub fn is_mutable(&self, name: &str) -> bool {
+        if self.values.contains_key(name) {
+            self.mutable_vars.contains(name)
+        } else if let Some(ref parent) = self.parent {
+            parent.borrow().is_mutable(name)
+        } else {
+            false
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<Value> {
@@ -2707,7 +2725,7 @@ impl Interpreter {
         match stmt {
             Statement::Let {
                 name,
-                mutable: _,
+                mutable,
                 type_annotation: _,
                 value,
                 pattern,
@@ -2782,6 +2800,10 @@ impl Interpreter {
                 // Handle pattern destructuring
                 if let Some(pat) = pattern {
                     self.bind_pattern(pat, &val)?;
+                } else if *mutable {
+                    self.environment
+                        .borrow_mut()
+                        .define_mutable(name.clone(), val);
                 } else {
                     self.environment.borrow_mut().define(name.clone(), val);
                 }
@@ -3832,6 +3854,156 @@ impl Interpreter {
                                 "Cannot assign to complex field access".to_string(),
                             ))
                         }
+                    }
+                    Expression::Index { .. } => {
+                        // Deep mutation: collect the chain of index operations
+                        // e.g., users[0]["role"] → chain = [0, "role"], root = "users"
+                        let mut chain: Vec<Expression> = Vec::new();
+                        let mut current = target.as_ref();
+                        loop {
+                            match current {
+                                Expression::Index { object, index } => {
+                                    chain.push(*index.clone());
+                                    current = object.as_ref();
+                                }
+                                Expression::Identifier(_) => break,
+                                _ => {
+                                    return Err(IntentError::RuntimeError(
+                                        "Invalid nested assignment target".to_string(),
+                                    ))
+                                }
+                            }
+                        }
+                        // chain is in reverse order (innermost first), reverse it
+                        chain.reverse();
+
+                        let root_name = if let Expression::Identifier(name) = current {
+                            name.clone()
+                        } else {
+                            unreachable!()
+                        };
+
+                        // Check mutability
+                        if !self.environment.borrow().is_mutable(&root_name) {
+                            return Err(IntentError::RuntimeError(format!(
+                                "Cannot mutate '{}': variable is not declared with 'let mut'",
+                                root_name
+                            )));
+                        }
+
+                        // Get the root value
+                        let mut root_val =
+                            self.environment.borrow().get(&root_name).ok_or_else(|| {
+                                let candidates = self.environment.borrow().keys();
+                                let suggestion =
+                                    crate::error::find_suggestion(&root_name, &candidates);
+                                IntentError::UndefinedVariable {
+                                    name: root_name.clone(),
+                                    suggestion,
+                                }
+                            })?;
+
+                        // Evaluate all index expressions
+                        let mut evaluated_indices = Vec::new();
+                        for idx_expr in &chain {
+                            evaluated_indices.push(self.eval_expression(idx_expr)?);
+                        }
+
+                        // Walk down to the parent of the final target and mutate
+                        {
+                            let mut cursor = &mut root_val;
+                            for (i, idx_val) in evaluated_indices.iter().enumerate() {
+                                let is_last = i == evaluated_indices.len() - 1;
+                                if is_last {
+                                    // Perform the final assignment
+                                    match cursor {
+                                        Value::Array(arr) => {
+                                            let index = match idx_val {
+                                                Value::Int(n) => *n as usize,
+                                                _ => {
+                                                    return Err(IntentError::RuntimeError(
+                                                        "Array index must be an integer"
+                                                            .to_string(),
+                                                    ))
+                                                }
+                                            };
+                                            if index >= arr.len() {
+                                                return Err(IntentError::IndexOutOfBounds {
+                                                    index: index as i64,
+                                                    length: arr.len(),
+                                                });
+                                            }
+                                            arr[index] = val.clone();
+                                        }
+                                        Value::Map(map) => {
+                                            let key = match idx_val {
+                                                Value::String(s) => s.clone(),
+                                                _ => {
+                                                    return Err(IntentError::RuntimeError(
+                                                        "Map key must be a string".to_string(),
+                                                    ))
+                                                }
+                                            };
+                                            map.insert(key, val.clone());
+                                        }
+                                        _ => {
+                                            return Err(IntentError::RuntimeError(
+                                                "Cannot index into non-collection value"
+                                                    .to_string(),
+                                            ))
+                                        }
+                                    }
+                                } else {
+                                    // Navigate deeper
+                                    cursor = match cursor {
+                                        Value::Array(arr) => {
+                                            let index = match idx_val {
+                                                Value::Int(n) => *n as usize,
+                                                _ => {
+                                                    return Err(IntentError::RuntimeError(
+                                                        "Array index must be an integer"
+                                                            .to_string(),
+                                                    ))
+                                                }
+                                            };
+                                            if index >= arr.len() {
+                                                return Err(IntentError::IndexOutOfBounds {
+                                                    index: index as i64,
+                                                    length: arr.len(),
+                                                });
+                                            }
+                                            &mut arr[index]
+                                        }
+                                        Value::Map(map) => {
+                                            let key = match idx_val {
+                                                Value::String(s) => s.clone(),
+                                                _ => {
+                                                    return Err(IntentError::RuntimeError(
+                                                        "Map key must be a string".to_string(),
+                                                    ))
+                                                }
+                                            };
+                                            map.get_mut(&key).ok_or_else(|| {
+                                                IntentError::RuntimeError(format!(
+                                                    "Key '{}' not found in map",
+                                                    key
+                                                ))
+                                            })?
+                                        }
+                                        _ => {
+                                            return Err(IntentError::RuntimeError(
+                                                "Cannot index into non-collection value"
+                                                    .to_string(),
+                                            ))
+                                        }
+                                    };
+                                }
+                            }
+                        }
+
+                        // Write back the modified root value
+                        self.environment.borrow_mut().set(&root_name, root_val);
+                        Ok(val)
                     }
                     _ => Err(IntentError::RuntimeError(
                         "Invalid assignment target".to_string(),
@@ -9077,5 +9249,64 @@ c")
 
         assert_eq!(interpreter.imported_files.len(), 2);
         assert!(interpreter.imported_files.contains_key("/path/to/file.tnt"));
+    }
+
+    #[test]
+    fn test_deep_mutation_array_index() {
+        let result = eval("let mut arr = [1, 2, 3]; arr[0] = 10; arr[0]").unwrap();
+        assert!(matches!(result, Value::Int(10)));
+    }
+
+    #[test]
+    fn test_deep_mutation_map_key() {
+        let result = eval(r#"let mut m = map { "a": 1 }; m["a"] = 2; m["a"]"#).unwrap();
+        assert!(matches!(result, Value::Int(2)));
+    }
+
+    #[test]
+    fn test_deep_mutation_array_of_maps() {
+        let result = eval(
+            r#"let mut users = [map { "name": "Alice", "role": "user" }]; users[0]["role"] = "admin"; users[0]["role"]"#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(s) if s == "admin"));
+    }
+
+    #[test]
+    fn test_deep_mutation_map_of_arrays() {
+        let result = eval(
+            r#"let mut data = map { "items": [1, 2, 3] }; data["items"][1] = 20; data["items"][1]"#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(20)));
+    }
+
+    #[test]
+    fn test_deep_mutation_triple_nesting() {
+        let result = eval(
+            r#"let mut deep = map { "a": map { "b": [10, 20] } }; deep["a"]["b"][0] = 99; deep["a"]["b"][0]"#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(99)));
+    }
+
+    #[test]
+    fn test_deep_mutation_immutable_fails() {
+        let result = eval(r#"let users = [map { "name": "Alice" }]; users[0]["name"] = "Bob""#);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not declared with 'let mut'"));
+    }
+
+    #[test]
+    fn test_deep_mutation_out_of_bounds() {
+        let result = eval("let mut arr = [1, 2]; arr[5] = 10");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_deep_mutation_new_map_key() {
+        let result = eval(r#"let mut m = map { "a": 1 }; m["b"] = 2; m["b"]"#).unwrap();
+        assert!(matches!(result, Value::Int(2)));
     }
 }

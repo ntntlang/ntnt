@@ -3564,3 +3564,97 @@ print(add(5, 20))
     assert_eq!(lines[0], "15");
     assert_eq!(lines[1], "25");
 }
+
+// ===== Deep Mutation Tests =====
+
+#[test]
+fn test_deep_mutation_array_index() {
+    let code = r#"
+let mut arr = [1, 2, 3]
+arr[0] = 10
+print(arr[0])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "10");
+}
+
+#[test]
+fn test_deep_mutation_map_key() {
+    let code = r#"
+let mut m = map { "a": 1 }
+m["a"] = 2
+print(m["a"])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "2");
+}
+
+#[test]
+fn test_deep_mutation_nested_array_of_maps() {
+    let code = r#"
+let mut users = [map { "name": "Alice", "role": "user" }]
+users[0]["role"] = "admin"
+print(users[0]["role"])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "admin");
+}
+
+#[test]
+fn test_deep_mutation_nested_map_of_arrays() {
+    let code = r#"
+let mut data = map { "items": [1, 2, 3] }
+data["items"][1] = 20
+print(data["items"][1])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "20");
+}
+
+#[test]
+fn test_deep_mutation_triple_nesting() {
+    let code = r#"
+let mut deep = map { "a": map { "b": [10, 20] } }
+deep["a"]["b"][0] = 99
+print(deep["a"]["b"][0])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "99");
+}
+
+#[test]
+fn test_deep_mutation_immutable_fails() {
+    let code = r#"
+let users = [map { "name": "Alice" }]
+users[0]["name"] = "Bob"
+"#;
+    let (_stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail: immutable variable");
+}
+
+#[test]
+fn test_deep_mutation_out_of_bounds() {
+    let code = r#"
+let mut arr = [1, 2]
+arr[5] = 10
+"#;
+    let (_stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail: index out of bounds");
+}
+
+#[test]
+fn test_deep_mutation_new_map_key() {
+    let code = r#"
+let mut m = map { "a": 1 }
+m["b"] = 2
+print(m["b"])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "2");
+}
