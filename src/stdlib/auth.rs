@@ -4138,9 +4138,9 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // @ntnt oauth_client_credentials
+    // @ntnt oauth_m2m
     // @module std/auth
-    // @signature oauth_client_credentials(token_url: String, client_id: String, client_secret: String, scopes: [String]) -> Result<Map, String>
+    // @signature oauth_m2m(token_url: String, client_id: String, client_secret: String, scopes: [String]) -> Result<Map, String>
     // Get an access token using client credentials grant (M2M authentication).
     //
     // Used for server-to-server API calls where no user is involved.
@@ -4152,16 +4152,16 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also oauth, oauth_refresh
     // @since v0.3.11
     // @tags #auth, #oauth, #m2m
-    // @example oauth_client_credentials("https://oauth.example.com/token", "id", "secret", ["api.read"]) => Ok({access_token: "...", ...}) ~ "Get M2M token"
+    // @example oauth_m2m("https://oauth.example.com/token", "id", "secret", ["api.read"]) => Ok({access_token: "...", ...}) ~ "Get M2M token"
     module.insert(
-        "oauth_client_credentials".to_string(),
+        "oauth_m2m".to_string(),
         Value::NativeFunction {
-            name: "oauth_client_credentials".to_string(),
+            name: "oauth_m2m".to_string(),
             arity: 4,
             func: |args| {
                 if args.len() < 4 {
                     return Err(IntentError::TypeError(
-                        "[auth] oauth_client_credentials() requires token_url, client_id, client_secret, scopes".to_string()
+                        "[auth] oauth_m2m() requires token_url, client_id, client_secret, scopes".to_string()
                     ));
                 }
 
@@ -4280,9 +4280,9 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // @ntnt oauth_validate_token
+    // @ntnt oauth_validate
     // @module std/auth
-    // @signature oauth_validate_token(token: String, options: Map) -> Result<Map, String>
+    // @signature oauth_validate(token: String, options: Map) -> Result<Map, String>
     // Validate an incoming bearer token (for APIs acting as resource servers).
     //
     // Decodes and validates the token claims without calling the provider.
@@ -4293,16 +4293,16 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also oauth_introspect, jwt_verify
     // @since v0.3.11
     // @tags #auth, #oauth, #validation
-    // @example oauth_validate_token(token, map { "issuer": "https://...", "audience": "my-api" }) ~ "Validate bearer token"
+    // @example oauth_validate(token, map { "issuer": "https://...", "audience": "my-api" }) ~ "Validate bearer token"
     module.insert(
-        "oauth_validate_token".to_string(),
+        "oauth_validate".to_string(),
         Value::NativeFunction {
-            name: "oauth_validate_token".to_string(),
+            name: "oauth_validate".to_string(),
             arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
-                        "[auth] oauth_validate_token() requires token and options".to_string(),
+                        "[auth] oauth_validate() requires token and options".to_string(),
                     ));
                 }
 
@@ -4377,7 +4377,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param client_id OAuth client ID
     // @param client_secret OAuth client secret
     // @returns Result containing introspection response or error
-    // @see_also oauth_validate_token
+    // @see_also oauth_validate
     // @since v0.3.11
     // @tags #auth, #oauth, #introspection
     // @example oauth_introspect("https://auth.example.com/introspect", token, "id", "secret") ~ "Introspect token"
@@ -4491,29 +4491,29 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // @ntnt get_session_data
+    // @ntnt session_data
     // @module std/auth
-    // @signature get_session_data(req: Request) -> Option<Map>
+    // @signature session_data(req: Request) -> Option<Map>
     // Get custom data stored in the current session.
     //
-    // Returns the custom data map stored via set_session_data, or None if no session
+    // Returns the custom data map stored via set_session, or None if no session
     // or no custom data. Use this to store and retrieve user roles, permissions,
     // preferences, or other application-specific data.
     // @param req The HTTP request object
     // @returns Option containing the custom data Map or None
-    // @see_also set_session_data, get_session, get_user
+    // @see_also set_session, get_session, get_user
     // @since v0.3.11
     // @tags #auth, #rbac
-    // @example get_session_data(req) ~ "Get user roles and preferences"
+    // @example session_data(req) ~ "Get user roles and preferences"
     module.insert(
-        "get_session_data".to_string(),
+        "session_data".to_string(),
         Value::NativeFunction {
-            name: "get_session_data".to_string(),
+            name: "session_data".to_string(),
             arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
-                        "[auth] get_session_data() requires a request".to_string(),
+                        "[auth] session_data() requires a request".to_string(),
                     ));
                 }
 
@@ -4533,9 +4533,9 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // @ntnt set_session_data
+    // @ntnt set_session
     // @module std/auth
-    // @signature set_session_data(req: Request, data: Map) -> Result<Unit, String>
+    // @signature set_session(req: Request, data: Map) -> Result<Unit, String>
     // Store custom data in the current session.
     //
     // Use this to store user roles, permissions, preferences, or other application-specific
@@ -4543,19 +4543,19 @@ pub fn init() -> HashMap<String, Value> {
     // @param req The HTTP request object
     // @param data The custom data map to store
     // @returns Result indicating success or error message
-    // @see_also get_session_data, get_session
+    // @see_also session_data, get_session
     // @since v0.3.11
     // @tags #auth, #rbac
-    // @example set_session_data(req, map { "roles": ["admin"], "theme": "dark" }) ~ "Store user preferences"
+    // @example set_session(req, map { "roles": ["admin"], "theme": "dark" }) ~ "Store user preferences"
     module.insert(
-        "set_session_data".to_string(),
+        "set_session".to_string(),
         Value::NativeFunction {
-            name: "set_session_data".to_string(),
+            name: "set_session".to_string(),
             arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
-                        "[auth] set_session_data() requires request and data".to_string(),
+                        "[auth] set_session() requires request and data".to_string(),
                     ));
                 }
 
@@ -4563,7 +4563,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Map(m) => m.clone(),
                     _ => {
                         return Err(IntentError::TypeError(
-                            "[auth] set_session_data() data must be a map".to_string(),
+                            "[auth] set_session() data must be a map".to_string(),
                         ))
                     }
                 };
@@ -4582,9 +4582,9 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // @ntnt cleanup_sessions
+    // @ntnt sessions_cleanup
     // @module std/auth
-    // @signature cleanup_sessions() -> Result<Int, String>
+    // @signature sessions_cleanup() -> Result<Int, String>
     // Clean up expired sessions and OAuth states from the session store.
     //
     // Call this periodically (e.g., via a cron job or scheduled task) to remove
@@ -4594,11 +4594,11 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also enable_auth
     // @since v0.3.11
     // @tags #auth, #maintenance
-    // @example cleanup_sessions() ~ "Remove expired sessions"
+    // @example sessions_cleanup() ~ "Remove expired sessions"
     module.insert(
-        "cleanup_sessions".to_string(),
+        "sessions_cleanup".to_string(),
         Value::NativeFunction {
-            name: "cleanup_sessions".to_string(),
+            name: "sessions_cleanup".to_string(),
             arity: 0,
             func: |_args| {
                 let mut total = 0u64;
@@ -4630,9 +4630,9 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // @ntnt get_user_sessions
+    // @ntnt user_sessions
     // @module std/auth
-    // @signature get_user_sessions(req: Request) -> Result<Array<SessionInfo>, String>
+    // @signature user_sessions(req: Request) -> Result<Array<SessionInfo>, String>
     // Get all active sessions for the current user.
     //
     // Returns an array of session info objects, each containing id, provider,
@@ -4640,19 +4640,19 @@ pub fn init() -> HashMap<String, Value> {
     // current session). Useful for "manage your sessions" UI.
     // @param req The HTTP request object
     // @returns Result containing array of session info, or error
-    // @see_also logout_all_sessions, get_session
+    // @see_also logout_all, get_session
     // @since v0.3.11
     // @tags #auth, #security
-    // @example get_user_sessions(req) ~ "List all user's active sessions"
+    // @example user_sessions(req) ~ "List all user's active sessions"
     module.insert(
-        "get_user_sessions".to_string(),
+        "user_sessions".to_string(),
         Value::NativeFunction {
-            name: "get_user_sessions".to_string(),
+            name: "user_sessions".to_string(),
             arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
-                        "[auth] get_user_sessions() requires a request".to_string(),
+                        "[auth] user_sessions() requires a request".to_string(),
                     ));
                 }
 
@@ -4691,9 +4691,9 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // @ntnt logout_all_sessions
+    // @ntnt logout_all
     // @module std/auth
-    // @signature logout_all_sessions(req: Request, keep_current: Bool) -> Result<Int, String>
+    // @signature logout_all(req: Request, keep_current: Bool) -> Result<Int, String>
     // Log out all sessions for the current user.
     //
     // Deletes all sessions for the user. If keep_current is true, keeps the
@@ -4702,20 +4702,20 @@ pub fn init() -> HashMap<String, Value> {
     // @param req The HTTP request object
     // @param keep_current If true, keep the current session active
     // @returns Result containing number of sessions deleted, or error
-    // @see_also get_user_sessions, logout_user
+    // @see_also user_sessions, logout_user
     // @since v0.3.11
     // @tags #auth, #security
-    // @example logout_all_sessions(req, true) ~ "Log out everywhere except here"
-    // @example logout_all_sessions(req, false) ~ "Log out from all devices"
+    // @example logout_all(req, true) ~ "Log out everywhere except here"
+    // @example logout_all(req, false) ~ "Log out from all devices"
     module.insert(
-        "logout_all_sessions".to_string(),
+        "logout_all".to_string(),
         Value::NativeFunction {
-            name: "logout_all_sessions".to_string(),
+            name: "logout_all".to_string(),
             arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
-                        "[auth] logout_all_sessions() requires request and keep_current"
+                        "[auth] logout_all() requires request and keep_current"
                             .to_string(),
                     ));
                 }
@@ -5197,14 +5197,14 @@ pub fn init() -> HashMap<String, Value> {
     // Initialize the authentication system with OAuth providers.
     //
     // Stores provider configurations for use by auth handlers. After calling this,
-    // you can use auth_start_handler, auth_callback_handler, and auth_logout_handler
+    // you can use auth_start, auth_callback, and auth_logout
     // with routes to enable OAuth login.
     //
     // Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
     // @param providers Array of provider configs created by oauth() or oauth_discover()
     // @param options Optional map with keys: session_secret, session_ttl, after_login, after_logout, session_store
     // @returns Unit
-    // @see_also oauth, oauth_discover, auth_start_handler
+    // @see_also oauth, oauth_discover, auth_start
     // @since v0.3.11
     // @tags #auth, #oauth
     // @example ~ "Initialize auth with GitHub"
@@ -5420,7 +5420,7 @@ pub fn init() -> HashMap<String, Value> {
     // Generate an OAuth authorization URL for manual flow control.
     //
     // Use this when you want to control the OAuth flow manually instead of using
-    // auth_start_handler. Returns the authorization URL with state parameter
+    // auth_start. Returns the authorization URL with state parameter
     // for CSRF protection.
     // @param provider Provider config from oauth()
     // @param redirect_uri Your callback URL
@@ -5731,53 +5731,53 @@ pub fn init() -> HashMap<String, Value> {
     // Convenience Handlers (optional, use primitives for more control)
     // ==========================================================================
 
-    // @ntnt auth_start_handler
+    // @ntnt auth_start
     // @module std/auth
-    // @signature auth_start_handler(req: Request) -> Response
+    // @signature auth_start(req: Request) -> Response
     // Handle OAuth login start - redirects to the provider's authorization page.
     //
     // Use with a route like GET /auth/{provider}. Reads the provider name from
     // req.params.provider and generates the OAuth authorization URL with PKCE/nonce.
     // @param req The HTTP request with route param {provider}
     // @returns Redirect response to OAuth provider
-    // @see_also enable_auth, auth_callback_handler
+    // @see_also enable_auth, auth_callback
     // @since v0.3.11
     // @tags #auth, #oauth, #handler
-    // @example get("/auth/{provider}", auth_start_handler) ~ "Wire up login routes"
+    // @example get("/auth/{provider}", auth_start) ~ "Wire up login routes"
     module.insert(
-        "auth_start_handler".to_string(),
+        "auth_start".to_string(),
         Value::NativeFunction {
-            name: "auth_start_handler".to_string(),
+            name: "auth_start".to_string(),
             arity: 1,
             func: |args| handle_auth_start(&args),
         },
     );
 
-    // @ntnt auth_callback_handler
+    // @ntnt auth_callback
     // @module std/auth
-    // @signature auth_callback_handler(req: Request) -> Response
+    // @signature auth_callback(req: Request) -> Response
     // Handle OAuth callback - exchanges code for tokens, creates session.
     //
     // Use with a route like GET /auth/{provider}/callback. Reads state and code from query params,
     // validates CSRF, exchanges code for tokens, and creates a user session.
     // @param req The HTTP request with query params state and code
     // @returns Redirect response to after_login URL with session cookie
-    // @see_also enable_auth, auth_start_handler
+    // @see_also enable_auth, auth_start
     // @since v0.3.11
     // @tags #auth, #oauth, #handler
-    // @example get("/auth/{provider}/callback", auth_callback_handler) ~ "Wire up callback route"
+    // @example get("/auth/{provider}/callback", auth_callback) ~ "Wire up callback route"
     module.insert(
-        "auth_callback_handler".to_string(),
+        "auth_callback".to_string(),
         Value::NativeFunction {
-            name: "auth_callback_handler".to_string(),
+            name: "auth_callback".to_string(),
             arity: 1,
             func: |args| handle_auth_callback(&args),
         },
     );
 
-    // @ntnt auth_logout_handler
+    // @ntnt auth_logout
     // @module std/auth
-    // @signature auth_logout_handler(req: Request) -> Response
+    // @signature auth_logout(req: Request) -> Response
     // Handle logout - clears the session and redirects.
     //
     // Use with a route like POST /auth/logout. Clears the session cookie and
@@ -5787,19 +5787,19 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also enable_auth, get_user
     // @since v0.3.11
     // @tags #auth, #handler
-    // @example post("/auth/logout", auth_logout_handler) ~ "Wire up logout route"
+    // @example post("/auth/logout", auth_logout) ~ "Wire up logout route"
     module.insert(
-        "auth_logout_handler".to_string(),
+        "auth_logout".to_string(),
         Value::NativeFunction {
-            name: "auth_logout_handler".to_string(),
+            name: "auth_logout".to_string(),
             arity: 1,
             func: |args| handle_auth_logout(&args),
         },
     );
 
-    // @ntnt auth_me_handler
+    // @ntnt auth_me
     // @module std/auth
-    // @signature auth_me_handler(req: Request) -> Response
+    // @signature auth_me(req: Request) -> Response
     // Return current user as JSON for SPAs.
     //
     // Use with a route like GET /auth/me. Returns the current user's session
@@ -5809,11 +5809,11 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also get_user, enable_auth
     // @since v0.3.11
     // @tags #auth, #handler, #api
-    // @example get("/auth/me", auth_me_handler) ~ "Wire up user endpoint"
+    // @example get("/auth/me", auth_me) ~ "Wire up user endpoint"
     module.insert(
-        "auth_me_handler".to_string(),
+        "auth_me".to_string(),
         Value::NativeFunction {
-            name: "auth_me_handler".to_string(),
+            name: "auth_me".to_string(),
             arity: 1,
             func: |args| {
                 let user = get_user_from_request(&args[0]);
@@ -5929,30 +5929,30 @@ pub fn init() -> HashMap<String, Value> {
     // MFA/2FA Functions
     // ==========================================================================
 
-    // @ntnt generate_totp_secret
+    // @ntnt totp_secret
     // @module std/auth
-    // @signature generate_totp_secret() -> String
+    // @signature totp_secret() -> String
     // Generate a new TOTP secret for MFA setup.
     //
     // Creates a random base32-encoded secret suitable for TOTP authentication.
-    // Use this secret with get_totp_uri() to generate a QR code for authenticator apps.
+    // Use this secret with totp_uri() to generate a QR code for authenticator apps.
     // @returns Base32-encoded TOTP secret
-    // @see_also get_totp_uri, verify_totp
+    // @see_also totp_uri, verify_totp
     // @since v0.3.11
     // @tags #auth, #mfa, #totp
-    // @example generate_totp_secret() => "JBSWY3DPEHPK3PXP..." ~ "Generate secret"
+    // @example totp_secret() => "JBSWY3DPEHPK3PXP..." ~ "Generate secret"
     module.insert(
-        "generate_totp_secret".to_string(),
+        "totp_secret".to_string(),
         Value::NativeFunction {
-            name: "generate_totp_secret".to_string(),
+            name: "totp_secret".to_string(),
             arity: 0,
             func: |_args| Ok(Value::String(generate_totp_secret())),
         },
     );
 
-    // @ntnt get_totp_uri
+    // @ntnt totp_uri
     // @module std/auth
-    // @signature get_totp_uri(secret: String, email: String, issuer: String) -> Result<String, String>
+    // @signature totp_uri(secret: String, email: String, issuer: String) -> Result<String, String>
     // Generate an otpauth:// URI for QR codes.
     //
     // Creates a URI that can be encoded as a QR code for authenticator apps
@@ -5961,19 +5961,19 @@ pub fn init() -> HashMap<String, Value> {
     // @param email User's email for the account label
     // @param issuer App name shown in authenticator
     // @returns Ok(uri) on success, Err(message) on failure
-    // @see_also generate_totp_secret, verify_totp
+    // @see_also totp_secret, verify_totp
     // @since v0.3.11
     // @tags #auth, #mfa, #totp
-    // @example get_totp_uri(secret, "user@example.com", "MyApp") => Ok("otpauth://...") ~ "Get URI for QR"
+    // @example totp_uri(secret, "user@example.com", "MyApp") => Ok("otpauth://...") ~ "Get URI for QR"
     module.insert(
-        "get_totp_uri".to_string(),
+        "totp_uri".to_string(),
         Value::NativeFunction {
-            name: "get_totp_uri".to_string(),
+            name: "totp_uri".to_string(),
             arity: 3,
             func: |args| {
                 if args.len() < 3 {
                     return Err(IntentError::TypeError(
-                        "[auth] get_totp_uri() requires (secret, email, issuer)".to_string(),
+                        "[auth] totp_uri() requires (secret, email, issuer)".to_string(),
                     ));
                 }
 
@@ -6022,7 +6022,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param secret TOTP secret (base32 encoded)
     // @param code 6-digit code from authenticator app
     // @returns true if code is valid, false otherwise
-    // @see_also generate_totp_secret, get_totp_uri
+    // @see_also totp_secret, totp_uri
     // @since v0.3.11
     // @tags #auth, #mfa, #totp
     // @example verify_totp(secret, "123456") => true ~ "Verify 2FA code"

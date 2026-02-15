@@ -9,13 +9,13 @@
 //
 // Note: Local user registration, password auth, and MFA are application-level
 // concerns. See the stdlib primitives (hash_password, verify_password,
-// generate_totp_secret, verify_totp) for building your own user system.
+// totp_secret, verify_totp) for building your own user system.
 
 import { json, html, redirect, parse_form } from "std/http/server"
 import {
     oauth, enable_auth, get_user, get_session,
-    auth_start_handler, auth_callback_handler, auth_logout_handler,
-    get_user_sessions, logout_all_sessions,
+    auth_start, auth_callback, auth_logout,
+    user_sessions, logout_all,
     verify_csrf
 } from "std/auth"
 import { get_key } from "std/collections"
@@ -309,7 +309,7 @@ fn sessions_page(req) {
     let user = get_user(req)
     match user {
         Some(u) => {
-            let sessions_result = get_user_sessions(req)
+            let sessions_result = user_sessions(req)
             let sessions_html = match sessions_result {
                 Ok(sessions) => {
                     let items = ""
@@ -405,7 +405,7 @@ fn handle_logout_all(req) {
         return redirect("/sessions?error=Invalid request")
     }
 
-    let result = logout_all_sessions(req, keep_current)
+    let result = logout_all(req, keep_current)
     match result {
         Ok(count) => {
             if keep_current {
@@ -431,7 +431,7 @@ fn api_me(req) {
 }
 
 fn api_sessions(req) {
-    let result = get_user_sessions(req)
+    let result = user_sessions(req)
     match result {
         Ok(sessions) => json(map { "sessions": sessions }),
         Err(e) => json(map { "error": e }, 401)
@@ -457,9 +457,9 @@ get("/api/me", api_me)
 get("/api/sessions", api_sessions)
 
 // OAuth routes
-get("/auth/{provider}", auth_start_handler)
-get("/auth/{provider}/callback", auth_callback_handler)
-post("/auth/logout", auth_logout_handler)
+get("/auth/{provider}", auth_start)
+get("/auth/{provider}/callback", auth_callback)
+post("/auth/logout", auth_logout)
 
 // ============================================================================
 // Start Server
