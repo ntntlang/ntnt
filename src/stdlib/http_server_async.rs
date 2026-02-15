@@ -277,12 +277,16 @@ async fn axum_to_bridge_request(
     let url = uri.to_string();
     let query = uri.query().unwrap_or("").to_string();
 
-    // Parse query params
+    // Parse query params (URL-decode values)
     let mut query_params = HashMap::new();
     if !query.is_empty() {
         for pair in query.split('&') {
             if let Some((key, value)) = pair.split_once('=') {
-                query_params.insert(key.to_string(), value.to_string());
+                // URL-decode the value to handle encoded characters like %2F -> /
+                let decoded_value = urlencoding::decode(value)
+                    .unwrap_or_else(|_| value.into())
+                    .to_string();
+                query_params.insert(key.to_string(), decoded_value);
             }
         }
     }

@@ -49,3 +49,4 @@ examples/snowgauge
 # Private notes
 notes/
 .plans/
+examples/auth_demo/sessions.db

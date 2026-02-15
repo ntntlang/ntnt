@@ -2,11 +2,12 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.3.11
+> Last updated: v0.3.12
 
 ## Table of Contents
 
 - [Global Builtins](#global-builtins)
+- [std/auth](#stdauth)
 - [std/collections](#stdcollections)
 - [std/concurrent](#stdconcurrent)
 - [std/crypto](#stdcrypto)
@@ -16,6 +17,7 @@
 - [std/http](#stdhttp)
 - [std/http/server](#stdhttpserver)
 - [std/json](#stdjson)
+- [std/kv](#stdkv)
 - [std/log](#stdlog)
 - [std/math](#stdmath)
 - [std/path](#stdpath)
@@ -1181,6 +1183,1008 @@ unwrap_or(Err("fail"), "fallback")  // => "fallback"  // Default returned for Er
 **See also:** `unwrap`, `is_some`, `is_ok`, `Some`, `Ok`
 
 *Since v0.1.0*
+
+---
+
+## std/auth
+
+Full OAuth 2.0 and OIDC authentication with JWT support
+
+```ntnt
+import { oauth, oauth_discover, oauth_m2m } from "std/auth"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`auth_callback`](#authcallback) | Handle OAuth callback - exchanges code for tokens, creates session. |
+| [`auth_logout`](#authlogout) | Handle logout - clears the session and redirects. |
+| [`auth_me`](#authme) | Return current user as JSON for SPAs. |
+| [`auth_start`](#authstart) | Handle OAuth login start - redirects to the provider's authorization page. |
+| [`create_session_from_oauth`](#createsessionfromoauth) | Create a session from OAuth user info and tokens. |
+| [`csrf_field`](#csrffield) | Get an HTML hidden input field with the CSRF token. |
+| [`csrf_token`](#csrftoken) | Get the CSRF token for the current session. |
+| [`enable_auth`](#enableauth) | Initialize the authentication system with OAuth providers. |
+| [`get_session`](#getsession) | Get the current session from the request. |
+| [`get_user`](#getuser) | Get the current authenticated user from the request. |
+| [`hash_password`](#hashpassword) | Hash a password using bcrypt. |
+| [`jwt_decode`](#jwtdecode) | Decode a JWT token WITHOUT verifying the signature. |
+| [`jwt_sign`](#jwtsign) | Create a signed JWT token from claims. |
+| [`jwt_verify`](#jwtverify) | Verify a JWT token and return its claims. |
+| [`logout_all`](#logoutall) | Log out all sessions for the current user. |
+| [`logout_user`](#logoutuser) | Log out the current user and return a redirect response. |
+| [`oauth`](#oauth) | Create an OAuth provider configuration. |
+| [`oauth_discover`](#oauthdiscover) | Create an OAuth provider using OIDC Discovery. |
+| [`oauth_exchange`](#oauthexchange) | Exchange OAuth authorization code for tokens and user info. |
+| [`oauth_introspect`](#oauthintrospect) | Introspect a token using the provider's introspection endpoint (RFC 7662). |
+| [`oauth_m2m`](#oauthm2m) | Get an access token using client credentials grant (M2M authentication). |
+| [`oauth_refresh`](#oauthrefresh) | Refresh the access token for the current session. |
+| [`oauth_start`](#oauthstart) | Generate an OAuth authorization URL for manual flow control. |
+| [`oauth_validate`](#oauthvalidate) | Validate an incoming bearer token (for APIs acting as resource servers). |
+| [`session_data`](#sessiondata) | Get custom data stored in the current session. |
+| [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions and OAuth states from the session store. |
+| [`set_session`](#setsession) | Store custom data in the current session. |
+| [`totp_secret`](#totpsecret) | Generate a new TOTP secret for MFA setup. |
+| [`totp_uri`](#totpuri) | Generate an otpauth:// URI for QR codes. |
+| [`user_sessions`](#usersessions) | Get all active sessions for the current user. |
+| [`verify_csrf`](#verifycsrf) | Verify a CSRF token against the session's token. |
+| [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
+| [`verify_totp`](#verifytotp) | Verify a TOTP code against a secret. |
+
+#### `auth_callback`
+
+```ntnt
+auth_callback(req: Request) -> Response
+```
+
+Handle OAuth callback - exchanges code for tokens, creates session.
+
+Use with a route like GET /auth/{provider}/callback. Reads state and code from query params, validates CSRF, exchanges code for tokens, and creates a user session.
+
+**Parameters:**
+
+- `req` — The HTTP request with query params state and code
+
+**Returns:** Redirect response to after_login URL with session cookie
+
+**Examples:**
+
+```ntnt
+get("/auth/{provider}/callback", auth_callback)  // Wire up callback route
+```
+
+**See also:** `enable_auth`, `auth_start`
+
+*Since v0.3.11*
+
+---
+
+#### `auth_logout`
+
+```ntnt
+auth_logout(req: Request) -> Response
+```
+
+Handle logout - clears the session and redirects.
+
+Use with a route like POST /auth/logout. Clears the session cookie and redirects to after_logout URL.
+
+**Parameters:**
+
+- `req` — The HTTP request
+
+**Returns:** Redirect response to after_logout URL
+
+**Examples:**
+
+```ntnt
+post("/auth/logout", auth_logout)  // Wire up logout route
+```
+
+**See also:** `enable_auth`, `get_user`
+
+*Since v0.3.11*
+
+---
+
+#### `auth_me`
+
+```ntnt
+auth_me(req: Request) -> Response
+```
+
+Return current user as JSON for SPAs.
+
+Use with a route like GET /auth/me. Returns the current user's session data as JSON, or 401 if not authenticated.
+
+**Parameters:**
+
+- `req` — The HTTP request
+
+**Returns:** JSON response with user data or 401
+
+**Examples:**
+
+```ntnt
+get("/auth/me", auth_me)  // Wire up user endpoint
+```
+
+**See also:** `get_user`, `enable_auth`
+
+*Since v0.3.11*
+
+---
+
+#### `auth_start`
+
+```ntnt
+auth_start(req: Request) -> Response
+```
+
+Handle OAuth login start - redirects to the provider's authorization page.
+
+Use with a route like GET /auth/{provider}. Reads the provider name from req.params.provider and generates the OAuth authorization URL with PKCE/nonce.
+
+**Parameters:**
+
+- `req` — The HTTP request with route param {provider}
+
+**Returns:** Redirect response to OAuth provider
+
+**Examples:**
+
+```ntnt
+get("/auth/{provider}", auth_start)  // Wire up login routes
+```
+
+**See also:** `enable_auth`, `auth_callback`
+
+*Since v0.3.11*
+
+---
+
+#### `create_session_from_oauth`
+
+```ntnt
+create_session_from_oauth(provider_name: String, user_info: Map, tokens?: Map) -> Result<Map, String>
+```
+
+Create a session from OAuth user info and tokens.
+
+Use this after oauth_exchange to create a session. Returns the session info and Set-Cookie header value.
+
+**Parameters:**
+
+- `provider_name` — Name of the provider (for user_id prefix)
+- `user_info` — User info map from oauth_exchange
+- `tokens` — Optional tokens map from oauth_exchange
+
+**Returns:** Ok(map with session_id, user_id, cookie) or Err on failure
+
+**Examples:**
+
+```ntnt
+create_session_from_oauth("github", user_info, tokens)  // => Ok({session_id: "...", cookie: "..."})  // Create session
+```
+
+**See also:** `oauth_exchange`, `get_session`
+
+*Since v0.3.11*
+
+---
+
+#### `csrf_field`
+
+```ntnt
+csrf_field(req: Request) -> String
+```
+
+Get an HTML hidden input field with the CSRF token.
+
+Returns a ready-to-use hidden input element for forms. Use this to easily include CSRF protection in your forms without manual formatting.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** HTML string like `<input type="hidden" name="_csrf" value="..."/>`
+
+**Examples:**
+
+```ntnt
+csrf_field(req)  // Get hidden input for form
+```
+
+**See also:** `csrf_token`, `verify_csrf`
+
+*Since v0.3.11*
+
+---
+
+#### `csrf_token`
+
+```ntnt
+csrf_token(req: Request) -> Option<String>
+```
+
+Get the CSRF token for the current session.
+
+Use this token in forms to protect against Cross-Site Request Forgery. Include the token as a hidden field named "_csrf" and verify it with verify_csrf().
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the CSRF token string, or None if not authenticated
+
+**Examples:**
+
+```ntnt
+csrf_token(req)  // Get token for form
+```
+
+**See also:** `verify_csrf`, `csrf_field`
+
+*Since v0.3.11*
+
+---
+
+#### `enable_auth`
+
+```ntnt
+enable_auth(providers: [Provider], options?: Map) -> Unit
+```
+
+Initialize the authentication system with OAuth providers.
+
+Stores provider configurations for use by auth handlers. After calling this, you can use auth_start, auth_callback, and auth_logout with routes to enable OAuth login.
+
+Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
+
+**Parameters:**
+
+- `providers` — Array of provider configs created by oauth() or oauth_discover()
+- `options` — Optional map with keys: session_secret, session_ttl, after_login, after_logout, session_store
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+// Initialize auth with GitHub
+let github = oauth("github", get_env("GITHUB_ID"), get_env("GITHUB_SECRET"))
+enable_auth([github], map { "session_secret": "my-secret" })
+enable_auth([github], map { "session_store": "sqlite:./sessions.db" })  // SQLite sessions
+enable_auth([github], map { "session_store": "redis://localhost:6379" })  // Redis sessions
+```
+
+**See also:** `oauth`, `oauth_discover`, `auth_start`
+
+*Since v0.3.11*
+
+---
+
+#### `get_session`
+
+```ntnt
+get_session(req: Request) -> Option<Session>
+```
+
+Get the current session from the request.
+
+Returns the full session object including user, timestamps, tokens, and custom data.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the Session map or None
+
+**Examples:**
+
+```ntnt
+get_session(req)  // Get full session data
+```
+
+**See also:** `get_user`, `logout_user`, `oauth_refresh`
+
+*Since v0.3.11*
+
+---
+
+#### `get_user`
+
+```ntnt
+get_user(req: Request) -> Option<User>
+```
+
+Get the current authenticated user from the request.
+
+Returns Some(user) if authenticated, None if not. Use with `otherwise` for concise auth checks in handlers.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the User map or None
+
+**Examples:**
+
+```ntnt
+get_user(req) otherwise return redirect("/login")  // Require auth
+```
+
+**See also:** `get_session`, `logout_user`
+
+*Since v0.3.11*
+
+---
+
+#### `hash_password`
+
+```ntnt
+hash_password(password: String) -> Result<String, String>
+```
+
+Hash a password using bcrypt.
+
+Utility function to hash passwords for custom storage or verification. Uses bcrypt with default cost factor.
+
+**Parameters:**
+
+- `password` — The password to hash
+
+**Returns:** Ok(hash) on success, Err(message) on failure
+
+**Examples:**
+
+```ntnt
+hash_password("mypassword")  // => Ok("$2b$12$...")  // Hash a password
+```
+
+**See also:** `verify_password`
+
+*Since v0.3.11*
+
+---
+
+#### `jwt_decode`
+
+```ntnt
+jwt_decode(token: String) -> Result<Map, String>
+```
+
+Decode a JWT token WITHOUT verifying the signature.
+
+Use this only for debugging or when you need to inspect token contents before verification. Never trust the claims from this function for auth.
+
+**Parameters:**
+
+- `token` — The JWT token string
+
+**Returns:** Result containing map with "header" and "payload" keys, or error
+
+**Examples:**
+
+```ntnt
+jwt_decode(token)  // Inspect token without verification
+```
+
+**See also:** `jwt_sign`, `jwt_verify`
+
+*Since v0.3.11*
+
+---
+
+#### `jwt_sign`
+
+```ntnt
+jwt_sign(claims: Map, secret: String, options?: Map) -> Result<String, String>
+```
+
+Create a signed JWT token from claims.
+
+Signs the claims using HS256 algorithm and returns the JWT string. Optional options map can include: exp (expiration as unix timestamp), iat (issued-at, defaults to now), sub (subject), iss (issuer), aud (audience).
+
+**Parameters:**
+
+- `claims` — The payload claims as a map
+- `secret` — The signing secret (should be at least 32 bytes)
+- `options` — Optional map with exp, iat, sub, iss, aud
+
+**Returns:** Result containing the JWT string, or error message
+
+**Examples:**
+
+```ntnt
+jwt_sign(map { "user_id": 123 }, secret)  // Create a token
+jwt_sign(map { "user_id": 123 }, secret, map { "exp": now() + 3600 })  // Token with 1hr expiry
+```
+
+**See also:** `jwt_verify`, `jwt_decode`
+
+*Since v0.3.11*
+
+---
+
+#### `jwt_verify`
+
+```ntnt
+jwt_verify(token: String, secret: String) -> Result<Map, String>
+```
+
+Verify a JWT token and return its claims.
+
+Validates the signature and expiration, then returns the claims as a map. Returns Err if the token is invalid, expired, or has wrong signature.
+
+**Parameters:**
+
+- `token` — The JWT token string
+- `secret` — The signing secret used to create the token
+
+**Returns:** Result containing the claims map, or error message
+
+**Examples:**
+
+```ntnt
+jwt_verify(token, secret)  // Verify and get claims
+```
+
+**See also:** `jwt_sign`, `jwt_decode`
+
+*Since v0.3.11*
+
+---
+
+#### `logout_all`
+
+```ntnt
+logout_all(req: Request, keep_current: Bool) -> Result<Int, String>
+```
+
+Log out all sessions for the current user.
+
+Deletes all sessions for the user. If keep_current is true, keeps the current session active (useful for "log out everywhere else"). Returns the number of sessions that were deleted.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+- `keep_current` — If true, keep the current session active
+
+**Returns:** Result containing number of sessions deleted, or error
+
+**Examples:**
+
+```ntnt
+logout_all(req, true)  // Log out everywhere except here
+logout_all(req, false)  // Log out from all devices
+```
+
+**See also:** `user_sessions`, `logout_user`
+
+*Since v0.3.11*
+
+---
+
+#### `logout_user`
+
+```ntnt
+logout_user(req: Request) -> Response
+```
+
+Log out the current user and return a redirect response.
+
+Clears the session and returns a redirect to the configured logout_url (default: "/") with the session cookie cleared.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Redirect response with session cookie cleared
+
+**Examples:**
+
+```ntnt
+logout_user(req)  // Log out and redirect to home
+```
+
+**See also:** `get_user`, `get_session`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth`
+
+```ntnt
+oauth(provider: String, client_id: String, client_secret: String, options?: Map) -> Provider
+```
+
+Create an OAuth provider configuration.
+
+Supports built-in providers (google, github, facebook, microsoft, discord, twitter, linkedin, apple) with sensible defaults, or custom providers with full configuration. Supports OIDC (ID tokens, nonce validation) and PKCE.
+
+**Parameters:**
+
+- `provider` — Provider name (e.g., "google", "github") or custom name
+- `client_id` — OAuth client ID (or config map for custom providers)
+- `client_secret` — OAuth client secret (omit for PKCE public clients)
+- `options` — Optional map: scopes, use_pkce, access_type, prompt
+
+**Returns:** Provider configuration to pass to enable_auth()
+
+**Examples:**
+
+```ntnt
+oauth("google", "client_id", "client_secret")  // => Provider  // Google OAuth with defaults
+oauth("github", "id", "secret", map { "scopes": ["repo"] })  // => Provider  // GitHub with custom scopes
+oauth("google", "id", "secret", map { "use_pkce": true })  // => Provider  // Google with PKCE
+```
+
+**See also:** `enable_auth`, `get_user`, `oauth_pkce`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_discover`
+
+```ntnt
+oauth_discover(issuer: String, client_id: String, client_secret?: String, options?: Map) -> Result<Provider, String>
+```
+
+Create an OAuth provider using OIDC Discovery.
+
+Automatically fetches configuration from the issuer's .well-known/openid-configuration endpoint. Useful for Okta, Auth0, Keycloak, and other OIDC providers.
+
+**Parameters:**
+
+- `issuer` — The OIDC issuer URL (e.g., "https://mycompany.okta.com")
+- `client_id` — OAuth client ID
+- `client_secret` — OAuth client secret (optional for PKCE)
+- `options` — Optional map: scopes, use_pkce
+
+**Returns:** Result containing Provider or error message
+
+**Examples:**
+
+```ntnt
+oauth_discover("https://mycompany.okta.com", "client_id", "secret")  // => Ok(Provider)  // Okta with auto-discovery
+```
+
+**See also:** `oauth`, `enable_auth`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_exchange`
+
+```ntnt
+oauth_exchange(provider: Map, code: String, state: String, redirect_uri: String) -> Result<Map, String>
+```
+
+Exchange OAuth authorization code for tokens and user info.
+
+Use this after receiving the callback with code and state parameters. Returns tokens and user info - you decide what to do with them (create session, etc).
+
+**Parameters:**
+
+- `provider` — Provider config from oauth()
+- `code` — Authorization code from callback
+- `state` — State parameter from callback (for CSRF validation)
+- `redirect_uri` — Same redirect_uri used in oauth_start
+
+**Returns:** Ok(map with tokens and user_info) or Err on failure
+
+**Examples:**
+
+```ntnt
+oauth_exchange(github, code, state, redirect_uri)  // => Ok({access_token: "...", user_info: {...}})  // Exchange code
+```
+
+**See also:** `oauth_start`, `create_session_from_oauth`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_introspect`
+
+```ntnt
+oauth_introspect(introspection_url: String, token: String, client_id: String, client_secret: String) -> Result<Map, String>
+```
+
+Introspect a token using the provider's introspection endpoint (RFC 7662).
+
+Calls the authorization server to validate the token. More reliable than local validation but adds network latency.
+
+**Parameters:**
+
+- `introspection_url` — The introspection endpoint URL
+- `token` — The token to introspect
+- `client_id` — OAuth client ID
+- `client_secret` — OAuth client secret
+
+**Returns:** Result containing introspection response or error
+
+**Examples:**
+
+```ntnt
+oauth_introspect("https://auth.example.com/introspect", token, "id", "secret")  // Introspect token
+```
+
+**See also:** `oauth_validate`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_m2m`
+
+```ntnt
+oauth_m2m(token_url: String, client_id: String, client_secret: String, scopes: [String]) -> Result<Map, String>
+```
+
+Get an access token using client credentials grant (M2M authentication).
+
+Used for server-to-server API calls where no user is involved.
+
+**Parameters:**
+
+- `token_url` — The token endpoint URL
+- `client_id` — OAuth client ID
+- `client_secret` — OAuth client secret
+- `scopes` — Array of scopes to request
+
+**Returns:** Result containing token response map or error
+
+**Examples:**
+
+```ntnt
+oauth_m2m("https://oauth.example.com/token", "id", "secret", ["api.read"])  // => Ok({access_token: "...", ...})  // Get M2M token
+```
+
+**See also:** `oauth`, `oauth_refresh`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_refresh`
+
+```ntnt
+oauth_refresh(req: Request) -> Result<Map, String>
+```
+
+Refresh the access token for the current session.
+
+Uses the stored refresh token to get a new access token. Updates the session with new tokens. Requires enable_auth() with store_tokens: true.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Result containing new token info or error
+
+**Examples:**
+
+```ntnt
+oauth_refresh(req)  // => Ok({access_token: "...", expires_in: 3600})  // Refresh tokens
+```
+
+**See also:** `get_session`, `oauth`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_start`
+
+```ntnt
+oauth_start(provider: Map, redirect_uri: String) -> Result<String, String>
+```
+
+Generate an OAuth authorization URL for manual flow control.
+
+Use this when you want to control the OAuth flow manually instead of using auth_start. Returns the authorization URL with state parameter for CSRF protection.
+
+**Parameters:**
+
+- `provider` — Provider config from oauth()
+- `redirect_uri` — Your callback URL
+
+**Returns:** Ok(auth_url) to redirect user to, Err on failure
+
+**Examples:**
+
+```ntnt
+oauth_start(github, "https://myapp.com/callback")  // => Ok("https://github.com/...")  // Get auth URL
+```
+
+**See also:** `oauth_exchange`, `oauth`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_validate`
+
+```ntnt
+oauth_validate(token: String, options: Map) -> Result<Map, String>
+```
+
+Validate an incoming bearer token (for APIs acting as resource servers).
+
+Decodes and validates the token claims without calling the provider. For full validation, use oauth_introspect().
+
+**Parameters:**
+
+- `token` — The bearer token to validate
+- `options` — Map with issuer, audience for validation
+
+**Returns:** Result containing token claims or error
+
+**Examples:**
+
+```ntnt
+oauth_validate(token, map { "issuer": "https://...", "audience": "my-api" })  // Validate bearer token
+```
+
+**See also:** `oauth_introspect`, `jwt_verify`
+
+*Since v0.3.11*
+
+---
+
+#### `session_data`
+
+```ntnt
+session_data(req: Request) -> Option<Map>
+```
+
+Get custom data stored in the current session.
+
+Returns the custom data map stored via set_session, or None if no session or no custom data. Use this to store and retrieve user roles, permissions, preferences, or other application-specific data.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the custom data Map or None
+
+**Examples:**
+
+```ntnt
+session_data(req)  // Get user roles and preferences
+```
+
+**See also:** `set_session`, `get_session`, `get_user`
+
+*Since v0.3.11*
+
+---
+
+#### `sessions_cleanup`
+
+```ntnt
+sessions_cleanup() -> Result<Int, String>
+```
+
+Clean up expired sessions and OAuth states from the session store.
+
+Call this periodically (e.g., via a cron job or scheduled task) to remove expired sessions and OAuth states from the database. For Redis, sessions use TTL so they expire automatically, but this will scan for any orphaned entries.
+
+**Returns:** Result containing the number of expired sessions removed, or error
+
+**Examples:**
+
+```ntnt
+sessions_cleanup()  // Remove expired sessions
+```
+
+**See also:** `enable_auth`
+
+*Since v0.3.11*
+
+---
+
+#### `set_session`
+
+```ntnt
+set_session(req: Request, data: Map) -> Result<Unit, String>
+```
+
+Store custom data in the current session.
+
+Use this to store user roles, permissions, preferences, or other application-specific data that should persist across requests. Data is stored as JSON in the session.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+- `data` — The custom data map to store
+
+**Returns:** Result indicating success or error message
+
+**Examples:**
+
+```ntnt
+set_session(req, map { "roles": ["admin"], "theme": "dark" })  // Store user preferences
+```
+
+**See also:** `session_data`, `get_session`
+
+*Since v0.3.11*
+
+---
+
+#### `totp_secret`
+
+```ntnt
+totp_secret() -> String
+```
+
+Generate a new TOTP secret for MFA setup.
+
+Creates a random base32-encoded secret suitable for TOTP authentication. Use this secret with totp_uri() to generate a QR code for authenticator apps.
+
+**Returns:** Base32-encoded TOTP secret
+
+**Examples:**
+
+```ntnt
+totp_secret()  // => "JBSWY3DPEHPK3PXP..."  // Generate secret
+```
+
+**See also:** `totp_uri`, `verify_totp`
+
+*Since v0.3.11*
+
+---
+
+#### `totp_uri`
+
+```ntnt
+totp_uri(secret: String, email: String, issuer: String) -> Result<String, String>
+```
+
+Generate an otpauth:// URI for QR codes.
+
+Creates a URI that can be encoded as a QR code for authenticator apps like Google Authenticator or Authy.
+
+**Parameters:**
+
+- `secret` — TOTP secret (base32 encoded)
+- `email` — User's email for the account label
+- `issuer` — App name shown in authenticator
+
+**Returns:** Ok(uri) on success, Err(message) on failure
+
+**Examples:**
+
+```ntnt
+totp_uri(secret, "user@example.com", "MyApp")  // => Ok("otpauth://...")  // Get URI for QR
+```
+
+**See also:** `totp_secret`, `verify_totp`
+
+*Since v0.3.11*
+
+---
+
+#### `user_sessions`
+
+```ntnt
+user_sessions(req: Request) -> Result<Array<SessionInfo>, String>
+```
+
+Get all active sessions for the current user.
+
+Returns an array of session info objects, each containing id, provider, created_at, expires_at, and is_current (boolean indicating if it's the current session). Useful for "manage your sessions" UI.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Result containing array of session info, or error
+
+**Examples:**
+
+```ntnt
+user_sessions(req)  // List all user's active sessions
+```
+
+**See also:** `logout_all`, `get_session`
+
+*Since v0.3.11*
+
+---
+
+#### `verify_csrf`
+
+```ntnt
+verify_csrf(req: Request, token: String) -> Bool
+```
+
+Verify a CSRF token against the session's token.
+
+Returns true if the token matches the session's CSRF token, false otherwise. Use this in POST/PUT/DELETE handlers to validate the "_csrf" form field.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+- `token` — The CSRF token from the form submission
+
+**Returns:** true if valid, false if invalid or not authenticated
+
+**Examples:**
+
+```ntnt
+verify_csrf(req, form["_csrf"])  // Validate form submission
+```
+
+**See also:** `csrf_token`, `csrf_field`
+
+*Since v0.3.11*
+
+---
+
+#### `verify_password`
+
+```ntnt
+verify_password(password: String, hash: String) -> Bool
+```
+
+Verify a password against a bcrypt hash.
+
+Utility function to verify passwords hashed with hash_password.
+
+**Parameters:**
+
+- `password` — The password to verify
+- `hash` — The bcrypt hash to verify against
+
+**Returns:** true if password matches hash, false otherwise
+
+**Examples:**
+
+```ntnt
+verify_password("mypassword", stored_hash)  // => true  // Verify password
+```
+
+**See also:** `hash_password`
+
+*Since v0.3.11*
+
+---
+
+#### `verify_totp`
+
+```ntnt
+verify_totp(secret: String, code: String) -> Bool
+```
+
+Verify a TOTP code against a secret.
+
+Checks if the provided 6-digit code is valid for the given secret. Allows for 30-second time window drift.
+
+**Parameters:**
+
+- `secret` — TOTP secret (base32 encoded)
+- `code` — 6-digit code from authenticator app
+
+**Returns:** true if code is valid, false otherwise
+
+**Examples:**
+
+```ntnt
+verify_totp(secret, "123456")  // => true  // Verify 2FA code
+```
+
+**See also:** `totp_secret`, `totp_uri`
+
+*Since v0.3.11*
 
 ---
 
@@ -4039,6 +5043,261 @@ stringify_pretty(map { "a": 1 })  // Pretty-printed with newlines and indentatio
 **See also:** `stringify`, `parse_json`
 
 *Since v0.1.0*
+
+---
+
+## std/kv
+
+Key-value store with SQLite and Redis/Valkey backends
+
+```ntnt
+import { open, get, set } from "std/kv"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`del`](#del) | Delete a key from the KV store. |
+| [`expire`](#expire) | Set a TTL (time-to-live) on an existing key. |
+| [`flush`](#flush) | Delete all keys from the KV store. |
+| [`get`](#get) | Get a value by key from the KV store. |
+| [`has`](#has) | Check if a key exists in the KV store. |
+| [`list`](#list) | List keys in the KV store, optionally filtered by prefix. |
+| [`open`](#open) | Open a KV store connection. |
+| [`set`](#set) | Set a key-value pair in the KV store. |
+| [`ttl`](#ttl) | Get the remaining TTL (time-to-live) for a key in seconds. |
+
+#### `del`
+
+```ntnt
+del(kv: KVStore, key: String) -> Result<Bool, String>
+```
+
+Delete a key from the KV store.
+
+Returns true if the key existed and was deleted, false if it didn't exist.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to delete
+
+**Returns:** Result containing true if deleted, false if not found
+
+**Examples:**
+
+```ntnt
+del(cache, "user:123")  // Delete a key
+```
+
+---
+
+#### `expire`
+
+```ntnt
+expire(kv: KVStore, key: String, seconds: Int) -> Result<Bool, String>
+```
+
+Set a TTL (time-to-live) on an existing key.
+
+Returns true if the key exists and TTL was set, false if key doesn't exist.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to set expiration on
+- `seconds` — Number of seconds until expiration
+
+**Returns:** Result containing true if TTL was set, false if key not found
+
+**Examples:**
+
+```ntnt
+expire(cache, "user:123", 600)  // Expire in 10 minutes
+```
+
+---
+
+#### `flush`
+
+```ntnt
+flush(kv: KVStore) -> Result<Unit, String>
+```
+
+Delete all keys from the KV store.
+
+Use with caution - this removes all data. Useful for tests and resets.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+
+**Returns:** Result indicating success or error
+
+**Examples:**
+
+```ntnt
+flush(cache)  // Clear all cached data
+```
+
+---
+
+#### `get`
+
+```ntnt
+get(kv: KVStore, key: String) -> Result<Option<Any>, String>
+```
+
+Get a value by key from the KV store.
+
+Returns None if the key doesn't exist or has expired. Values are automatically deserialized to their original type.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to retrieve
+
+**Returns:** Result containing Some(value) or None if not found
+
+**Examples:**
+
+```ntnt
+get(cache, "user:123")  // Get user by key
+get(cache, "session:abc")  // Get session data
+```
+
+---
+
+#### `has`
+
+```ntnt
+has(kv: KVStore, key: String) -> Result<Bool, String>
+```
+
+Check if a key exists in the KV store.
+
+Returns false for expired keys.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to check
+
+**Returns:** Result containing true if exists, false otherwise
+
+**Examples:**
+
+```ntnt
+has(cache, "user:123")  // Check if key exists
+```
+
+---
+
+#### `list`
+
+```ntnt
+list(kv: KVStore, prefix?: String) -> Result<Array<String>, String>
+```
+
+List keys in the KV store, optionally filtered by prefix.
+
+Without a prefix, returns all keys (use sparingly on large stores).
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `prefix` — Optional prefix to filter keys
+
+**Returns:** Result containing array of matching key names
+
+**Examples:**
+
+```ntnt
+list(cache, "user:")  // List all user keys
+list(cache, "session:")  // List all session keys
+list(cache)  // List all keys
+```
+
+---
+
+#### `open`
+
+```ntnt
+open(url: String) -> Result<KVStore, String>
+```
+
+Open a KV store connection.
+
+For SQLite (bundled, zero-config), pass a file path or ":memory:". For Redis/Valkey (production), pass a URL like "redis://host:6379".
+
+**Parameters:**
+
+- `url` — Connection string: file path for SQLite, redis:// or valkey:// URL for Redis/Valkey
+
+**Returns:** Result containing the KV store handle or an error message
+
+**Examples:**
+
+```ntnt
+open("cache.db")  // Open SQLite KV store
+open(":memory:")  // Open in-memory SQLite KV store
+open("redis://localhost:6379")  // Open Redis connection
+open("valkey://localhost:6379/0")  // Open Valkey connection with database 0
+```
+
+---
+
+#### `set`
+
+```ntnt
+set(kv: KVStore, key: String, value: Any, opts?: Map) -> Result<Unit, String>
+```
+
+Set a key-value pair in the KV store.
+
+Values are automatically serialized. Maps and arrays are stored as JSON. Setting a value to None deletes the key.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to set
+- `value` — The value to store (string, int, float, bool, map, or array)
+- `opts` — Optional map with "ttl" key for expiration in seconds
+
+**Returns:** Result indicating success or error
+
+**Examples:**
+
+```ntnt
+set(cache, "user:123", map { "name": "Alice" })  // Set without TTL
+set(cache, "session:abc", token, map { "ttl": 3600 })  // Set with 1 hour TTL
+```
+
+---
+
+#### `ttl`
+
+```ntnt
+ttl(kv: KVStore, key: String) -> Result<Option<Int>, String>
+```
+
+Get the remaining TTL (time-to-live) for a key in seconds.
+
+Returns None if the key doesn't exist or has no expiration set.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to check TTL for
+
+**Returns:** Result containing Some(seconds) or None
+
+**Examples:**
+
+```ntnt
+ttl(cache, "session:abc")  // Get remaining TTL
+```
 
 ---
 

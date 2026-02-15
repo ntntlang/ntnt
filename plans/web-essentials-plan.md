@@ -6,6 +6,7 @@
 
 **Scope:** 57 stdlib functions, 1 global builtin, 7 CLI commands, 1 new syntax form
 
+**Status:** Phase 2 In Progress (Features 1-5, 8, 9 Complete + Performance Optimizations)
 **Status:** Phase 2 In Progress (Features 1-5, 9 Complete + Performance Optimizations)
 
 **Key deliverables:**
@@ -18,6 +19,7 @@
 - ✅ ⚡ **Route matching optimization** — O(1) lookup by method+segment count (DONE)
 - 🗄️ **Query builder** — 15 functions covering all CRUD patterns + transactions + upsert
 - 📋 **Schema sync** — declarative migrations with production workflow + seeding + drift detection
+- ✅ ⚡ **KV store** — SQLite + Redis/Valkey backends complete
 - ⚡ **KV store** — SQLite (dev) or Redis/Valkey (prod) with same API
 - 🔑 **Auth module** — `enable_oauth()` batteries-included + granular API for custom flows
 
@@ -51,6 +53,10 @@ Features are ordered by dependencies — each feature builds on the ones before 
 | 5 | File uploads | Medium | None | — | ✅ Done |
 | 6 | Query builder (`std/db`) | Large | None | — | Pending |
 | 7 | Schema sync + seeding + migrations | Large | None | #6 | Pending |
+| 8 | KV store (`std/kv`) | Large | `redis` | — | ✅ Done |
+| 9 | Declarative route blocks (`server` syntax) | Large | None | #2, #4 | ✅ Done |
+| 9a | Route matching optimization | Small | None | #9 | ✅ Done |
+| 10 | Auth module (`std/auth`) | Large | `jsonwebtoken` | #2, #8 | ✅ Done |
 | 8 | KV store (`std/kv`) | Large | `redis` | — | Pending |
 | 9 | Declarative route blocks (`server` syntax) | Large | None | #2, #4 | ✅ Done |
 | 9a | Route matching optimization | Small | None | #9 | ✅ Done |
@@ -1276,6 +1282,17 @@ ntnt db seed seeds/ --db app.db --if-empty   # Only seed empty tables
 
 ---
 
+## Feature 8: KV Store — `std/kv` ✅ COMPLETE
+
+A unified key-value interface that works with both a built-in SQLite backend (zero-config, good for development and small deployments) and Redis/Valkey (production-grade, distributed).
+
+**Implemented:**
+- ✅ SQLite backend — 9 functions (open, get, set, del, has, list, expire, ttl, flush)
+- ✅ Redis/Valkey backend — Same 9 functions, uses redis crate
+- ✅ URL-based backend selection: file paths → SQLite, `redis://` or `valkey://` → Redis protocol
+- ✅ Type-preserving serialization (strings, ints, floats, bools, maps, arrays)
+- ✅ TTL support on both backends
+
 ## Feature 8: KV Store — `std/kv`
 
 A unified key-value interface that works with both a built-in SQLite backend (zero-config, good for development and small deployments) and Redis/Valkey (production-grade, distributed).
@@ -1626,6 +1643,191 @@ Route matching optimized from O(n) to O(n/m/k) via two-level HashMap:
 
 ---
 
+## Feature 10: Auth Module — `std/auth` ✅ COMPLETE
+
+A complete authentication module supporting OAuth 2.0/OIDC federation and JWT tokens. Designed for the common case: NTNT apps as OAuth **clients** (Login with Google/GitHub/Okta), not OAuth servers.
+
+> **Implementation Note:** Full OAuth 2.0 + OIDC support was implemented with a slightly different API than originally planned. TOTP/MFA was deferred to a future release.
+
+### What Was Implemented
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| OAuth 2.0 Authorization Code flow | ✅ | With PKCE support |
+| OAuth 2.0 Client Credentials flow | ✅ | For M2M authentication |
+| OAuth 2.0 Refresh Token flow | ✅ | `oauth_refresh()` function |
+| OIDC ID Token extraction/validation | ✅ | Nonce + issuer/audience validation |
+| OIDC Discovery | ✅ | `oauth_discover()` for enterprise providers |
+| 10 built-in providers | ✅ | Google, GitHub, Facebook, Microsoft, Discord, Twitter, LinkedIn, Apple, Okta, Auth0 |
+| JWT signing/verification | ✅ | HS256/HS384/HS512 |
+| Session management | ✅ | In-memory, SQLite, or PostgreSQL backends |
+| Token validation for APIs | ✅ | `oauth_validate_token()`, `oauth_introspect()` |
+| TOTP/MFA | ❌ Deferred | Planned for future release |
+
+### Actual API (as implemented)
+
+```ntnt
+import { get_env } from "std/env"
+import { json } from "std/http/server"
+
+// Configure OAuth providers using oauth() helper
+let google = oauth("google", map {
+    "client_id": get_env("GOOGLE_CLIENT_ID"),
+    "client_secret": get_env("GOOGLE_CLIENT_SECRET"),
+    "redirect_uri": "http://localhost:8080/auth/google/callback"
+})
+
+let github = oauth("github", map {
+    "client_id": get_env("GITHUB_CLIENT_ID"),
+    "client_secret": get_env("GITHUB_CLIENT_SECRET"),
+    "redirect_uri": "http://localhost:8080/auth/github/callback"
+})
+
+// Register providers with enable_auth (auto-registers routes)
+enable_auth([google, github], map {
+    "session_secret": get_env("SESSION_SECRET"),
+    "after_login": "/dashboard",
+    "after_logout": "/",
+    // Session storage (optional, defaults to "memory")
+    // "session_store": "memory"                        // In-memory (default)
+    // "session_store": "sqlite:./sessions.db"          // SQLite file
+    // "session_store": "postgres://user:pass@host/db"  // PostgreSQL
+    // "session_store": "redis://localhost:6379"        // Redis/Valkey
+})
+
+// Auto-registered routes:
+// GET  /auth/google          -> Redirect to Google
+// GET  /auth/google/callback -> Handle callback
+// GET  /auth/github          -> Redirect to GitHub
+// GET  /auth/github/callback -> Handle callback
+// POST /auth/logout          -> Clear session
+// GET  /auth/me              -> Current user as JSON
+
+listen(8080)
+```
+
+### Exported Functions
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `oauth` | `(provider: String, config: Map) -> Map` | Create provider config for built-in providers |
+| `oauth_discover` | `(issuer: String, config: Map) -> Result<Map, String>` | Fetch OIDC discovery and create provider config |
+| `oauth_client_credentials` | `(provider: Map, scopes?: Array) -> Result<Map, String>` | M2M authentication (client credentials flow) |
+| `oauth_refresh` | `(provider: Map, refresh_token: String) -> Result<Map, String>` | Refresh an access token |
+| `oauth_validate_token` | `(token: String, opts: Map) -> Result<Map, String>` | Validate a JWT token (for APIs as resource servers) |
+| `oauth_introspect` | `(token: String, provider: Map) -> Result<Map, String>` | Token introspection (RFC 7662) |
+| `enable_auth` | `(providers: Array, opts: Map) -> Unit` | Register providers and auto-create routes |
+| `get_user` | `(req: Request) -> Option<Map>` | Get current user from session |
+| `get_session` | `(req: Request) -> Option<Map>` | Get full session data |
+| `logout_user` | `(req: Request) -> Response` | Clear session and redirect |
+| `jwt_sign` | `(claims: Map, secret: String, opts?: Map) -> Result<String, String>` | Sign a JWT |
+| `jwt_verify` | `(token: String, secret: String, opts?: Map) -> Result<Map, String>` | Verify and decode a JWT |
+| `jwt_decode` | `(token: String) -> Result<Map, String>` | Decode JWT without verification |
+
+### Session Storage Backends
+
+Sessions can be stored in-memory (default), SQLite, PostgreSQL, or Redis/Valkey. Configure via `session_store` option:
+
+```ntnt
+// In-memory (default) — sessions lost on server restart
+enable_auth([github], map {
+    "session_secret": "...",
+    "session_store": "memory"
+})
+
+// SQLite — persistent, file-based storage
+enable_auth([github], map {
+    "session_secret": "...",
+    "session_store": "sqlite:./sessions.db"
+})
+
+// PostgreSQL — for distributed/clustered deployments
+enable_auth([github], map {
+    "session_secret": "...",
+    "session_store": "postgres://user:pass@localhost/myapp"
+})
+
+// Redis/Valkey — for high-performance distributed sessions
+enable_auth([github], map {
+    "session_secret": "...",
+    "session_store": "redis://localhost:6379"
+})
+```
+
+| Backend | Format | Use Case |
+|---------|--------|----------|
+| Memory | `"memory"` | Development, single-instance |
+| SQLite | `"sqlite:./path.db"` | Production, single-instance |
+| PostgreSQL | `"postgres://..."` | Production, clustered |
+| Redis | `"redis://..."` | Production, high-performance clustered |
+| Valkey | `"valkey://..."` | Production, Redis-compatible (AWS ElastiCache) |
+
+The database backends auto-create the `auth_sessions` table with proper indexes. Redis uses `ntnt:session:{id}` keys with automatic TTL expiration.
+
+### Built-in Providers
+
+| Provider | Protocol | PKCE | Notes |
+|----------|----------|------|-------|
+| `google` | OIDC | Optional | Full OIDC support |
+| `github` | OAuth 2.0 | No | Requires email scope for email |
+| `facebook` | OAuth 2.0 | Optional | |
+| `microsoft` | OIDC | Optional | Azure AD |
+| `discord` | OAuth 2.0 | No | |
+| `twitter` | OAuth 2.0 | Required | Always uses PKCE |
+| `linkedin` | OAuth 2.0 | No | Uses OpenID Connect scopes |
+| `apple` | OIDC | Optional | Uses ID token (no userinfo endpoint) |
+| `okta` | OIDC | Optional | Requires `oauth_discover()` with issuer |
+| `auth0` | OIDC | Optional | Requires `oauth_discover()` with issuer |
+
+### Enterprise OIDC (Okta, Auth0, Keycloak)
+
+```ntnt
+// Use oauth_discover for any OIDC-compliant provider
+let okta = oauth_discover("https://mycompany.okta.com", map {
+    "client_id": get_env("OKTA_CLIENT_ID"),
+    "client_secret": get_env("OKTA_CLIENT_SECRET"),
+    "redirect_uri": "http://localhost:8080/auth/okta/callback",
+    "scopes": ["openid", "email", "profile", "groups"]
+})?
+
+enable_auth([okta], map { ... })
+```
+
+### Machine-to-Machine (M2M) Authentication
+
+```ntnt
+// Client credentials flow for backend services
+let tokens = oauth_client_credentials(google, ["https://www.googleapis.com/auth/cloud-platform"])?
+// tokens = { access_token, token_type, expires_in }
+
+// Use token to call APIs
+let resp = fetch(map {
+    "url": "https://api.example.com/data",
+    "headers": map { "Authorization": "Bearer {tokens.access_token}" }
+})
+```
+
+### Token Validation for APIs
+
+```ntnt
+// Validate incoming bearer tokens (API as resource server)
+fn api_handler(req: Request) -> Response {
+    let auth_header = req.headers["authorization"]
+    let token = replace(auth_header, "Bearer ", "")
+
+    let claims = oauth_validate_token(token, map {
+        "issuer": "https://accounts.google.com",
+        "audience": "my-api-client-id"
+    })?
+
+    // claims contains validated token data
+    return json(map { "user_id": claims["sub"] })
+}
+```
+
+---
+
+### Original Plan (preserved for reference)
 ## Feature 10: Auth Module — `std/auth`
 
 A complete authentication module supporting OAuth 2.0/OIDC federation, JWT tokens, and TOTP-based MFA. Designed for the common case: NTNT apps as OAuth **clients** (Login with Google/GitHub/Okta), not OAuth servers.

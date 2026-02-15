@@ -433,6 +433,7 @@ impl Interpreter {
                         | "use_middleware"
                         | "on_shutdown"
                         | "enable_cors"
+                        | "enable_auth"
                 )
             }
         }
@@ -3370,6 +3371,19 @@ impl Interpreter {
                         return Ok(Value::Unit);
                     }
 
+                    // Special handling for enable_auth(provider_or_config)
+                    if name == "enable_auth" && arguments.len() == 1 {
+                        if self.should_skip_server_call("enable_auth") {
+                            return Ok(Value::Unit);
+                        }
+
+                        let arg = self.eval_expression(&arguments[0])?;
+                        let config = self.parse_auth_config(arg)?;
+                        self.setup_auth_routes(&config)?;
+                        crate::stdlib::auth::init_auth(config);
+                        return Ok(Value::Unit);
+                    }
+
                     // Special handling for template(path, data) - load and render template
                     if name == "template" && arguments.len() == 2 {
                         let path = self.eval_expression(&arguments[0])?;
@@ -4106,6 +4120,99 @@ impl Interpreter {
             // For non-interpolated strings, variables, etc. — evaluate normally
             _ => self.eval_expression(expr),
         }
+    }
+
+    /// Parse auth configuration from enable_auth() argument
+    fn parse_auth_config(&self, arg: Value) -> Result<crate::stdlib::auth::AuthConfig> {
+        use crate::stdlib::auth::{value_to_provider, AuthConfig};
+
+        match arg {
+            // Single provider: enable_auth(google(...))
+            Value::Map(ref map) if map.contains_key("_provider") => {
+                let provider = value_to_provider(&arg)?;
+                let mut config = AuthConfig::default();
+                config.providers.push(provider);
+                Ok(config)
+            }
+            // Config map: enable_auth(map { "providers": [...], ... })
+            Value::Map(ref map) => {
+                let mut config = AuthConfig::default();
+
+                // Parse providers array
+                if let Some(Value::Array(providers)) = map.get("providers") {
+                    for p in providers {
+                        let provider = value_to_provider(p)?;
+                        config.providers.push(provider);
+                    }
+                } else {
+                    return Err(IntentError::TypeError(
+                        "enable_auth() requires a provider or config with 'providers' array"
+                            .to_string(),
+                    ));
+                }
+
+                // Parse optional settings
+                if let Some(Value::String(s)) = map.get("success_url") {
+                    config.success_url = s.clone();
+                }
+                if let Some(Value::String(s)) = map.get("failure_url") {
+                    config.failure_url = s.clone();
+                }
+                if let Some(Value::String(s)) = map.get("cookie_name") {
+                    config.cookie_name = s.clone();
+                }
+                if let Some(Value::Bool(b)) = map.get("cookie_secure") {
+                    config.cookie_secure = *b;
+                }
+                if let Some(Value::Int(i)) = map.get("session_ttl") {
+                    config.session_ttl = *i;
+                }
+
+                Ok(config)
+            }
+            _ => Err(IntentError::TypeError(
+                "enable_auth() requires a provider or config map".to_string(),
+            )),
+        }
+    }
+
+    /// Set up OAuth routes for the given auth configuration
+    fn setup_auth_routes(&mut self, _config: &crate::stdlib::auth::AuthConfig) -> Result<()> {
+        // Create handlers for each provider - use dynamic route with provider param
+        // Register a single route with {provider} parameter
+        self.server_state.add_route(
+            "GET",
+            "/auth/{provider}",
+            Value::NativeFunction {
+                name: "_auth_start".to_string(),
+                arity: 1,
+                func: crate::stdlib::auth::handle_auth_start,
+            },
+        );
+
+        // Create callback handler: GET /auth/callback
+        self.server_state.add_route(
+            "GET",
+            "/auth/callback",
+            Value::NativeFunction {
+                name: "_auth_callback".to_string(),
+                arity: 1,
+                func: crate::stdlib::auth::handle_auth_callback,
+            },
+        );
+
+        // Create logout handler: POST /auth/logout
+        self.server_state.add_route(
+            "POST",
+            "/auth/logout",
+            Value::NativeFunction {
+                name: "_auth_logout".to_string(),
+                arity: 1,
+                func: crate::stdlib::auth::handle_auth_logout,
+            },
+        );
+
+        Ok(())
     }
 
     /// Render a template string with the given data

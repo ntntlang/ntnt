@@ -42,7 +42,7 @@ This document outlines the implementation plan for NTNT, a programming language 
 - [x] Union types
 - [x] Effect annotations foundation
 - [x] Module system with imports/exports
-- [x] Standard library: std/string, std/math, std/collections, std/env, std/fs, std/path, std/json, std/time, std/crypto, std/url, std/http
+- [x] Standard library: std/string, std/math, std/collections, std/env, std/fs, std/path, std/json, std/time, std/crypto, std/url, std/http, std/auth, std/kv, std/log
 - [x] Traits with default implementations
 - [x] For-in loops and ranges
 - [x] Defer statement
@@ -1236,6 +1236,95 @@ Added 17 stdlib functions across 3 modules plus 1 global builtin to enable build
 **Password Hashing:**
 - [x] Minimum bcrypt cost raised to 10 (OWASP compliance)
 
+### 7.19 OAuth/OIDC Authentication (`std/auth`) ✅
+
+**Goal:** Full OAuth 2.0 and OIDC support with progressive disclosure — simple things simple, complex things possible.
+
+**Supported OAuth Flows:**
+- [x] Authorization Code (server-side apps)
+- [x] Authorization Code + PKCE (SPAs, mobile, CLI)
+- [x] Client Credentials (machine-to-machine)
+- [x] Refresh Token (long-lived sessions)
+
+**OIDC Support:**
+- [x] ID token extraction and validation
+- [x] Nonce for replay attack protection
+- [x] OIDC Discovery (`oauth_discover()` auto-configures from issuer)
+- [x] ID token claims as user info source (fixes Apple Sign In)
+- [x] Issuer and audience validation
+
+**Progressive Disclosure API:**
+
+```ntnt
+import { oauth, get_user, get_session, oauth_discover } from "std/auth"
+
+// One line for common cases
+enable_auth(oauth("google", client_id, client_secret))
+
+// With PKCE (for SPAs/mobile)
+enable_auth(oauth("google", id, secret, map { "use_pkce": true }))
+
+// OIDC Discovery (Okta, Auth0, Keycloak)
+let provider = oauth_discover("https://mycompany.okta.com", client_id, client_secret)?
+enable_auth(provider)
+
+// M2M authentication (server-to-server)
+let token = oauth_client_credentials(token_url, client_id, client_secret, ["api.read"])?
+
+// API acting as resource server
+let claims = oauth_validate_token(req.headers["authorization"], map {
+    "issuer": "https://accounts.google.com",
+    "audience": "my-api-client-id"
+})?
+```
+
+**Built-in Providers (8 fully configured + 2 discovery-based):**
+- [x] Google (OIDC, PKCE)
+- [x] GitHub (OAuth2)
+- [x] Facebook (PKCE)
+- [x] Microsoft (OIDC, PKCE)
+- [x] Discord (PKCE)
+- [x] Twitter (OAuth 2.0, PKCE required)
+- [x] LinkedIn (OIDC)
+- [x] Apple (OIDC, uses ID token)
+- [x] Okta (via `oauth_discover()`)
+- [x] Auth0 (via `oauth_discover()`)
+
+**Core Functions (12 total):**
+- [x] `oauth(provider, client_id, client_secret, options?)` — create provider configuration
+- [x] `oauth_discover(issuer, client_id, secret?)` — auto-configure from OIDC discovery
+- [x] `oauth_client_credentials(token_url, id, secret, scopes)` — M2M token grant
+- [x] `oauth_refresh(req)` — refresh access token using stored refresh token
+- [x] `oauth_validate_token(token, options)` — validate incoming bearer tokens
+- [x] `oauth_introspect(url, token, id, secret)` — token introspection (RFC 7662)
+- [x] `get_user(req)` — get authenticated user from request
+- [x] `get_session(req)` — get full session with tokens and data
+- [x] `logout_user(req)` — clear session and redirect
+
+**JWT Support:**
+- [x] `jwt_sign(payload, secret, options?)` — create signed JWT (HS256)
+- [x] `jwt_verify(token, secret, options?)` — verify and decode JWT
+- [x] `jwt_decode(token)` — decode without verification
+
+**Auto-Registered Routes:**
+- [x] `GET /auth/{provider}` — start OAuth flow (with OIDC nonce, PKCE)
+- [x] `GET /auth/callback` — handle callback, validate ID token
+- [x] `POST /auth/logout` — clear session
+
+**Security Features:**
+- [x] CSRF protection via OAuth state parameter
+- [x] OIDC nonce validation (replay attack protection)
+- [x] PKCE for public clients (code verifier/challenge)
+- [x] ID token issuer/audience/expiry validation
+- [x] HttpOnly, Secure, SameSite cookies
+
+**Developer Experience:**
+- [x] Typo suggestions for provider names (Levenshtein distance)
+- [x] Sensible defaults for each provider's scopes
+- [x] In-memory session storage (zero-config, works out of box)
+- [x] Provider-specific user info extraction (id, email, name, picture)
+- [x] Token storage in session (opt-in via `store_tokens: true`)
+
 **Phase 7 Deliverables:**
 
 - ✅ Semicolons removed from language (lint warning `unnecessary_semicolon`, examples cleaned up, return parser updated)
@@ -1256,6 +1345,7 @@ Added 17 stdlib functions across 3 modules plus 1 global builtin to enable build
 - ✅ Regex capture groups (`capture_pattern`, `capture_all_pattern`, `capture_named_pattern`)
 - ✅ None/null JSON serialization (consistent NULL→None across json, sqlite, postgres, http_server)
 - ✅ Web application essentials (password hashing, cookies, logging, CORS, file uploads)
+- ✅ OAuth authentication (`std/auth` with 8 providers, JWT support, zero-config)
 - ~~Guard clauses (`let-else`)~~ — superseded by `otherwise` (7.2.1)
 - Intent file Meta section cleanup (7.11 — pending)
 - Import error quality (7.13 — pending)
@@ -2713,7 +2803,74 @@ pub fn main() {
 }
 ```
 
+### 7.20 Nested Assignment (Deep Mutation)
+
+**Goal:** Support assigning to nested structures like `array[i]["key"] = value` and `map["a"]["b"] = value`, which currently fails with "Invalid assignment target".
+
+**Motivation:** This was hit repeatedly while building a real app (Larri Dashboard) using `std/auth`. Any app that stores data in arrays of maps (users, tasks, sessions) needs to update individual fields without rebuilding the entire object. The current workaround — reconstructing the map and replacing the array element — is verbose and error-prone.
+
+**Current behavior:**
+```ntnt
+let users = load_users()
+users[0]["role"] = "admin"  // ❌ Runtime error: Invalid assignment target
+```
+
+**Workaround (painful):**
+```ntnt
+let user = users[0]
+let updated = map {
+    "id": user["id"],
+    "email": user["email"],
+    "role": "admin",
+    // ... copy every other field manually
+}
+let new_users = []
+let i = 0
+for u in users {
+    if i == 0 { new_users = new_users + [updated] } else { new_users = new_users + [u] }
+    i = i + 1
+}
+```
+
+**Desired behavior:**
+```ntnt
+users[0]["role"] = "admin"           // ✅ Nested index + key assignment
+users[0]["profile"]["name"] = "Bob"  // ✅ Arbitrary depth
+task["tags"][2] = "updated"          // ✅ Map → array nesting
+```
+
+**Implementation notes:**
+- The interpreter's assignment handling needs to walk nested `Index` / `FieldAccess` chains
+- Each intermediate step must resolve to a mutable reference
+- Arrays and maps both need to support being the "parent" at any level
+- Should work with `let mut` variables (or all variables if NTNT stays default-mutable)
+
+**Priority:** High — this is the most common "papercut" when building real NTNT web apps with data persistence.
+
+### 7.21 Nested `{{#if}}` Blocks in Templates
+
+**Goal:** Support nested `{{#if}}` conditionals inside template strings and external template files.
+
+**Motivation:** Hit while building the Larri Dashboard nav component. The template engine correctly handles a single `{{#if}}` block, but any `{{#if}}` nested inside another `{{#if}}` renders as literal text instead of being evaluated.
+
+**Current behavior:**
+```html
+{{#if is_admin}}
+  <a class="{{#if admin_active}} active{{/if}}" href="/admin">Admin</a>
+{{/if}}
+```
+Renders the inner `{{#if admin_active}}` and `{{/if}}` as visible text in the HTML output.
+
+**Desired behavior:**
+Both levels of `{{#if}}` should evaluate. Nesting should work to arbitrary depth, matching the behavior users expect from any template engine.
+
+**Root cause:** The lexer's `find_matching_end()` and `parse_if_block_content()` in `src/lexer.rs` don't account for nested blocks when scanning for the closing `{{/if}}` tag — the first `{{/if}}` encountered closes the outer block, leaving the inner block's closing tag as literal text.
+
+**Workaround:** Pre-compute all conditional values in the data map and use only simple `{{var}}` interpolation in templates. This works but defeats the purpose of having `{{#if}}` in templates.
+
+**Priority:** Medium — templates are usable with the workaround, but nested conditionals are a basic expectation of any template system.
+
 ---
 
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: January 2026 (v0.3.8 — Active: Phase 7 Language Ergonomics & Documentation)_
+_Last updated: February 2026 (v0.3.11 — Active: Phase 7 Language Ergonomics & Documentation)_
