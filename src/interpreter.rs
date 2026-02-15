@@ -3384,6 +3384,7 @@ impl Interpreter {
                         return Ok(Value::Unit);
                     }
 
+
                     // Special handling for template(path, data) - load and render template
                     if name == "template" && arguments.len() == 2 {
                         let path = self.eval_expression(&arguments[0])?;

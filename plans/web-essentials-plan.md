@@ -7,6 +7,7 @@
 **Scope:** 57 stdlib functions, 1 global builtin, 7 CLI commands, 1 new syntax form
 
 **Status:** Phase 2 In Progress (Features 1-5, 8, 9 Complete + Performance Optimizations)
+**Status:** Phase 2 In Progress (Features 1-5, 9 Complete + Performance Optimizations)
 
 **Key deliverables:**
 - ✅ 🔐 **Password hashing** — bcrypt with intent-revealing names (DONE)
@@ -19,6 +20,7 @@
 - 🗄️ **Query builder** — 15 functions covering all CRUD patterns + transactions + upsert
 - 📋 **Schema sync** — declarative migrations with production workflow + seeding + drift detection
 - ✅ ⚡ **KV store** — SQLite + Redis/Valkey backends complete
+- ⚡ **KV store** — SQLite (dev) or Redis/Valkey (prod) with same API
 - 🔑 **Auth module** — `enable_oauth()` batteries-included + granular API for custom flows
 
 **New crates:** `bcrypt` ✅, `redis`, `jsonwebtoken`, `totp-rs`, `tracing-appender`
@@ -55,6 +57,10 @@ Features are ordered by dependencies — each feature builds on the ones before 
 | 9 | Declarative route blocks (`server` syntax) | Large | None | #2, #4 | ✅ Done |
 | 9a | Route matching optimization | Small | None | #9 | ✅ Done |
 | 10 | Auth module (`std/auth`) | Large | `jsonwebtoken` | #2, #8 | ✅ Done |
+| 8 | KV store (`std/kv`) | Large | `redis` | — | Pending |
+| 9 | Declarative route blocks (`server` syntax) | Large | None | #2, #4 | ✅ Done |
+| 9a | Route matching optimization | Small | None | #9 | ✅ Done |
+| 10 | Auth module (`std/auth`) | Large | `jsonwebtoken`, `totp-rs` | #2, #8 | Pending |
 | 11 | Roadmap + docs update | Small | — | All | ✅ Done (Phase 1) |
 
 **Parallelization:** Features 1-6 and 8 can be implemented in parallel. Feature 7 requires 6. Feature 9 requires 2 and 4. Feature 10 requires 2 and 8.
@@ -1287,6 +1293,10 @@ A unified key-value interface that works with both a built-in SQLite backend (ze
 - ✅ Type-preserving serialization (strings, ints, floats, bools, maps, arrays)
 - ✅ TTL support on both backends
 
+## Feature 8: KV Store — `std/kv`
+
+A unified key-value interface that works with both a built-in SQLite backend (zero-config, good for development and small deployments) and Redis/Valkey (production-grade, distributed).
+
 ### Redis and Valkey Compatibility
 
 **Valkey is a fork of Redis 7.2.4** (created in March 2024 by the Linux Foundation after Redis changed its license). Both use the identical RESP (Redis Serialization Protocol), so:
@@ -1818,6 +1828,9 @@ fn api_handler(req: Request) -> Response {
 ---
 
 ### Original Plan (preserved for reference)
+## Feature 10: Auth Module — `std/auth`
+
+A complete authentication module supporting OAuth 2.0/OIDC federation, JWT tokens, and TOTP-based MFA. Designed for the common case: NTNT apps as OAuth **clients** (Login with Google/GitHub/Okta), not OAuth servers.
 
 ### Design Philosophy
 
