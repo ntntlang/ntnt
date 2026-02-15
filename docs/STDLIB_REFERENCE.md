@@ -44,8 +44,6 @@ These functions are available everywhere without importing.
 | [`clamp(x: Int \| Float, min_val: Int \| Float, max_val: Int \| Float)`](#clamp) | Constrains a value between a minimum and maximum. |
 | [`delete(pattern: String, handler: Function)`](#delete) | Registers a DELETE route handler. |
 | [`enable_cors(options?: Map)`](#enablecors) | Enable CORS (Cross-Origin Resource Sharing) for the HTTP server. |
-| [`float(x: Int | Float | String)`](#float) | Converts a value to float. |
-| [`floor(x: Int | Float)`](#floor) | Rounds down to the nearest integer. |
 | [`float(x: Int \| Float \| String)`](#float) | Converts a value to float. |
 | [`floor(x: Int \| Float)`](#floor) | Rounds down to the nearest integer. |
 | [`get(pattern: String, handler: Function)`](#get) | Registers a GET route handler. |
@@ -1193,51 +1191,51 @@ unwrap_or(Err("fail"), "fallback")  // => "fallback"  // Default returned for Er
 Full OAuth 2.0 and OIDC authentication with JWT support
 
 ```ntnt
-import { oauth, oauth_discover, oauth_client_credentials } from "std/auth"
+import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 ```
 
 ### Functions
 
 | Function | Description |
 |----------|-------------|
-| [`auth_callback_handler`](#authcallbackhandler) | Handle OAuth callback - exchanges code for tokens, creates session. |
-| [`auth_logout_handler`](#authlogouthandler) | Handle logout - clears the session and redirects. |
-| [`auth_me_handler`](#authmehandler) | Return current user as JSON for SPAs. |
-| [`auth_start_handler`](#authstarthandler) | Handle OAuth login start - redirects to the provider's authorization page. |
-| [`cleanup_sessions`](#cleanupsessions) | Clean up expired sessions and OAuth states from the session store. |
+| [`auth_callback`](#authcallback) | Handle OAuth callback - exchanges code for tokens, creates session. |
+| [`auth_logout`](#authlogout) | Handle logout - clears the session and redirects. |
+| [`auth_me`](#authme) | Return current user as JSON for SPAs. |
+| [`auth_start`](#authstart) | Handle OAuth login start - redirects to the provider's authorization page. |
 | [`create_session_from_oauth`](#createsessionfromoauth) | Create a session from OAuth user info and tokens. |
 | [`csrf_field`](#csrffield) | Get an HTML hidden input field with the CSRF token. |
 | [`csrf_token`](#csrftoken) | Get the CSRF token for the current session. |
 | [`enable_auth`](#enableauth) | Initialize the authentication system with OAuth providers. |
-| [`generate_totp_secret`](#generatetotpsecret) | Generate a new TOTP secret for MFA setup. |
 | [`get_session`](#getsession) | Get the current session from the request. |
-| [`get_session_data`](#getsessiondata) | Get custom data stored in the current session. |
-| [`get_totp_uri`](#gettotpuri) | Generate an otpauth:// URI for QR codes. |
 | [`get_user`](#getuser) | Get the current authenticated user from the request. |
-| [`get_user_sessions`](#getusersessions) | Get all active sessions for the current user. |
 | [`hash_password`](#hashpassword) | Hash a password using bcrypt. |
 | [`jwt_decode`](#jwtdecode) | Decode a JWT token WITHOUT verifying the signature. |
 | [`jwt_sign`](#jwtsign) | Create a signed JWT token from claims. |
 | [`jwt_verify`](#jwtverify) | Verify a JWT token and return its claims. |
-| [`logout_all_sessions`](#logoutallsessions) | Log out all sessions for the current user. |
+| [`logout_all`](#logoutall) | Log out all sessions for the current user. |
 | [`logout_user`](#logoutuser) | Log out the current user and return a redirect response. |
 | [`oauth`](#oauth) | Create an OAuth provider configuration. |
-| [`oauth_client_credentials`](#oauthclientcredentials) | Get an access token using client credentials grant (M2M authentication). |
 | [`oauth_discover`](#oauthdiscover) | Create an OAuth provider using OIDC Discovery. |
 | [`oauth_exchange`](#oauthexchange) | Exchange OAuth authorization code for tokens and user info. |
 | [`oauth_introspect`](#oauthintrospect) | Introspect a token using the provider's introspection endpoint (RFC 7662). |
+| [`oauth_m2m`](#oauthm2m) | Get an access token using client credentials grant (M2M authentication). |
 | [`oauth_refresh`](#oauthrefresh) | Refresh the access token for the current session. |
 | [`oauth_start`](#oauthstart) | Generate an OAuth authorization URL for manual flow control. |
-| [`oauth_validate_token`](#oauthvalidatetoken) | Validate an incoming bearer token (for APIs acting as resource servers). |
-| [`set_session_data`](#setsessiondata) | Store custom data in the current session. |
+| [`oauth_validate`](#oauthvalidate) | Validate an incoming bearer token (for APIs acting as resource servers). |
+| [`session_data`](#sessiondata) | Get custom data stored in the current session. |
+| [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions and OAuth states from the session store. |
+| [`set_session`](#setsession) | Store custom data in the current session. |
+| [`totp_secret`](#totpsecret) | Generate a new TOTP secret for MFA setup. |
+| [`totp_uri`](#totpuri) | Generate an otpauth:// URI for QR codes. |
+| [`user_sessions`](#usersessions) | Get all active sessions for the current user. |
 | [`verify_csrf`](#verifycsrf) | Verify a CSRF token against the session's token. |
 | [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
 | [`verify_totp`](#verifytotp) | Verify a TOTP code against a secret. |
 
-#### `auth_callback_handler`
+#### `auth_callback`
 
 ```ntnt
-auth_callback_handler(req: Request) -> Response
+auth_callback(req: Request) -> Response
 ```
 
 Handle OAuth callback - exchanges code for tokens, creates session.
@@ -1253,19 +1251,19 @@ Use with a route like GET /auth/{provider}/callback. Reads state and code from q
 **Examples:**
 
 ```ntnt
-get("/auth/{provider}/callback", auth_callback_handler)  // Wire up callback route
+get("/auth/{provider}/callback", auth_callback)  // Wire up callback route
 ```
 
-**See also:** `enable_auth`, `auth_start_handler`
+**See also:** `enable_auth`, `auth_start`
 
 *Since v0.3.11*
 
 ---
 
-#### `auth_logout_handler`
+#### `auth_logout`
 
 ```ntnt
-auth_logout_handler(req: Request) -> Response
+auth_logout(req: Request) -> Response
 ```
 
 Handle logout - clears the session and redirects.
@@ -1281,7 +1279,7 @@ Use with a route like POST /auth/logout. Clears the session cookie and redirects
 **Examples:**
 
 ```ntnt
-post("/auth/logout", auth_logout_handler)  // Wire up logout route
+post("/auth/logout", auth_logout)  // Wire up logout route
 ```
 
 **See also:** `enable_auth`, `get_user`
@@ -1290,10 +1288,10 @@ post("/auth/logout", auth_logout_handler)  // Wire up logout route
 
 ---
 
-#### `auth_me_handler`
+#### `auth_me`
 
 ```ntnt
-auth_me_handler(req: Request) -> Response
+auth_me(req: Request) -> Response
 ```
 
 Return current user as JSON for SPAs.
@@ -1309,7 +1307,7 @@ Use with a route like GET /auth/me. Returns the current user's session data as J
 **Examples:**
 
 ```ntnt
-get("/auth/me", auth_me_handler)  // Wire up user endpoint
+get("/auth/me", auth_me)  // Wire up user endpoint
 ```
 
 **See also:** `get_user`, `enable_auth`
@@ -1318,10 +1316,10 @@ get("/auth/me", auth_me_handler)  // Wire up user endpoint
 
 ---
 
-#### `auth_start_handler`
+#### `auth_start`
 
 ```ntnt
-auth_start_handler(req: Request) -> Response
+auth_start(req: Request) -> Response
 ```
 
 Handle OAuth login start - redirects to the provider's authorization page.
@@ -1337,34 +1335,10 @@ Use with a route like GET /auth/{provider}. Reads the provider name from req.par
 **Examples:**
 
 ```ntnt
-get("/auth/{provider}", auth_start_handler)  // Wire up login routes
+get("/auth/{provider}", auth_start)  // Wire up login routes
 ```
 
-**See also:** `enable_auth`, `auth_callback_handler`
-
-*Since v0.3.11*
-
----
-
-#### `cleanup_sessions`
-
-```ntnt
-cleanup_sessions() -> Result<Int, String>
-```
-
-Clean up expired sessions and OAuth states from the session store.
-
-Call this periodically (e.g., via a cron job or scheduled task) to remove expired sessions and OAuth states from the database. For Redis, sessions use TTL so they expire automatically, but this will scan for any orphaned entries.
-
-**Returns:** Result containing the number of expired sessions removed, or error
-
-**Examples:**
-
-```ntnt
-cleanup_sessions()  // Remove expired sessions
-```
-
-**See also:** `enable_auth`
+**See also:** `enable_auth`, `auth_callback`
 
 *Since v0.3.11*
 
@@ -1464,7 +1438,7 @@ enable_auth(providers: [Provider], options?: Map) -> Unit
 
 Initialize the authentication system with OAuth providers.
 
-Stores provider configurations for use by auth handlers. After calling this, you can use auth_start_handler, auth_callback_handler, and auth_logout_handler with routes to enable OAuth login.
+Stores provider configurations for use by auth handlers. After calling this, you can use auth_start, auth_callback, and auth_logout with routes to enable OAuth login.
 
 Session storage options: "memory" (default), "sqlite:./path.db", "postgres://url", or "redis://url".
 
@@ -1485,31 +1459,7 @@ enable_auth([github], map { "session_store": "sqlite:./sessions.db" })  // SQLit
 enable_auth([github], map { "session_store": "redis://localhost:6379" })  // Redis sessions
 ```
 
-**See also:** `oauth`, `oauth_discover`, `auth_start_handler`
-
-*Since v0.3.11*
-
----
-
-#### `generate_totp_secret`
-
-```ntnt
-generate_totp_secret() -> String
-```
-
-Generate a new TOTP secret for MFA setup.
-
-Creates a random base32-encoded secret suitable for TOTP authentication. Use this secret with get_totp_uri() to generate a QR code for authenticator apps.
-
-**Returns:** Base32-encoded TOTP secret
-
-**Examples:**
-
-```ntnt
-generate_totp_secret()  // => "JBSWY3DPEHPK3PXP..."  // Generate secret
-```
-
-**See also:** `get_totp_uri`, `verify_totp`
+**See also:** `oauth`, `oauth_discover`, `auth_start`
 
 *Since v0.3.11*
 
@@ -1543,64 +1493,6 @@ get_session(req)  // Get full session data
 
 ---
 
-#### `get_session_data`
-
-```ntnt
-get_session_data(req: Request) -> Option<Map>
-```
-
-Get custom data stored in the current session.
-
-Returns the custom data map stored via set_session_data, or None if no session or no custom data. Use this to store and retrieve user roles, permissions, preferences, or other application-specific data.
-
-**Parameters:**
-
-- `req` — The HTTP request object
-
-**Returns:** Option containing the custom data Map or None
-
-**Examples:**
-
-```ntnt
-get_session_data(req)  // Get user roles and preferences
-```
-
-**See also:** `set_session_data`, `get_session`, `get_user`
-
-*Since v0.3.11*
-
----
-
-#### `get_totp_uri`
-
-```ntnt
-get_totp_uri(secret: String, email: String, issuer: String) -> Result<String, String>
-```
-
-Generate an otpauth:// URI for QR codes.
-
-Creates a URI that can be encoded as a QR code for authenticator apps like Google Authenticator or Authy.
-
-**Parameters:**
-
-- `secret` — TOTP secret (base32 encoded)
-- `email` — User's email for the account label
-- `issuer` — App name shown in authenticator
-
-**Returns:** Ok(uri) on success, Err(message) on failure
-
-**Examples:**
-
-```ntnt
-get_totp_uri(secret, "user@example.com", "MyApp")  // => Ok("otpauth://...")  // Get URI for QR
-```
-
-**See also:** `generate_totp_secret`, `verify_totp`
-
-*Since v0.3.11*
-
----
-
 #### `get_user`
 
 ```ntnt
@@ -1624,34 +1516,6 @@ get_user(req) otherwise return redirect("/login")  // Require auth
 ```
 
 **See also:** `get_session`, `logout_user`
-
-*Since v0.3.11*
-
----
-
-#### `get_user_sessions`
-
-```ntnt
-get_user_sessions(req: Request) -> Result<Array<SessionInfo>, String>
-```
-
-Get all active sessions for the current user.
-
-Returns an array of session info objects, each containing id, provider, created_at, expires_at, and is_current (boolean indicating if it's the current session). Useful for "manage your sessions" UI.
-
-**Parameters:**
-
-- `req` — The HTTP request object
-
-**Returns:** Result containing array of session info, or error
-
-**Examples:**
-
-```ntnt
-get_user_sessions(req)  // List all user's active sessions
-```
-
-**See also:** `logout_all_sessions`, `get_session`
 
 *Since v0.3.11*
 
@@ -1773,10 +1637,10 @@ jwt_verify(token, secret)  // Verify and get claims
 
 ---
 
-#### `logout_all_sessions`
+#### `logout_all`
 
 ```ntnt
-logout_all_sessions(req: Request, keep_current: Bool) -> Result<Int, String>
+logout_all(req: Request, keep_current: Bool) -> Result<Int, String>
 ```
 
 Log out all sessions for the current user.
@@ -1793,11 +1657,11 @@ Deletes all sessions for the user. If keep_current is true, keeps the current se
 **Examples:**
 
 ```ntnt
-logout_all_sessions(req, true)  // Log out everywhere except here
-logout_all_sessions(req, false)  // Log out from all devices
+logout_all(req, true)  // Log out everywhere except here
+logout_all(req, false)  // Log out from all devices
 ```
 
-**See also:** `get_user_sessions`, `logout_user`
+**See also:** `user_sessions`, `logout_user`
 
 *Since v0.3.11*
 
@@ -1811,7 +1675,7 @@ logout_user(req: Request) -> Response
 
 Log out the current user and return a redirect response.
 
-Clears the session and returns a redirect to the configured success_url (default: "/") with the session cookie cleared.
+Clears the session and returns a redirect to the configured logout_url (default: "/") with the session cookie cleared.
 
 **Parameters:**
 
@@ -1859,37 +1723,6 @@ oauth("google", "id", "secret", map { "use_pkce": true })  // => Provider  // Go
 ```
 
 **See also:** `enable_auth`, `get_user`, `oauth_pkce`
-
-*Since v0.3.11*
-
----
-
-#### `oauth_client_credentials`
-
-```ntnt
-oauth_client_credentials(token_url: String, client_id: String, client_secret: String, scopes: [String]) -> Result<Map, String>
-```
-
-Get an access token using client credentials grant (M2M authentication).
-
-Used for server-to-server API calls where no user is involved.
-
-**Parameters:**
-
-- `token_url` — The token endpoint URL
-- `client_id` — OAuth client ID
-- `client_secret` — OAuth client secret
-- `scopes` — Array of scopes to request
-
-**Returns:** Result containing token response map or error
-
-**Examples:**
-
-```ntnt
-oauth_client_credentials("https://oauth.example.com/token", "id", "secret", ["api.read"])  // => Ok({access_token: "...", ...})  // Get M2M token
-```
-
-**See also:** `oauth`, `oauth_refresh`
 
 *Since v0.3.11*
 
@@ -1982,7 +1815,38 @@ Calls the authorization server to validate the token. More reliable than local v
 oauth_introspect("https://auth.example.com/introspect", token, "id", "secret")  // Introspect token
 ```
 
-**See also:** `oauth_validate_token`
+**See also:** `oauth_validate`
+
+*Since v0.3.11*
+
+---
+
+#### `oauth_m2m`
+
+```ntnt
+oauth_m2m(token_url: String, client_id: String, client_secret: String, scopes: [String]) -> Result<Map, String>
+```
+
+Get an access token using client credentials grant (M2M authentication).
+
+Used for server-to-server API calls where no user is involved.
+
+**Parameters:**
+
+- `token_url` — The token endpoint URL
+- `client_id` — OAuth client ID
+- `client_secret` — OAuth client secret
+- `scopes` — Array of scopes to request
+
+**Returns:** Result containing token response map or error
+
+**Examples:**
+
+```ntnt
+oauth_m2m("https://oauth.example.com/token", "id", "secret", ["api.read"])  // => Ok({access_token: "...", ...})  // Get M2M token
+```
+
+**See also:** `oauth`, `oauth_refresh`
 
 *Since v0.3.11*
 
@@ -2024,7 +1888,7 @@ oauth_start(provider: Map, redirect_uri: String) -> Result<String, String>
 
 Generate an OAuth authorization URL for manual flow control.
 
-Use this when you want to control the OAuth flow manually instead of using auth_start_handler. Returns the authorization URL with state parameter for CSRF protection.
+Use this when you want to control the OAuth flow manually instead of using auth_start. Returns the authorization URL with state parameter for CSRF protection.
 
 **Parameters:**
 
@@ -2045,10 +1909,10 @@ oauth_start(github, "https://myapp.com/callback")  // => Ok("https://github.com/
 
 ---
 
-#### `oauth_validate_token`
+#### `oauth_validate`
 
 ```ntnt
-oauth_validate_token(token: String, options: Map) -> Result<Map, String>
+oauth_validate(token: String, options: Map) -> Result<Map, String>
 ```
 
 Validate an incoming bearer token (for APIs acting as resource servers).
@@ -2065,7 +1929,7 @@ Decodes and validates the token claims without calling the provider. For full va
 **Examples:**
 
 ```ntnt
-oauth_validate_token(token, map { "issuer": "https://...", "audience": "my-api" })  // Validate bearer token
+oauth_validate(token, map { "issuer": "https://...", "audience": "my-api" })  // Validate bearer token
 ```
 
 **See also:** `oauth_introspect`, `jwt_verify`
@@ -2074,10 +1938,62 @@ oauth_validate_token(token, map { "issuer": "https://...", "audience": "my-api" 
 
 ---
 
-#### `set_session_data`
+#### `session_data`
 
 ```ntnt
-set_session_data(req: Request, data: Map) -> Result<Unit, String>
+session_data(req: Request) -> Option<Map>
+```
+
+Get custom data stored in the current session.
+
+Returns the custom data map stored via set_session, or None if no session or no custom data. Use this to store and retrieve user roles, permissions, preferences, or other application-specific data.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Option containing the custom data Map or None
+
+**Examples:**
+
+```ntnt
+session_data(req)  // Get user roles and preferences
+```
+
+**See also:** `set_session`, `get_session`, `get_user`
+
+*Since v0.3.11*
+
+---
+
+#### `sessions_cleanup`
+
+```ntnt
+sessions_cleanup() -> Result<Int, String>
+```
+
+Clean up expired sessions and OAuth states from the session store.
+
+Call this periodically (e.g., via a cron job or scheduled task) to remove expired sessions and OAuth states from the database. For Redis, sessions use TTL so they expire automatically, but this will scan for any orphaned entries.
+
+**Returns:** Result containing the number of expired sessions removed, or error
+
+**Examples:**
+
+```ntnt
+sessions_cleanup()  // Remove expired sessions
+```
+
+**See also:** `enable_auth`
+
+*Since v0.3.11*
+
+---
+
+#### `set_session`
+
+```ntnt
+set_session(req: Request, data: Map) -> Result<Unit, String>
 ```
 
 Store custom data in the current session.
@@ -2094,10 +2010,92 @@ Use this to store user roles, permissions, preferences, or other application-spe
 **Examples:**
 
 ```ntnt
-set_session_data(req, map { "roles": ["admin"], "theme": "dark" })  // Store user preferences
+set_session(req, map { "roles": ["admin"], "theme": "dark" })  // Store user preferences
 ```
 
-**See also:** `get_session_data`, `get_session`
+**See also:** `session_data`, `get_session`
+
+*Since v0.3.11*
+
+---
+
+#### `totp_secret`
+
+```ntnt
+totp_secret() -> String
+```
+
+Generate a new TOTP secret for MFA setup.
+
+Creates a random base32-encoded secret suitable for TOTP authentication. Use this secret with totp_uri() to generate a QR code for authenticator apps.
+
+**Returns:** Base32-encoded TOTP secret
+
+**Examples:**
+
+```ntnt
+totp_secret()  // => "JBSWY3DPEHPK3PXP..."  // Generate secret
+```
+
+**See also:** `totp_uri`, `verify_totp`
+
+*Since v0.3.11*
+
+---
+
+#### `totp_uri`
+
+```ntnt
+totp_uri(secret: String, email: String, issuer: String) -> Result<String, String>
+```
+
+Generate an otpauth:// URI for QR codes.
+
+Creates a URI that can be encoded as a QR code for authenticator apps like Google Authenticator or Authy.
+
+**Parameters:**
+
+- `secret` — TOTP secret (base32 encoded)
+- `email` — User's email for the account label
+- `issuer` — App name shown in authenticator
+
+**Returns:** Ok(uri) on success, Err(message) on failure
+
+**Examples:**
+
+```ntnt
+totp_uri(secret, "user@example.com", "MyApp")  // => Ok("otpauth://...")  // Get URI for QR
+```
+
+**See also:** `totp_secret`, `verify_totp`
+
+*Since v0.3.11*
+
+---
+
+#### `user_sessions`
+
+```ntnt
+user_sessions(req: Request) -> Result<Array<SessionInfo>, String>
+```
+
+Get all active sessions for the current user.
+
+Returns an array of session info objects, each containing id, provider, created_at, expires_at, and is_current (boolean indicating if it's the current session). Useful for "manage your sessions" UI.
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** Result containing array of session info, or error
+
+**Examples:**
+
+```ntnt
+user_sessions(req)  // List all user's active sessions
+```
+
+**See also:** `logout_all`, `get_session`
 
 *Since v0.3.11*
 
@@ -2184,7 +2182,7 @@ Checks if the provided 6-digit code is valid for the given secret. Allows for 30
 verify_totp(secret, "123456")  // => true  // Verify 2FA code
 ```
 
-**See also:** `generate_totp_secret`, `get_totp_uri`
+**See also:** `totp_secret`, `totp_uri`
 
 *Since v0.3.11*
 

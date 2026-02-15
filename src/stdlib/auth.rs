@@ -4161,33 +4161,60 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| {
                 if args.len() < 4 {
                     return Err(IntentError::TypeError(
-                        "[auth] oauth_m2m() requires token_url, client_id, client_secret, scopes".to_string()
+                        "[auth] oauth_m2m() requires token_url, client_id, client_secret, scopes"
+                            .to_string(),
                     ));
                 }
 
                 let token_url = match &args[0] {
                     Value::String(s) => s.clone(),
-                    _ => return Err(IntentError::TypeError("[auth] token_url must be a string".to_string())),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "[auth] token_url must be a string".to_string(),
+                        ))
+                    }
                 };
                 let client_id = match &args[1] {
                     Value::String(s) => s.clone(),
-                    _ => return Err(IntentError::TypeError("[auth] client_id must be a string".to_string())),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "[auth] client_id must be a string".to_string(),
+                        ))
+                    }
                 };
                 let client_secret = match &args[2] {
                     Value::String(s) => s.clone(),
-                    _ => return Err(IntentError::TypeError("[auth] client_secret must be a string".to_string())),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "[auth] client_secret must be a string".to_string(),
+                        ))
+                    }
                 };
                 let scopes: Vec<String> = match &args[3] {
-                    Value::Array(arr) => arr.iter()
-                        .filter_map(|v| if let Value::String(s) = v { Some(s.clone()) } else { None })
+                    Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|v| {
+                            if let Value::String(s) = v {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
                         .collect(),
-                    _ => return Err(IntentError::TypeError("[auth] scopes must be an array".to_string())),
+                    _ => {
+                        return Err(IntentError::TypeError(
+                            "[auth] scopes must be an array".to_string(),
+                        ))
+                    }
                 };
 
                 match client_credentials_grant(&token_url, &client_id, &client_secret, &scopes) {
                     Ok(tokens) => {
                         let mut map = HashMap::new();
-                        map.insert("access_token".to_string(), Value::String(tokens.access_token));
+                        map.insert(
+                            "access_token".to_string(),
+                            Value::String(tokens.access_token),
+                        );
                         map.insert("token_type".to_string(), Value::String(tokens.token_type));
                         if let Some(exp) = tokens.expires_in {
                             map.insert("expires_in".to_string(), Value::Int(exp));
@@ -4715,8 +4742,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
-                        "[auth] logout_all() requires request and keep_current"
-                            .to_string(),
+                        "[auth] logout_all() requires request and keep_current".to_string(),
                     ));
                 }
 
