@@ -729,7 +729,7 @@ pub fn exchange_code_for_tokens(
     let response = client
         .post(&provider.token_url)
         .header("Accept", "application/json")
-        .header("User-Agent", "NTNT/0.3.11") // Required by GitHub
+        .header("User-Agent", "NTNT/0.3.12") // Required by GitHub
         .form(&params)
         .send()
         .map_err(|e| IntentError::RuntimeError(format!("[auth] Token exchange failed: {}", e)))?;
@@ -1079,7 +1079,7 @@ pub fn fetch_userinfo(
         .get(&provider.userinfo_url)
         .header("Authorization", format!("Bearer {}", access_token))
         .header("Accept", "application/json")
-        .header("User-Agent", "NTNT/0.3.11") // Required by GitHub
+        .header("User-Agent", "NTNT/0.3.12") // Required by GitHub
         .send()
         .map_err(|e| IntentError::RuntimeError(format!("[auth] Userinfo request failed: {}", e)))?;
 
