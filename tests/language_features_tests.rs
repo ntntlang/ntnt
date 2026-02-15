@@ -675,6 +675,88 @@ print(page)
     assert!(stdout.contains("<html>"), "Should preserve HTML tags");
 }
 
+/// @since v0.3.13
+#[test]
+fn test_template_nested_if_both_true() {
+    let code = r#"
+let outer = true
+let inner = true
+let out = """{{#if outer}}{{#if inner}}yes{{/if}}{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Nested if blocks should work");
+    assert_eq!(
+        stdout.trim(),
+        "yes",
+        "Both conditions true should render inner content"
+    );
+}
+
+/// @since v0.3.13
+#[test]
+fn test_template_nested_if_inner_false() {
+    let code = r#"
+let outer = true
+let inner = false
+let out = """{{#if outer}}{{#if inner}}yes{{/if}}no{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Nested if with inner false should work");
+    assert_eq!(
+        stdout.trim(),
+        "no",
+        "Inner false should skip inner block but keep outer content"
+    );
+}
+
+/// @since v0.3.13
+#[test]
+fn test_template_triple_nested_if() {
+    let code = r#"
+let a = true
+let b = true
+let c = true
+let out = """{{#if a}}{{#if b}}{{#if c}}deep{{/if}}{{/if}}{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Triple nested if should work");
+    assert_eq!(stdout.trim(), "deep", "Three levels deep should render");
+}
+
+/// @since v0.3.13
+#[test]
+fn test_template_nested_if_with_else() {
+    let code = r#"
+let a = true
+let b = false
+let out = """{{#if a}}{{#if b}}both{{#else}}only a{{/if}}{{#else}}neither{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Nested if with else should work");
+    assert_eq!(stdout.trim(), "only a", "Should render else of inner block");
+}
+
+/// @since v0.3.13
+#[test]
+fn test_template_nested_if_mixed_content() {
+    let code = r#"
+let show = true
+let detail = true
+let out = """before{{#if show}} outer {{#if detail}}(detail){{/if}} end{{/if}} after"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "Mixed content around nested blocks should work"
+    );
+    assert_eq!(stdout.trim(), "before outer (detail) end after");
+}
+
 #[test]
 fn test_get_key_with_two_args() {
     let code = r#"
