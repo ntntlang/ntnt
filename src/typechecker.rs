@@ -2979,6 +2979,15 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("hex_encode", ["data" => Type::Any], Type::String);
             sig!("hex_decode", ["s" => Type::String], Type::Array(Box::new(Type::Int)));
             sig!("uuid", [], Type::String);
+            sig!("base64_encode", ["data" => Type::String], Type::String);
+            sig!("base64_decode", ["encoded" => Type::String], Type::Any);
+            sig!("base64url_encode", ["data" => Type::String], Type::String);
+            sig!("base64url_decode", ["encoded" => Type::String], Type::Any);
+            sig!("aes_generate_key", [], Type::String);
+            sig!("aes_encrypt", ["plaintext" => Type::String, "key" => Type::String], Type::Any);
+            sig!("aes_decrypt", ["ciphertext" => Type::String, "key" => Type::String], Type::Any);
+            sig!("argon2_hash", ["password" => Type::String], Type::String);
+            sig!("argon2_verify", ["password" => Type::String, "hash" => Type::String], Type::Bool);
         }
         _ => {
             // Unknown module — imports will be bound as Any

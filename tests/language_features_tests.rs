@@ -3658,3 +3658,86 @@ print(m["b"])
     assert_eq!(exit_code, 0);
     assert_eq!(stdout.trim(), "2");
 }
+
+#[test]
+fn test_crypto_base64_roundtrip() {
+    let code = r#"
+import { base64_encode, base64_decode } from "std/crypto"
+
+let encoded = base64_encode("Hello NTNT!")
+print(encoded)
+let decoded = base64_decode(encoded)
+match decoded {
+    Ok(val) => print(val)
+    Err(e) => print("ERROR: " + e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "base64 roundtrip failed: stderr={}", stderr);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "SGVsbG8gTlROVCE=");
+    assert_eq!(lines[1], "Hello NTNT!");
+}
+
+#[test]
+fn test_crypto_base64url_roundtrip() {
+    let code = r#"
+import { base64url_encode, base64url_decode } from "std/crypto"
+
+let encoded = base64url_encode("Hello NTNT!")
+print(encoded)
+let decoded = base64url_decode(encoded)
+match decoded {
+    Ok(val) => print(val)
+    Err(e) => print("ERROR: " + e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "base64url roundtrip failed: stderr={}",
+        stderr
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "SGVsbG8gTlROVCE");
+    assert_eq!(lines[1], "Hello NTNT!");
+}
+
+#[test]
+fn test_crypto_aes_roundtrip() {
+    let code = r#"
+import { aes_generate_key, aes_encrypt, aes_decrypt } from "std/crypto"
+
+let key = aes_generate_key()
+let encrypted = aes_encrypt("secret message", key)
+match encrypted {
+    Ok(ct) => {
+        let decrypted = aes_decrypt(ct, key)
+        match decrypted {
+            Ok(pt) => print(pt)
+            Err(e) => print("DECRYPT ERROR: " + e)
+        }
+    }
+    Err(e) => print("ENCRYPT ERROR: " + e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "aes roundtrip failed: stderr={}", stderr);
+    assert_eq!(stdout.trim(), "secret message");
+}
+
+#[test]
+fn test_crypto_argon2_hash_verify() {
+    let code = r#"
+import { argon2_hash, argon2_verify } from "std/crypto"
+
+let hash = argon2_hash("mypassword")
+print(argon2_verify("mypassword", hash))
+print(argon2_verify("wrongpassword", hash))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "argon2 failed: stderr={}", stderr);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true");
+    assert_eq!(lines[1], "false");
+}
