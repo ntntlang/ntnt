@@ -1,6 +1,6 @@
 [package]
 name = "ntnt"
-version = "0.3.12"
+version = "0.3.13"
 edition = "2021"
 authors = ["NTNT Language Team"]
 description = "NTNT (Intent) - A programming language designed for AI-driven development"
@@ -37,6 +37,8 @@ uuid = { version = "1.6", features = ["v4"] }
 rand = "0.8"
 hex = "0.4"
 base64 = "0.21"
+aes-gcm = "0.10"
+argon2 = "0.5"
 totp-rs = { version = "5.5", features = ["gen_secret", "otpauth"] }
 
 # Regex for pattern matching

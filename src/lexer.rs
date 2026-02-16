@@ -668,7 +668,7 @@ impl<'a> Lexer<'a> {
 
     /// Find matching closing tag, respecting nested blocks
     fn find_matching_end(&self, content: &str, block_type: &str) -> Option<usize> {
-        let open_tag = format!("{{{{#{}}}", block_type);
+        let open_tag = format!("{{{{#{}", block_type);
         let close_tag = format!("{{{{/{}}}}}", block_type);
 
         let mut depth = 0;

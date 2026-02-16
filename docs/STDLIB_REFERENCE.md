@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.3.12
+> Last updated: v0.3.13
 
 ## Table of Contents
 
@@ -2205,10 +2205,12 @@ import { push, pop, first } from "std/collections"
 | [`first`](#first) | Returns the first element of an array. |
 | [`get_index`](#getindex) | Gets an element from an array by index with safe access. |
 | [`get_key`](#getkey) | Gets a value from a map by key with safe access. |
+| [`get_or`](#getor) | Gets a value from a map by key, returning a default if the key is missing. |
 | [`has_key`](#haskey) | Returns true if the map contains the specified key. |
 | [`is_empty`](#isempty) | Returns true if the array or string is empty. |
 | [`keys`](#keys) | Returns an array of all keys in the map. |
 | [`last`](#last) | Returns the last element of an array. |
+| [`merge`](#merge) | Shallow-merges two maps. Values from map2 win on key conflicts. |
 | [`pop`](#pop) | Returns a tuple of [new array without last element, popped element as Option]. |
 | [`push`](#push) | Returns a new array with the item appended. |
 | [`reverse`](#reverse) | Returns a new array with elements in reverse order. |
@@ -2387,6 +2389,41 @@ get_key(map { "a": 1 }, "b", 0)  // => 0  // Key missing, default returned
 
 ---
 
+#### `get_or`
+
+```ntnt
+get_or(m: Map, key: String, default: Any) -> Any
+```
+
+Gets a value from a map by key, returning a default if the key is missing.
+
+Unlike get_key which returns an Option, get_or always returns a plain value. If the key exists, returns its value. If not, returns the default.
+
+**Parameters:**
+
+- `m` — The source map
+- `key` — The key to look up
+- `default` — The value to return if the key is not found
+
+**Returns:** The value for the key, or the default
+
+**Examples:**
+
+```ntnt
+get_or(map { "name": "Alice" }, "name", "Anonymous")  // => "Alice"  // Key exists
+get_or(map { "name": "Alice" }, "age", 0)  // => 0  // Key missing, returns default
+```
+
+**Errors:**
+
+- **TypeError**: get_or() requires a map, string key, and default value — *Fix: Pass a map, string key, and default value*
+
+**See also:** `get_key`, `has_key`, `merge`, `keys`
+
+*Since v0.3.13*
+
+---
+
 #### `has_key`
 
 ```ntnt
@@ -2514,6 +2551,39 @@ last([], 0)  // => 0  // Default returned for empty array
 **See also:** `first`, `push`, `pop`, `slice`
 
 *Since v0.1.0*
+
+---
+
+#### `merge`
+
+```ntnt
+merge(map1: Map, map2: Map) -> Map
+```
+
+Shallow-merges two maps. Values from map2 win on key conflicts.
+
+Returns a new map containing all key-value pairs from both maps. If both maps contain the same key, the value from map2 is used.
+
+**Parameters:**
+
+- `map1` — The base map
+- `map2` — The map whose values take priority on conflict
+
+**Returns:** A new map with merged key-value pairs
+
+**Examples:**
+
+```ntnt
+merge(map { "a": 1, "b": 2 }, map { "b": 3, "c": 4 })  // => map { "a": 1, "b": 3, "c": 4 }  // Merge with conflict resolution
+```
+
+**Errors:**
+
+- **TypeError**: merge() requires two maps — *Fix: Ensure both arguments are maps*
+
+**See also:** `get_key`, `get_or`, `has_key`, `keys`, `values`
+
+*Since v0.3.13*
 
 ---
 
@@ -2898,6 +2968,15 @@ import { sha256, sha256_bytes, hmac_sha256 } from "std/crypto"
 
 | Function | Description |
 |----------|-------------|
+| [`aes_decrypt`](#aesdecrypt) | Decrypts AES-256-GCM encrypted data produced by aes_encrypt. The input is a Base64-encoded string containing the nonce and ciphertext. The key must be the same 64-character hex string used for encryption. |
+| [`aes_encrypt`](#aesencrypt) | Encrypts plaintext using AES-256-GCM authenticated encryption. The key must be a 64-character hex string (32 bytes). A random 96-bit nonce is generated for each call and prepended to the ciphertext before Base64 encoding. |
+| [`aes_generate_key`](#aesgeneratekey) | Generates a random 256-bit AES key, returned as a 64-character hex string. Use this key with aes_encrypt and aes_decrypt. |
+| [`argon2_hash`](#argon2hash) | Hashes a password using Argon2id, the recommended password hashing algorithm. Returns a PHC-format string that includes the salt and parameters. Uses OWASP-recommended defaults: m=19456 KiB, t=2 iterations, p=1 parallelism. |
+| [`argon2_verify`](#argon2verify) | Verifies a password against an Argon2 hash in PHC format. Returns true if the password matches, false otherwise (including for invalid hashes). |
+| [`base64_decode`](#base64decode) | Decodes a standard Base64-encoded string back to plaintext. Returns Err if the input is not valid Base64 or not valid UTF-8. |
+| [`base64_encode`](#base64encode) | Encodes a string using standard Base64 encoding (RFC 4648). |
+| [`base64url_decode`](#base64urldecode) | Decodes a URL-safe Base64-encoded string (no padding) back to plaintext. Returns Err if the input is not valid URL-safe Base64 or not valid UTF-8. |
+| [`base64url_encode`](#base64urlencode) | Encodes a string using URL-safe Base64 encoding (no padding). Uses the URL_SAFE_NO_PAD alphabet, suitable for URLs and filenames. |
 | [`hash_password`](#hashpassword) | Hash a password using bcrypt with configurable cost factor. |
 | [`hex_decode`](#hexdecode) | Decodes hex string to byte array. Returns Err for invalid hex. |
 | [`hex_encode`](#hexencode) | Encodes bytes or string as hex. |
@@ -2909,6 +2988,242 @@ import { sha256, sha256_bytes, hmac_sha256 } from "std/crypto"
 | [`sha256_bytes`](#sha256bytes) | SHA-256 hash as byte array. Returns array of 32 integers (0-255). |
 | [`uuid`](#uuid) | Generates a random UUID v4 string. |
 | [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
+
+#### `aes_decrypt`
+
+```ntnt
+aes_decrypt(ciphertext: String, key: String) -> Result<String, String>
+```
+
+Decrypts AES-256-GCM encrypted data produced by aes_encrypt. The input is a Base64-encoded string containing the nonce and ciphertext. The key must be the same 64-character hex string used for encryption.
+
+**Parameters:**
+
+- `ciphertext` — The Base64-encoded string from aes_encrypt
+- `key` — A 64-character hex string (256-bit key)
+
+**Returns:** Ok(plaintext) on success, Err(message) on failure (wrong key, tampered data, etc.)
+
+**Examples:**
+
+```ntnt
+aes_decrypt(encrypted, key)  // Returns Ok with original plaintext
+```
+
+**See also:** `aes_encrypt`, `aes_generate_key`
+
+*Since v0.3.13*
+
+---
+
+#### `aes_encrypt`
+
+```ntnt
+aes_encrypt(plaintext: String, key: String) -> Result<String, String>
+```
+
+Encrypts plaintext using AES-256-GCM authenticated encryption. The key must be a 64-character hex string (32 bytes). A random 96-bit nonce is generated for each call and prepended to the ciphertext before Base64 encoding.
+
+**Parameters:**
+
+- `plaintext` — The string to encrypt
+- `key` — A 64-character hex string (256-bit key from aes_generate_key)
+
+**Returns:** Ok(base64_encoded_nonce_and_ciphertext) on success, Err(message) on failure
+
+**Examples:**
+
+```ntnt
+aes_encrypt("secret data", aes_generate_key())  // Returns Ok with base64 ciphertext
+```
+
+**See also:** `aes_decrypt`, `aes_generate_key`
+
+*Since v0.3.13*
+
+---
+
+#### `aes_generate_key`
+
+```ntnt
+aes_generate_key() -> String
+```
+
+Generates a random 256-bit AES key, returned as a 64-character hex string. Use this key with aes_encrypt and aes_decrypt.
+
+**Returns:** 64-character hex string representing a 256-bit key
+
+**Examples:**
+
+```ntnt
+aes_generate_key()  // Returns a 64-char hex string like 'a1b2c3d4...'
+```
+
+**See also:** `aes_encrypt`, `aes_decrypt`
+
+*Since v0.3.13*
+
+---
+
+#### `argon2_hash`
+
+```ntnt
+argon2_hash(password: String) -> String
+```
+
+Hashes a password using Argon2id, the recommended password hashing algorithm. Returns a PHC-format string that includes the salt and parameters. Uses OWASP-recommended defaults: m=19456 KiB, t=2 iterations, p=1 parallelism.
+
+**Parameters:**
+
+- `password` — The plaintext password to hash
+
+**Returns:** PHC-format hash string starting with $argon2id$
+
+**Examples:**
+
+```ntnt
+argon2_hash("my_password")  // Returns '$argon2id$v=19$m=19456,t=2,p=1$...'
+```
+
+**See also:** `argon2_verify`, `hash_password`
+
+*Since v0.3.13*
+
+---
+
+#### `argon2_verify`
+
+```ntnt
+argon2_verify(password: String, hash: String) -> Bool
+```
+
+Verifies a password against an Argon2 hash in PHC format. Returns true if the password matches, false otherwise (including for invalid hashes).
+
+**Parameters:**
+
+- `password` — The plaintext password to verify
+- `hash` — The Argon2 PHC-format hash string to verify against
+
+**Returns:** true if password matches, false otherwise
+
+**Examples:**
+
+```ntnt
+argon2_verify("my_password", argon2_hash("my_password"))  // => true  // Correct password
+argon2_verify("wrong", argon2_hash("my_password"))  // => false  // Wrong password
+```
+
+**See also:** `argon2_hash`, `verify_password`
+
+*Since v0.3.13*
+
+---
+
+#### `base64_decode`
+
+```ntnt
+base64_decode(encoded: String) -> Result<String, String>
+```
+
+Decodes a standard Base64-encoded string back to plaintext. Returns Err if the input is not valid Base64 or not valid UTF-8.
+
+**Parameters:**
+
+- `encoded` — The Base64-encoded string to decode
+
+**Returns:** Ok(decoded_string) on success, Err(message) on failure
+
+**Examples:**
+
+```ntnt
+base64_decode("SGVsbG8sIFdvcmxkIQ==")  // => Ok("Hello, World!")  // Decode base64 string
+base64_decode("!!!invalid!!!")  // => Err("...")  // Invalid base64 returns Err
+```
+
+**See also:** `base64_encode`, `base64url_decode`
+
+*Since v0.3.13*
+
+---
+
+#### `base64_encode`
+
+```ntnt
+base64_encode(data: String) -> String
+```
+
+Encodes a string using standard Base64 encoding (RFC 4648).
+
+**Parameters:**
+
+- `data` — The string to encode
+
+**Returns:** Base64-encoded string
+
+**Examples:**
+
+```ntnt
+base64_encode("Hello, World!")  // => "SGVsbG8sIFdvcmxkIQ=="  // Standard base64 encoding
+```
+
+**See also:** `base64_decode`, `base64url_encode`
+
+*Since v0.3.13*
+
+---
+
+#### `base64url_decode`
+
+```ntnt
+base64url_decode(encoded: String) -> Result<String, String>
+```
+
+Decodes a URL-safe Base64-encoded string (no padding) back to plaintext. Returns Err if the input is not valid URL-safe Base64 or not valid UTF-8.
+
+**Parameters:**
+
+- `encoded` — The URL-safe Base64-encoded string to decode
+
+**Returns:** Ok(decoded_string) on success, Err(message) on failure
+
+**Examples:**
+
+```ntnt
+base64url_decode("SGVsbG8sIFdvcmxkIQ")  // => Ok("Hello, World!")  // Decode URL-safe base64
+base64url_decode("!!!")  // => Err("...")  // Invalid input returns Err
+```
+
+**See also:** `base64url_encode`, `base64_decode`
+
+*Since v0.3.13*
+
+---
+
+#### `base64url_encode`
+
+```ntnt
+base64url_encode(data: String) -> String
+```
+
+Encodes a string using URL-safe Base64 encoding (no padding). Uses the URL_SAFE_NO_PAD alphabet, suitable for URLs and filenames.
+
+**Parameters:**
+
+- `data` — The string to encode
+
+**Returns:** URL-safe Base64-encoded string without padding
+
+**Examples:**
+
+```ntnt
+base64url_encode("Hello, World!")  // => "SGVsbG8sIFdvcmxkIQ"  // URL-safe base64 (no padding)
+```
+
+**See also:** `base64url_decode`, `base64_encode`
+
+*Since v0.3.13*
+
+---
 
 #### `hash_password`
 

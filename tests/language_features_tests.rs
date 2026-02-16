@@ -675,6 +675,88 @@ print(page)
     assert!(stdout.contains("<html>"), "Should preserve HTML tags");
 }
 
+/// @since v0.3.13
+#[test]
+fn test_template_nested_if_both_true() {
+    let code = r#"
+let outer = true
+let inner = true
+let out = """{{#if outer}}{{#if inner}}yes{{/if}}{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Nested if blocks should work");
+    assert_eq!(
+        stdout.trim(),
+        "yes",
+        "Both conditions true should render inner content"
+    );
+}
+
+/// @since v0.3.13
+#[test]
+fn test_template_nested_if_inner_false() {
+    let code = r#"
+let outer = true
+let inner = false
+let out = """{{#if outer}}{{#if inner}}yes{{/if}}no{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Nested if with inner false should work");
+    assert_eq!(
+        stdout.trim(),
+        "no",
+        "Inner false should skip inner block but keep outer content"
+    );
+}
+
+/// @since v0.3.13
+#[test]
+fn test_template_triple_nested_if() {
+    let code = r#"
+let a = true
+let b = true
+let c = true
+let out = """{{#if a}}{{#if b}}{{#if c}}deep{{/if}}{{/if}}{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Triple nested if should work");
+    assert_eq!(stdout.trim(), "deep", "Three levels deep should render");
+}
+
+/// @since v0.3.13
+#[test]
+fn test_template_nested_if_with_else() {
+    let code = r#"
+let a = true
+let b = false
+let out = """{{#if a}}{{#if b}}both{{#else}}only a{{/if}}{{#else}}neither{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Nested if with else should work");
+    assert_eq!(stdout.trim(), "only a", "Should render else of inner block");
+}
+
+/// @since v0.3.13
+#[test]
+fn test_template_nested_if_mixed_content() {
+    let code = r#"
+let show = true
+let detail = true
+let out = """before{{#if show}} outer {{#if detail}}(detail){{/if}} end{{/if}} after"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "Mixed content around nested blocks should work"
+    );
+    assert_eq!(stdout.trim(), "before outer (detail) end after");
+}
+
 #[test]
 fn test_get_key_with_two_args() {
     let code = r#"
@@ -3481,4 +3563,181 @@ print(add(5, 20))
     let lines: Vec<&str> = stdout.trim().lines().collect();
     assert_eq!(lines[0], "15");
     assert_eq!(lines[1], "25");
+}
+
+// ===== Deep Mutation Tests =====
+
+#[test]
+fn test_deep_mutation_array_index() {
+    let code = r#"
+let mut arr = [1, 2, 3]
+arr[0] = 10
+print(arr[0])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "10");
+}
+
+#[test]
+fn test_deep_mutation_map_key() {
+    let code = r#"
+let mut m = map { "a": 1 }
+m["a"] = 2
+print(m["a"])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "2");
+}
+
+#[test]
+fn test_deep_mutation_nested_array_of_maps() {
+    let code = r#"
+let mut users = [map { "name": "Alice", "role": "user" }]
+users[0]["role"] = "admin"
+print(users[0]["role"])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "admin");
+}
+
+#[test]
+fn test_deep_mutation_nested_map_of_arrays() {
+    let code = r#"
+let mut data = map { "items": [1, 2, 3] }
+data["items"][1] = 20
+print(data["items"][1])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "20");
+}
+
+#[test]
+fn test_deep_mutation_triple_nesting() {
+    let code = r#"
+let mut deep = map { "a": map { "b": [10, 20] } }
+deep["a"]["b"][0] = 99
+print(deep["a"]["b"][0])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "99");
+}
+
+#[test]
+fn test_deep_mutation_immutable_fails() {
+    let code = r#"
+let users = [map { "name": "Alice" }]
+users[0]["name"] = "Bob"
+"#;
+    let (_stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail: immutable variable");
+}
+
+#[test]
+fn test_deep_mutation_out_of_bounds() {
+    let code = r#"
+let mut arr = [1, 2]
+arr[5] = 10
+"#;
+    let (_stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail: index out of bounds");
+}
+
+#[test]
+fn test_deep_mutation_new_map_key() {
+    let code = r#"
+let mut m = map { "a": 1 }
+m["b"] = 2
+print(m["b"])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "2");
+}
+
+#[test]
+fn test_crypto_base64_roundtrip() {
+    let code = r#"
+import { base64_encode, base64_decode } from "std/crypto"
+
+let encoded = base64_encode("Hello NTNT!")
+print(encoded)
+let decoded = base64_decode(encoded)
+match decoded {
+    Ok(val) => print(val)
+    Err(e) => print("ERROR: " + e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "base64 roundtrip failed: stderr={}", stderr);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "SGVsbG8gTlROVCE=");
+    assert_eq!(lines[1], "Hello NTNT!");
+}
+
+#[test]
+fn test_crypto_base64url_roundtrip() {
+    let code = r#"
+import { base64url_encode, base64url_decode } from "std/crypto"
+
+let encoded = base64url_encode("Hello NTNT!")
+print(encoded)
+let decoded = base64url_decode(encoded)
+match decoded {
+    Ok(val) => print(val)
+    Err(e) => print("ERROR: " + e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "base64url roundtrip failed: stderr={}",
+        stderr
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "SGVsbG8gTlROVCE");
+    assert_eq!(lines[1], "Hello NTNT!");
+}
+
+#[test]
+fn test_crypto_aes_roundtrip() {
+    let code = r#"
+import { aes_generate_key, aes_encrypt, aes_decrypt } from "std/crypto"
+
+let key = aes_generate_key()
+let encrypted = aes_encrypt("secret message", key)
+match encrypted {
+    Ok(ct) => {
+        let decrypted = aes_decrypt(ct, key)
+        match decrypted {
+            Ok(pt) => print(pt)
+            Err(e) => print("DECRYPT ERROR: " + e)
+        }
+    }
+    Err(e) => print("ENCRYPT ERROR: " + e)
+}
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "aes roundtrip failed: stderr={}", stderr);
+    assert_eq!(stdout.trim(), "secret message");
+}
+
+#[test]
+fn test_crypto_argon2_hash_verify() {
+    let code = r#"
+import { argon2_hash, argon2_verify } from "std/crypto"
+
+let hash = argon2_hash("mypassword")
+print(argon2_verify("mypassword", hash))
+print(argon2_verify("wrongpassword", hash))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "argon2 failed: stderr={}", stderr);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true");
+    assert_eq!(lines[1], "false");
 }
