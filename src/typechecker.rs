@@ -2111,7 +2111,7 @@ impl TypeContext {
                     }
                 }
                 // Collection functions that preserve Array<T> element type
-                "sort" | "reverse" if arguments.len() == 1 => {
+                "sort" | "sort_desc" | "reverse" if arguments.len() >= 1 => {
                     if let Type::Array(_) = &arg_types[0] {
                         return arg_types[0].clone();
                     }
@@ -2666,11 +2666,15 @@ impl TypeContext {
         sig!("has_key", ["map" => Type::Any, "key" => Type::String], Type::Bool);
         sig!("get_key", ["map" => Type::Any, "key" => Type::String], Type::Any);
         sig!("get_index", ["array" => Type::Array(Box::new(Type::Any)), "index" => Type::Int], Type::Any);
-        sig!("sort", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)));
+        sig!("sort", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
+        sig!("sort_desc", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
         sig!("reverse", ["value" => Type::Any], Type::Any);
         sig!("contains", ["haystack" => Type::Any, "needle" => Type::Any], Type::Bool);
+        sig!("merge", ["map1" => Type::Any, "map2" => Type::Any], Type::Any);
+        sig!("get_or", ["map" => Type::Any, "key" => Type::String, "default" => Type::Any], Type::Any);
         sig!("filter", ["array" => Type::Array(Box::new(Type::Any)), "predicate" => Type::Any], Type::Array(Box::new(Type::Any)));
         sig!("transform", ["array" => Type::Array(Box::new(Type::Any)), "mapper" => Type::Any], Type::Array(Box::new(Type::Any)));
+        sig!("flat_map", ["array" => Type::Array(Box::new(Type::Any)), "mapper" => Type::Any], Type::Array(Box::new(Type::Any)));
         sig!("first", ["array" => Type::Array(Box::new(Type::Any))], Type::Any, variadic);
         sig!("last", ["array" => Type::Array(Box::new(Type::Any))], Type::Any, variadic);
         sig!("concat", ["a" => Type::Any, "b" => Type::Any], Type::Any);
@@ -2855,7 +2859,11 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("last", ["array" => Type::Array(Box::new(Type::Any))], Type::Any, variadic);
             sig!("concat", ["a" => Type::Any, "b" => Type::Any], Type::Any);
             sig!("slice", ["array" => Type::Array(Box::new(Type::Any)), "start" => Type::Int], Type::Array(Box::new(Type::Any)), variadic);
-            sig!("sort", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)));
+            sig!("sort", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
+            sig!("sort_desc", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
+            sig!("merge", ["map1" => Type::Any, "map2" => Type::Any], Type::Any);
+            sig!("get_or", ["map" => Type::Any, "key" => Type::String, "default" => Type::Any], Type::Any);
+            sig!("flat_map", ["array" => Type::Array(Box::new(Type::Any)), "mapper" => Type::Any], Type::Array(Box::new(Type::Any)));
             sig!("reverse", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)));
             sig!("is_empty", ["value" => Type::Any], Type::Bool);
             sig!("flatten", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)));
