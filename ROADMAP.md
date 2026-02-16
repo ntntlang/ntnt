@@ -2897,5 +2897,34 @@ Both levels of `{{#if}}` should evaluate. Nesting should work to arbitrary depth
 
 ---
 
+---
+
+## Security & Performance Hardening (v0.3.14+)
+
+Based on the comprehensive security and performance audit conducted February 2026.
+See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) and [PERFORMANCE_AUDIT.md](PERFORMANCE_AUDIT.md) for full details.
+
+### Security Fixes (Completed in v0.3.14)
+- [x] Path traversal protection for async HTTP server static file serving
+- [x] HTTP client response size limits (50MB default, configurable)
+- [x] PostgreSQL connection error sanitization (prevent credential leakage)
+
+### Security Hardening (Proposed)
+- [ ] Interpreter recursion depth limit (default: 1000)
+- [ ] Per-request timeout for sync HTTP server
+- [ ] Optional filesystem sandboxing (`NTNT_FS_ROOT`)
+- [ ] Random dev-mode session secret generation
+- [ ] Warning on CORS wildcard origin in production
+
+### Performance Improvements (Proposed)
+- [ ] Template compilation/caching
+- [ ] In-memory static file caching
+- [ ] Replace Redis `KEYS` with `SCAN` in KV module
+- [ ] Interpreter thread pool for async server (multi-interpreter)
+- [ ] Automatic session cleanup timer for in-memory sessions
+- [ ] Copy-on-write Value semantics (major refactor)
+
+---
+
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: February 2026 (v0.3.13 — Active: Phase 7 Language Ergonomics & Documentation)_
+_Last updated: February 2026 (v0.3.14 — Security & Performance Audit)_

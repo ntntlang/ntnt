@@ -338,11 +338,26 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
                 values: vec![Value::Map(handle)],
             })
         }
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("Connection failed: {}", e))],
-        }),
+        Err(e) => {
+            // Sanitize error message to avoid leaking credentials from connection string
+            // @since v0.3.14
+            let error_msg = e.to_string();
+            let sanitized =
+                if error_msg.contains("password") || error_msg.contains("authentication") {
+                    format!("Connection failed: authentication error (details hidden for security)")
+                } else {
+                    // Remove any embedded connection strings from error messages
+                    let sanitized = error_msg
+                        .replace(connection_string, "<connection_string>")
+                        .to_string();
+                    format!("Connection failed: {}", sanitized)
+                };
+            Ok(Value::EnumValue {
+                enum_name: "Result".to_string(),
+                variant: "Err".to_string(),
+                values: vec![Value::String(sanitized)],
+            })
+        }
     }
 }
 

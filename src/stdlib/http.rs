@@ -549,6 +549,54 @@ fn response_to_value(
     Value::Map(response_map)
 }
 
+/// Maximum response body size (50MB default, configurable via NTNT_MAX_RESPONSE_SIZE)
+/// @since v0.3.14
+fn max_response_size() -> usize {
+    static MAX_SIZE: OnceLock<usize> = OnceLock::new();
+    *MAX_SIZE.get_or_init(|| {
+        std::env::var("NTNT_MAX_RESPONSE_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(50 * 1024 * 1024) // 50MB default
+    })
+}
+
+/// Read response body with size limit to prevent memory exhaustion
+/// @since v0.3.14
+fn read_response_body_limited(
+    response: reqwest::blocking::Response,
+) -> std::result::Result<(String, u16, reqwest::header::HeaderMap, String), String> {
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let final_url = response.url().to_string();
+
+    // Check Content-Length header first for early rejection
+    if let Some(content_length) = response.content_length() {
+        if content_length as usize > max_response_size() {
+            return Err(format!(
+                "Response too large: {} bytes (max: {} bytes)",
+                content_length,
+                max_response_size()
+            ));
+        }
+    }
+
+    match response.text() {
+        Ok(body) => {
+            if body.len() > max_response_size() {
+                Err(format!(
+                    "Response body too large: {} bytes (max: {} bytes)",
+                    body.len(),
+                    max_response_size()
+                ))
+            } else {
+                Ok((body, status, headers, final_url))
+            }
+        }
+        Err(e) => Err(format!("Failed to read response body: {}", e)),
+    }
+}
+
 /// Simple HTTP GET request
 fn http_get(url: &str) -> Result<Value> {
     // SSRF protection: validate URL before making request
@@ -562,29 +610,21 @@ fn http_get(url: &str) -> Result<Value> {
 
     let client = reqwest::blocking::Client::new();
     match client.get(url).send() {
-        Ok(response) => {
-            let status = response.status().as_u16();
-            let headers = response.headers().clone();
-            let final_url = response.url().to_string();
-            match response.text() {
-                Ok(body) => {
-                    let resp_value = response_to_value(status, &headers, body, &final_url, url);
-                    Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![resp_value],
-                    })
-                }
-                Err(e) => Ok(Value::EnumValue {
+        Ok(response) => match read_response_body_limited(response) {
+            Ok((body, status, headers, final_url)) => {
+                let resp_value = response_to_value(status, &headers, body, &final_url, url);
+                Ok(Value::EnumValue {
                     enum_name: "Result".to_string(),
-                    variant: "Err".to_string(),
-                    values: vec![Value::String(format!(
-                        "Failed to read response body: {}",
-                        e
-                    ))],
-                }),
+                    variant: "Ok".to_string(),
+                    values: vec![resp_value],
+                })
             }
-        }
+            Err(e) => Ok(Value::EnumValue {
+                enum_name: "Result".to_string(),
+                variant: "Err".to_string(),
+                values: vec![Value::String(e)],
+            }),
+        },
         Err(e) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
             variant: "Err".to_string(),

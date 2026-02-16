@@ -131,19 +131,46 @@ impl AsyncServerState {
     }
 
     /// Check if path matches a static directory
+    ///
+    /// Security: validates against path traversal attacks by rejecting ".." segments,
+    /// null bytes, and encoded traversal patterns, then verifying the canonical path
+    /// stays within the base directory.
+    /// @since v0.3.14
     pub async fn find_static_file(&self, path: &str) -> Option<(String, String)> {
         let dirs = self.static_dirs.read().await;
         for dir in dirs.iter() {
             if path.starts_with(&dir.url_prefix) {
                 let relative = path.strip_prefix(&dir.url_prefix).unwrap_or("");
                 let relative = relative.trim_start_matches('/');
-                let file_path = PathBuf::from(&dir.fs_path).join(relative);
-                if file_path.exists() && file_path.is_file() {
-                    return Some((
-                        file_path.to_string_lossy().to_string(),
-                        dir.url_prefix.clone(),
-                    ));
+
+                // Security: reject path traversal attempts
+                if relative.contains("..") || relative.contains('\0') {
+                    return None;
                 }
+
+                // Check for encoded traversal patterns
+                let decoded = urlencoding::decode(relative).unwrap_or_else(|_| relative.into());
+                if decoded.contains("..") {
+                    return None;
+                }
+
+                let file_path = PathBuf::from(&dir.fs_path).join(relative);
+
+                // Security: verify canonical path stays within base directory
+                if let Ok(canonical) = file_path.canonicalize() {
+                    if let Ok(base_canonical) = std::path::Path::new(&dir.fs_path).canonicalize() {
+                        if canonical.starts_with(&base_canonical) && canonical.is_file() {
+                            return Some((
+                                canonical.to_string_lossy().to_string(),
+                                dir.url_prefix.clone(),
+                            ));
+                        }
+                    }
+                    // File exists but outside base directory — reject
+                    return None;
+                }
+
+                // File doesn't exist — no match
             }
         }
         None
