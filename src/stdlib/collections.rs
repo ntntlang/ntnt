@@ -615,5 +615,73 @@ pub fn init() -> HashMap<String, Value> {
         },
     });
 
+    // @ntnt merge
+    // @module std/collections
+    // @signature merge(map1: Map, map2: Map) -> Map
+    // Shallow-merges two maps. Values from map2 win on key conflicts.
+    //
+    // Returns a new map containing all key-value pairs from both maps.
+    // If both maps contain the same key, the value from map2 is used.
+    // @param map1 The base map
+    // @param map2 The map whose values take priority on conflict
+    // @returns A new map with merged key-value pairs
+    // @see_also get_key, get_or, has_key, keys, values
+    // @since v0.3.13
+    // @tags #pure, #deterministic
+    // @example merge(map { "a": 1, "b": 2 }, map { "b": 3, "c": 4 }) => map { "a": 1, "b": 3, "c": 4 } ~ "Merge with conflict resolution"
+    // @error TypeError ~ "merge() requires two maps" fix: "Ensure both arguments are maps"
+    module.insert(
+        "merge".to_string(),
+        Value::NativeFunction {
+            name: "merge".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::Map(map1), Value::Map(map2)) => {
+                    let mut result = map1.clone();
+                    for (k, v) in map2.iter() {
+                        result.insert(k.clone(), v.clone());
+                    }
+                    Ok(Value::Map(result))
+                }
+                _ => Err(IntentError::TypeError(
+                    "merge() requires two maps".to_string(),
+                )),
+            },
+        },
+    );
+
+    // @ntnt get_or
+    // @module std/collections
+    // @signature get_or(m: Map, key: String, default: Any) -> Any
+    // Gets a value from a map by key, returning a default if the key is missing.
+    //
+    // Unlike get_key which returns an Option, get_or always returns a plain value.
+    // If the key exists, returns its value. If not, returns the default.
+    // @param m The source map
+    // @param key The key to look up
+    // @param default The value to return if the key is not found
+    // @returns The value for the key, or the default
+    // @see_also get_key, has_key, merge, keys
+    // @since v0.3.13
+    // @tags #pure, #deterministic
+    // @example get_or(map { "name": "Alice" }, "name", "Anonymous") => "Alice" ~ "Key exists"
+    // @example get_or(map { "name": "Alice" }, "age", 0) => 0 ~ "Key missing, returns default"
+    // @error TypeError ~ "get_or() requires a map, string key, and default value" fix: "Pass a map, string key, and default value"
+    module.insert(
+        "get_or".to_string(),
+        Value::NativeFunction {
+            name: "get_or".to_string(),
+            arity: 3,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::Map(map), Value::String(key)) => {
+                    Ok(map.get(key).cloned().unwrap_or_else(|| args[2].clone()))
+                }
+                _ => Err(IntentError::TypeError(
+                    "get_or() requires a map, string key, and default value".to_string(),
+                )),
+            },
+        },
+    );
+
     module
 }

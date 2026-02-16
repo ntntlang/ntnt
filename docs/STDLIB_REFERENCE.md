@@ -2205,10 +2205,12 @@ import { push, pop, first } from "std/collections"
 | [`first`](#first) | Returns the first element of an array. |
 | [`get_index`](#getindex) | Gets an element from an array by index with safe access. |
 | [`get_key`](#getkey) | Gets a value from a map by key with safe access. |
+| [`get_or`](#getor) | Gets a value from a map by key, returning a default if the key is missing. |
 | [`has_key`](#haskey) | Returns true if the map contains the specified key. |
 | [`is_empty`](#isempty) | Returns true if the array or string is empty. |
 | [`keys`](#keys) | Returns an array of all keys in the map. |
 | [`last`](#last) | Returns the last element of an array. |
+| [`merge`](#merge) | Shallow-merges two maps. Values from map2 win on key conflicts. |
 | [`pop`](#pop) | Returns a tuple of [new array without last element, popped element as Option]. |
 | [`push`](#push) | Returns a new array with the item appended. |
 | [`reverse`](#reverse) | Returns a new array with elements in reverse order. |
@@ -2387,6 +2389,41 @@ get_key(map { "a": 1 }, "b", 0)  // => 0  // Key missing, default returned
 
 ---
 
+#### `get_or`
+
+```ntnt
+get_or(m: Map, key: String, default: Any) -> Any
+```
+
+Gets a value from a map by key, returning a default if the key is missing.
+
+Unlike get_key which returns an Option, get_or always returns a plain value. If the key exists, returns its value. If not, returns the default.
+
+**Parameters:**
+
+- `m` — The source map
+- `key` — The key to look up
+- `default` — The value to return if the key is not found
+
+**Returns:** The value for the key, or the default
+
+**Examples:**
+
+```ntnt
+get_or(map { "name": "Alice" }, "name", "Anonymous")  // => "Alice"  // Key exists
+get_or(map { "name": "Alice" }, "age", 0)  // => 0  // Key missing, returns default
+```
+
+**Errors:**
+
+- **TypeError**: get_or() requires a map, string key, and default value — *Fix: Pass a map, string key, and default value*
+
+**See also:** `get_key`, `has_key`, `merge`, `keys`
+
+*Since v0.3.13*
+
+---
+
 #### `has_key`
 
 ```ntnt
@@ -2514,6 +2551,39 @@ last([], 0)  // => 0  // Default returned for empty array
 **See also:** `first`, `push`, `pop`, `slice`
 
 *Since v0.1.0*
+
+---
+
+#### `merge`
+
+```ntnt
+merge(map1: Map, map2: Map) -> Map
+```
+
+Shallow-merges two maps. Values from map2 win on key conflicts.
+
+Returns a new map containing all key-value pairs from both maps. If both maps contain the same key, the value from map2 is used.
+
+**Parameters:**
+
+- `map1` — The base map
+- `map2` — The map whose values take priority on conflict
+
+**Returns:** A new map with merged key-value pairs
+
+**Examples:**
+
+```ntnt
+merge(map { "a": 1, "b": 2 }, map { "b": 3, "c": 4 })  // => map { "a": 1, "b": 3, "c": 4 }  // Merge with conflict resolution
+```
+
+**Errors:**
+
+- **TypeError**: merge() requires two maps — *Fix: Ensure both arguments are maps*
+
+**See also:** `get_key`, `get_or`, `has_key`, `keys`, `values`
+
+*Since v0.3.13*
 
 ---
 

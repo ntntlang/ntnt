@@ -2872,5 +2872,30 @@ Both levels of `{{#if}}` should evaluate. Nesting should work to arbitrary depth
 
 ---
 
+### 7.22 Collections & Functional Array Operations ✅
+
+**Goal:** Provide sort, merge, and functional array operations (filter, map, find, reduce) to eliminate manual loops and verbose patterns in real applications.
+
+**Motivation:** Building the Larri Dashboard revealed repeated patterns: bubble sort implementations (3 instances, ~45 lines), manual map reconstruction for updates, verbose `match get_key` for defaults, and for-loop filtering. These are solved problems in every modern language.
+
+**Functions (all added in v0.3.13):**
+
+- [x] `sort(array, key_or_fn?)` — Sort ascending by natural order, map key, or function
+- [x] `sort_desc(array, key_or_fn?)` — Sort descending
+- [x] `merge(map1, map2)` — Shallow merge, map2 wins on conflict
+- [x] `get_or(map, key, default)` — Get with default (no Option unwrapping needed)
+- [x] `filter(array, fn)` — Keep elements where fn returns true
+- [x] `transform(array, fn)` — Apply fn to each element (map operation)
+- [x] `find(array, fn)` — First element matching fn, as Option
+- [x] `any(array, fn)` — True if any element matches
+- [x] `all(array, fn)` — True if all elements match
+- [x] `count(array, fn)` — Count matching elements
+- [x] `reduce(array, initial, fn)` — Fold/reduce with accumulator
+- [x] `flat_map(array, fn)` — Map then flatten one level
+
+**Implementation:** `merge` and `get_or` are NativeFunctions in `src/stdlib/collections.rs`. All higher-order functions (`sort`, `sort_desc`, `filter`, `transform`, `find`, `any`, `all`, `count`, `reduce`, `flat_map`) are special-cased builtins in `src/interpreter.rs` because they need access to the interpreter to call closures.
+
+---
+
 _This roadmap is a living document updated as implementation progresses._
-_Last updated: February 2026 (v0.3.11 — Active: Phase 7 Language Ergonomics & Documentation)_
+_Last updated: February 2026 (v0.3.13 — Active: Phase 7 Language Ergonomics & Documentation)_

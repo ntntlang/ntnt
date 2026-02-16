@@ -3636,6 +3636,212 @@ impl Interpreter {
                         }
                     }
 
+                    // Special handling for sort(arr, key_or_fn?) - higher-order function
+                    if name == "sort" && (arguments.len() == 1 || arguments.len() == 2) {
+                        let arr = self.eval_expression(&arguments[0])?;
+                        let key_or_fn = if arguments.len() == 2 {
+                            Some(self.eval_expression(&arguments[1])?)
+                        } else {
+                            None
+                        };
+
+                        if let Value::Array(mut items) = arr {
+                            // Extract sort keys for each element
+                            let mut keyed: Vec<(Value, Value)> = Vec::new();
+                            for item in &items {
+                                let key = match &key_or_fn {
+                                    None => item.clone(),
+                                    Some(Value::String(field)) => {
+                                        if let Value::Map(m) = item {
+                                            m.get(field).cloned().unwrap_or(Value::Unit)
+                                        } else {
+                                            item.clone()
+                                        }
+                                    }
+                                    Some(
+                                        func @ (Value::Function { .. }
+                                        | Value::NativeFunction { .. }),
+                                    ) => self.call_function(func.clone(), vec![item.clone()])?,
+                                    _ => item.clone(),
+                                };
+                                keyed.push((key, item.clone()));
+                            }
+                            keyed.sort_by(|(a, _), (b, _)| Self::compare_values(a, b));
+                            items = keyed.into_iter().map(|(_, v)| v).collect();
+                            return Ok(Value::Array(items));
+                        } else {
+                            return Err(IntentError::TypeError(
+                                "sort() requires an array as first argument".to_string(),
+                            ));
+                        }
+                    }
+
+                    // Special handling for sort_desc(arr, key_or_fn?) - higher-order function
+                    if name == "sort_desc" && (arguments.len() == 1 || arguments.len() == 2) {
+                        let arr = self.eval_expression(&arguments[0])?;
+                        let key_or_fn = if arguments.len() == 2 {
+                            Some(self.eval_expression(&arguments[1])?)
+                        } else {
+                            None
+                        };
+
+                        if let Value::Array(mut items) = arr {
+                            let mut keyed: Vec<(Value, Value)> = Vec::new();
+                            for item in &items {
+                                let key = match &key_or_fn {
+                                    None => item.clone(),
+                                    Some(Value::String(field)) => {
+                                        if let Value::Map(m) = item {
+                                            m.get(field).cloned().unwrap_or(Value::Unit)
+                                        } else {
+                                            item.clone()
+                                        }
+                                    }
+                                    Some(
+                                        func @ (Value::Function { .. }
+                                        | Value::NativeFunction { .. }),
+                                    ) => self.call_function(func.clone(), vec![item.clone()])?,
+                                    _ => item.clone(),
+                                };
+                                keyed.push((key, item.clone()));
+                            }
+                            keyed.sort_by(|(a, _), (b, _)| Self::compare_values(b, a));
+                            items = keyed.into_iter().map(|(_, v)| v).collect();
+                            return Ok(Value::Array(items));
+                        } else {
+                            return Err(IntentError::TypeError(
+                                "sort_desc() requires an array as first argument".to_string(),
+                            ));
+                        }
+                    }
+
+                    // Special handling for find(arr, fn) - higher-order function
+                    if name == "find" && arguments.len() == 2 {
+                        let arr = self.eval_expression(&arguments[0])?;
+                        let predicate = self.eval_expression(&arguments[1])?;
+
+                        if let Value::Array(items) = arr {
+                            for item in items {
+                                let result =
+                                    self.call_function(predicate.clone(), vec![item.clone()])?;
+                                if result.is_truthy() {
+                                    return Ok(Value::EnumValue {
+                                        enum_name: "Option".to_string(),
+                                        variant: "Some".to_string(),
+                                        values: vec![item],
+                                    });
+                                }
+                            }
+                            return Ok(Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                values: vec![],
+                            });
+                        } else {
+                            return Err(IntentError::TypeError(
+                                "find() requires an array as first argument".to_string(),
+                            ));
+                        }
+                    }
+
+                    // Special handling for any(arr, fn) - higher-order function
+                    if name == "any" && arguments.len() == 2 {
+                        let arr = self.eval_expression(&arguments[0])?;
+                        let predicate = self.eval_expression(&arguments[1])?;
+
+                        if let Value::Array(items) = arr {
+                            for item in items {
+                                let result = self.call_function(predicate.clone(), vec![item])?;
+                                if result.is_truthy() {
+                                    return Ok(Value::Bool(true));
+                                }
+                            }
+                            return Ok(Value::Bool(false));
+                        } else {
+                            return Err(IntentError::TypeError(
+                                "any() requires an array as first argument".to_string(),
+                            ));
+                        }
+                    }
+
+                    // Special handling for all(arr, fn) - higher-order function
+                    if name == "all" && arguments.len() == 2 {
+                        let arr = self.eval_expression(&arguments[0])?;
+                        let predicate = self.eval_expression(&arguments[1])?;
+
+                        if let Value::Array(items) = arr {
+                            for item in items {
+                                let result = self.call_function(predicate.clone(), vec![item])?;
+                                if !result.is_truthy() {
+                                    return Ok(Value::Bool(false));
+                                }
+                            }
+                            return Ok(Value::Bool(true));
+                        } else {
+                            return Err(IntentError::TypeError(
+                                "all() requires an array as first argument".to_string(),
+                            ));
+                        }
+                    }
+
+                    // Special handling for count(arr, fn) - higher-order function
+                    // Only intercept when first arg is array (to avoid conflict with std/string count)
+                    if name == "count" && arguments.len() == 2 {
+                        let arr = self.eval_expression(&arguments[0])?;
+                        if let Value::Array(items) = arr {
+                            let predicate = self.eval_expression(&arguments[1])?;
+                            let mut n = 0i64;
+                            for item in items {
+                                let result = self.call_function(predicate.clone(), vec![item])?;
+                                if result.is_truthy() {
+                                    n += 1;
+                                }
+                            }
+                            return Ok(Value::Int(n));
+                        }
+                        // Not an array - fall through to normal function resolution (e.g. std/string count)
+                    }
+
+                    // Special handling for reduce(arr, initial, fn) - higher-order function
+                    if name == "reduce" && arguments.len() == 3 {
+                        let arr = self.eval_expression(&arguments[0])?;
+                        let mut acc = self.eval_expression(&arguments[1])?;
+                        let func = self.eval_expression(&arguments[2])?;
+
+                        if let Value::Array(items) = arr {
+                            for item in items {
+                                acc = self.call_function(func.clone(), vec![acc, item])?;
+                            }
+                            return Ok(acc);
+                        } else {
+                            return Err(IntentError::TypeError(
+                                "reduce() requires an array as first argument".to_string(),
+                            ));
+                        }
+                    }
+
+                    // Special handling for flat_map(arr, fn) - higher-order function
+                    if name == "flat_map" && arguments.len() == 2 {
+                        let arr = self.eval_expression(&arguments[0])?;
+                        let func = self.eval_expression(&arguments[1])?;
+
+                        if let Value::Array(items) = arr {
+                            let mut result = Vec::new();
+                            for item in items {
+                                let mapped = self.call_function(func.clone(), vec![item])?;
+                                match mapped {
+                                    Value::Array(inner) => result.extend(inner),
+                                    other => result.push(other),
+                                }
+                            }
+                            return Ok(Value::Array(result));
+                        } else {
+                            return Err(IntentError::TypeError(
+                                "flat_map() requires an array as first argument".to_string(),
+                            ));
+                        }
+                    }
+
                     // Special handling for HTTP route registration
                     // Only intercept if first arg is a route pattern (starts with /)
                     // NOT if it's a URL (starts with http:// or https://) - those are HTTP client calls
@@ -6062,6 +6268,30 @@ impl Interpreter {
     }
 
     /// Format an expression as a human-readable string for error messages
+    /// Compare two Values for sorting purposes.
+    /// Returns std::cmp::Ordering. Values of different types are ordered by type tag.
+    fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (a, b) {
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+            (Value::Int(a), Value::Float(b)) => {
+                (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal)
+            }
+            (Value::Float(a), Value::Int(b)) => {
+                a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
+            }
+            (Value::String(a), Value::String(b)) => a.cmp(b),
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+            _ => {
+                // Fall back to string representation for other types
+                let sa = format!("{}", a);
+                let sb = format!("{}", b);
+                sa.cmp(&sb)
+            }
+        }
+    }
+
     fn format_expression(expr: &Expression) -> String {
         match expr {
             Expression::Integer(n) => n.to_string(),
@@ -7858,6 +8088,309 @@ c")
         )
         .unwrap();
         assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_collections_merge() {
+        let result = eval(
+            r#"
+            import { merge } from "std/collections"
+            let a = map { "x": 1, "y": 2 }
+            let b = map { "y": 3, "z": 4 }
+            let c = merge(a, b)
+            c["x"] + c["y"] + c["z"]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(8))); // 1 + 3 + 4
+    }
+
+    #[test]
+    fn test_collections_merge_empty() {
+        let result = eval(
+            r#"
+            import { merge } from "std/collections"
+            let a = map { "x": 1 }
+            let b = map {}
+            let c = merge(a, b)
+            c["x"]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(1)));
+    }
+
+    #[test]
+    fn test_collections_get_or_exists() {
+        let result = eval(
+            r#"
+            import { get_or } from "std/collections"
+            let m = map { "name": "Alice" }
+            get_or(m, "name", "Anonymous")
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(s) if s == "Alice"));
+    }
+
+    #[test]
+    fn test_collections_get_or_missing() {
+        let result = eval(
+            r#"
+            import { get_or } from "std/collections"
+            let m = map { "name": "Alice" }
+            get_or(m, "age", 0)
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(0)));
+    }
+
+    #[test]
+    fn test_sort_numbers() {
+        let result = eval(
+            r#"
+            sort([3, 1, 2])
+        "#,
+        )
+        .unwrap();
+        if let Value::Array(arr) = result {
+            assert_eq!(arr.len(), 3);
+            assert!(matches!(arr[0], Value::Int(1)));
+            assert!(matches!(arr[1], Value::Int(2)));
+            assert!(matches!(arr[2], Value::Int(3)));
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[test]
+    fn test_sort_strings() {
+        let result = eval(
+            r#"
+            sort(["banana", "apple", "cherry"])
+        "#,
+        )
+        .unwrap();
+        if let Value::Array(arr) = result {
+            assert!(matches!(&arr[0], Value::String(s) if s == "apple"));
+            assert!(matches!(&arr[1], Value::String(s) if s == "banana"));
+            assert!(matches!(&arr[2], Value::String(s) if s == "cherry"));
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[test]
+    fn test_sort_by_key() {
+        let result = eval(
+            r#"
+            let items = [map{"name":"Bob"}, map{"name":"Alice"}, map{"name":"Charlie"}]
+            let sorted = sort(items, "name")
+            sorted[0]["name"]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::String(s) if s == "Alice"));
+    }
+
+    #[test]
+    fn test_sort_by_fn() {
+        let result = eval(
+            r#"
+            let items = [map{"v": 3}, map{"v": 1}, map{"v": 2}]
+            let sorted = sort(items, fn(x) { x["v"] })
+            sorted[0]["v"]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(1)));
+    }
+
+    #[test]
+    fn test_sort_empty() {
+        let result = eval("sort([])").unwrap();
+        assert!(matches!(result, Value::Array(arr) if arr.is_empty()));
+    }
+
+    #[test]
+    fn test_sort_desc() {
+        let result = eval(
+            r#"
+            let sorted = sort_desc([1, 3, 2])
+            sorted[0]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(3)));
+    }
+
+    #[test]
+    fn test_sort_desc_by_key() {
+        let result = eval(
+            r#"
+            let items = [map{"t":1}, map{"t":3}, map{"t":2}]
+            let sorted = sort_desc(items, "t")
+            sorted[0]["t"]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(3)));
+    }
+
+    #[test]
+    fn test_filter() {
+        let result = eval(
+            r#"
+            let nums = [1, 2, 3, 4, 5]
+            filter(nums, fn(x) { x > 3 })
+        "#,
+        )
+        .unwrap();
+        if let Value::Array(arr) = result {
+            assert_eq!(arr.len(), 2);
+            assert!(matches!(arr[0], Value::Int(4)));
+            assert!(matches!(arr[1], Value::Int(5)));
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[test]
+    fn test_filter_no_matches() {
+        let result = eval(r#"filter([1, 2, 3], fn(x) { x > 10 })"#).unwrap();
+        assert!(matches!(result, Value::Array(arr) if arr.is_empty()));
+    }
+
+    #[test]
+    fn test_filter_empty() {
+        let result = eval(r#"filter([], fn(x) { true })"#).unwrap();
+        assert!(matches!(result, Value::Array(arr) if arr.is_empty()));
+    }
+
+    #[test]
+    fn test_transform() {
+        let result = eval(
+            r#"
+            transform([1, 2, 3], fn(x) { x * 2 })
+        "#,
+        )
+        .unwrap();
+        if let Value::Array(arr) = result {
+            assert_eq!(arr.len(), 3);
+            assert!(matches!(arr[0], Value::Int(2)));
+            assert!(matches!(arr[1], Value::Int(4)));
+            assert!(matches!(arr[2], Value::Int(6)));
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[test]
+    fn test_transform_empty() {
+        let result = eval(r#"transform([], fn(x) { x })"#).unwrap();
+        assert!(matches!(result, Value::Array(arr) if arr.is_empty()));
+    }
+
+    #[test]
+    fn test_find_found() {
+        let result = eval(
+            r#"
+            let r = find([1, 2, 3, 4], fn(x) { x == 3 })
+            match r {
+                Some(v) => v,
+                None => -1
+            }
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(3)));
+    }
+
+    #[test]
+    fn test_find_not_found() {
+        let result = eval(
+            r#"
+            let r = find([1, 2, 3], fn(x) { x == 99 })
+            match r {
+                Some(v) => v,
+                None => -1
+            }
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(-1)));
+    }
+
+    #[test]
+    fn test_find_empty() {
+        let result = eval(
+            r#"
+            let r = find([], fn(x) { true })
+            match r {
+                Some(v) => 1,
+                None => 0
+            }
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(0)));
+    }
+
+    #[test]
+    fn test_any_true() {
+        let result = eval(r#"any([1, 2, 3], fn(x) { x == 2 })"#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_any_false() {
+        let result = eval(r#"any([1, 2, 3], fn(x) { x > 10 })"#).unwrap();
+        assert!(matches!(result, Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_all_true() {
+        let result = eval(r#"all([2, 4, 6], fn(x) { x % 2 == 0 })"#).unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_all_false() {
+        let result = eval(r#"all([2, 3, 6], fn(x) { x % 2 == 0 })"#).unwrap();
+        assert!(matches!(result, Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_count_array() {
+        let result = eval(r#"count([1, 2, 3, 4, 5], fn(x) { x > 3 })"#).unwrap();
+        assert!(matches!(result, Value::Int(2)));
+    }
+
+    #[test]
+    fn test_reduce() {
+        let result = eval(r#"reduce([1, 2, 3, 4], 0, fn(acc, x) { acc + x })"#).unwrap();
+        assert!(matches!(result, Value::Int(10)));
+    }
+
+    #[test]
+    fn test_reduce_empty() {
+        let result = eval(r#"reduce([], 42, fn(acc, x) { acc + x })"#).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_flat_map() {
+        let result = eval(r#"flat_map([1, 2, 3], fn(x) { [x, x * 10] })"#).unwrap();
+        if let Value::Array(arr) = result {
+            assert_eq!(arr.len(), 6);
+            assert!(matches!(arr[0], Value::Int(1)));
+            assert!(matches!(arr[1], Value::Int(10)));
+            assert!(matches!(arr[2], Value::Int(2)));
+            assert!(matches!(arr[3], Value::Int(20)));
+        } else {
+            panic!("Expected array");
+        }
     }
 
     #[test]

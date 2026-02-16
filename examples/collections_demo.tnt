@@ -1,0 +1,70 @@
+// Collections & Functional Array Operations Demo
+import { merge, get_or } from "std/collections"
+
+// === sort / sort_desc ===
+let nums = [3, 1, 4, 1, 5, 9, 2, 6]
+let sorted = sort(nums)
+print("Sorted: " + str(sorted))
+
+let desc = sort_desc(nums)
+print("Descending: " + str(desc))
+
+// Sort by map key
+let people = [
+    map { "name": "Charlie", "age": 30 },
+    map { "name": "Alice", "age": 25 },
+    map { "name": "Bob", "age": 35 }
+]
+let by_name = sort(people, "name")
+print("By name: " + by_name[0]["name"] + ", " + by_name[1]["name"] + ", " + by_name[2]["name"])
+
+// Sort by function
+let by_age = sort(people, fn(p) { p["age"] })
+print("By age: " + by_age[0]["name"] + " (" + str(by_age[0]["age"]) + ")")
+
+// === merge ===
+let defaults = map { "theme": "light", "lang": "en", "page_size": 20 }
+let user_prefs = map { "theme": "dark", "lang": "de" }
+let config = merge(defaults, user_prefs)
+print("Config theme: " + config["theme"] + ", lang: " + config["lang"] + ", page_size: " + str(config["page_size"]))
+
+// === get_or ===
+let user = map { "name": "Alice" }
+let name = get_or(user, "name", "Anonymous")
+let role = get_or(user, "role", "viewer")
+print("Name: " + name + ", Role: " + role)
+
+// === filter ===
+let numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+let evens = filter(numbers, fn(x) { x % 2 == 0 })
+print("Evens: " + str(evens))
+
+// === transform ===
+let doubled = transform(numbers, fn(x) { x * 2 })
+print("Doubled: " + str(doubled))
+
+// === find ===
+let found = find(people, fn(p) { p["name"] == "Bob" })
+match found {
+    Some(p) => print("Found: " + p["name"] + ", age " + str(p["age"])),
+    None => print("Not found")
+}
+
+// === any / all ===
+let has_senior = any(people, fn(p) { p["age"] >= 35 })
+let all_adults = all(people, fn(p) { p["age"] >= 18 })
+print("Has senior: " + str(has_senior) + ", All adults: " + str(all_adults))
+
+// === count ===
+let over_25 = count(people, fn(p) { p["age"] > 25 })
+print("Over 25: " + str(over_25))
+
+// === reduce ===
+let sum = reduce(numbers, 0, fn(acc, x) { acc + x })
+print("Sum 1-10: " + str(sum))
+
+// === flat_map ===
+let nested = flat_map([1, 2, 3], fn(x) { [x, x * x] })
+print("Flat mapped: " + str(nested))
+
+print("All collections tests passed!")
