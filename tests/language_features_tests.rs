@@ -3741,3 +3741,74 @@ print(argon2_verify("wrongpassword", hash))
     assert_eq!(lines[0], "true");
     assert_eq!(lines[1], "false");
 }
+
+#[test]
+fn test_collections_contains_strings() {
+    let code = r#"
+import { contains } from "std/collections"
+let colors = ["red", "green", "blue"]
+print(contains(colors, "green"))
+print(contains(colors, "purple"))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "contains() should work with strings");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true");
+    assert_eq!(lines[1], "false");
+}
+
+#[test]
+fn test_collections_contains_ints() {
+    let code = r#"
+import { contains } from "std/collections"
+let nums = [1, 2, 3]
+print(contains(nums, 2))
+print(contains(nums, 99))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "contains() should work with ints");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true");
+    assert_eq!(lines[1], "false");
+}
+
+#[test]
+fn test_collections_contains_empty_array() {
+    let code = r#"
+import { contains } from "std/collections"
+print(contains([], "anything"))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "contains() should work with empty array");
+    assert_eq!(stdout.trim(), "false");
+}
+
+#[test]
+fn test_collections_contains_nested() {
+    let code = r#"
+import { contains } from "std/collections"
+let nested = [[1, 2], [3, 4]]
+print(contains(nested, [1, 2]))
+print(contains(nested, [5, 6]))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "contains() should work with nested arrays");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true");
+    assert_eq!(lines[1], "false");
+}
+
+#[test]
+fn test_collections_contains_bools() {
+    let code = r#"
+import { contains } from "std/collections"
+let flags = [true, false]
+print(contains(flags, true))
+print(contains(flags, false))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "contains() should work with bools");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true", "true is in [true, false]");
+    assert_eq!(lines[1], "true", "false is in [true, false]");
+}
