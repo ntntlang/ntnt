@@ -683,9 +683,9 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // @ntnt contains
+    // @ntnt has_value
     // @module std/collections
-    // @signature contains(arr: Array, value: Any) -> Bool
+    // @signature has_value(arr: Array, value: Any) -> Bool
     // Returns true if the array contains the specified value (deep equality).
     //
     // Iterates through the array and checks each element for equality with the
@@ -696,13 +696,13 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also has_key, first, last, is_empty
     // @since v0.4.0
     // @tags #pure, #deterministic
-    // @example contains(["red", "green", "blue"], "green") => true ~ "Value found"
-    // @example contains([1, 2, 3], 5) => false ~ "Value not found"
-    // @error TypeError ~ "contains() requires an array as first argument" fix: "Ensure first argument is an array"
+    // @example has_value(["red", "green", "blue"], "green") => true ~ "Value found"
+    // @example has_value([1, 2, 3], 5) => false ~ "Value not found"
+    // @error TypeError ~ "has_value() requires an array as first argument" fix: "Ensure first argument is an array"
     module.insert(
-        "contains".to_string(),
+        "has_value".to_string(),
         Value::NativeFunction {
-            name: "contains".to_string(),
+            name: "has_value".to_string(),
             arity: 2,
             func: |args| match &args[0] {
                 Value::Array(arr) => {
@@ -711,7 +711,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(Value::Bool(found))
                 }
                 _ => Err(IntentError::TypeError(
-                    "contains() requires an array as first argument".to_string(),
+                    "has_value() requires an array as first argument".to_string(),
                 )),
             },
         },

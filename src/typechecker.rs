@@ -2669,7 +2669,7 @@ impl TypeContext {
         sig!("sort", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
         sig!("sort_desc", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
         sig!("reverse", ["value" => Type::Any], Type::Any);
-        sig!("contains", ["haystack" => Type::Any, "needle" => Type::Any], Type::Bool);
+        sig!("has_value", ["haystack" => Type::Any, "needle" => Type::Any], Type::Bool);
         sig!("merge", ["map1" => Type::Any, "map2" => Type::Any], Type::Any);
         sig!("get_or", ["map" => Type::Any, "key" => Type::String, "default" => Type::Any], Type::Any);
         sig!("filter", ["array" => Type::Array(Box::new(Type::Any)), "predicate" => Type::Any], Type::Array(Box::new(Type::Any)));

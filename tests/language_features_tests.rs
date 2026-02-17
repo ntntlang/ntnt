@@ -3743,12 +3743,12 @@ print(argon2_verify("wrongpassword", hash))
 }
 
 #[test]
-fn test_collections_contains_strings() {
+fn test_collections_has_value_strings() {
     let code = r#"
-import { contains } from "std/collections"
+import { has_value } from "std/collections"
 let colors = ["red", "green", "blue"]
-print(contains(colors, "green"))
-print(contains(colors, "purple"))
+print(has_value(colors, "green"))
+print(has_value(colors, "purple"))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "contains() should work with strings");
@@ -3758,12 +3758,12 @@ print(contains(colors, "purple"))
 }
 
 #[test]
-fn test_collections_contains_ints() {
+fn test_collections_has_value_ints() {
     let code = r#"
-import { contains } from "std/collections"
+import { has_value } from "std/collections"
 let nums = [1, 2, 3]
-print(contains(nums, 2))
-print(contains(nums, 99))
+print(has_value(nums, 2))
+print(has_value(nums, 99))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "contains() should work with ints");
@@ -3773,10 +3773,10 @@ print(contains(nums, 99))
 }
 
 #[test]
-fn test_collections_contains_empty_array() {
+fn test_collections_has_value_empty_array() {
     let code = r#"
-import { contains } from "std/collections"
-print(contains([], "anything"))
+import { has_value } from "std/collections"
+print(has_value([], "anything"))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "contains() should work with empty array");
@@ -3784,12 +3784,12 @@ print(contains([], "anything"))
 }
 
 #[test]
-fn test_collections_contains_nested() {
+fn test_collections_has_value_nested() {
     let code = r#"
-import { contains } from "std/collections"
+import { has_value } from "std/collections"
 let nested = [[1, 2], [3, 4]]
-print(contains(nested, [1, 2]))
-print(contains(nested, [5, 6]))
+print(has_value(nested, [1, 2]))
+print(has_value(nested, [5, 6]))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "contains() should work with nested arrays");
@@ -3799,12 +3799,12 @@ print(contains(nested, [5, 6]))
 }
 
 #[test]
-fn test_collections_contains_bools() {
+fn test_collections_has_value_bools() {
     let code = r#"
-import { contains } from "std/collections"
+import { has_value } from "std/collections"
 let flags = [true, false]
-print(contains(flags, true))
-print(contains(flags, false))
+print(has_value(flags, true))
+print(has_value(flags, false))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "contains() should work with bools");
