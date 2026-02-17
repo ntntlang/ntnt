@@ -595,6 +595,19 @@ pub fn create_json_response(data: &Value, status: i64) -> Value {
     let json_value = crate::stdlib::json::intent_value_to_json(data);
     let json_string = json_value.to_string();
     let mut headers = HashMap::new();
+    // Default security headers
+    headers.insert(
+        "x-content-type-options".to_string(),
+        Value::String("nosniff".to_string()),
+    );
+    headers.insert(
+        "x-frame-options".to_string(),
+        Value::String("DENY".to_string()),
+    );
+    headers.insert(
+        "referrer-policy".to_string(),
+        Value::String("strict-origin-when-cross-origin".to_string()),
+    );
     headers.insert(
         "content-type".to_string(),
         Value::String("application/json".to_string()),

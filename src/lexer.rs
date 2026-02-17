@@ -19,10 +19,17 @@ pub enum StringPart {
 pub enum TemplatePart {
     /// Literal string portion
     Literal(String),
-    /// Expression to interpolate: {{expr}}
+    /// Expression to interpolate: {{expr}} — auto-escaped
     Expr(String),
-    /// Expression with filters: {{expr | filter1 | filter2(arg)}}
+    /// Raw expression: {{{expr}}} — NOT escaped
+    RawExpr(String),
+    /// Expression with filters: {{expr | filter1 | filter2(arg)}} — auto-escaped after filters
     FilteredExpr {
+        expr: String,
+        filters: Vec<TemplateFilter>,
+    },
+    /// Raw expression with filters: {{{expr | filters}}} — NOT escaped
+    RawFilteredExpr {
         expr: String,
         filters: Vec<TemplateFilter>,
     },
@@ -510,13 +517,19 @@ impl<'a> Lexer<'a> {
             } else if ch == '{' && chars.peek() == Some(&'{') {
                 chars.next(); // consume second {
 
+                // Check for triple-mustache {{{ (raw/unescaped)
+                let is_raw = chars.peek() == Some(&'{');
+                if is_raw {
+                    chars.next(); // consume third {
+                }
+
                 // Save accumulated literal
                 if !literal.is_empty() {
                     parts.push(TemplatePart::Literal(literal.clone()));
                     literal.clear();
                 }
 
-                // Read until }}
+                // Read until }}} (if raw) or }} (if normal)
                 let mut expr = String::new();
                 let mut brace_depth = 0;
 
@@ -525,14 +538,35 @@ impl<'a> Lexer<'a> {
                         brace_depth += 1;
                         expr.push(c);
                     } else if c == '}' {
-                        if chars.peek() == Some(&'}') && brace_depth == 0 {
-                            chars.next(); // consume second }
-                            break;
-                        } else if brace_depth > 0 {
-                            brace_depth -= 1;
-                            expr.push(c);
+                        if is_raw {
+                            // Need }}} to close
+                            if chars.peek() == Some(&'}') && brace_depth == 0 {
+                                // Check for third }
+                                chars.next(); // consume second }
+                                if chars.peek() == Some(&'}') {
+                                    chars.next(); // consume third }
+                                    break;
+                                } else {
+                                    // Only two } found, not three — put them in expr
+                                    expr.push('}');
+                                    expr.push('}');
+                                }
+                            } else if brace_depth > 0 {
+                                brace_depth -= 1;
+                                expr.push(c);
+                            } else {
+                                expr.push(c);
+                            }
                         } else {
-                            expr.push(c);
+                            if chars.peek() == Some(&'}') && brace_depth == 0 {
+                                chars.next(); // consume second }
+                                break;
+                            } else if brace_depth > 0 {
+                                brace_depth -= 1;
+                                expr.push(c);
+                            } else {
+                                expr.push(c);
+                            }
                         }
                     } else {
                         expr.push(c);
@@ -642,15 +676,30 @@ impl<'a> Lexer<'a> {
                     // Check for filter syntax: expr | filter1 | filter2(arg)
                     if let Some((base_expr, filters)) = self.parse_filter_chain(expr) {
                         if filters.is_empty() {
-                            parts.push(TemplatePart::Expr(base_expr));
+                            if is_raw {
+                                parts.push(TemplatePart::RawExpr(base_expr));
+                            } else {
+                                parts.push(TemplatePart::Expr(base_expr));
+                            }
                         } else {
-                            parts.push(TemplatePart::FilteredExpr {
-                                expr: base_expr,
-                                filters,
-                            });
+                            if is_raw {
+                                parts.push(TemplatePart::RawFilteredExpr {
+                                    expr: base_expr,
+                                    filters,
+                                });
+                            } else {
+                                parts.push(TemplatePart::FilteredExpr {
+                                    expr: base_expr,
+                                    filters,
+                                });
+                            }
                         }
                     } else {
-                        parts.push(TemplatePart::Expr(expr.to_string()));
+                        if is_raw {
+                            parts.push(TemplatePart::RawExpr(expr.to_string()));
+                        } else {
+                            parts.push(TemplatePart::Expr(expr.to_string()));
+                        }
                     }
                 }
             } else {

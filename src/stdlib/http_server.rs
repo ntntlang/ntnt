@@ -1025,7 +1025,25 @@ fn intent_value_to_json(value: &Value) -> serde_json::Value {
 fn create_response_value(status: i64, headers: HashMap<String, Value>, body: String) -> Value {
     let mut response_map: HashMap<String, Value> = HashMap::new();
     response_map.insert("status".to_string(), Value::Int(status));
-    response_map.insert("headers".to_string(), Value::Map(headers));
+    // Add default security headers, then merge with provided headers (which override defaults)
+    let mut final_headers: HashMap<String, Value> = HashMap::new();
+    final_headers.insert(
+        "x-content-type-options".to_string(),
+        Value::String("nosniff".to_string()),
+    );
+    final_headers.insert(
+        "x-frame-options".to_string(),
+        Value::String("DENY".to_string()),
+    );
+    final_headers.insert(
+        "referrer-policy".to_string(),
+        Value::String("strict-origin-when-cross-origin".to_string()),
+    );
+    // Merge with provided headers (overrides defaults)
+    for (key, value) in headers {
+        final_headers.insert(key, value);
+    }
+    response_map.insert("headers".to_string(), Value::Map(final_headers));
     response_map.insert("body".to_string(), Value::String(body));
     Value::Map(response_map)
 }
@@ -1095,18 +1113,20 @@ pub fn init() -> HashMap<String, Value> {
     // @tags #http, #server
     // @example html("<h1>Hello</h1>") => Response { status: 200, body: "<h1>Hello</h1>" } ~ "HTML response"
     // @example html("<h1>Not Found</h1>", 404) => Response { status: 404 } ~ "HTML with custom status"
-    // @error TypeError ~ "html() requires 1 or 2 arguments (body, optional status_code)" fix: "Pass 1 or 2 arguments"
+    // @example html("<h1>Hi</h1>", 200, map { "x-custom": "value" }) ~ "HTML with custom headers"
+    // @error TypeError ~ "html() requires 1 to 3 arguments (body, optional status_code, optional headers)" fix: "Pass 1 to 3 arguments"
     // @error TypeError ~ "html() body must be a string" fix: "Ensure the first argument is a String"
     // @error TypeError ~ "html() status code must be an integer" fix: "Pass an Int as the second argument"
+    // @error TypeError ~ "html() headers must be a map" fix: "Pass a Map as the third argument"
     module.insert(
         "html".to_string(),
         Value::NativeFunction {
             name: "html".to_string(),
             arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
             func: |args| {
-                if args.is_empty() || args.len() > 2 {
+                if args.is_empty() || args.len() > 3 {
                     return Err(IntentError::TypeError(
-                        "html() requires 1 or 2 arguments (body, optional status_code)".to_string(),
+                        "html() requires 1 to 3 arguments (body, optional status_code, optional headers)".to_string(),
                     ));
                 }
 
@@ -1143,6 +1163,28 @@ pub fn init() -> HashMap<String, Value> {
                     Value::String("no-cache, no-store, must-revalidate".to_string()),
                 );
                 headers.insert("pragma".to_string(), Value::String("no-cache".to_string()));
+                // Content Security Policy for HTML responses
+                headers.insert(
+                    "content-security-policy".to_string(),
+                    Value::String("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'".to_string()),
+                );
+
+                // Merge custom headers (3rd argument) if provided
+                if args.len() == 3 {
+                    match &args[2] {
+                        Value::Map(custom) => {
+                            for (key, value) in custom {
+                                headers.insert(key.to_lowercase(), value.clone());
+                            }
+                        }
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "html() headers must be a map".to_string(),
+                            ))
+                        }
+                    }
+                }
+
                 Ok(create_response_value(status_code, headers, body))
             },
         },
@@ -1173,13 +1215,13 @@ pub fn init() -> HashMap<String, Value> {
             name: "json".to_string(),
             arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
             func: |args| {
-                if args.is_empty() || args.len() > 2 {
+                if args.is_empty() || args.len() > 3 {
                     return Err(IntentError::TypeError(
-                        "json() requires 1 or 2 arguments (data, optional status_code)".to_string(),
+                        "json() requires 1 to 3 arguments (data, optional status_code, optional headers)".to_string(),
                     ));
                 }
 
-                let status_code = if args.len() == 2 {
+                let status_code = if args.len() >= 2 {
                     match &args[1] {
                         Value::Int(code) => *code,
                         _ => {
@@ -1204,6 +1246,23 @@ pub fn init() -> HashMap<String, Value> {
                     "cache-control".to_string(),
                     Value::String("no-cache, no-store, must-revalidate".to_string()),
                 );
+
+                // Merge custom headers (3rd argument) if provided
+                if args.len() == 3 {
+                    match &args[2] {
+                        Value::Map(custom) => {
+                            for (key, value) in custom {
+                                headers.insert(key.to_lowercase(), value.clone());
+                            }
+                        }
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "json() headers must be a map".to_string(),
+                            ))
+                        }
+                    }
+                }
+
                 Ok(create_response_value(status_code, headers, body))
             },
         },

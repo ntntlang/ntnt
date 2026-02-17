@@ -3398,10 +3398,11 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                     for part in parts {
                         match part {
                             TemplatePart::Literal(_) => {}
-                            TemplatePart::Expr(expr) => {
+                            TemplatePart::Expr(expr) | TemplatePart::RawExpr(expr) => {
                                 collect_fn(expr, names);
                             }
-                            TemplatePart::FilteredExpr { expr, filters } => {
+                            TemplatePart::FilteredExpr { expr, filters }
+                            | TemplatePart::RawFilteredExpr { expr, filters } => {
                                 collect_fn(expr, names);
                                 for filter in filters {
                                     for arg in &filter.args {

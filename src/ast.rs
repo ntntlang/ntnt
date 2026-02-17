@@ -400,10 +400,17 @@ pub enum StringPart {
 pub enum TemplatePart {
     /// Literal string segment
     Literal(String),
-    /// Expression to interpolate: {{expr}}
+    /// Expression to interpolate: {{expr}} — auto-escaped
     Expr(Expression),
-    /// Expression with filters: {{expr | filter1 | filter2(arg)}}
+    /// Raw expression: {{{expr}}} — NOT escaped
+    RawExpr(Expression),
+    /// Expression with filters: {{expr | filter1 | filter2(arg)}} — auto-escaped after filters
     FilteredExpr {
+        expr: Expression,
+        filters: Vec<TemplateFilter>,
+    },
+    /// Raw expression with filters: {{{expr | filters}}} — NOT escaped
+    RawFilteredExpr {
         expr: Expression,
         filters: Vec<TemplateFilter>,
     },

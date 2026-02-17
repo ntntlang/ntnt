@@ -2796,6 +2796,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("replace_chars", ["s" => Type::String, "chars" => Type::String, "replacement" => Type::String], Type::String);
             sig!("remove_chars", ["s" => Type::String, "chars" => Type::String], Type::String);
             sig!("keep_chars", ["s" => Type::String, "chars" => Type::String], Type::String);
+            sig!("html_escape", ["s" => Type::String], Type::String);
             sig!("contains", ["s" => Type::String, "sub" => Type::String], Type::Bool);
             sig!("starts_with", ["s" => Type::String, "prefix" => Type::String], Type::Bool);
             sig!("ends_with", ["s" => Type::String, "suffix" => Type::String], Type::Bool);
@@ -2987,6 +2988,8 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("hex_encode", ["data" => Type::Any], Type::String);
             sig!("hex_decode", ["s" => Type::String], Type::Array(Box::new(Type::Int)));
             sig!("uuid", [], Type::String);
+            sig!("csrf_generate", [], Type::Any);
+            sig!("csrf_validate", ["token" => Type::String, "hash" => Type::String], Type::Bool);
             sig!("base64_encode", ["data" => Type::String], Type::String);
             sig!("base64_decode", ["encoded" => Type::String], Type::Any);
             sig!("base64url_encode", ["data" => Type::String], Type::String);

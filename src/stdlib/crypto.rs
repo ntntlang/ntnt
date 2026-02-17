@@ -14,7 +14,15 @@ use rand::RngCore;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use uuid::Uuid;
+
+/// Per-process secret for CSRF token generation/validation
+static CSRF_SECRET: OnceLock<String> = OnceLock::new();
+
+fn get_csrf_secret() -> &'static str {
+    CSRF_SECRET.get_or_init(|| Uuid::new_v4().to_string())
+}
 
 /// Initialize the std/crypto module
 pub fn init() -> HashMap<String, Value> {
@@ -897,6 +905,80 @@ pub fn init() -> HashMap<String, Value> {
                         .verify_password(password.as_bytes(), &parsed_hash)
                         .is_ok(),
                 ))
+            },
+        },
+    );
+
+    // @ntnt csrf_generate
+    // @module std/crypto
+    // @signature csrf_generate() -> Map<String, String>
+    // Generate a CSRF token and its HMAC signature for stateless CSRF protection.
+    //
+    // Returns a map with `token` (random value) and `hash` (HMAC-SHA256 signature).
+    // Embed `token` in a hidden form field and `hash` in another hidden field or cookie.
+    // Validate on POST with `csrf_validate(token, hash)`.
+    // @returns A map with keys `"token"` and `"hash"`.
+    // @see_also csrf_validate, hmac_sha256, uuid
+    // @since v0.3.0
+    // @tags #security
+    // @example csrf_generate() ~ "Returns map { \"token\": \"...\", \"hash\": \"...\" }"
+    module.insert(
+        "csrf_generate".to_string(),
+        Value::NativeFunction {
+            name: "csrf_generate".to_string(),
+            arity: 0,
+            func: |_args| {
+                let token = Uuid::new_v4().to_string();
+                let secret = get_csrf_secret();
+
+                type HmacSha256 = Hmac<Sha256>;
+                let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes())
+                    .map_err(|e| IntentError::RuntimeError(format!("HMAC error: {}", e)))?;
+                mac.update(token.as_bytes());
+                let hash = hex::encode(mac.finalize().into_bytes());
+
+                let mut result = HashMap::new();
+                result.insert("token".to_string(), Value::String(token));
+                result.insert("hash".to_string(), Value::String(hash));
+                Ok(Value::Map(result))
+            },
+        },
+    );
+
+    // @ntnt csrf_validate
+    // @module std/crypto
+    // @signature csrf_validate(token: String, hash: String) -> Bool
+    // Validate a CSRF token against its HMAC hash.
+    //
+    // Compares the provided token's HMAC-SHA256 against the provided hash
+    // using the same per-process secret used by `csrf_generate()`.
+    // @param token The CSRF token from the form submission.
+    // @param hash The HMAC hash from the form submission.
+    // @returns `true` if the token is valid, `false` otherwise.
+    // @see_also csrf_generate, hmac_sha256
+    // @since v0.3.0
+    // @tags #security
+    // @example csrf_validate("some-token", "some-hash") => false ~ "Invalid token returns false"
+    module.insert(
+        "csrf_validate".to_string(),
+        Value::NativeFunction {
+            name: "csrf_validate".to_string(),
+            arity: 2,
+            func: |args| match (&args[0], &args[1]) {
+                (Value::String(token), Value::String(hash)) => {
+                    let secret = get_csrf_secret();
+
+                    type HmacSha256 = Hmac<Sha256>;
+                    let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes())
+                        .map_err(|e| IntentError::RuntimeError(format!("HMAC error: {}", e)))?;
+                    mac.update(token.as_bytes());
+                    let expected = hex::encode(mac.finalize().into_bytes());
+
+                    Ok(Value::Bool(expected == *hash))
+                }
+                _ => Err(IntentError::TypeError(
+                    "csrf_validate() requires two string arguments (token, hash)".to_string(),
+                )),
             },
         },
     );
