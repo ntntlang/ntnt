@@ -2897,5 +2897,23 @@ Both levels of `{{#if}}` should evaluate. Nesting should work to arbitrary depth
 
 ---
 
+### 7.23 HTML Auto-Routes in File-Based Routing
+
+**Goal:** Automatically serve `.html` files in the routes directory as GET routes, enabling zero-boilerplate page creation.
+
+**Motivation:** When building client sites with Larri Design, most pages are simple HTML templates with no server-side logic. Currently, each page requires both an `.html` template AND a `.tnt` route file (even if the route file is just 4 lines that call `template()`). HTML auto-routes eliminate the boilerplate — just drop an HTML file in `routes/` and it's a page.
+
+**Behavior:**
+- [x] `.html` files in routes directory auto-register as GET routes
+- [x] `.tnt` files take priority (if both `about.tnt` and `about.html` exist, `.tnt` wins)
+- [x] URL pattern follows same rules as `.tnt` files (`index.html` = directory root, subdirectories = URL segments)
+- [x] Response served with `Content-Type: text/html`
+- [x] Hot-reload detects changes to `.html` files
+- [ ] Layout wrapping: auto-wrap HTML content in a layout template (future enhancement)
+
+**Priority:** High — directly enables the Larri Design platform's zero-boilerplate page creation workflow.
+
+---
+
 _This roadmap is a living document updated as implementation progresses._
 _Last updated: February 2026 (v0.3.13 — Active: Phase 7 Language Ergonomics & Documentation)_

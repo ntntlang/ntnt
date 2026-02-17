@@ -2482,6 +2482,13 @@ impl Interpreter {
                 // Process .tnt file
                 let file_routes = self.process_route_file(&path, base_dir, lib_modules)?;
                 routes.extend(file_routes);
+            } else if path.extension().map(|e| e == "html").unwrap_or(false) {
+                // Process .html file only if no corresponding .tnt file exists
+                let tnt_path = path.with_extension("tnt");
+                if !tnt_path.exists() {
+                    let html_routes = self.process_html_route(&path, base_dir)?;
+                    routes.extend(html_routes);
+                }
             }
         }
 
@@ -2589,6 +2596,95 @@ impl Interpreter {
         Ok(routes)
     }
 
+    /// Process an HTML file as an auto-route (GET only)
+    /// Creates a synthetic handler that reads the HTML file and returns it with text/html content type
+    fn process_html_route(
+        &mut self,
+        file_path: &std::path::Path,
+        base_dir: &std::path::Path,
+    ) -> Result<
+        Vec<(
+            String,
+            String,
+            Value,
+            String,
+            HashMap<String, std::time::SystemTime>,
+        )>,
+    > {
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+
+        let relative_path = file_path
+            .strip_prefix(base_dir)
+            .map_err(|_| IntentError::RuntimeError("Failed to get relative path".to_string()))?;
+
+        let url_pattern = self.file_path_to_url_pattern(relative_path);
+
+        // Escape the file path for embedding in source code
+        let html_path_str = file_path
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+
+        // Create synthetic .tnt source that reads the HTML file and returns an HTTP response
+        let source_code = format!(
+            r#"fn get(req) {{
+    let content = read_file("{}")
+    return map {{
+        "status": 200,
+        "headers": map {{
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-cache, no-store, must-revalidate"
+        }},
+        "body": content
+    }}
+}}"#,
+            html_path_str
+        );
+
+        let lexer = Lexer::new(&source_code);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse()?;
+
+        // Create a fresh environment
+        let previous_env = Rc::clone(&self.environment);
+        let previous_file = self.current_file.clone();
+        let previous_imports = std::mem::take(&mut self.imported_files);
+
+        self.environment = Rc::new(RefCell::new(Environment::new()));
+        self.current_file = Some(file_path.to_string_lossy().to_string());
+
+        self.define_builtins();
+        self.define_builtin_types();
+
+        // Evaluate the synthetic module
+        self.eval(&ast)?;
+
+        let route_imports = std::mem::take(&mut self.imported_files);
+
+        let mut routes = Vec::new();
+        let env = self.environment.borrow();
+        if let Some(handler) = env.values.get("get") {
+            if matches!(handler, Value::Function { .. }) {
+                routes.push((
+                    "GET".to_string(),
+                    url_pattern,
+                    handler.clone(),
+                    file_path.to_string_lossy().to_string(),
+                    route_imports,
+                ));
+            }
+        }
+        drop(env);
+
+        self.environment = previous_env;
+        self.current_file = previous_file;
+        self.imported_files = previous_imports;
+
+        Ok(routes)
+    }
+
     /// Reload a single route handler from a file (for hot-reload)
     /// Returns: (handler, imported_files)
     fn reload_route_handler(
@@ -2602,10 +2698,28 @@ impl Interpreter {
 
         let path = std::path::Path::new(file_path);
 
-        // Read and parse the file
-        let source_code = fs::read_to_string(path).map_err(|e| {
-            IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path, e))
-        })?;
+        // For .html files, generate synthetic source instead of reading the file as .tnt
+        let source_code = if file_path.ends_with(".html") {
+            let html_path_str = file_path.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(
+                r#"fn get(req) {{
+    let content = read_file("{}")
+    return map {{
+        "status": 200,
+        "headers": map {{
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-cache, no-store, must-revalidate"
+        }},
+        "body": content
+    }}
+}}"#,
+                html_path_str
+            )
+        } else {
+            fs::read_to_string(path).map_err(|e| {
+                IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path, e))
+            })?
+        };
 
         let lexer = Lexer::new(&source_code);
         let tokens: Vec<_> = lexer.collect();
@@ -2681,8 +2795,12 @@ impl Interpreter {
             if let std::path::Component::Normal(os_str) = component {
                 let segment = os_str.to_string_lossy().to_string();
 
-                // Remove .tnt extension
-                let segment = segment.strip_suffix(".tnt").unwrap_or(&segment).to_string();
+                // Remove .tnt or .html extension
+                let segment = segment
+                    .strip_suffix(".tnt")
+                    .or_else(|| segment.strip_suffix(".html"))
+                    .unwrap_or(&segment)
+                    .to_string();
 
                 // Skip index files (they represent the directory root)
                 if segment == "index" {
@@ -9841,5 +9959,101 @@ c")
     fn test_deep_mutation_new_map_key() {
         let result = eval(r#"let mut m = map { "a": 1 }; m["b"] = 2; m["b"]"#).unwrap();
         assert!(matches!(result, Value::Int(2)));
+    }
+
+    #[test]
+    fn test_file_path_to_url_pattern_html() {
+        let interpreter = Interpreter::new();
+        assert_eq!(
+            interpreter.file_path_to_url_pattern(std::path::Path::new("about.html")),
+            "/about"
+        );
+        assert_eq!(
+            interpreter.file_path_to_url_pattern(std::path::Path::new("blog/index.html")),
+            "/blog"
+        );
+        assert_eq!(
+            interpreter.file_path_to_url_pattern(std::path::Path::new("blog/tips.html")),
+            "/blog/tips"
+        );
+        assert_eq!(
+            interpreter.file_path_to_url_pattern(std::path::Path::new("index.html")),
+            "/"
+        );
+    }
+
+    #[test]
+    fn test_html_auto_route_discover() {
+        use std::fs;
+
+        let tmp =
+            std::env::temp_dir().join(format!("ntnt_test_html_routes_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let routes_dir = tmp.join("routes");
+        fs::create_dir_all(&routes_dir).unwrap();
+
+        // HTML file with no corresponding .tnt → auto-route
+        fs::write(routes_dir.join("about.html"), "<h1>About</h1>").unwrap();
+
+        // .tnt takes priority over .html
+        fs::write(
+            routes_dir.join("contact.tnt"),
+            "import { html } from \"std/http/server\"\nfn get(req) {\n    return html(\"<h1>Contact</h1>\")\n}",
+        ).unwrap();
+        fs::write(routes_dir.join("contact.html"), "<h1>Contact HTML</h1>").unwrap();
+
+        // Subdirectory with HTML
+        let blog_dir = routes_dir.join("blog");
+        fs::create_dir_all(&blog_dir).unwrap();
+        fs::write(blog_dir.join("index.html"), "<h1>Blog</h1>").unwrap();
+        fs::write(blog_dir.join("tips.html"), "<h1>Tips</h1>").unwrap();
+
+        let mut interpreter = Interpreter::new();
+        let lib_modules = HashMap::new();
+        let routes = interpreter
+            .discover_routes(&routes_dir, &routes_dir, &lib_modules)
+            .unwrap();
+
+        let route_info: Vec<(String, String)> = routes
+            .iter()
+            .map(|(method, pattern, _, _, _)| (method.clone(), pattern.clone()))
+            .collect();
+
+        // about.html → GET /about
+        assert!(
+            route_info.contains(&("GET".to_string(), "/about".to_string())),
+            "Expected GET /about, got: {:?}",
+            route_info
+        );
+
+        // blog/index.html → GET /blog
+        assert!(
+            route_info.contains(&("GET".to_string(), "/blog".to_string())),
+            "Expected GET /blog, got: {:?}",
+            route_info
+        );
+
+        // blog/tips.html → GET /blog/tips
+        assert!(
+            route_info.contains(&("GET".to_string(), "/blog/tips".to_string())),
+            "Expected GET /blog/tips, got: {:?}",
+            route_info
+        );
+
+        // contact from .tnt should exist
+        assert!(
+            route_info.contains(&("GET".to_string(), "/contact".to_string())),
+            "Expected GET /contact from .tnt, got: {:?}",
+            route_info
+        );
+
+        // HTML auto-routes should only produce GET
+        for (method, pattern) in &route_info {
+            if pattern == "/about" || pattern == "/blog" || pattern == "/blog/tips" {
+                assert_eq!(method, "GET", "HTML auto-routes should only be GET");
+            }
+        }
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }
