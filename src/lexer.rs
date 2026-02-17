@@ -685,7 +685,9 @@ impl<'a> Lexer<'a> {
                 depth += 1;
                 pos += open_tag.len();
             } else {
-                pos += 1;
+                // Advance by the byte length of the current character
+                let ch = content[pos..].chars().next().unwrap();
+                pos += ch.len_utf8();
             }
         }
 
@@ -709,7 +711,9 @@ impl<'a> Lexer<'a> {
             } else if depth == 0 && content[pos..].starts_with(&target) {
                 return Some(pos);
             }
-            pos += 1;
+            // Advance by the byte length of the current character
+            let ch = content[pos..].chars().next().unwrap();
+            pos += ch.len_utf8();
         }
 
         None
@@ -736,12 +740,14 @@ impl<'a> Lexer<'a> {
         while pos < content.len() {
             if content[pos..].starts_with("{{#for ") || content[pos..].starts_with("{{#if ") {
                 depth += 1;
-                pos += 1;
+                let ch = content[pos..].chars().next().unwrap();
+                pos += ch.len_utf8();
             } else if content[pos..].starts_with("{{/for}}")
                 || content[pos..].starts_with("{{/if}}")
             {
                 depth -= 1;
-                pos += 1;
+                let ch = content[pos..].chars().next().unwrap();
+                pos += ch.len_utf8();
             } else if depth == 0 {
                 if content[pos..].starts_with("{{#elif ") {
                     sections.push(("elif", pos));
@@ -750,10 +756,12 @@ impl<'a> Lexer<'a> {
                     sections.push(("else", pos));
                     pos += 9;
                 } else {
-                    pos += 1;
+                    let ch = content[pos..].chars().next().unwrap();
+                    pos += ch.len_utf8();
                 }
             } else {
-                pos += 1;
+                let ch = content[pos..].chars().next().unwrap();
+                pos += ch.len_utf8();
             }
         }
 
@@ -1377,6 +1385,95 @@ impl Iterator for Lexer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unicode_template_string() {
+        // Test that multi-byte Unicode characters don't cause panics
+        let source = r#""""{{title}} 🎸 ✓ café naïve""""#;
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+
+        match &tokens[0].kind {
+            TokenKind::TemplateString(parts) => {
+                // Should have an Expr for title and literals with unicode
+                assert!(
+                    parts.len() >= 2,
+                    "Expected at least 2 parts, got {:?}",
+                    parts
+                );
+                match &parts[0] {
+                    TemplatePart::Expr(e) => assert_eq!(e, "title"),
+                    other => panic!("Expected Expr, got {:?}", other),
+                }
+                match &parts[1] {
+                    TemplatePart::Literal(lit) => {
+                        assert!(lit.contains("🎸"), "Literal should contain guitar emoji");
+                        assert!(lit.contains("✓"), "Literal should contain checkmark");
+                        assert!(lit.contains("café"), "Literal should contain café");
+                    }
+                    other => panic!("Expected Literal, got {:?}", other),
+                }
+            }
+            other => panic!("Expected TemplateString, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unicode_template_with_for_loop() {
+        // Test for loops with unicode content don't panic in find_matching_end
+        let source = r#""""{{#for item in items}}🎵 {{item}} ✓{{/for}}""""#;
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+
+        match &tokens[0].kind {
+            TokenKind::TemplateString(parts) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    TemplatePart::ForLoop {
+                        var,
+                        iterable,
+                        body,
+                        ..
+                    } => {
+                        assert_eq!(var, "item");
+                        assert_eq!(iterable, "items");
+                        // Body should contain unicode literals
+                        assert!(body.len() >= 2);
+                    }
+                    other => panic!("Expected ForLoop, got {:?}", other),
+                }
+            }
+            other => panic!("Expected TemplateString, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unicode_template_with_if_block() {
+        // Test if blocks with unicode content don't panic in find_matching_end/parse_if_block_content
+        let source = r#""""{{#if show}}🎸 résumé{{#else}}naïve 🎶{{/if}}""""#;
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+
+        match &tokens[0].kind {
+            TokenKind::TemplateString(parts) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    TemplatePart::IfBlock {
+                        condition,
+                        then_parts,
+                        else_parts,
+                        ..
+                    } => {
+                        assert_eq!(condition, "show");
+                        assert!(!then_parts.is_empty());
+                        assert!(!else_parts.is_empty());
+                    }
+                    other => panic!("Expected IfBlock, got {:?}", other),
+                }
+            }
+            other => panic!("Expected TemplateString, got {:?}", other),
+        }
+    }
 
     #[test]
     fn test_basic_tokens() {
