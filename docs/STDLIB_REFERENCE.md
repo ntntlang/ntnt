@@ -2207,6 +2207,7 @@ import { push, pop, first } from "std/collections"
 | [`get_key`](#getkey) | Gets a value from a map by key with safe access. |
 | [`get_or`](#getor) | Gets a value from a map by key, returning a default if the key is missing. |
 | [`has_key`](#haskey) | Returns true if the map contains the specified key. |
+| [`has_value`](#hasvalue) | Returns true if the array contains the specified value (deep equality). |
 | [`is_empty`](#isempty) | Returns true if the array or string is empty. |
 | [`keys`](#keys) | Returns an array of all keys in the map. |
 | [`last`](#last) | Returns the last element of an array. |
@@ -2453,6 +2454,40 @@ has_key(map { "a": 1 }, "b")  // => false  // Key does not exist
 **See also:** `get_key`, `keys`, `values`, `entries`
 
 *Since v0.1.0*
+
+---
+
+#### `has_value`
+
+```ntnt
+has_value(arr: Array, value: Any) -> Bool
+```
+
+Returns true if the array contains the specified value (deep equality).
+
+Iterates through the array and checks each element for equality with the given value. Supports all value types including nested arrays and enums.
+
+**Parameters:**
+
+- `arr` — The array to search
+- `value` — The value to look for
+
+**Returns:** true if the value is found in the array, false otherwise
+
+**Examples:**
+
+```ntnt
+has_value(["red", "green", "blue"], "green")  // => true  // Value found
+has_value([1, 2, 3], 5)  // => false  // Value not found
+```
+
+**Errors:**
+
+- **TypeError**: has_value() requires an array as first argument — *Fix: Ensure first argument is an array*
+
+**See also:** `has_key`, `first`, `last`, `is_empty`
+
+*Since v0.4.0*
 
 ---
 
@@ -2977,6 +3012,8 @@ import { sha256, sha256_bytes, hmac_sha256 } from "std/crypto"
 | [`base64_encode`](#base64encode) | Encodes a string using standard Base64 encoding (RFC 4648). |
 | [`base64url_decode`](#base64urldecode) | Decodes a URL-safe Base64-encoded string (no padding) back to plaintext. Returns Err if the input is not valid URL-safe Base64 or not valid UTF-8. |
 | [`base64url_encode`](#base64urlencode) | Encodes a string using URL-safe Base64 encoding (no padding). Uses the URL_SAFE_NO_PAD alphabet, suitable for URLs and filenames. |
+| [`csrf_generate`](#csrfgenerate) | Generate a CSRF token and its HMAC signature for stateless CSRF protection. |
+| [`csrf_validate`](#csrfvalidate) | Validate a CSRF token against its HMAC hash. |
 | [`hash_password`](#hashpassword) | Hash a password using bcrypt with configurable cost factor. |
 | [`hex_decode`](#hexdecode) | Decodes hex string to byte array. Returns Err for invalid hex. |
 | [`hex_encode`](#hexencode) | Encodes bytes or string as hex. |
@@ -3222,6 +3259,59 @@ base64url_encode("Hello, World!")  // => "SGVsbG8sIFdvcmxkIQ"  // URL-safe base6
 **See also:** `base64url_decode`, `base64_encode`
 
 *Since v0.3.13*
+
+---
+
+#### `csrf_generate`
+
+```ntnt
+csrf_generate() -> Map<String, String>
+```
+
+Generate a CSRF token and its HMAC signature for stateless CSRF protection.
+
+Returns a map with `token` (random value) and `hash` (HMAC-SHA256 signature). Embed `token` in a hidden form field and `hash` in another hidden field or cookie. Validate on POST with `csrf_validate(token, hash)`.
+
+**Returns:** A map with keys `"token"` and `"hash"`.
+
+**Examples:**
+
+```ntnt
+csrf_generate()  // Returns map { \"token\": \"...\", \"hash\": \"...\" }
+```
+
+**See also:** `csrf_validate`, `hmac_sha256`, `uuid`
+
+*Since v0.3.0*
+
+---
+
+#### `csrf_validate`
+
+```ntnt
+csrf_validate(token: String, hash: String) -> Bool
+```
+
+Validate a CSRF token against its HMAC hash.
+
+Compares the provided token's HMAC-SHA256 against the provided hash using the same per-process secret used by `csrf_generate()`.
+
+**Parameters:**
+
+- `token` — The CSRF token from the form submission.
+- `hash` — The HMAC hash from the form submission.
+
+**Returns:** `true` if the token is valid, `false` otherwise.
+
+**Examples:**
+
+```ntnt
+csrf_validate("some-token", "some-hash")  // => false  // Invalid token returns false
+```
+
+**See also:** `csrf_generate`, `hmac_sha256`
+
+*Since v0.3.0*
 
 ---
 
@@ -4740,13 +4830,15 @@ Returns a Response map with Content-Type `text/html; charset=utf-8`. Accepts an 
 ```ntnt
 html("<h1>Hello</h1>")  // => Response { status: 200, body: "<h1>Hello</h1>" }  // HTML response
 html("<h1>Not Found</h1>", 404)  // => Response { status: 404 }  // HTML with custom status
+html("<h1>Hi</h1>", 200, map { "x-custom": "value" })  // HTML with custom headers
 ```
 
 **Errors:**
 
-- **TypeError**: html() requires 1 or 2 arguments (body, optional status_code) — *Fix: Pass 1 or 2 arguments*
+- **TypeError**: html() requires 1 to 3 arguments (body, optional status_code, optional headers) — *Fix: Pass 1 to 3 arguments*
 - **TypeError**: html() body must be a string — *Fix: Ensure the first argument is a String*
 - **TypeError**: html() status code must be an integer — *Fix: Pass an Int as the second argument*
+- **TypeError**: html() headers must be a map — *Fix: Pass a Map as the third argument*
 
 **See also:** `text`, `json`, `status`, `redirect`, `response`
 
@@ -7565,6 +7657,7 @@ import { split, join, concat } from "std/string"
 | [`ends_with`](#endswith) | Checks if string ends with suffix. |
 | [`find_all_pattern`](#findallpattern) | Returns all regex matches. |
 | [`find_pattern`](#findpattern) | Returns first regex match or None. |
+| [`html_escape`](#htmlescape) | Escape HTML special characters in a string. |
 | [`index_of`](#indexof) | Returns index of first occurrence, or -1 if not found. |
 | [`is_alpha`](#isalpha) | Returns true if string contains only letters. |
 | [`is_alphanumeric`](#isalphanumeric) | Returns true if string contains only letters and digits. |
@@ -7975,6 +8068,35 @@ find_pattern("ab12cd", "\\d+")  // => Some("12")  // Find first digit sequence
 **See also:** `find_all_pattern`, `matches_pattern`, `capture_pattern`
 
 *Since v0.2.0*
+
+---
+
+#### `html_escape`
+
+```ntnt
+html_escape(s: String) -> String
+```
+
+Escape HTML special characters in a string.
+
+Replaces `&`, `<`, `>`, `"`, and `'` with their HTML entity equivalents. Use this when inserting user-provided content into HTML outside of templates (templates auto-escape by default with `{{var}}`).
+
+**Parameters:**
+
+- `s` — The string to escape.
+
+**Returns:** The escaped string safe for HTML insertion.
+
+**Examples:**
+
+```ntnt
+html_escape("<script>alert('xss')</script>")  // => "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"  // Escape HTML
+html_escape("hello & world")  // => "hello &amp; world"  // Escape ampersand
+```
+
+**See also:** `contains`, `replace_all`
+
+*Since v0.3.0*
 
 ---
 
