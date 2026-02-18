@@ -19,10 +19,17 @@ pub enum StringPart {
 pub enum TemplatePart {
     /// Literal string portion
     Literal(String),
-    /// Expression to interpolate: {{expr}}
+    /// Expression to interpolate: {{expr}} — auto-escaped
     Expr(String),
-    /// Expression with filters: {{expr | filter1 | filter2(arg)}}
+    /// Raw expression: {{{expr}}} — NOT escaped
+    RawExpr(String),
+    /// Expression with filters: {{expr | filter1 | filter2(arg)}} — auto-escaped after filters
     FilteredExpr {
+        expr: String,
+        filters: Vec<TemplateFilter>,
+    },
+    /// Raw expression with filters: {{{expr | filters}}} — NOT escaped
+    RawFilteredExpr {
         expr: String,
         filters: Vec<TemplateFilter>,
     },
@@ -383,6 +390,14 @@ impl<'a> Lexer<'a> {
     }
 
     /// Scan a raw string literal: r"..." or r#"..."# (with any number of #)
+    ///
+    /// For `r#"..."#`, the closing delimiter is `"` followed by exactly N `#` characters,
+    /// where N matches the opening. The closing `"#` must be followed by a valid code
+    /// boundary (whitespace, newline, EOF, `)`, `]`, `;`, `,`) — otherwise it's treated
+    /// as content. This prevents `href="#"` and `color: #fff` from terminating the string.
+    ///
+    /// This is a pragmatic extension over Rust's raw string behavior, designed for a
+    /// language where HTML/CSS content in raw strings is the common case.
     fn scan_raw_string(&mut self, hash_count: usize) -> Token {
         let start_line = self.line;
         let start_column = self.column;
@@ -402,7 +417,32 @@ impl<'a> Lexer<'a> {
                         closing_hashes += 1;
                     }
                     if closing_hashes == hash_count {
-                        // Found the end
+                        if hash_count > 0 {
+                            // Smart close detection: verify the delimiter is at a code boundary.
+                            // If the next char looks like continued string content (not whitespace,
+                            // EOF, or a code punctuator), treat `"#` as content, not a close.
+                            let at_code_boundary = match self.peek() {
+                                None => true, // EOF is a valid boundary
+                                Some(&ch) => {
+                                    ch.is_whitespace()
+                                        || ch == ')'
+                                        || ch == ']'
+                                        || ch == ';'
+                                        || ch == ','
+                                        || ch == '}'
+                                        || ch == '\n'
+                                }
+                            };
+                            if !at_code_boundary {
+                                // Not a real close — treat as content
+                                value.push('"');
+                                for _ in 0..closing_hashes {
+                                    value.push('#');
+                                }
+                                continue;
+                            }
+                        }
+                        // Found the real end
                         break;
                     } else {
                         // Not the end, add the quote and any hashes to the value
@@ -510,13 +550,19 @@ impl<'a> Lexer<'a> {
             } else if ch == '{' && chars.peek() == Some(&'{') {
                 chars.next(); // consume second {
 
+                // Check for triple-mustache {{{ (raw/unescaped)
+                let is_raw = chars.peek() == Some(&'{');
+                if is_raw {
+                    chars.next(); // consume third {
+                }
+
                 // Save accumulated literal
                 if !literal.is_empty() {
                     parts.push(TemplatePart::Literal(literal.clone()));
                     literal.clear();
                 }
 
-                // Read until }}
+                // Read until }}} (if raw) or }} (if normal)
                 let mut expr = String::new();
                 let mut brace_depth = 0;
 
@@ -525,14 +571,35 @@ impl<'a> Lexer<'a> {
                         brace_depth += 1;
                         expr.push(c);
                     } else if c == '}' {
-                        if chars.peek() == Some(&'}') && brace_depth == 0 {
-                            chars.next(); // consume second }
-                            break;
-                        } else if brace_depth > 0 {
-                            brace_depth -= 1;
-                            expr.push(c);
+                        if is_raw {
+                            // Need }}} to close
+                            if chars.peek() == Some(&'}') && brace_depth == 0 {
+                                // Check for third }
+                                chars.next(); // consume second }
+                                if chars.peek() == Some(&'}') {
+                                    chars.next(); // consume third }
+                                    break;
+                                } else {
+                                    // Only two } found, not three — put them in expr
+                                    expr.push('}');
+                                    expr.push('}');
+                                }
+                            } else if brace_depth > 0 {
+                                brace_depth -= 1;
+                                expr.push(c);
+                            } else {
+                                expr.push(c);
+                            }
                         } else {
-                            expr.push(c);
+                            if chars.peek() == Some(&'}') && brace_depth == 0 {
+                                chars.next(); // consume second }
+                                break;
+                            } else if brace_depth > 0 {
+                                brace_depth -= 1;
+                                expr.push(c);
+                            } else {
+                                expr.push(c);
+                            }
                         }
                     } else {
                         expr.push(c);
@@ -642,15 +709,30 @@ impl<'a> Lexer<'a> {
                     // Check for filter syntax: expr | filter1 | filter2(arg)
                     if let Some((base_expr, filters)) = self.parse_filter_chain(expr) {
                         if filters.is_empty() {
-                            parts.push(TemplatePart::Expr(base_expr));
+                            if is_raw {
+                                parts.push(TemplatePart::RawExpr(base_expr));
+                            } else {
+                                parts.push(TemplatePart::Expr(base_expr));
+                            }
                         } else {
-                            parts.push(TemplatePart::FilteredExpr {
-                                expr: base_expr,
-                                filters,
-                            });
+                            if is_raw {
+                                parts.push(TemplatePart::RawFilteredExpr {
+                                    expr: base_expr,
+                                    filters,
+                                });
+                            } else {
+                                parts.push(TemplatePart::FilteredExpr {
+                                    expr: base_expr,
+                                    filters,
+                                });
+                            }
                         }
                     } else {
-                        parts.push(TemplatePart::Expr(expr.to_string()));
+                        if is_raw {
+                            parts.push(TemplatePart::RawExpr(expr.to_string()));
+                        } else {
+                            parts.push(TemplatePart::Expr(expr.to_string()));
+                        }
                     }
                 }
             } else {
@@ -685,7 +767,9 @@ impl<'a> Lexer<'a> {
                 depth += 1;
                 pos += open_tag.len();
             } else {
-                pos += 1;
+                // Advance by the byte length of the current character
+                let ch = content[pos..].chars().next().unwrap();
+                pos += ch.len_utf8();
             }
         }
 
@@ -709,7 +793,9 @@ impl<'a> Lexer<'a> {
             } else if depth == 0 && content[pos..].starts_with(&target) {
                 return Some(pos);
             }
-            pos += 1;
+            // Advance by the byte length of the current character
+            let ch = content[pos..].chars().next().unwrap();
+            pos += ch.len_utf8();
         }
 
         None
@@ -736,12 +822,14 @@ impl<'a> Lexer<'a> {
         while pos < content.len() {
             if content[pos..].starts_with("{{#for ") || content[pos..].starts_with("{{#if ") {
                 depth += 1;
-                pos += 1;
+                let ch = content[pos..].chars().next().unwrap();
+                pos += ch.len_utf8();
             } else if content[pos..].starts_with("{{/for}}")
                 || content[pos..].starts_with("{{/if}}")
             {
                 depth -= 1;
-                pos += 1;
+                let ch = content[pos..].chars().next().unwrap();
+                pos += ch.len_utf8();
             } else if depth == 0 {
                 if content[pos..].starts_with("{{#elif ") {
                     sections.push(("elif", pos));
@@ -750,10 +838,12 @@ impl<'a> Lexer<'a> {
                     sections.push(("else", pos));
                     pos += 9;
                 } else {
-                    pos += 1;
+                    let ch = content[pos..].chars().next().unwrap();
+                    pos += ch.len_utf8();
                 }
             } else {
-                pos += 1;
+                let ch = content[pos..].chars().next().unwrap();
+                pos += ch.len_utf8();
             }
         }
 
@@ -1377,6 +1467,95 @@ impl Iterator for Lexer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_unicode_template_string() {
+        // Test that multi-byte Unicode characters don't cause panics
+        let source = r#""""{{title}} 🎸 ✓ café naïve""""#;
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+
+        match &tokens[0].kind {
+            TokenKind::TemplateString(parts) => {
+                // Should have an Expr for title and literals with unicode
+                assert!(
+                    parts.len() >= 2,
+                    "Expected at least 2 parts, got {:?}",
+                    parts
+                );
+                match &parts[0] {
+                    TemplatePart::Expr(e) => assert_eq!(e, "title"),
+                    other => panic!("Expected Expr, got {:?}", other),
+                }
+                match &parts[1] {
+                    TemplatePart::Literal(lit) => {
+                        assert!(lit.contains("🎸"), "Literal should contain guitar emoji");
+                        assert!(lit.contains("✓"), "Literal should contain checkmark");
+                        assert!(lit.contains("café"), "Literal should contain café");
+                    }
+                    other => panic!("Expected Literal, got {:?}", other),
+                }
+            }
+            other => panic!("Expected TemplateString, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unicode_template_with_for_loop() {
+        // Test for loops with unicode content don't panic in find_matching_end
+        let source = r#""""{{#for item in items}}🎵 {{item}} ✓{{/for}}""""#;
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+
+        match &tokens[0].kind {
+            TokenKind::TemplateString(parts) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    TemplatePart::ForLoop {
+                        var,
+                        iterable,
+                        body,
+                        ..
+                    } => {
+                        assert_eq!(var, "item");
+                        assert_eq!(iterable, "items");
+                        // Body should contain unicode literals
+                        assert!(body.len() >= 2);
+                    }
+                    other => panic!("Expected ForLoop, got {:?}", other),
+                }
+            }
+            other => panic!("Expected TemplateString, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unicode_template_with_if_block() {
+        // Test if blocks with unicode content don't panic in find_matching_end/parse_if_block_content
+        let source = r#""""{{#if show}}🎸 résumé{{#else}}naïve 🎶{{/if}}""""#;
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+
+        match &tokens[0].kind {
+            TokenKind::TemplateString(parts) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    TemplatePart::IfBlock {
+                        condition,
+                        then_parts,
+                        else_parts,
+                        ..
+                    } => {
+                        assert_eq!(condition, "show");
+                        assert!(!then_parts.is_empty());
+                        assert!(!else_parts.is_empty());
+                    }
+                    other => panic!("Expected IfBlock, got {:?}", other),
+                }
+            }
+            other => panic!("Expected TemplateString, got {:?}", other),
+        }
+    }
 
     #[test]
     fn test_basic_tokens() {

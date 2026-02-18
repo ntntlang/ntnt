@@ -1025,7 +1025,25 @@ fn intent_value_to_json(value: &Value) -> serde_json::Value {
 fn create_response_value(status: i64, headers: HashMap<String, Value>, body: String) -> Value {
     let mut response_map: HashMap<String, Value> = HashMap::new();
     response_map.insert("status".to_string(), Value::Int(status));
-    response_map.insert("headers".to_string(), Value::Map(headers));
+    // Add default security headers, then merge with provided headers (which override defaults)
+    let mut final_headers: HashMap<String, Value> = HashMap::new();
+    final_headers.insert(
+        "x-content-type-options".to_string(),
+        Value::String("nosniff".to_string()),
+    );
+    final_headers.insert(
+        "x-frame-options".to_string(),
+        Value::String("DENY".to_string()),
+    );
+    final_headers.insert(
+        "referrer-policy".to_string(),
+        Value::String("strict-origin-when-cross-origin".to_string()),
+    );
+    // Merge with provided headers (overrides defaults)
+    for (key, value) in headers {
+        final_headers.insert(key, value);
+    }
+    response_map.insert("headers".to_string(), Value::Map(final_headers));
     response_map.insert("body".to_string(), Value::String(body));
     Value::Map(response_map)
 }
@@ -1095,18 +1113,20 @@ pub fn init() -> HashMap<String, Value> {
     // @tags #http, #server
     // @example html("<h1>Hello</h1>") => Response { status: 200, body: "<h1>Hello</h1>" } ~ "HTML response"
     // @example html("<h1>Not Found</h1>", 404) => Response { status: 404 } ~ "HTML with custom status"
-    // @error TypeError ~ "html() requires 1 or 2 arguments (body, optional status_code)" fix: "Pass 1 or 2 arguments"
+    // @example html("<h1>Hi</h1>", 200, map { "x-custom": "value" }) ~ "HTML with custom headers"
+    // @error TypeError ~ "html() requires 1 to 3 arguments (body, optional status_code, optional headers)" fix: "Pass 1 to 3 arguments"
     // @error TypeError ~ "html() body must be a string" fix: "Ensure the first argument is a String"
     // @error TypeError ~ "html() status code must be an integer" fix: "Pass an Int as the second argument"
+    // @error TypeError ~ "html() headers must be a map" fix: "Pass a Map as the third argument"
     module.insert(
         "html".to_string(),
         Value::NativeFunction {
             name: "html".to_string(),
             arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
             func: |args| {
-                if args.is_empty() || args.len() > 2 {
+                if args.is_empty() || args.len() > 3 {
                     return Err(IntentError::TypeError(
-                        "html() requires 1 or 2 arguments (body, optional status_code)".to_string(),
+                        "html() requires 1 to 3 arguments (body, optional status_code, optional headers)".to_string(),
                     ));
                 }
 
@@ -1143,6 +1163,28 @@ pub fn init() -> HashMap<String, Value> {
                     Value::String("no-cache, no-store, must-revalidate".to_string()),
                 );
                 headers.insert("pragma".to_string(), Value::String("no-cache".to_string()));
+                // Content Security Policy for HTML responses
+                headers.insert(
+                    "content-security-policy".to_string(),
+                    Value::String("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'".to_string()),
+                );
+
+                // Merge custom headers (3rd argument) if provided
+                if args.len() == 3 {
+                    match &args[2] {
+                        Value::Map(custom) => {
+                            for (key, value) in custom {
+                                headers.insert(key.to_lowercase(), value.clone());
+                            }
+                        }
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "html() headers must be a map".to_string(),
+                            ))
+                        }
+                    }
+                }
+
                 Ok(create_response_value(status_code, headers, body))
             },
         },
@@ -1173,13 +1215,13 @@ pub fn init() -> HashMap<String, Value> {
             name: "json".to_string(),
             arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
             func: |args| {
-                if args.is_empty() || args.len() > 2 {
+                if args.is_empty() || args.len() > 3 {
                     return Err(IntentError::TypeError(
-                        "json() requires 1 or 2 arguments (data, optional status_code)".to_string(),
+                        "json() requires 1 to 3 arguments (data, optional status_code, optional headers)".to_string(),
                     ));
                 }
 
-                let status_code = if args.len() == 2 {
+                let status_code = if args.len() >= 2 {
                     match &args[1] {
                         Value::Int(code) => *code,
                         _ => {
@@ -1204,6 +1246,23 @@ pub fn init() -> HashMap<String, Value> {
                     "cache-control".to_string(),
                     Value::String("no-cache, no-store, must-revalidate".to_string()),
                 );
+
+                // Merge custom headers (3rd argument) if provided
+                if args.len() == 3 {
+                    match &args[2] {
+                        Value::Map(custom) => {
+                            for (key, value) in custom {
+                                headers.insert(key.to_lowercase(), value.clone());
+                            }
+                        }
+                        _ => {
+                            return Err(IntentError::TypeError(
+                                "json() headers must be a map".to_string(),
+                            ))
+                        }
+                    }
+                }
+
                 Ok(create_response_value(status_code, headers, body))
             },
         },
@@ -1645,17 +1704,17 @@ pub fn init() -> HashMap<String, Value> {
                         continue;
                     }
                     if let Some((key, value)) = pair.split_once('=') {
-                        // URL decode the key and value
-                        let decoded_key = urlencoding::decode(key)
+                        // URL decode the key and value (+ means space in form data)
+                        let decoded_key = urlencoding::decode(&key.replace('+', " "))
                             .unwrap_or_else(|_| key.into())
                             .to_string();
-                        let decoded_value = urlencoding::decode(value)
+                        let decoded_value = urlencoding::decode(&value.replace('+', " "))
                             .unwrap_or_else(|_| value.into())
                             .to_string();
                         form_data.insert(decoded_key, Value::String(decoded_value));
                     } else {
                         // Key with no value
-                        let decoded_key = urlencoding::decode(pair)
+                        let decoded_key = urlencoding::decode(&pair.replace('+', " "))
                             .unwrap_or_else(|_| pair.into())
                             .to_string();
                         form_data.insert(decoded_key, Value::String(String::new()));
@@ -2748,32 +2807,102 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
 /// In production mode (NTNT_ENV=production), error details are hidden unless
 /// NTNT_DETAILED_ERRORS=true is explicitly set.
 pub fn create_error_response(status: i64, message: &str) -> Value {
-    let config = get_security_config();
+    create_error_response_with_context(status, message, "", "")
+}
 
-    // In production, hide error details unless explicitly enabled
-    let body = if config.detailed_errors {
-        message.to_string()
+/// Create an error response with request context for better error pages.
+/// `method_path` is like "GET /admin/design", `handler` is the route file/function name.
+pub fn create_error_response_with_context(
+    status: i64,
+    message: &str,
+    method_path: &str,
+    handler: &str,
+) -> Value {
+    let is_production = std::env::var("NTNT_ENV")
+        .map(|v| v == "production" || v == "prod")
+        .unwrap_or(false);
+
+    let status_text = match status {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
+
+    let body = if is_production {
+        format!(
+            r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{status} {status_text}</title>
+<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:system-ui,-apple-system,sans-serif;background:#09090b;color:#fafafa;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}}.err{{text-align:center;max-width:480px}}.code{{font-size:6rem;font-weight:800;color:#c084fc;line-height:1}}.msg{{font-size:1.25rem;color:#a1a1aa;margin:1rem 0 2rem}}a{{color:#c084fc;text-decoration:none}}a:hover{{text-decoration:underline}}</style>
+</head><body><div class="err"><div class="code">{status}</div><div class="msg">{status_text}</div>
+<p style="color:#52525b;font-size:0.85rem;margin-bottom:1.5rem">Something went wrong processing your request.</p>
+<a href="/">← Back to Home</a></div></body></html>"#,
+            status = status,
+            status_text = status_text,
+        )
     } else {
-        // Generic messages for common status codes
-        match status {
-            400 => "Bad Request".to_string(),
-            401 => "Unauthorized".to_string(),
-            403 => "Forbidden".to_string(),
-            404 => "Not Found".to_string(),
-            405 => "Method Not Allowed".to_string(),
-            413 => "Payload Too Large".to_string(),
-            429 => "Too Many Requests".to_string(),
-            500 => "Internal Server Error".to_string(),
-            502 => "Bad Gateway".to_string(),
-            503 => "Service Unavailable".to_string(),
-            _ => format!("Error {}", status),
-        }
+        let escaped_error = message
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        let escaped_path = method_path
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        let handler_html = if handler.is_empty() {
+            String::new()
+        } else {
+            let escaped_handler = handler
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            format!(
+                r#"<div class="detail"><span class="label">Handler</span><span class="value">{}</span></div>"#,
+                escaped_handler
+            )
+        };
+        let route_html = if method_path.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"<div class="detail"><span class="label">Route</span><span class="value">{}</span></div>"#,
+                escaped_path
+            )
+        };
+
+        format!(
+            r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{status} {status_text} — ntnt</title>
+<style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:system-ui,-apple-system,sans-serif;background:#09090b;color:#fafafa;padding:2rem}}.container{{max-width:800px;margin:0 auto}}.header{{display:flex;align-items:baseline;gap:1rem;margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid #27272a}}.code{{font-size:3rem;font-weight:800;color:#ef4444;line-height:1}}.title{{font-size:1.5rem;color:#a1a1aa}}.error-box{{background:#1c1c1e;border:1px solid #ef4444;border-radius:12px;padding:1.25rem;margin-bottom:1.5rem;font-family:'JetBrains Mono',monospace;font-size:0.9rem;line-height:1.6;color:#fca5a5;white-space:pre-wrap;word-break:break-word}}.details{{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:1.25rem;margin-bottom:1.5rem}}.detail{{display:flex;gap:1rem;padding:0.5rem 0;border-bottom:1px solid #1e1e21}}.detail:last-child{{border-bottom:none}}.label{{color:#71717a;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;min-width:80px;flex-shrink:0}}.value{{font-family:'JetBrains Mono',monospace;font-size:0.85rem;color:#e4e4e7}}.hint{{background:#1a1a2e;border:1px solid #312e81;border-radius:12px;padding:1.25rem;color:#a5b4fc;font-size:0.85rem;line-height:1.6}}.hint strong{{color:#c084fc}}.footer{{margin-top:2rem;color:#3f3f46;font-size:0.75rem;text-align:center}}</style>
+</head><body><div class="container">
+<div class="header"><div class="code">{status}</div><div class="title">{status_text}</div></div>
+<div class="error-box">{error}</div>
+<div class="details">{route_html}{handler_html}</div>
+<div class="hint"><strong>💡 Dev Mode</strong> — This detailed error page is shown because <code>NTNT_ENV</code> is not set to <code>production</code>.<br>Set <code>NTNT_ENV=production</code> to show a clean error page to users.</div>
+<div class="footer">ntnt error handler · <a href="/" style="color:#52525b">home</a></div>
+</div></body></html>"#,
+            status = status,
+            status_text = status_text,
+            error = escaped_error,
+            route_html = route_html,
+            handler_html = handler_html,
+        )
     };
 
     let mut headers = HashMap::new();
     headers.insert(
         "content-type".to_string(),
-        Value::String("text/plain; charset=utf-8".to_string()),
+        Value::String("text/html; charset=utf-8".to_string()),
     );
     create_response_value(status, headers, body)
 }
@@ -3374,7 +3503,17 @@ mod tests {
         match response {
             Value::Map(map) => {
                 assert_eq!(get_map_int(&map, "status"), 500);
-                assert_eq!(get_map_string(&map, "body"), "Internal Server Error");
+                let body = get_map_string(&map, "body");
+                assert!(body.contains("500"), "Body should contain status code");
+                assert!(
+                    body.contains("Internal Server Error"),
+                    "Body should contain error text in dev mode"
+                );
+                let headers = get_map_map(&map, "headers");
+                assert_eq!(
+                    get_map_string(&headers, "content-type"),
+                    "text/html; charset=utf-8"
+                );
             }
             _ => panic!("Expected response to be a map"),
         }
@@ -3789,15 +3928,16 @@ mod tests {
         let resp = create_error_response(400, "Bad Request: Precondition failed");
         if let Value::Map(map) = resp {
             assert_eq!(get_map_int(&map, "status"), 400);
-            assert_eq!(
-                get_map_string(&map, "body"),
-                "Bad Request: Precondition failed"
+            let body = get_map_string(&map, "body");
+            assert!(body.contains("400"), "Body should contain status code");
+            assert!(
+                body.contains("Precondition failed"),
+                "Body should contain error detail in dev mode"
             );
-            // Content-type is in the headers sub-map
             let headers = get_map_map(&map, "headers");
             assert_eq!(
                 get_map_string(&headers, "content-type"),
-                "text/plain; charset=utf-8"
+                "text/html; charset=utf-8"
             );
         } else {
             panic!("Expected Map response");
@@ -3809,10 +3949,9 @@ mod tests {
         let resp = create_error_response(500, "Internal Error: Postcondition failed");
         if let Value::Map(map) = resp {
             assert_eq!(get_map_int(&map, "status"), 500);
-            assert_eq!(
-                get_map_string(&map, "body"),
-                "Internal Error: Postcondition failed"
-            );
+            let body = get_map_string(&map, "body");
+            assert!(body.contains("500"));
+            assert!(body.contains("Postcondition failed"));
         } else {
             panic!("Expected Map response");
         }
@@ -3823,7 +3962,9 @@ mod tests {
         let resp = create_error_response(404, "Not Found: /api/missing");
         if let Value::Map(map) = resp {
             assert_eq!(get_map_int(&map, "status"), 404);
-            assert_eq!(get_map_string(&map, "body"), "Not Found: /api/missing");
+            let body = get_map_string(&map, "body");
+            assert!(body.contains("404"));
+            assert!(body.contains("/api/missing"));
         } else {
             panic!("Expected Map response");
         }
@@ -3834,7 +3975,9 @@ mod tests {
         let resp = create_error_response(503, "Service Unavailable");
         if let Value::Map(map) = resp {
             assert_eq!(get_map_int(&map, "status"), 503);
-            assert_eq!(get_map_string(&map, "body"), "Service Unavailable");
+            let body = get_map_string(&map, "body");
+            assert!(body.contains("503"));
+            assert!(body.contains("Service Unavailable"));
         } else {
             panic!("Expected Map response");
         }

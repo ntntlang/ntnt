@@ -4643,6 +4643,11 @@ impl Interpreter {
                 TemplatePart::Literal(s) => result.push_str(s),
                 TemplatePart::Expr(expr) => {
                     let value = self.eval_expression(expr)?;
+                    let s = value.to_string();
+                    result.push_str(&html_escape_string(&s));
+                }
+                TemplatePart::RawExpr(expr) => {
+                    let value = self.eval_expression(expr)?;
                     result.push_str(&value.to_string());
                 }
                 TemplatePart::FilteredExpr { expr, filters } => {
@@ -4654,6 +4659,33 @@ impl Interpreter {
                         Err(e) => {
                             // If there's a default filter and we got an undefined variable error,
                             // use Unit as the value so the default filter can provide a fallback
+                            if has_default && matches!(&e, IntentError::UndefinedVariable { .. }) {
+                                Value::Unit
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    };
+                    let mut skip_escape = false;
+                    for filter in filters {
+                        if filter.name == "safe" || filter.name == "raw" {
+                            skip_escape = true;
+                        }
+                        value = self.apply_template_filter(&value, filter)?;
+                    }
+                    let s = value.to_string();
+                    if skip_escape {
+                        result.push_str(&s);
+                    } else {
+                        result.push_str(&html_escape_string(&s));
+                    }
+                }
+                TemplatePart::RawFilteredExpr { expr, filters } => {
+                    let has_default = filters.iter().any(|f| f.name == "default");
+
+                    let mut value = match self.eval_expression(expr) {
+                        Ok(v) => v,
+                        Err(e) => {
                             if has_default && matches!(&e, IntentError::UndefinedVariable { .. }) {
                                 Value::Unit
                             } else {
@@ -4909,8 +4941,8 @@ impl Interpreter {
                     .replace('\'', "&#x27;");
                 Ok(Value::String(escaped))
             }
-            "raw" => {
-                // raw just returns the value as-is (no auto-escaping)
+            "raw" | "safe" => {
+                // raw/safe just returns the value as-is (no auto-escaping)
                 Ok(value.clone())
             }
             "default" => match value {
@@ -5749,26 +5781,47 @@ impl Interpreter {
                             match self.call_function(handler, vec![req_value]) {
                                 Ok(response) => response,
                                 Err(e) => {
-                                    eprintln!("Handler error: {}", e);
+                                    let handler_file = self
+                                        .server_state
+                                        .get_route_source(route_index)
+                                        .and_then(|s| s.file_path.clone())
+                                        .unwrap_or_default();
+                                    eprintln!(
+                                        "[ERROR] {} {} | handler: {} | {}",
+                                        method, path, handler_file, e
+                                    );
+                                    let method_path = format!("{} {}", method, path);
                                     // Check for contract violations and return appropriate HTTP status
                                     if let IntentError::ContractViolation(msg) = &e {
                                         if msg.contains("Precondition failed") {
-                                            // Precondition = bad request from client
-                                            http_server::create_error_response(
+                                            http_server::create_error_response_with_context(
                                                 400,
                                                 &format!("Bad Request: {}", msg),
+                                                &method_path,
+                                                &handler_file,
                                             )
                                         } else if msg.contains("Postcondition failed") {
-                                            // Postcondition = server logic error
-                                            http_server::create_error_response(
+                                            http_server::create_error_response_with_context(
                                                 500,
                                                 &format!("Internal Error: {}", msg),
+                                                &method_path,
+                                                &handler_file,
                                             )
                                         } else {
-                                            http_server::create_error_response(500, &e.to_string())
+                                            http_server::create_error_response_with_context(
+                                                500,
+                                                &e.to_string(),
+                                                &method_path,
+                                                &handler_file,
+                                            )
                                         }
                                     } else {
-                                        http_server::create_error_response(500, &e.to_string())
+                                        http_server::create_error_response_with_context(
+                                            500,
+                                            &e.to_string(),
+                                            &method_path,
+                                            &handler_file,
+                                        )
                                     }
                                 }
                             }
@@ -6093,11 +6146,13 @@ impl Interpreter {
                                     _ => {}
                                 },
                                 Err(e) => {
-                                    eprintln!("Middleware error: {}", e);
+                                    eprintln!("[ERROR] {} {} | middleware | {}", method, path, e);
                                     early_response =
-                                        Some(crate::stdlib::http_server::create_error_response(
+                                        Some(crate::stdlib::http_server::create_error_response_with_context(
                                             500,
                                             &e.to_string(),
+                                            &format!("{} {}", method, path),
+                                            "middleware",
                                         ));
                                     break;
                                 }
@@ -6111,10 +6166,20 @@ impl Interpreter {
                             match self.call_function(handler, vec![current_req]) {
                                 Ok(response) => response,
                                 Err(e) => {
-                                    eprintln!("Handler error: {}", e);
-                                    crate::stdlib::http_server::create_error_response(
+                                    let handler_file = self
+                                        .server_state
+                                        .get_route_source(route_index)
+                                        .and_then(|s| s.file_path.clone())
+                                        .unwrap_or_default();
+                                    eprintln!(
+                                        "[ERROR] {} {} | handler: {} | {}",
+                                        method, path, handler_file, e
+                                    );
+                                    crate::stdlib::http_server::create_error_response_with_context(
                                         500,
                                         &e.to_string(),
+                                        &format!("{} {}", method, path),
+                                        &handler_file,
                                     )
                                 }
                             }
@@ -6775,6 +6840,15 @@ impl Interpreter {
             self.run_async_http_server(port)
         }
     }
+}
+
+/// HTML-escape a string for safe rendering in templates.
+fn html_escape_string(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
 }
 
 impl Default for Interpreter {

@@ -1923,6 +1923,43 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt html_escape
+    // @module std/string
+    // @signature html_escape(s: String) -> String
+    // Escape HTML special characters in a string.
+    //
+    // Replaces `&`, `<`, `>`, `"`, and `'` with their HTML entity equivalents.
+    // Use this when inserting user-provided content into HTML outside of templates
+    // (templates auto-escape by default with `{{var}}`).
+    // @param s The string to escape.
+    // @returns The escaped string safe for HTML insertion.
+    // @see_also contains, replace_all
+    // @since v0.3.0
+    // @tags #pure, #deterministic
+    // @example html_escape("<script>alert('xss')</script>") => "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;" ~ "Escape HTML"
+    // @example html_escape("hello & world") => "hello &amp; world" ~ "Escape ampersand"
+    module.insert(
+        "html_escape".to_string(),
+        Value::NativeFunction {
+            name: "html_escape".to_string(),
+            arity: 1,
+            func: |args| match &args[0] {
+                Value::String(s) => {
+                    let escaped = s
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;")
+                        .replace('"', "&quot;")
+                        .replace('\'', "&#x27;");
+                    Ok(Value::String(escaped))
+                }
+                _ => Err(IntentError::TypeError(
+                    "html_escape() requires a string argument".to_string(),
+                )),
+            },
+        },
+    );
+
     module
 }
 

@@ -683,5 +683,76 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt has_value
+    // @module std/collections
+    // @signature has_value(arr: Array, value: Any) -> Bool
+    // Returns true if the array contains the specified value (deep equality).
+    //
+    // Iterates through the array and checks each element for equality with the
+    // given value. Supports all value types including nested arrays and enums.
+    // @param arr The array to search
+    // @param value The value to look for
+    // @returns true if the value is found in the array, false otherwise
+    // @see_also has_key, first, last, is_empty
+    // @since v0.4.0
+    // @tags #pure, #deterministic
+    // @example has_value(["red", "green", "blue"], "green") => true ~ "Value found"
+    // @example has_value([1, 2, 3], 5) => false ~ "Value not found"
+    // @error TypeError ~ "has_value() requires an array as first argument" fix: "Ensure first argument is an array"
+    module.insert(
+        "has_value".to_string(),
+        Value::NativeFunction {
+            name: "has_value".to_string(),
+            arity: 2,
+            func: |args| match &args[0] {
+                Value::Array(arr) => {
+                    let needle = &args[1];
+                    let found = arr.iter().any(|item| values_equal(item, needle));
+                    Ok(Value::Bool(found))
+                }
+                _ => Err(IntentError::TypeError(
+                    "has_value() requires an array as first argument".to_string(),
+                )),
+            },
+        },
+    );
+
     module
+}
+
+/// Deep equality comparison for Values (used by contains)
+fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => a == b,
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Unit, Value::Unit) => true,
+        (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
+        (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+        }
+        (
+            Value::EnumValue {
+                enum_name: en1,
+                variant: v1,
+                values: vals1,
+            },
+            Value::EnumValue {
+                enum_name: en2,
+                variant: v2,
+                values: vals2,
+            },
+        ) => {
+            en1 == en2
+                && v1 == v2
+                && vals1.len() == vals2.len()
+                && vals1
+                    .iter()
+                    .zip(vals2.iter())
+                    .all(|(x, y)| values_equal(x, y))
+        }
+        _ => false,
+    }
 }

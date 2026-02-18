@@ -131,19 +131,46 @@ impl AsyncServerState {
     }
 
     /// Check if path matches a static directory
+    ///
+    /// Security: validates against path traversal attacks by rejecting ".." segments,
+    /// null bytes, and encoded traversal patterns, then verifying the canonical path
+    /// stays within the base directory.
+    /// @since v0.3.14
     pub async fn find_static_file(&self, path: &str) -> Option<(String, String)> {
         let dirs = self.static_dirs.read().await;
         for dir in dirs.iter() {
             if path.starts_with(&dir.url_prefix) {
                 let relative = path.strip_prefix(&dir.url_prefix).unwrap_or("");
                 let relative = relative.trim_start_matches('/');
-                let file_path = PathBuf::from(&dir.fs_path).join(relative);
-                if file_path.exists() && file_path.is_file() {
-                    return Some((
-                        file_path.to_string_lossy().to_string(),
-                        dir.url_prefix.clone(),
-                    ));
+
+                // Security: reject path traversal attempts
+                if relative.contains("..") || relative.contains('\0') {
+                    return None;
                 }
+
+                // Check for encoded traversal patterns
+                let decoded = urlencoding::decode(relative).unwrap_or_else(|_| relative.into());
+                if decoded.contains("..") {
+                    return None;
+                }
+
+                let file_path = PathBuf::from(&dir.fs_path).join(relative);
+
+                // Security: verify canonical path stays within base directory
+                if let Ok(canonical) = file_path.canonicalize() {
+                    if let Ok(base_canonical) = std::path::Path::new(&dir.fs_path).canonicalize() {
+                        if canonical.starts_with(&base_canonical) && canonical.is_file() {
+                            return Some((
+                                canonical.to_string_lossy().to_string(),
+                                dir.url_prefix.clone(),
+                            ));
+                        }
+                    }
+                    // File exists but outside base directory — reject
+                    return None;
+                }
+
+                // File doesn't exist — no match
             }
         }
         None
@@ -264,6 +291,8 @@ pub struct AppState {
     pub interpreter: SharedHandle,
     /// Route registry for matching requests
     pub routes: Arc<AsyncServerState>,
+    /// Whether running in production mode (controls error page detail)
+    pub is_production: bool,
 }
 
 /// Convert Axum request to BridgeRequest
@@ -414,22 +443,42 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
     let route_match = state.routes.find_route(method.as_str(), &path).await;
 
     match route_match {
-        Some((_handler_name, params)) => {
+        Some((handler_name, params)) => {
             // Convert request and send to interpreter
             match axum_to_bridge_request(req, params).await {
                 Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
                     Ok(response) => bridge_to_axum_response(response),
                     Err(e) => {
-                        eprintln!("Handler error: {}", e);
-                        bridge_to_axum_response(BridgeResponse::error(
+                        let error_msg = format!("{}", e);
+                        // Structured error log — always printed regardless of mode
+                        eprintln!(
+                            "[ERROR] {} {} | handler: {} | {}",
+                            method, path, handler_name, error_msg
+                        );
+                        error_response(
                             500,
-                            &format!("Internal Server Error: {}", e),
-                        ))
+                            &error_msg,
+                            &method.to_string(),
+                            &path,
+                            &handler_name,
+                            state.is_production,
+                        )
                     }
                 },
                 Err(e) => {
-                    eprintln!("Request parsing error: {}", e);
-                    bridge_to_axum_response(BridgeResponse::error(400, "Bad Request"))
+                    let error_msg = format!("{}", e);
+                    eprintln!(
+                        "[ERROR] {} {} | request parse | {}",
+                        method, path, error_msg
+                    );
+                    error_response(
+                        400,
+                        &error_msg,
+                        &method.to_string(),
+                        &path,
+                        "",
+                        state.is_production,
+                    )
                 }
             }
         }
@@ -442,9 +491,142 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
             }
 
             // No route or static file - return 404
-            bridge_to_axum_response(BridgeResponse::not_found())
+            error_response(
+                404,
+                "Not Found",
+                &method.to_string(),
+                &path,
+                "",
+                state.is_production,
+            )
         }
     }
+}
+
+/// Generate an error response with proper HTML page.
+/// In dev mode: shows full error details for debugging.
+/// In prod mode: shows a clean, user-friendly page without internals.
+/// Always logs structured error to stderr regardless of mode.
+fn error_response(
+    status: u16,
+    error: &str,
+    method: &str,
+    path: &str,
+    handler: &str,
+    is_production: bool,
+) -> Response<Body> {
+    let status_text = match status {
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "Error",
+    };
+
+    let body = if is_production {
+        // Production: clean page, no internals leaked
+        format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{status} {status_text}</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:system-ui,-apple-system,sans-serif;background:#09090b;color:#fafafa;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}}
+.err{{text-align:center;max-width:480px}}
+.code{{font-size:6rem;font-weight:800;color:#c084fc;line-height:1}}
+.msg{{font-size:1.25rem;color:#a1a1aa;margin:1rem 0 2rem}}
+a{{color:#c084fc;text-decoration:none}}a:hover{{text-decoration:underline}}
+</style>
+</head>
+<body><div class="err">
+<div class="code">{status}</div>
+<div class="msg">{status_text}</div>
+<p style="color:#52525b;font-size:0.85rem;margin-bottom:1.5rem">Something went wrong processing your request.</p>
+<a href="/">← Back to Home</a>
+</div></body></html>"#,
+            status = status,
+            status_text = status_text,
+        )
+    } else {
+        // Dev mode: full error details for debugging
+        let handler_info = if handler.is_empty() {
+            String::new()
+        } else {
+            format!(
+                r#"<div class="detail"><span class="label">Handler</span><span class="value">{}</span></div>"#,
+                html_escape_str(handler)
+            )
+        };
+
+        format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{status} {status_text} — ntnt</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:system-ui,-apple-system,sans-serif;background:#09090b;color:#fafafa;padding:2rem}}
+.container{{max-width:800px;margin:0 auto}}
+.header{{display:flex;align-items:baseline;gap:1rem;margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid #27272a}}
+.code{{font-size:3rem;font-weight:800;color:#ef4444;line-height:1}}
+.title{{font-size:1.5rem;color:#a1a1aa}}
+.error-box{{background:#1c1c1e;border:1px solid #ef4444;border-radius:12px;padding:1.25rem;margin-bottom:1.5rem;font-family:'JetBrains Mono',monospace;font-size:0.9rem;line-height:1.6;color:#fca5a5;white-space:pre-wrap;word-break:break-word;overflow-x:auto}}
+.details{{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:1.25rem;margin-bottom:1.5rem}}
+.detail{{display:flex;gap:1rem;padding:0.5rem 0;border-bottom:1px solid #1e1e21}}
+.detail:last-child{{border-bottom:none}}
+.label{{color:#71717a;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.05em;min-width:80px;flex-shrink:0}}
+.value{{font-family:'JetBrains Mono',monospace;font-size:0.85rem;color:#e4e4e7}}
+.hint{{background:#1a1a2e;border:1px solid #312e81;border-radius:12px;padding:1.25rem;color:#a5b4fc;font-size:0.85rem;line-height:1.6}}
+.hint strong{{color:#c084fc}}
+.footer{{margin-top:2rem;color:#3f3f46;font-size:0.75rem;text-align:center}}
+</style>
+</head>
+<body><div class="container">
+<div class="header"><div class="code">{status}</div><div class="title">{status_text}</div></div>
+<div class="error-box">{error}</div>
+<div class="details">
+<div class="detail"><span class="label">Route</span><span class="value">{method} {path}</span></div>
+{handler_info}
+</div>
+<div class="hint">
+<strong>💡 Dev Mode</strong> — This page is only shown when <code>NTNT_ENV</code> is not set to <code>production</code>.<br>
+Set <code>NTNT_ENV=production</code> to show a clean error page to users.
+</div>
+<div class="footer">ntnt error handler · <a href="/" style="color:#52525b">home</a></div>
+</div></body></html>"#,
+            status = status,
+            status_text = status_text,
+            error = html_escape_str(error),
+            method = method,
+            path = html_escape_str(path),
+            handler_info = handler_info,
+        )
+    };
+
+    let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    Response::builder()
+        .status(status_code)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("server", "ntnt-async")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("Internal Server Error"))
+                .unwrap()
+        })
+}
+
+/// Escape HTML special characters in error messages
+fn html_escape_str(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Configuration for the async server
@@ -484,9 +666,14 @@ pub async fn start_server_with_bridge(
     let route_count = routes.route_count().await;
     let static_count = routes.static_dir_count().await;
 
+    let is_production = std::env::var("NTNT_ENV")
+        .map(|v| v == "production" || v == "prod")
+        .unwrap_or(false);
+
     let state = AppState {
         interpreter: interpreter_handle,
         routes,
+        is_production,
     };
 
     // Build the router with catch-all handler
@@ -568,6 +755,19 @@ pub fn create_json_response(data: &Value, status: i64) -> Value {
     let json_value = crate::stdlib::json::intent_value_to_json(data);
     let json_string = json_value.to_string();
     let mut headers = HashMap::new();
+    // Default security headers
+    headers.insert(
+        "x-content-type-options".to_string(),
+        Value::String("nosniff".to_string()),
+    );
+    headers.insert(
+        "x-frame-options".to_string(),
+        Value::String("DENY".to_string()),
+    );
+    headers.insert(
+        "referrer-policy".to_string(),
+        Value::String("strict-origin-when-cross-origin".to_string()),
+    );
     headers.insert(
         "content-type".to_string(),
         Value::String("application/json".to_string()),

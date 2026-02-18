@@ -2033,6 +2033,28 @@ impl Parser {
                         }
                     }
                 }
+                LexerTemplatePart::RawExpr(expr_str) => {
+                    let lexer = crate::lexer::Lexer::new(expr_str);
+                    let tokens: Vec<_> = lexer.collect();
+                    let mut parser = Parser::new(tokens);
+                    match parser.expression() {
+                        Ok(expr) => ast_parts.push(TemplatePart::RawExpr(expr)),
+                        Err(e) => {
+                            let original_msg = match &e {
+                                IntentError::ParserError { message, .. } => message.clone(),
+                                _ => e.to_string(),
+                            };
+                            return Err(IntentError::ParserError {
+                                line,
+                                column: 0,
+                                message: format!(
+                                    "Error in template raw interpolation '{{{{{{{{{}}}}}}}}}': {}",
+                                    expr_str, original_msg
+                                ),
+                            });
+                        }
+                    }
+                }
                 LexerTemplatePart::FilteredExpr { expr, filters } => {
                     // Parse the base expression
                     let lexer = crate::lexer::Lexer::new(expr);
@@ -2089,6 +2111,65 @@ impl Parser {
                     }
 
                     ast_parts.push(TemplatePart::FilteredExpr {
+                        expr: base_expr,
+                        filters: ast_filters,
+                    });
+                }
+                LexerTemplatePart::RawFilteredExpr { expr, filters } => {
+                    // Parse the base expression
+                    let lexer = crate::lexer::Lexer::new(expr);
+                    let tokens: Vec<_> = lexer.collect();
+                    let mut parser = Parser::new(tokens);
+                    let base_expr = match parser.expression() {
+                        Ok(e) => e,
+                        Err(e) => {
+                            let original_msg = match &e {
+                                IntentError::ParserError { message, .. } => message.clone(),
+                                _ => e.to_string(),
+                            };
+                            return Err(IntentError::ParserError {
+                                line,
+                                column: 0,
+                                message: format!(
+                                    "Error in template raw filtered expression '{}': {}",
+                                    expr, original_msg
+                                ),
+                            });
+                        }
+                    };
+
+                    let mut ast_filters = Vec::new();
+                    for filter in filters {
+                        let mut parsed_args = Vec::new();
+                        for arg_str in &filter.args {
+                            let lexer = crate::lexer::Lexer::new(arg_str);
+                            let tokens: Vec<_> = lexer.collect();
+                            let mut parser = Parser::new(tokens);
+                            match parser.expression() {
+                                Ok(arg_expr) => parsed_args.push(arg_expr),
+                                Err(e) => {
+                                    let original_msg = match &e {
+                                        IntentError::ParserError { message, .. } => message.clone(),
+                                        _ => e.to_string(),
+                                    };
+                                    return Err(IntentError::ParserError {
+                                        line,
+                                        column: 0,
+                                        message: format!(
+                                            "Error in raw filter '{}' argument '{}': {}",
+                                            filter.name, arg_str, original_msg
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                        ast_filters.push(crate::ast::TemplateFilter {
+                            name: filter.name.clone(),
+                            args: parsed_args,
+                        });
+                    }
+
+                    ast_parts.push(TemplatePart::RawFilteredExpr {
                         expr: base_expr,
                         filters: ast_filters,
                     });
