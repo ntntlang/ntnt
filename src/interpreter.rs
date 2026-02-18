@@ -5781,7 +5781,8 @@ impl Interpreter {
                             match self.call_function(handler, vec![req_value]) {
                                 Ok(response) => response,
                                 Err(e) => {
-                                    let handler_file = self.server_state
+                                    let handler_file = self
+                                        .server_state
                                         .get_route_source(route_index)
                                         .and_then(|s| s.file_path.clone())
                                         .unwrap_or_default();
@@ -5808,12 +5809,18 @@ impl Interpreter {
                                             )
                                         } else {
                                             http_server::create_error_response_with_context(
-                                                500, &e.to_string(), &method_path, &handler_file,
+                                                500,
+                                                &e.to_string(),
+                                                &method_path,
+                                                &handler_file,
                                             )
                                         }
                                     } else {
                                         http_server::create_error_response_with_context(
-                                            500, &e.to_string(), &method_path, &handler_file,
+                                            500,
+                                            &e.to_string(),
+                                            &method_path,
+                                            &handler_file,
                                         )
                                     }
                                 }
@@ -6139,10 +6146,7 @@ impl Interpreter {
                                     _ => {}
                                 },
                                 Err(e) => {
-                                    eprintln!(
-                                        "[ERROR] {} {} | middleware | {}",
-                                        method, path, e
-                                    );
+                                    eprintln!("[ERROR] {} {} | middleware | {}", method, path, e);
                                     early_response =
                                         Some(crate::stdlib::http_server::create_error_response_with_context(
                                             500,
@@ -6162,7 +6166,8 @@ impl Interpreter {
                             match self.call_function(handler, vec![current_req]) {
                                 Ok(response) => response,
                                 Err(e) => {
-                                    let handler_file = self.server_state
+                                    let handler_file = self
+                                        .server_state
                                         .get_route_source(route_index)
                                         .and_then(|s| s.file_path.clone())
                                         .unwrap_or_default();

@@ -390,6 +390,14 @@ impl<'a> Lexer<'a> {
     }
 
     /// Scan a raw string literal: r"..." or r#"..."# (with any number of #)
+    ///
+    /// For `r#"..."#`, the closing delimiter is `"` followed by exactly N `#` characters,
+    /// where N matches the opening. The closing `"#` must be followed by a valid code
+    /// boundary (whitespace, newline, EOF, `)`, `]`, `;`, `,`) — otherwise it's treated
+    /// as content. This prevents `href="#"` and `color: #fff` from terminating the string.
+    ///
+    /// This is a pragmatic extension over Rust's raw string behavior, designed for a
+    /// language where HTML/CSS content in raw strings is the common case.
     fn scan_raw_string(&mut self, hash_count: usize) -> Token {
         let start_line = self.line;
         let start_column = self.column;
@@ -409,7 +417,32 @@ impl<'a> Lexer<'a> {
                         closing_hashes += 1;
                     }
                     if closing_hashes == hash_count {
-                        // Found the end
+                        if hash_count > 0 {
+                            // Smart close detection: verify the delimiter is at a code boundary.
+                            // If the next char looks like continued string content (not whitespace,
+                            // EOF, or a code punctuator), treat `"#` as content, not a close.
+                            let at_code_boundary = match self.peek() {
+                                None => true, // EOF is a valid boundary
+                                Some(&ch) => {
+                                    ch.is_whitespace()
+                                        || ch == ')'
+                                        || ch == ']'
+                                        || ch == ';'
+                                        || ch == ','
+                                        || ch == '}'
+                                        || ch == '\n'
+                                }
+                            };
+                            if !at_code_boundary {
+                                // Not a real close — treat as content
+                                value.push('"');
+                                for _ in 0..closing_hashes {
+                                    value.push('#');
+                                }
+                                continue;
+                            }
+                        }
+                        // Found the real end
                         break;
                     } else {
                         // Not the end, add the quote and any hashes to the value

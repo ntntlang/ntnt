@@ -455,7 +455,14 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
                             "[ERROR] {} {} | handler: {} | {}",
                             method, path, handler_name, error_msg
                         );
-                        error_response(500, &error_msg, &method.to_string(), &path, &handler_name, state.is_production)
+                        error_response(
+                            500,
+                            &error_msg,
+                            &method.to_string(),
+                            &path,
+                            &handler_name,
+                            state.is_production,
+                        )
                     }
                 },
                 Err(e) => {
@@ -464,7 +471,14 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
                         "[ERROR] {} {} | request parse | {}",
                         method, path, error_msg
                     );
-                    error_response(400, &error_msg, &method.to_string(), &path, "", state.is_production)
+                    error_response(
+                        400,
+                        &error_msg,
+                        &method.to_string(),
+                        &path,
+                        "",
+                        state.is_production,
+                    )
                 }
             }
         }
@@ -477,7 +491,14 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
             }
 
             // No route or static file - return 404
-            error_response(404, "Not Found", &method.to_string(), &path, "", state.is_production)
+            error_response(
+                404,
+                "Not Found",
+                &method.to_string(),
+                &path,
+                "",
+                state.is_production,
+            )
         }
     }
 }

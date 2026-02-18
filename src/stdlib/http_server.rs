@@ -2845,21 +2845,38 @@ pub fn create_error_response_with_context(
 </head><body><div class="err"><div class="code">{status}</div><div class="msg">{status_text}</div>
 <p style="color:#52525b;font-size:0.85rem;margin-bottom:1.5rem">Something went wrong processing your request.</p>
 <a href="/">← Back to Home</a></div></body></html>"#,
-            status = status, status_text = status_text,
+            status = status,
+            status_text = status_text,
         )
     } else {
-        let escaped_error = message.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
-        let escaped_path = method_path.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let escaped_error = message
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+        let escaped_path = method_path
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
         let handler_html = if handler.is_empty() {
             String::new()
         } else {
-            let escaped_handler = handler.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-            format!(r#"<div class="detail"><span class="label">Handler</span><span class="value">{}</span></div>"#, escaped_handler)
+            let escaped_handler = handler
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            format!(
+                r#"<div class="detail"><span class="label">Handler</span><span class="value">{}</span></div>"#,
+                escaped_handler
+            )
         };
         let route_html = if method_path.is_empty() {
             String::new()
         } else {
-            format!(r#"<div class="detail"><span class="label">Route</span><span class="value">{}</span></div>"#, escaped_path)
+            format!(
+                r#"<div class="detail"><span class="label">Route</span><span class="value">{}</span></div>"#,
+                escaped_path
+            )
         };
 
         format!(
@@ -2874,8 +2891,11 @@ pub fn create_error_response_with_context(
 <div class="hint"><strong>💡 Dev Mode</strong> — This detailed error page is shown because <code>NTNT_ENV</code> is not set to <code>production</code>.<br>Set <code>NTNT_ENV=production</code> to show a clean error page to users.</div>
 <div class="footer">ntnt error handler · <a href="/" style="color:#52525b">home</a></div>
 </div></body></html>"#,
-            status = status, status_text = status_text, error = escaped_error,
-            route_html = route_html, handler_html = handler_html,
+            status = status,
+            status_text = status_text,
+            error = escaped_error,
+            route_html = route_html,
+            handler_html = handler_html,
         )
     };
 
@@ -3485,9 +3505,15 @@ mod tests {
                 assert_eq!(get_map_int(&map, "status"), 500);
                 let body = get_map_string(&map, "body");
                 assert!(body.contains("500"), "Body should contain status code");
-                assert!(body.contains("Internal Server Error"), "Body should contain error text in dev mode");
+                assert!(
+                    body.contains("Internal Server Error"),
+                    "Body should contain error text in dev mode"
+                );
                 let headers = get_map_map(&map, "headers");
-                assert_eq!(get_map_string(&headers, "content-type"), "text/html; charset=utf-8");
+                assert_eq!(
+                    get_map_string(&headers, "content-type"),
+                    "text/html; charset=utf-8"
+                );
             }
             _ => panic!("Expected response to be a map"),
         }
@@ -3904,9 +3930,15 @@ mod tests {
             assert_eq!(get_map_int(&map, "status"), 400);
             let body = get_map_string(&map, "body");
             assert!(body.contains("400"), "Body should contain status code");
-            assert!(body.contains("Precondition failed"), "Body should contain error detail in dev mode");
+            assert!(
+                body.contains("Precondition failed"),
+                "Body should contain error detail in dev mode"
+            );
             let headers = get_map_map(&map, "headers");
-            assert_eq!(get_map_string(&headers, "content-type"), "text/html; charset=utf-8");
+            assert_eq!(
+                get_map_string(&headers, "content-type"),
+                "text/html; charset=utf-8"
+            );
         } else {
             panic!("Expected Map response");
         }

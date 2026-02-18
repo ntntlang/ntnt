@@ -3812,3 +3812,101 @@ print(has_value(flags, false))
     assert_eq!(lines[0], "true", "true is in [true, false]");
     assert_eq!(lines[1], "true", "false is in [true, false]");
 }
+
+// =============================================================================
+// Raw string smart delimiter tests (fixes #1.3, #1.4)
+// =============================================================================
+
+#[test]
+fn test_raw_string_with_href_hash() {
+    // Issue 1.4: r#"..."# should handle href="#" without premature termination
+    let code = r##"
+let html = r#"<a href="#">Link</a>"#
+print(html)
+"##;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "r#\"...\"# with href=\"#\" should parse. stderr: {}",
+        stderr
+    );
+    assert_eq!(stdout.trim(), r##"<a href="#">Link</a>"##);
+}
+
+#[test]
+fn test_raw_string_with_hex_colors() {
+    // Issue 1.4: r#"..."# should handle CSS hex colors
+    let code = r##"
+let css = r#"<div style="color: #fff; background: #333">"#
+print(css)
+"##;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "r#\"...\"# with hex colors should parse. stderr: {}",
+        stderr
+    );
+    assert!(stdout.contains("#fff"));
+    assert!(stdout.contains("#333"));
+}
+
+#[test]
+fn test_raw_string_with_svg_paths() {
+    // Issue 1.3: SVG paths with decimals in raw strings
+    let code = r##"
+let svg = r#"<path d="M10.5 20.3 L30.7 40.1"/>"#
+print(svg)
+"##;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "SVG paths in raw strings should work. stderr: {}",
+        stderr
+    );
+    assert!(stdout.contains("M10.5 20.3"));
+}
+
+#[test]
+fn test_raw_string_multi_hash_still_works() {
+    // r##"..."## should continue to work
+    let code = r###"
+let s = r##"contains "# and more"##
+print(s)
+"###;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "r##\"...\"## should work. stderr: {}", stderr);
+    assert!(stdout.contains(r##"contains "# and more"##));
+}
+
+#[test]
+fn test_raw_string_multiple_hash_sequences() {
+    // Multiple "# sequences in one r#"..."# string
+    let code = r##"
+let html = r#"<a href="#">one</a> <a href="#">two</a>"#
+print(html)
+"##;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "Multiple href=\"#\" in one raw string. stderr: {}",
+        stderr
+    );
+    assert!(stdout.contains(r##"<a href="#">one</a>"##));
+    assert!(stdout.contains(r##"<a href="#">two</a>"##));
+}
+
+#[test]
+fn test_raw_string_normal_close_still_works() {
+    // Regular r#"..."# without problematic content
+    let code = r##"
+let s = r#"just a normal string"#
+print(s)
+"##;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "Normal raw string should still close properly. stderr: {}",
+        stderr
+    );
+    assert_eq!(stdout.trim(), "just a normal string");
+}
