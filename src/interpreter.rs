@@ -5781,26 +5781,40 @@ impl Interpreter {
                             match self.call_function(handler, vec![req_value]) {
                                 Ok(response) => response,
                                 Err(e) => {
-                                    eprintln!("Handler error: {}", e);
+                                    let handler_file = self.server_state
+                                        .get_route_source(route_index)
+                                        .and_then(|s| s.file_path.clone())
+                                        .unwrap_or_default();
+                                    eprintln!(
+                                        "[ERROR] {} {} | handler: {} | {}",
+                                        method, path, handler_file, e
+                                    );
+                                    let method_path = format!("{} {}", method, path);
                                     // Check for contract violations and return appropriate HTTP status
                                     if let IntentError::ContractViolation(msg) = &e {
                                         if msg.contains("Precondition failed") {
-                                            // Precondition = bad request from client
-                                            http_server::create_error_response(
+                                            http_server::create_error_response_with_context(
                                                 400,
                                                 &format!("Bad Request: {}", msg),
+                                                &method_path,
+                                                &handler_file,
                                             )
                                         } else if msg.contains("Postcondition failed") {
-                                            // Postcondition = server logic error
-                                            http_server::create_error_response(
+                                            http_server::create_error_response_with_context(
                                                 500,
                                                 &format!("Internal Error: {}", msg),
+                                                &method_path,
+                                                &handler_file,
                                             )
                                         } else {
-                                            http_server::create_error_response(500, &e.to_string())
+                                            http_server::create_error_response_with_context(
+                                                500, &e.to_string(), &method_path, &handler_file,
+                                            )
                                         }
                                     } else {
-                                        http_server::create_error_response(500, &e.to_string())
+                                        http_server::create_error_response_with_context(
+                                            500, &e.to_string(), &method_path, &handler_file,
+                                        )
                                     }
                                 }
                             }
@@ -6125,11 +6139,16 @@ impl Interpreter {
                                     _ => {}
                                 },
                                 Err(e) => {
-                                    eprintln!("Middleware error: {}", e);
+                                    eprintln!(
+                                        "[ERROR] {} {} | middleware | {}",
+                                        method, path, e
+                                    );
                                     early_response =
-                                        Some(crate::stdlib::http_server::create_error_response(
+                                        Some(crate::stdlib::http_server::create_error_response_with_context(
                                             500,
                                             &e.to_string(),
+                                            &format!("{} {}", method, path),
+                                            "middleware",
                                         ));
                                     break;
                                 }
@@ -6143,10 +6162,19 @@ impl Interpreter {
                             match self.call_function(handler, vec![current_req]) {
                                 Ok(response) => response,
                                 Err(e) => {
-                                    eprintln!("Handler error: {}", e);
-                                    crate::stdlib::http_server::create_error_response(
+                                    let handler_file = self.server_state
+                                        .get_route_source(route_index)
+                                        .and_then(|s| s.file_path.clone())
+                                        .unwrap_or_default();
+                                    eprintln!(
+                                        "[ERROR] {} {} | handler: {} | {}",
+                                        method, path, handler_file, e
+                                    );
+                                    crate::stdlib::http_server::create_error_response_with_context(
                                         500,
                                         &e.to_string(),
+                                        &format!("{} {}", method, path),
+                                        &handler_file,
                                     )
                                 }
                             }
