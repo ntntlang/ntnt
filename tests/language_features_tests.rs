@@ -774,11 +774,11 @@ print(missing)
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "get_key() with 2 args should work");
     assert!(
-        stdout.contains("Some(Alice)") || stdout.contains("Option::Some(Alice)"),
-        "Should return Some for existing key"
+        stdout.contains("Alice"),
+        "Should display Alice for existing key"
     );
     assert!(
-        stdout.contains("None") || stdout.contains("Option::None"),
+        stdout.contains("none"),
         "Should return None for missing key"
     );
 }
@@ -1742,7 +1742,7 @@ print(result)
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "first without default should work");
-    assert!(stdout.contains("Some(10)"), "Should return Some(10)");
+    assert!(stdout.contains("10"), "Should display 10");
 }
 
 #[test]
@@ -1785,7 +1785,7 @@ print(result)
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "last without default should work");
-    assert!(stdout.contains("Some(30)"), "Should return Some(30)");
+    assert!(stdout.contains("30"), "Should display 30");
 }
 
 #[test]
@@ -2381,8 +2381,8 @@ print(result)
         stdout
     );
     assert!(
-        stdout.contains("Err"),
-        "Should print the Err value: stdout={}",
+        stdout.contains("error:"),
+        "Should print the error value: stdout={}",
         stdout
     );
 }
@@ -2411,8 +2411,8 @@ print(result)
         stdout
     );
     assert!(
-        stdout.contains("None"),
-        "Should print None: stdout={}",
+        stdout.contains("none"),
+        "Should print none: stdout={}",
         stdout
     );
 }
@@ -2908,18 +2908,18 @@ print(get_index(arr, 5))
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
     assert!(
-        stdout.contains("Some(10)"),
-        "Index 0 should be Some(10): stdout={}",
+        stdout.contains("10"),
+        "Index 0 should be 10: stdout={}",
         stdout
     );
     assert!(
-        stdout.contains("Some(30)"),
-        "Index 2 should be Some(30): stdout={}",
+        stdout.contains("30"),
+        "Index 2 should be 30: stdout={}",
         stdout
     );
     assert!(
-        stdout.contains("None"),
-        "Index 5 should be None: stdout={}",
+        stdout.contains("none"),
+        "Index 5 should be none: stdout={}",
         stdout
     );
 }
@@ -2957,19 +2957,11 @@ print(get_index(arr, -5))
 "#;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(stdout.contains("30"), "-1 should be 30: stdout={}", stdout);
+    assert!(stdout.contains("10"), "-3 should be 10: stdout={}", stdout);
     assert!(
-        stdout.contains("Some(30)"),
-        "-1 should be Some(30): stdout={}",
-        stdout
-    );
-    assert!(
-        stdout.contains("Some(10)"),
-        "-3 should be Some(10): stdout={}",
-        stdout
-    );
-    assert!(
-        stdout.contains("None"),
-        "-5 should be None: stdout={}",
+        stdout.contains("none"),
+        "-5 should be none: stdout={}",
         stdout
     );
 }
@@ -3014,8 +3006,8 @@ print(get_index([], 0, "default"))
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
     assert!(
-        stdout.contains("None"),
-        "Empty array index 0 should be None: stdout={}",
+        stdout.contains("none"),
+        "Empty array index 0 should be none: stdout={}",
         stdout
     );
     assert!(
@@ -3246,7 +3238,7 @@ print(last_valid)
     );
     assert!(
         stdout.contains("28"),
-        "Last valid temp should be Some(28.0): stdout={}",
+        "Last valid temp should be 28.0: stdout={}",
         stdout
     );
 }

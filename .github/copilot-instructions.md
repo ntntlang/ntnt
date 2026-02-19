@@ -1,6 +1,6 @@
 <!-- NTNT coding guide sections are sourced from docs/AI_AGENT_GUIDE.md -->
 <!-- To update NTNT coding instructions, edit AI_AGENT_GUIDE.md and copy to all agent files -->
-<!-- Last synced: 2026-02-17 -->
+<!-- Last synced: 2026-02-19 -->
 
 # NTNT Language - GitHub Copilot Instructions
 
@@ -1343,4 +1343,68 @@ When using `ntnt lint` or `NTNT_STRICT=1`, you may see type diagnostics:
 6. **Use Intent Studio**: Live feedback as you code
 
 See [STDLIB_REFERENCE.md](../docs/STDLIB_REFERENCE.md) for complete function documentation.
+
+## Common Patterns & Gotchas
+
+### Imports Are Per-File
+
+Each `.tnt` file has its own import scope. Importing `std/collections` in `lib/data.tnt` does NOT make `get_or` or `merge` available in `routes/admin/index.tnt`. Every file that uses a stdlib function must import it explicitly.
+
+```ntnt
+// routes/admin/index.tnt
+import { get_or } from "std/collections"  // Required even if lib/data.tnt also imports it
+```
+
+This is intentional — explicit imports make dependencies clear and prevent hidden coupling between files.
+
+### Shared State Across Files (Singleton Pattern)
+
+Module-level variables are not accessible across files. Use the function-wrapper pattern for shared resources like database connections:
+
+```ntnt
+// lib/data.tnt — shared database module
+import { connect } from "std/db/sqlite"
+
+let db = connect("app.db")
+
+fn get_db() {
+    return db
+}
+
+fn get_users() {
+    return query(get_db(), "SELECT * FROM users", [])
+}
+```
+
+```ntnt
+// routes/api/users.tnt — uses the shared module
+import { get_users } from "../lib/data"
+
+fn handle(req) {
+    let users = get_users()
+    return json(users)
+}
+```
+
+The `get_db()` function pattern is the idiomatic way to share state. The module's `let db = connect(...)` runs once when first imported, and the function provides access to it from any file.
+
+### Option/Result Display in Strings
+
+Option and Result values auto-unwrap when displayed (in `print()`, string interpolation, templates):
+
+- `Option::Some("hello")` displays as `hello`
+- `Option::None` displays as `none`
+- `Result::Ok(42)` displays as `42`
+- `Result::Err("failed")` displays as `error: failed`
+
+For explicit handling, use `unwrap()`, `unwrap_or()`, `otherwise`, or `match`:
+
+```ntnt
+import { get_env } from "std/env"
+
+// These all work for handling missing values explicitly:
+let home = unwrap_or(get_env("HOME"), "/default")
+let home = get_env("HOME") otherwise return error("HOME not set")
+let home = unwrap(get_env("HOME"))  // Panics if None
+```
 <!-- END NTNT CODING GUIDE -->

@@ -191,11 +191,41 @@ impl fmt::Display for Value {
                 variant,
                 values,
             } => {
-                if values.is_empty() {
-                    write!(f, "{}::{}", enum_name, variant)
-                } else {
-                    let vals: Vec<String> = values.iter().map(|v| v.to_string()).collect();
-                    write!(f, "{}::{}({})", enum_name, variant, vals.join(", "))
+                // Auto-unwrap Option and Result in display contexts for better DX:
+                // Option::Some(x) → x, Option::None → "none"
+                // Result::Ok(x) → x, Result::Err(e) → "error: e"
+                // All other enums display as EnumName::Variant(values)
+                match (enum_name.as_str(), variant.as_str()) {
+                    ("Option", "Some") => {
+                        if let Some(inner) = values.first() {
+                            write!(f, "{}", inner)
+                        } else {
+                            write!(f, "none")
+                        }
+                    }
+                    ("Option", "None") => write!(f, "none"),
+                    ("Result", "Ok") => {
+                        if let Some(inner) = values.first() {
+                            write!(f, "{}", inner)
+                        } else {
+                            write!(f, "")
+                        }
+                    }
+                    ("Result", "Err") => {
+                        if let Some(inner) = values.first() {
+                            write!(f, "error: {}", inner)
+                        } else {
+                            write!(f, "error")
+                        }
+                    }
+                    _ => {
+                        if values.is_empty() {
+                            write!(f, "{}::{}", enum_name, variant)
+                        } else {
+                            let vals: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+                            write!(f, "{}::{}({})", enum_name, variant, vals.join(", "))
+                        }
+                    }
                 }
             }
             Value::EnumConstructor {
@@ -3921,14 +3951,13 @@ impl Interpreter {
                     }
                     // Map access with string key: map["key"]
                     // Returns None for missing keys instead of throwing (DX improvement)
-                    (Value::Map(map), Value::String(key)) => Ok(map
-                        .get(&key)
-                        .cloned()
-                        .unwrap_or_else(|| Value::EnumValue {
+                    (Value::Map(map), Value::String(key)) => {
+                        Ok(map.get(&key).cloned().unwrap_or_else(|| Value::EnumValue {
                             enum_name: "Option".to_string(),
                             variant: "None".to_string(),
                             values: vec![],
-                        })),
+                        }))
+                    }
                     // Struct access with string key: struct["field"]
                     (Value::Struct { fields, .. }, Value::String(key)) => {
                         fields.get(&key).cloned().ok_or_else(|| {
@@ -3947,13 +3976,13 @@ impl Interpreter {
                     Value::Struct { fields, .. } => fields.get(field).cloned().ok_or_else(|| {
                         IntentError::RuntimeError(format!("Unknown field: {}", field))
                     }),
-                    Value::Map(map) => Ok(map.get(field).cloned().unwrap_or_else(|| {
-                        Value::EnumValue {
+                    Value::Map(map) => {
+                        Ok(map.get(field).cloned().unwrap_or_else(|| Value::EnumValue {
                             enum_name: "Option".to_string(),
                             variant: "None".to_string(),
                             values: vec![],
-                        }
-                    })),
+                        }))
+                    }
                     _ => Err(IntentError::TypeError(
                         "Field access on non-struct value".to_string(),
                     )),
