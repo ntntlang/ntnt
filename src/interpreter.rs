@@ -3920,10 +3920,15 @@ impl Interpreter {
                             })
                     }
                     // Map access with string key: map["key"]
-                    (Value::Map(map), Value::String(key)) => map
+                    // Returns None for missing keys instead of throwing (DX improvement)
+                    (Value::Map(map), Value::String(key)) => Ok(map
                         .get(&key)
                         .cloned()
-                        .ok_or_else(|| IntentError::RuntimeError(format!("Unknown key: {}", key))),
+                        .unwrap_or_else(|| Value::EnumValue {
+                            enum_name: "Option".to_string(),
+                            variant: "None".to_string(),
+                            values: vec![],
+                        })),
                     // Struct access with string key: struct["field"]
                     (Value::Struct { fields, .. }, Value::String(key)) => {
                         fields.get(&key).cloned().ok_or_else(|| {
@@ -3942,9 +3947,13 @@ impl Interpreter {
                     Value::Struct { fields, .. } => fields.get(field).cloned().ok_or_else(|| {
                         IntentError::RuntimeError(format!("Unknown field: {}", field))
                     }),
-                    Value::Map(map) => map.get(field).cloned().ok_or_else(|| {
-                        IntentError::RuntimeError(format!("Unknown key: {}", field))
-                    }),
+                    Value::Map(map) => Ok(map.get(field).cloned().unwrap_or_else(|| {
+                        Value::EnumValue {
+                            enum_name: "Option".to_string(),
+                            variant: "None".to_string(),
+                            values: vec![],
+                        }
+                    })),
                     _ => Err(IntentError::TypeError(
                         "Field access on non-struct value".to_string(),
                     )),
@@ -8777,6 +8786,70 @@ c")
         )
         .unwrap();
         assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_map_bracket_missing_key_returns_none() {
+        // Missing key should return None instead of throwing
+        let result = eval(
+            r#"
+            let m = map { "a": 1 }
+            is_none(m["b"])
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_map_bracket_missing_key_with_get_or() {
+        // get_or should work as fallback for missing keys
+        let result = eval(
+            r#"
+            import { get_or } from "std/collections"
+            let m = map { "a": 1 }
+            get_or(m, "missing", "default")
+        "#,
+        )
+        .unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "default");
+        } else {
+            panic!("Expected String 'default'");
+        }
+    }
+
+    #[test]
+    fn test_map_bracket_missing_key_in_loop() {
+        // Iterating over maps with potentially missing keys should not crash
+        // Use get_or as the safe pattern since missing returns None (Option type)
+        // but present returns the raw value (not wrapped in Some)
+        let result = eval(
+            r#"
+            import { get_or } from "std/collections"
+            let items = [map { "name": "a", "score": 1 }, map { "name": "b" }]
+            let mut total = 0
+            for item in items {
+                total = total + get_or(item, "score", 0)
+            }
+            total
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(1)));
+    }
+
+    #[test]
+    fn test_map_dot_access_missing_key_returns_none() {
+        // Dot access on map should also return None for missing keys
+        let result = eval(
+            r#"
+            let m = map { "a": 1 }
+            is_none(m.b)
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]
