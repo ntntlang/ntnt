@@ -269,7 +269,13 @@ impl SQLiteKV {
                 .collect(),
         };
 
-        Ok(keys)
+        // Filter out internal type metadata keys (consistent with Redis impl)
+        let filtered: Vec<String> = keys
+            .into_iter()
+            .filter(|k| !k.ends_with(":__type"))
+            .collect();
+
+        Ok(filtered)
     }
 
     /// Set TTL on existing key
