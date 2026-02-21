@@ -1381,6 +1381,40 @@ fn handle(req) {
 
 The `get_db()` function pattern is the idiomatic way to share state. The module's `let db = connect(...)` runs once when first imported, and the function provides access to it from any file.
 
+### Map Access Returns None for Missing Keys
+
+Map bracket and dot access return `None` for missing keys instead of throwing errors:
+
+```ntnt
+let m = map { "name": "Alice" }
+m["name"]     // "Alice" (raw value, NOT wrapped in Some)
+m["missing"]  // None
+m.name        // "Alice"
+m.missing     // None
+```
+
+**Important:** Use `has_key()` to check key existence, NOT `is_some()`:
+
+```ntnt
+import { has_key } from "std/collections"
+
+// ✅ Correct — use has_key()
+if has_key(m, "name") { ... }
+
+// ❌ Wrong — is_some() won't work because existing keys return raw values, not Some
+if is_some(m["name"]) { ... }
+```
+
+**Edge case:** If a map contains an explicit `None` value, bracket access returns `None` for both the key-with-None-value and missing keys. Use `has_key()` to distinguish:
+
+```ntnt
+let m = map { "a": None }
+m["a"]            // None (key exists, value is None)
+m["b"]            // None (key doesn't exist)
+has_key(m, "a")   // true
+has_key(m, "b")   // false
+```
+
 ### Option/Result Display in Strings
 
 Option and Result values auto-unwrap when displayed (in `print()`, string interpolation, templates):

@@ -4011,11 +4011,10 @@ let r = json(map { "a": 1 }, 200, map {}, "extra")
     let (_, stderr, exit_code) = run_ntnt_code(code);
     assert_ne!(exit_code, 0);
     assert!(
-        stderr.contains("1 or 2")
-            || stderr.contains("1-3")
+        stderr.contains("1-3")
             || stderr.contains("arity")
             || stderr.contains("argument"),
-        "Should report arity error, got: {}",
+        "Should report arity error for json() (accepts 1-3 args), got: {}",
         stderr
     );
 }
