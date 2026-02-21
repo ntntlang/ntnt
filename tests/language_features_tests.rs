@@ -3902,3 +3902,101 @@ print(s)
     );
     assert_eq!(stdout.trim(), "just a normal string");
 }
+
+// === DX Improvements: len(map), typeof(), defensive get_or/has_key ===
+
+#[test]
+fn test_len_on_map() {
+    let code = r#"
+let m = map { "a": 1, "b": 2, "c": 3 }
+print(len(m))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "3");
+}
+
+#[test]
+fn test_len_on_empty_map() {
+    let code = r#"
+let m = map {}
+print(len(m))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "0");
+}
+
+#[test]
+fn test_typeof_builtin() {
+    let code = r#"
+print(typeof(42))
+print(typeof("hello"))
+print(typeof(true))
+print(typeof([1, 2]))
+print(typeof(map { "a": 1 }))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "Int");
+    assert_eq!(lines[1], "String");
+    assert_eq!(lines[2], "Bool");
+    assert_eq!(lines[3], "Array");
+    assert_eq!(lines[4], "Map");
+}
+
+#[test]
+fn test_typeof_for_defensive_checks() {
+    // Real-world pattern: check type before accessing map fields
+    let code = r#"
+let x = "not a map"
+if typeof(x) == "Map" {
+    print("is map")
+} else {
+    print("not map")
+}
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "not map");
+}
+
+#[test]
+fn test_get_or_on_non_map_returns_default() {
+    let code = r#"
+import { get_or } from "std/collections"
+let x = "not a map"
+let result = get_or(x, "key", "default_value")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "default_value");
+}
+
+#[test]
+fn test_has_key_on_non_map_returns_false() {
+    let code = r#"
+import { has_key } from "std/collections"
+let x = 42
+print(has_key(x, "key"))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "false");
+}
+
+#[test]
+fn test_get_or_on_int_returns_default() {
+    // get_or on a non-map value should return the default, not crash
+    let code = r#"
+import { get_or } from "std/collections"
+let x = 123
+let result = get_or(x, "key", "fallback")
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "fallback");
+}
