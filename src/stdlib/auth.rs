@@ -3793,6 +3793,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth".to_string(),
             arity: 0,  // Variadic: 2-4 args (provider, client_id, client_secret?, options?)
+            max_arity: 0,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4023,6 +4024,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_discover".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -4158,6 +4160,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_m2m".to_string(),
             arity: 4,
+            max_arity: 4,
             func: |args| {
                 if args.len() < 4 {
                     return Err(IntentError::TypeError(
@@ -4248,6 +4251,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_refresh".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4326,6 +4330,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_validate".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -4413,6 +4418,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_introspect".to_string(),
             arity: 4,
+            max_arity: 4,
             func: |args| {
                 if args.len() < 4 {
                     return Err(IntentError::TypeError(
@@ -4463,6 +4469,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "get_user".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4499,6 +4506,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "get_session".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4537,6 +4545,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "session_data".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4579,6 +4588,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "set_session".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -4627,6 +4637,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "sessions_cleanup".to_string(),
             arity: 0,
+            max_arity: 0,
             func: |_args| {
                 let mut total = 0u64;
 
@@ -4676,6 +4687,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "user_sessions".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4739,6 +4751,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "logout_all".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -4793,6 +4806,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "csrf_token".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4830,6 +4844,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "csrf_field".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4873,6 +4888,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "verify_csrf".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -4925,6 +4941,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "jwt_sign".to_string(),
             arity: 2, // 2-3 args (options is optional)
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -5022,6 +5039,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "jwt_verify".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -5086,6 +5104,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "jwt_decode".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -5192,6 +5211,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "logout_user".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -5243,6 +5263,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "enable_auth".to_string(),
             arity: 0, // Variadic: 1-2 args (providers, options?)
+            max_arity: 0,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -5460,6 +5481,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_start".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -5547,6 +5569,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_exchange".to_string(),
             arity: 4,
+            max_arity: 4,
             func: |args| {
                 if args.len() < 4 {
                     return Err(IntentError::TypeError(
@@ -5669,6 +5692,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "create_session_from_oauth".to_string(),
             arity: 0, // Variadic: 2-3 args
+            max_arity: 0,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -5775,6 +5799,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "auth_start".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| handle_auth_start(&args),
         },
     );
@@ -5797,6 +5822,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "auth_callback".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| handle_auth_callback(&args),
         },
     );
@@ -5819,6 +5845,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "auth_logout".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| handle_auth_logout(&args),
         },
     );
@@ -5841,6 +5868,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "auth_me".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let user = get_user_from_request(&args[0]);
                 match user {
@@ -5879,6 +5907,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "hash_password".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -5921,6 +5950,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "verify_password".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -5972,6 +6002,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "totp_secret".to_string(),
             arity: 0,
+            max_arity: 0,
             func: |_args| Ok(Value::String(generate_totp_secret())),
         },
     );
@@ -5996,6 +6027,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "totp_uri".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| {
                 if args.len() < 3 {
                     return Err(IntentError::TypeError(
@@ -6057,6 +6089,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "verify_totp".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(

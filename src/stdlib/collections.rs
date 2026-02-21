@@ -29,6 +29,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "push".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match &args[0] {
                 Value::Array(arr) => {
                     let mut new_arr = arr.clone();
@@ -62,6 +63,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "pop".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 match &args[0] {
                     Value::Array(arr) => {
@@ -112,6 +114,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "first".to_string(),
             arity: 0, // Variable: 1 or 2 args
+            max_arity: 0,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::TypeError(
@@ -172,6 +175,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "last".to_string(),
             arity: 0, // Variable: 1 or 2 args
+            max_arity: 0,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::TypeError(
@@ -228,6 +232,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "reverse".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Array(arr) => {
                     let mut new_arr = arr.clone();
@@ -263,6 +268,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "slice".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::Array(arr), Value::Int(start), Value::Int(end)) => {
                     let start = *start as usize;
@@ -299,6 +305,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "concat".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Array(arr1), Value::Array(arr2)) => {
                     let mut new_arr = arr1.clone();
@@ -332,6 +339,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_empty".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Array(arr) => Ok(Value::Bool(arr.is_empty())),
                 Value::String(s) => Ok(Value::Bool(s.is_empty())),
@@ -362,6 +370,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "keys".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Map(map) => {
                     let keys: Vec<Value> = map.keys().map(|k| Value::String(k.clone())).collect();
@@ -391,6 +400,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "values".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Map(map) => {
                     let values: Vec<Value> = map.values().cloned().collect();
@@ -422,6 +432,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "entries".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Map(map) => {
                     let entries: Vec<Value> = map
@@ -455,6 +466,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "has_key".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Map(map), Value::String(key)) => Ok(Value::Bool(map.contains_key(key))),
                 // Non-map first argument: return false instead of crashing.
@@ -488,6 +500,7 @@ pub fn init() -> HashMap<String, Value> {
     module.insert("get_key".to_string(), Value::NativeFunction {
         name: "get_key".to_string(),
         arity: 0, // Variable arity: 2 or 3 arguments
+        max_arity: 0,
         func: |args| {
             if args.len() < 2 || args.len() > 3 {
                 return Err(IntentError::TypeError(
@@ -556,6 +569,7 @@ pub fn init() -> HashMap<String, Value> {
     module.insert("get_index".to_string(), Value::NativeFunction {
         name: "get_index".to_string(),
         arity: 0, // Variable arity: 2 or 3 arguments
+        max_arity: 0,
         func: |args| {
             if args.len() < 2 || args.len() > 3 {
                 return Err(IntentError::TypeError(
@@ -638,6 +652,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "merge".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Map(map1), Value::Map(map2)) => {
                     let mut result = map1.clone();
@@ -675,6 +690,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "get_or".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Map(map), Value::String(key)) => {
                     Ok(map.get(key).cloned().unwrap_or_else(|| args[2].clone()))
@@ -711,6 +727,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "has_value".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match &args[0] {
                 Value::Array(arr) => {
                     let needle = &args[1];

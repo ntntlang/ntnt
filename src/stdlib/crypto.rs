@@ -42,6 +42,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "sha256".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 match &args[0] {
                     Value::String(data) => {
@@ -89,6 +90,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "sha256_bytes".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(data) => {
                     let mut hasher = Sha256::new();
@@ -119,6 +121,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "hmac_sha256".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(key), Value::String(data)) => {
                     type HmacSha256 = Hmac<Sha256>;
@@ -146,6 +149,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "uuid".to_string(),
             arity: 0,
+            max_arity: 1,
             func: |_args| Ok(Value::String(Uuid::new_v4().to_string())),
         },
     );
@@ -163,6 +167,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "random_bytes".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Int(n) => {
                     if *n < 0 || *n > 1024 * 1024 {
@@ -195,6 +200,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "random_hex".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Int(n) => {
                     if *n < 0 || *n > 1024 * 1024 {
@@ -227,6 +233,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "hex_encode".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Array(bytes) => {
                     let byte_vec: std::result::Result<Vec<u8>, _> = bytes
@@ -263,6 +270,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "hex_decode".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(hex_str) => match hex::decode(hex_str) {
                     Ok(bytes) => {
@@ -311,6 +319,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "hash_password".to_string(),
             arity: 0, // Variadic: 1-2 args
+            max_arity: 0,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::TypeError(
@@ -391,6 +400,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "verify_password".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let password = match &args[0] {
                     Value::String(s) => s.clone(),
@@ -447,6 +457,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_valid_hash".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let hash = match &args[0] {
                     Value::String(s) => s.clone(),
@@ -482,6 +493,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "base64_encode".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(data) => Ok(Value::String(STANDARD.encode(data.as_bytes()))),
                 _ => Err(IntentError::TypeError(
@@ -508,6 +520,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "base64_decode".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(encoded) => match STANDARD.decode(encoded.as_bytes()) {
                     Ok(bytes) => match String::from_utf8(bytes) {
@@ -551,6 +564,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "base64url_encode".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(data) => Ok(Value::String(URL_SAFE_NO_PAD.encode(data.as_bytes()))),
                 _ => Err(IntentError::TypeError(
@@ -577,6 +591,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "base64url_decode".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(encoded) => match URL_SAFE_NO_PAD.decode(encoded.as_bytes()) {
                     Ok(bytes) => match String::from_utf8(bytes) {
@@ -619,6 +634,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "aes_generate_key".to_string(),
             arity: 0,
+            max_arity: 0,
             func: |_args| {
                 let mut key = [0u8; 32];
                 rand::thread_rng().fill_bytes(&mut key);
@@ -645,6 +661,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "aes_encrypt".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let plaintext = match &args[0] {
                     Value::String(s) => s.clone(),
@@ -727,6 +744,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "aes_decrypt".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let ciphertext_b64 = match &args[0] {
                     Value::String(s) => s.clone(),
@@ -831,6 +849,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "argon2_hash".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let password = match &args[0] {
                     Value::String(s) => s.clone(),
@@ -876,6 +895,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "argon2_verify".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let password = match &args[0] {
                     Value::String(s) => s.clone(),
@@ -927,6 +947,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "csrf_generate".to_string(),
             arity: 0,
+            max_arity: 0,
             func: |_args| {
                 let token = Uuid::new_v4().to_string();
                 let secret = get_csrf_secret();
@@ -964,6 +985,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "csrf_validate".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(token), Value::String(hash)) => {
                     let secret = get_csrf_secret();
