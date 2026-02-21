@@ -433,23 +433,24 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // @ntnt join
+    // @ntnt join_url
     // @module std/url
-    // @signature join(base: String, path: String) -> String
+    // @signature join_url(base: String, path: String) -> String
     // Joins a base URL with a path, handling trailing/leading slashes.
     //
     // Trims trailing slashes from the base and leading slashes from the path,
-    // then joins them with a single slash.
+    // then joins them with a single slash. Renamed from join() to avoid
+    // ambiguity with join() in std/string and std/path.
     // @param base The base URL
     // @param path The path to append
     // @returns Combined URL string
-    // @since v0.2.0
+    // @since v0.4.0
     // @tags #pure, #deterministic
-    // @example join("https://example.com", "/api/v1") => "https://example.com/api/v1" ~ "Join base and path"
+    // @example join_url("https://example.com", "/api/v1") => "https://example.com/api/v1" ~ "Join base and path"
     module.insert(
-        "join".to_string(),
+        "join_url".to_string(),
         Value::NativeFunction {
-            name: "join".to_string(),
+            name: "join_url".to_string(),
             arity: 2,
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
@@ -459,8 +460,40 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(Value::String(format!("{}/{}", base, path)))
                 }
                 _ => Err(IntentError::TypeError(
-                    "join() requires two strings".to_string(),
+                    "join_url() requires two strings".to_string(),
                 )),
+            },
+        },
+    );
+
+    // @ntnt join
+    // @module std/url
+    // @signature join(base: String, path: String) -> String
+    // Deprecated: use join_url() instead. Alias for backward compatibility.
+    // @param base The base URL
+    // @param path The path to append
+    // @returns Combined URL string
+    // @since v0.2.0
+    // @tags #pure, #deterministic, #deprecated
+    // @example join("https://example.com", "/api") => "https://example.com/api" ~ "Deprecated: use join_url()"
+    module.insert(
+        "join".to_string(),
+        Value::NativeFunction {
+            name: "join".to_string(),
+            arity: 2,
+            max_arity: 2,
+            func: |args| {
+                eprintln!("[DEPRECATED] join() in std/url is deprecated. Use join_url() instead.");
+                match (&args[0], &args[1]) {
+                    (Value::String(base), Value::String(path)) => {
+                        let base = base.trim_end_matches('/');
+                        let path = path.trim_start_matches('/');
+                        Ok(Value::String(format!("{}/{}", base, path)))
+                    }
+                    _ => Err(IntentError::TypeError(
+                        "join() requires two strings".to_string(),
+                    )),
+                }
             },
         },
     );

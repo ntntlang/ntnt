@@ -5909,6 +5909,7 @@ pub fn init() -> HashMap<String, Value> {
             arity: 1,
             max_arity: 1,
             func: |args| {
+                eprintln!("[DEPRECATED] hash_password() in std/auth is deprecated. Use hash_password() from std/crypto instead.");
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
                         "[auth] hash_password() requires a password".to_string(),
@@ -5952,6 +5953,7 @@ pub fn init() -> HashMap<String, Value> {
             arity: 2,
             max_arity: 2,
             func: |args| {
+                eprintln!("[DEPRECATED] verify_password() in std/auth is deprecated. Use verify_password() from std/crypto instead.");
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
                         "[auth] verify_password() requires (password, hash)".to_string(),

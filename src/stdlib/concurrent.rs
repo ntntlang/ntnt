@@ -510,11 +510,16 @@ pub fn init() -> HashMap<String, Value> {
             name: "sleep_ms".to_string(),
             arity: 1,
             max_arity: 1,
-            func: |args| match &args[0] {
-                Value::Int(ms) => concurrent_sleep_ms(*ms),
-                _ => Err(IntentError::TypeError(
-                    "sleep_ms requires an integer".to_string(),
-                )),
+            func: |args| {
+                eprintln!(
+                    "[DEPRECATED] sleep_ms() is deprecated. Use sleep() from std/time instead."
+                );
+                match &args[0] {
+                    Value::Int(ms) => concurrent_sleep_ms(*ms),
+                    _ => Err(IntentError::TypeError(
+                        "sleep_ms requires an integer".to_string(),
+                    )),
+                }
             },
         },
     );

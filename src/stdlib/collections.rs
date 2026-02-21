@@ -499,9 +499,10 @@ pub fn init() -> HashMap<String, Value> {
     // @error TypeError ~ "get_key() requires a map and string key" fix: "Pass a map and a string key"
     module.insert("get_key".to_string(), Value::NativeFunction {
         name: "get_key".to_string(),
-        arity: 0, // Variable arity: 2 or 3 arguments
-        max_arity: 0,
+        arity: 2,
+        max_arity: 3,
         func: |args| {
+            eprintln!("[DEPRECATED] get_key() is deprecated. Use get_or() instead.");
             if args.len() < 2 || args.len() > 3 {
                 return Err(IntentError::TypeError(
                     "get_key() requires 2 or 3 arguments: get_key(map, key) or get_key(map, key, default)".to_string()
@@ -706,26 +707,28 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // @ntnt has_value
+    // @ntnt includes
     // @module std/collections
-    // @signature has_value(arr: Array, value: Any) -> Bool
-    // Returns true if the array contains the specified value (deep equality).
+    // @signature includes(arr: Array, value: Any) -> Bool
+    // Returns true if the array includes the specified value (deep equality).
     //
     // Iterates through the array and checks each element for equality with the
     // given value. Supports all value types including nested arrays and enums.
+    // Named `includes` (not `contains`) to avoid collision with contains() in
+    // std/string which checks substrings. Follows JavaScript convention.
     // @param arr The array to search
     // @param value The value to look for
     // @returns true if the value is found in the array, false otherwise
     // @see_also has_key, first, last, is_empty
     // @since v0.4.0
     // @tags #pure, #deterministic
-    // @example has_value(["red", "green", "blue"], "green") => true ~ "Value found"
-    // @example has_value([1, 2, 3], 5) => false ~ "Value not found"
-    // @error TypeError ~ "has_value() requires an array as first argument" fix: "Ensure first argument is an array"
+    // @example includes(["red", "green", "blue"], "green") => true ~ "Value found"
+    // @example includes([1, 2, 3], 5) => false ~ "Value not found"
+    // @error TypeError ~ "includes() requires an array as first argument" fix: "Ensure first argument is an array"
     module.insert(
-        "has_value".to_string(),
+        "includes".to_string(),
         Value::NativeFunction {
-            name: "has_value".to_string(),
+            name: "includes".to_string(),
             arity: 2,
             max_arity: 2,
             func: |args| match &args[0] {
@@ -735,8 +738,41 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(Value::Bool(found))
                 }
                 _ => Err(IntentError::TypeError(
-                    "has_value() requires an array as first argument".to_string(),
+                    "includes() requires an array as first argument".to_string(),
                 )),
+            },
+        },
+    );
+
+    // @ntnt has_value
+    // @module std/collections
+    // @signature has_value(arr: Array, value: Any) -> Bool
+    // Deprecated: use includes() instead. Alias for backward compatibility.
+    // @param arr The array to search
+    // @param value The value to look for
+    // @returns true if the value is found in the array, false otherwise
+    // @see_also includes
+    // @since v0.4.0
+    // @tags #pure, #deterministic, #deprecated
+    // @example has_value([1, 2, 3], 2) => true ~ "Deprecated alias for includes"
+    module.insert(
+        "has_value".to_string(),
+        Value::NativeFunction {
+            name: "has_value".to_string(),
+            arity: 2,
+            max_arity: 2,
+            func: |args| {
+                eprintln!("[DEPRECATED] has_value() is deprecated. Use includes() from std/collections instead.");
+                match &args[0] {
+                    Value::Array(arr) => {
+                        let needle = &args[1];
+                        let found = arr.iter().any(|item| values_equal(item, needle));
+                        Ok(Value::Bool(found))
+                    }
+                    _ => Err(IntentError::TypeError(
+                        "has_value() requires an array as first argument".to_string(),
+                    )),
+                }
             },
         },
     );
