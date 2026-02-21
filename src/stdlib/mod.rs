@@ -20,6 +20,7 @@ pub mod http_server_async;
 pub mod json;
 pub mod kv;
 pub mod log;
+pub mod markdown;
 pub mod math;
 pub mod path;
 pub mod postgres;
@@ -57,6 +58,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/csv".to_string(), csv::init());
     modules.insert("std/template".to_string(), template::init());
     modules.insert("std/log".to_string(), log::init());
+    modules.insert("std/markdown".to_string(), markdown::init());
     modules.insert("std/kv".to_string(), kv::create_kv_module());
     modules.insert("std/auth".to_string(), auth::init());
 
