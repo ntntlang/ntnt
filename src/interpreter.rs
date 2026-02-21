@@ -945,7 +945,8 @@ impl Interpreter {
         // @since v0.1.0
         // @example len("hello") => 5 ~ "String length"
         // @example len([1, 2, 3]) => 3 ~ "Array length"
-        // @error TypeError ~ "len() requires a string or array" fix: "Pass a String, Array, or Map"
+        // @example len(map { "a": 1, "b": 2 }) => 2 ~ "Map length"
+        // @error TypeError ~ "len() requires a string, array, or map" fix: "Pass a String, Array, or Map"
         self.environment.borrow_mut().define(
             "len".to_string(),
             Value::NativeFunction {
@@ -954,8 +955,9 @@ impl Interpreter {
                 func: |args| match &args[0] {
                     Value::String(s) => Ok(Value::Int(s.len() as i64)),
                     Value::Array(a) => Ok(Value::Int(a.len() as i64)),
+                    Value::Map(m) => Ok(Value::Int(m.len() as i64)),
                     _ => Err(IntentError::TypeError(
-                        "len() requires a string or array".to_string(),
+                        "len() requires a string, array, or map".to_string(),
                     )),
                 },
             },
@@ -978,6 +980,33 @@ impl Interpreter {
             "type".to_string(),
             Value::NativeFunction {
                 name: "type".to_string(),
+                arity: 1,
+                func: |args| Ok(Value::String(args[0].type_name().to_string())),
+            },
+        );
+
+        // @ntnt typeof
+        // @signature typeof(x: Any) -> String
+        // Returns the type name of a value as a string.
+        //
+        // Alias for `type()` that works in all contexts, including where `type`
+        // is parsed as a keyword (type alias declarations). Use `typeof()` for
+        // runtime type checking in conditional logic.
+        // Returns one of: "Int", "Float", "String", "Bool", "Array",
+        // "Map", "Function", "Unit", or the enum/struct name.
+        // @param x The value to inspect
+        // @returns The type name as a string
+        // @tags #pure, #deterministic
+        // @see_also type, str, len
+        // @since v0.4.0
+        // @example typeof(42) => "Int" ~ "Integer type"
+        // @example typeof("hello") => "String" ~ "String type"
+        // @example typeof(map { "a": 1 }) => "Map" ~ "Map type"
+        // @example typeof([1, 2]) => "Array" ~ "Array type"
+        self.environment.borrow_mut().define(
+            "typeof".to_string(),
+            Value::NativeFunction {
+                name: "typeof".to_string(),
                 arity: 1,
                 func: |args| Ok(Value::String(args[0].type_name().to_string())),
             },

@@ -457,6 +457,9 @@ pub fn init() -> HashMap<String, Value> {
             arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Map(map), Value::String(key)) => Ok(Value::Bool(map.contains_key(key))),
+                // Non-map first argument: return false instead of crashing.
+                // has_key() is a check — it should be safe to call on anything.
+                (_, Value::String(_)) => Ok(Value::Bool(false)),
                 _ => Err(IntentError::TypeError(
                     "has_key() requires a map and string key".to_string(),
                 )),
@@ -676,8 +679,12 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::Map(map), Value::String(key)) => {
                     Ok(map.get(key).cloned().unwrap_or_else(|| args[2].clone()))
                 }
+                // Non-map first argument: return the default value instead of crashing.
+                // get_or() exists for defensive access — it should never be the thing that crashes.
+                (_, Value::String(_)) => Ok(args[2].clone()),
                 _ => Err(IntentError::TypeError(
-                    "get_or() requires a map, string key, and default value".to_string(),
+                    "get_or() requires a map (or any value), string key, and default value"
+                        .to_string(),
                 )),
             },
         },

@@ -2655,6 +2655,7 @@ impl TypeContext {
         sig!("float", ["value" => Type::Any], Type::Float);
         sig!("bool", ["value" => Type::Any], Type::Bool);
         sig!("type", ["value" => Type::Any], Type::String);
+        sig!("typeof", ["value" => Type::Any], Type::String);
 
         // Collections
         sig!("len", ["value" => Type::Any], Type::Int);
