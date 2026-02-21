@@ -348,6 +348,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "connect".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => sqlite_connect(path),
                 _ => Err(IntentError::TypeError(
@@ -384,6 +385,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "query".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => sqlite_query(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => sqlite_query(conn, sql, &[]),
@@ -420,6 +422,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "query_one".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => {
                     sqlite_query_one(conn, sql, params)
@@ -458,6 +461,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "execute".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => {
                     sqlite_execute(conn, sql, params)
@@ -491,6 +495,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "close".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| sqlite_close(&args[0]),
         },
     );
@@ -518,6 +523,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "begin".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| sqlite_begin(&args[0]),
         },
     );
@@ -544,6 +550,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "commit".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| sqlite_commit(&args[0]),
         },
     );
@@ -571,6 +578,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "rollback".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| sqlite_rollback(&args[0]),
         },
     );

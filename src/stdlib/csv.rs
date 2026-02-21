@@ -28,6 +28,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "parse_csv".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let csv_string = match &args[0] {
                     Value::String(s) => s.clone(),
@@ -78,6 +79,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "csv_parse_with_headers".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let csv_string = match &args[0] {
                     Value::String(s) => s.clone(),
@@ -142,6 +144,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "csv_stringify".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let rows = match &args[0] {
                     Value::Array(arr) => arr,
@@ -211,6 +214,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "csv_stringify_with_headers".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let rows = match &args[0] {
                     Value::Array(arr) => arr,

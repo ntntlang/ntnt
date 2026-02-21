@@ -34,6 +34,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "split".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(delim)) => {
                     let parts: Vec<Value> = s
@@ -66,6 +67,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "join".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Array(arr), Value::String(delim)) => {
                     let parts: Vec<String> = arr
@@ -102,6 +104,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "concat".to_string(),
             arity: 2, // At least 2, but handles variadic via array
+            max_arity: 2,
             func: |args| match &args[0] {
                 Value::Array(arr) => {
                     let result: String = arr
@@ -142,6 +145,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "repeat".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::Int(n)) => {
                     if *n < 0 {
@@ -171,6 +175,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "reverse".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
                 _ => Err(IntentError::TypeError(
@@ -196,6 +201,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "trim".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim().to_string())),
                 _ => Err(IntentError::TypeError(
@@ -219,6 +225,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "trim_left".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
                 _ => Err(IntentError::TypeError(
@@ -242,6 +249,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "trim_right".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
                 _ => Err(IntentError::TypeError(
@@ -266,6 +274,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "trim_chars".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(chars)) => {
                     let char_set: Vec<char> = chars.chars().collect();
@@ -296,6 +305,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "to_upper".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.to_uppercase())),
                 _ => Err(IntentError::TypeError(
@@ -319,6 +329,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "to_lower".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.to_lowercase())),
                 _ => Err(IntentError::TypeError(
@@ -342,6 +353,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "capitalize".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let mut chars = s.chars();
@@ -377,6 +389,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "title".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let result = s
@@ -416,6 +429,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "to_snake_case".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let mut result = String::new();
@@ -454,6 +468,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "to_camel_case".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let mut result = String::new();
@@ -491,6 +506,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "to_pascal_case".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let mut result = String::new();
@@ -528,6 +544,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "to_kebab_case".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let mut result = String::new();
@@ -569,6 +586,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "slugify".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 match &args[0] {
                     Value::String(s) => {
@@ -629,6 +647,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "contains".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(substr)) => {
                     Ok(Value::Bool(s.contains(substr.as_str())))
@@ -655,6 +674,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "starts_with".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(prefix)) => {
                     Ok(Value::Bool(s.starts_with(prefix.as_str())))
@@ -681,6 +701,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "ends_with".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(suffix)) => {
                     Ok(Value::Bool(s.ends_with(suffix.as_str())))
@@ -707,6 +728,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "index_of".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(substr)) => match s.find(substr.as_str()) {
                     Some(idx) => Ok(Value::Int(idx as i64)),
@@ -734,6 +756,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "last_index_of".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(substr)) => match s.rfind(substr.as_str()) {
                     Some(idx) => Ok(Value::Int(idx as i64)),
@@ -761,6 +784,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "count".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(substr)) => {
                     Ok(Value::Int(s.matches(substr.as_str()).count() as i64))
@@ -788,6 +812,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "replace".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(from), Value::String(to)) => {
                     Ok(Value::String(s.replace(from.as_str(), to.as_str())))
@@ -815,6 +840,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "replace_first".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(from), Value::String(to)) => {
                     Ok(Value::String(s.replacen(from.as_str(), to.as_str(), 1)))
@@ -842,6 +868,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "replace_chars".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(chars), Value::String(replacement)) => {
                     let char_set: std::collections::HashSet<char> = chars.chars().collect();
@@ -879,6 +906,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "remove_chars".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(chars)) => {
                     let char_set: std::collections::HashSet<char> = chars.chars().collect();
@@ -907,6 +935,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "keep_chars".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(allowed)) => {
                     let char_set: std::collections::HashSet<char> = allowed.chars().collect();
@@ -939,6 +968,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "replace_pattern".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(pattern), Value::String(replacement)) => {
                     match regex::Regex::new(pattern) {
@@ -974,6 +1004,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "matches_pattern".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => Ok(Value::Bool(re.is_match(s))),
@@ -1005,6 +1036,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "find_pattern".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => match re.find(s) {
@@ -1047,6 +1079,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "find_all_pattern".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => {
@@ -1084,6 +1117,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "split_pattern".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => {
@@ -1124,6 +1158,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "capture_pattern".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => match re.captures(s) {
@@ -1181,6 +1216,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "capture_all_pattern".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => {
@@ -1234,6 +1270,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "capture_named_pattern".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => match re.captures(s) {
@@ -1292,6 +1329,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "char_at".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::Int(idx)) => {
                     let idx = *idx as usize;
@@ -1326,6 +1364,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "substring".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::Int(start), Value::Int(end)) => {
                     let start = *start as usize;
@@ -1359,6 +1398,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "chars".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let chars: Vec<Value> =
@@ -1386,6 +1426,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "lines".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let lines: Vec<Value> =
@@ -1413,6 +1454,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "words".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let words: Vec<Value> = s
@@ -1446,6 +1488,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "truncate".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::Int(max_len), Value::String(suffix)) => {
                     let max = *max_len as usize;
@@ -1483,6 +1526,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "pad_left".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::Int(len), Value::String(pad_char)) => {
                     let target_len = *len as usize;
@@ -1518,6 +1562,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "pad_right".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::Int(len), Value::String(pad_char)) => {
                     let target_len = *len as usize;
@@ -1553,6 +1598,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "center".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::Int(len), Value::String(pad_char)) => {
                     let target_len = *len as usize;
@@ -1591,6 +1637,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_empty".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(s.is_empty())),
                 _ => Err(IntentError::TypeError(
@@ -1614,6 +1661,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_blank".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(s.trim().is_empty())),
                 _ => Err(IntentError::TypeError(
@@ -1637,6 +1685,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_numeric".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
@@ -1662,6 +1711,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_alpha".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
@@ -1687,6 +1737,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_alphanumeric".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
@@ -1712,6 +1763,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_lowercase".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| !c.is_alphabetic() || c.is_lowercase()),
@@ -1737,6 +1789,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_uppercase".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| !c.is_alphabetic() || c.is_uppercase()),
@@ -1762,6 +1815,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_whitespace".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_whitespace()),
@@ -1791,6 +1845,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "matches".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => {
                     Ok(Value::Bool(simple_glob_match(s, pattern)))
@@ -1820,6 +1875,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "replace_all".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(from), Value::String(to)) => {
                     Ok(Value::String(s.replace(from.as_str(), to.as_str())))
@@ -1845,6 +1901,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "upper".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.to_uppercase())),
                 _ => Err(IntentError::TypeError(
@@ -1868,6 +1925,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "lower".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.to_lowercase())),
                 _ => Err(IntentError::TypeError(
@@ -1891,6 +1949,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "trim_start".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
                 _ => Err(IntentError::TypeError(
@@ -1914,6 +1973,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "trim_end".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
                 _ => Err(IntentError::TypeError(
@@ -1943,6 +2003,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "html_escape".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let escaped = s

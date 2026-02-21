@@ -30,6 +30,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "read_file".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::read_to_string(path) {
                     Ok(content) => Ok(Value::EnumValue {
@@ -70,6 +71,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "read_bytes".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::read(path) {
                     Ok(bytes) => {
@@ -114,6 +116,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "write_file".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(path), Value::String(content)) => match fs::write(path, content) {
                     Ok(()) => Ok(Value::EnumValue {
@@ -154,6 +157,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "append_file".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 use std::fs::OpenOptions;
                 use std::io::Write;
@@ -206,6 +210,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "exists".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).exists())),
                 _ => Err(IntentError::TypeError(
@@ -234,6 +239,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_file".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).is_file())),
                 _ => Err(IntentError::TypeError(
@@ -261,6 +267,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_dir".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).is_dir())),
                 _ => Err(IntentError::TypeError(
@@ -290,6 +297,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "mkdir".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::create_dir(path) {
                     Ok(()) => Ok(Value::EnumValue {
@@ -329,6 +337,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "mkdir_all".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::create_dir_all(path) {
                     Ok(()) => Ok(Value::EnumValue {
@@ -369,6 +378,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "readdir".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::read_dir(path) {
                     Ok(entries) => {
@@ -414,6 +424,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "remove".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::remove_file(path) {
                     Ok(()) => Ok(Value::EnumValue {
@@ -454,6 +465,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "remove_dir".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::remove_dir(path) {
                     Ok(()) => Ok(Value::EnumValue {
@@ -494,6 +506,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "remove_dir_all".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::remove_dir_all(path) {
                     Ok(()) => Ok(Value::EnumValue {
@@ -536,6 +549,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "rename".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(from), Value::String(to)) => match fs::rename(from, to) {
                     Ok(()) => Ok(Value::EnumValue {
@@ -577,6 +591,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "copy".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(from), Value::String(to)) => match fs::copy(from, to) {
                     Ok(bytes) => Ok(Value::EnumValue {
@@ -616,6 +631,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "file_size".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::metadata(path) {
                     Ok(meta) => Ok(Value::EnumValue {

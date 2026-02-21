@@ -925,6 +925,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "fetch".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(url) => http_get(url),
                 Value::Map(opts) => http_fetch(opts),
@@ -959,6 +960,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "download".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(url), Value::String(file_path)) => http_download(url, file_path),
                 _ => Err(IntentError::TypeError(
@@ -988,6 +990,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "Cache".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Int(ttl) => {
                     let cache_id = get_next_cache_id();
@@ -1036,6 +1039,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "cache_fetch".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let cache_id = match &args[0] {
                     Value::Map(m) => match m.get("_cache_id") {
@@ -1090,6 +1094,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "cache_delete".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let cache_id = match &args[0] {
                     Value::Map(m) => match m.get("_cache_id") {
@@ -1133,6 +1138,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "cache_clear".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let cache_id = match &args[0] {
                     Value::Map(m) => match m.get("_cache_id") {

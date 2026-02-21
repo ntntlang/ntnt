@@ -4000,3 +4000,39 @@ print(result)
     assert_eq!(exit_code, 0);
     assert_eq!(stdout.trim(), "fallback");
 }
+
+#[test]
+fn test_json_arity_error_too_many_args() {
+    // json() accepts 1-3 args; 4 should error
+    let code = r#"
+import { json } from "std/http/server"
+let r = json(map { "a": 1 }, 200, map {}, "extra")
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0);
+    assert!(
+        stderr.contains("1 or 2")
+            || stderr.contains("1-3")
+            || stderr.contains("arity")
+            || stderr.contains("argument"),
+        "Should report arity error, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_json_accepts_map_directly() {
+    // json() should accept a map without stringify()
+    let code = r#"
+import { json } from "std/http/server"
+let r = json(map { "name": "test", "count": 42 })
+print(r["body"])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert!(
+        stdout.contains("\"name\":\"test\"") || stdout.contains("\"name\": \"test\""),
+        "json() should serialize map directly, got: {}",
+        stdout
+    );
+}

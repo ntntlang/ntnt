@@ -580,6 +580,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "connect".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(conn_str) => pg_connect(conn_str),
                 _ => Err(IntentError::TypeError(
@@ -613,6 +614,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "query".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => pg_query(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => pg_query(conn, sql, &[]),
@@ -647,6 +649,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "query_one".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => pg_query_one(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => pg_query_one(conn, sql, &[]),
@@ -679,6 +682,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "execute".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => pg_execute(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => pg_execute(conn, sql, &[]),
@@ -709,6 +713,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "close".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| pg_close(&args[0]),
         },
     );
@@ -734,6 +739,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "begin".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| pg_begin(&args[0]),
         },
     );
@@ -757,6 +763,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "commit".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| pg_commit(&args[0]),
         },
     );
@@ -781,6 +788,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "rollback".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| pg_rollback(&args[0]),
         },
     );

@@ -116,6 +116,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "parse_url".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 match &args[0] {
                     Value::String(url_str) => {
@@ -258,6 +259,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "encode".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let encoded = url_encode(s);
@@ -289,6 +291,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "encode_component".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let encoded = url_encode_component(s);
@@ -319,6 +322,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "decode".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => match url_decode(s) {
                     Ok(decoded) => Ok(Value::EnumValue {
@@ -357,6 +361,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "build_query".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Map(params) => {
                     let pairs: Vec<String> = params
@@ -394,6 +399,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "parse_query".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 match &args[0] {
                     Value::String(query) => {
@@ -445,6 +451,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "join".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(base), Value::String(path)) => {
                     let base = base.trim_end_matches('/');

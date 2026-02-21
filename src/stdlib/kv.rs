@@ -589,6 +589,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "open".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.len() != 1 {
                     return Err(IntentError::TypeError(
@@ -676,6 +677,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "get".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::TypeError(
@@ -750,7 +752,8 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         "set".to_string(),
         Value::NativeFunction {
             name: "set".to_string(),
-            arity: 0, // variadic: 3-4 args (kv, key, value, opts?)
+            arity: 3, // variadic: 3-4 args (kv, key, value, opts?)
+            max_arity: 4,
             func: |args| {
                 if args.len() < 3 || args.len() > 4 {
                     return Err(IntentError::TypeError(
@@ -823,6 +826,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "del".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::TypeError(
@@ -881,6 +885,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "has".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::TypeError(
@@ -940,7 +945,8 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         "list".to_string(),
         Value::NativeFunction {
             name: "list".to_string(),
-            arity: 0, // variadic: 1-2 args (kv, prefix?)
+            arity: 1, // variadic: 1-2 args (kv, prefix?)
+            max_arity: 2,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::TypeError(
@@ -1007,6 +1013,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "expire".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| {
                 if args.len() != 3 {
                     return Err(IntentError::TypeError(
@@ -1074,6 +1081,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "ttl".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::TypeError(
@@ -1144,6 +1152,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "flush".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.len() != 1 {
                     return Err(IntentError::TypeError(
