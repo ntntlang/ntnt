@@ -73,6 +73,61 @@ fn serialize_value(value: &Value) -> (String, String) {
     }
 }
 
+/// Serialize a Value to a JSON envelope for Redis storage.
+/// Non-string types get wrapped: {"__ntnt_t":"<type>","v":<json_value>}
+/// Plain strings are stored as-is for backward compatibility and efficiency.
+fn serialize_value_envelope(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Int(i) => {
+            serde_json::json!({"__ntnt_t": "int", "v": i}).to_string()
+        }
+        Value::Float(f) => {
+            serde_json::json!({"__ntnt_t": "float", "v": f}).to_string()
+        }
+        Value::Bool(b) => {
+            serde_json::json!({"__ntnt_t": "bool", "v": b}).to_string()
+        }
+        Value::Array(_) | Value::Map(_) => {
+            let type_name = match value {
+                Value::Array(_) => "array",
+                Value::Map(_) => "map",
+                _ => unreachable!(),
+            };
+            let json_val = value_to_json(value);
+            serde_json::json!({"__ntnt_t": type_name, "v": json_val}).to_string()
+        }
+        _ => format!("{:?}", value),
+    }
+}
+
+/// Deserialize a Redis value using envelope format, with backward compatibility.
+/// Detects envelope `{"__ntnt_t":...,"v":...}` or falls back to legacy `__type` hint.
+fn deserialize_value_envelope(data: &str, legacy_type_hint: Option<&str>) -> Value {
+    // Try envelope format first
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
+        if let Some(obj) = parsed.as_object() {
+            if let (Some(serde_json::Value::String(t)), Some(v)) =
+                (obj.get("__ntnt_t"), obj.get("v"))
+            {
+                return match t.as_str() {
+                    "int" => v.as_i64().map(Value::Int).unwrap_or(Value::Unit),
+                    "float" => v.as_f64().map(Value::Float).unwrap_or(Value::Unit),
+                    "bool" => v.as_bool().map(Value::Bool).unwrap_or(Value::Unit),
+                    "array" | "map" => json_to_value(v.clone()),
+                    _ => Value::String(data.to_string()),
+                };
+            }
+        }
+    }
+
+    // Fall back to legacy format (separate __type key)
+    match legacy_type_hint {
+        Some(hint) => deserialize_value(data, hint),
+        None => Value::String(data.to_string()),
+    }
+}
+
 /// Convert Value to serde_json::Value for serialization
 fn value_to_json(value: &Value) -> serde_json::Value {
     match value {
@@ -349,7 +404,6 @@ impl RedisKV {
 
     /// Get a value by key
     pub fn get(&mut self, key: &str) -> Result<Option<Value>> {
-        // Redis stores type hint as a separate key: key:__type
         let value: Option<String> = self
             .conn
             .get(key)
@@ -357,12 +411,13 @@ impl RedisKV {
 
         match value {
             Some(data) => {
+                // Try envelope format first, fall back to legacy __type key
                 let type_key = format!("{}:__type", key);
-                let type_hint: String = self
-                    .conn
-                    .get(&type_key)
-                    .unwrap_or_else(|_| "string".to_string());
-                Ok(Some(deserialize_value(&data, &type_hint)))
+                let legacy_hint: Option<String> = self.conn.get(&type_key).ok();
+                Ok(Some(deserialize_value_envelope(
+                    &data,
+                    legacy_hint.as_deref(),
+                )))
             }
             None => Ok(None),
         }
@@ -375,29 +430,25 @@ impl RedisKV {
             return self.del(key).map(|_| ());
         }
 
-        let (serialized, type_hint) = serialize_value(value);
-        let type_key = format!("{}:__type", key);
+        // Use envelope format — single key, no __type sibling
+        let serialized = serialize_value_envelope(value);
 
         match ttl_seconds {
             Some(ttl) => {
-                // Set with expiration
                 self.conn
                     .set_ex::<_, _, ()>(key, &serialized, ttl as u64)
                     .map_err(|e| IntentError::RuntimeError(format!("Redis set error: {}", e)))?;
-                self.conn
-                    .set_ex::<_, _, ()>(&type_key, &type_hint, ttl as u64)
-                    .map_err(|e| IntentError::RuntimeError(format!("Redis set error: {}", e)))?;
             }
             None => {
-                // Set without expiration
                 self.conn
                     .set::<_, _, ()>(key, &serialized)
                     .map_err(|e| IntentError::RuntimeError(format!("Redis set error: {}", e)))?;
-                self.conn
-                    .set::<_, _, ()>(&type_key, &type_hint)
-                    .map_err(|e| IntentError::RuntimeError(format!("Redis set error: {}", e)))?;
             }
         }
+
+        // Clean up legacy __type key if it exists (migration)
+        let type_key = format!("{}:__type", key);
+        let _: std::result::Result<i32, _> = self.conn.del(&type_key);
 
         Ok(())
     }
@@ -450,12 +501,6 @@ impl RedisKV {
             .conn
             .expire(key, seconds)
             .map_err(|e| IntentError::RuntimeError(format!("Redis expire error: {}", e)))?;
-
-        if success {
-            // Also set TTL on the type key
-            let type_key = format!("{}:__type", key);
-            let _: bool = self.conn.expire(&type_key, seconds).unwrap_or(false);
-        }
 
         Ok(success)
     }
