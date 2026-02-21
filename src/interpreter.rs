@@ -214,7 +214,7 @@ impl fmt::Display for Value {
                         if let Some(inner) = values.first() {
                             write!(f, "{}", inner)
                         } else {
-                            write!(f, "")
+                            write!(f, "ok")
                         }
                     }
                     ("Result", "Err") => {

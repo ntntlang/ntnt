@@ -149,7 +149,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "uuid".to_string(),
             arity: 0,
-            max_arity: 1,
+            max_arity: 0,
             func: |_args| Ok(Value::String(Uuid::new_v4().to_string())),
         },
     );
