@@ -3735,71 +3735,71 @@ print(argon2_verify("wrongpassword", hash))
 }
 
 #[test]
-fn test_collections_has_value_strings() {
+fn test_collections_includes_strings() {
     let code = r#"
-import { has_value } from "std/collections"
+import { includes } from "std/collections"
 let colors = ["red", "green", "blue"]
-print(has_value(colors, "green"))
-print(has_value(colors, "purple"))
+print(includes(colors, "green"))
+print(includes(colors, "purple"))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
-    assert_eq!(exit_code, 0, "contains() should work with strings");
+    assert_eq!(exit_code, 0, "includes() should work with strings");
     let lines: Vec<&str> = stdout.trim().lines().collect();
     assert_eq!(lines[0], "true");
     assert_eq!(lines[1], "false");
 }
 
 #[test]
-fn test_collections_has_value_ints() {
+fn test_collections_includes_ints() {
     let code = r#"
-import { has_value } from "std/collections"
+import { includes } from "std/collections"
 let nums = [1, 2, 3]
-print(has_value(nums, 2))
-print(has_value(nums, 99))
+print(includes(nums, 2))
+print(includes(nums, 99))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
-    assert_eq!(exit_code, 0, "contains() should work with ints");
+    assert_eq!(exit_code, 0, "includes() should work with ints");
     let lines: Vec<&str> = stdout.trim().lines().collect();
     assert_eq!(lines[0], "true");
     assert_eq!(lines[1], "false");
 }
 
 #[test]
-fn test_collections_has_value_empty_array() {
+fn test_collections_includes_empty_array() {
     let code = r#"
-import { has_value } from "std/collections"
-print(has_value([], "anything"))
+import { includes } from "std/collections"
+print(includes([], "anything"))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
-    assert_eq!(exit_code, 0, "contains() should work with empty array");
+    assert_eq!(exit_code, 0, "includes() should work with empty array");
     assert_eq!(stdout.trim(), "false");
 }
 
 #[test]
-fn test_collections_has_value_nested() {
+fn test_collections_includes_nested() {
     let code = r#"
-import { has_value } from "std/collections"
+import { includes } from "std/collections"
 let nested = [[1, 2], [3, 4]]
-print(has_value(nested, [1, 2]))
-print(has_value(nested, [5, 6]))
+print(includes(nested, [1, 2]))
+print(includes(nested, [5, 6]))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
-    assert_eq!(exit_code, 0, "contains() should work with nested arrays");
+    assert_eq!(exit_code, 0, "includes() should work with nested arrays");
     let lines: Vec<&str> = stdout.trim().lines().collect();
     assert_eq!(lines[0], "true");
     assert_eq!(lines[1], "false");
 }
 
 #[test]
-fn test_collections_has_value_bools() {
+fn test_collections_includes_bools() {
     let code = r#"
-import { has_value } from "std/collections"
+import { includes } from "std/collections"
 let flags = [true, false]
-print(has_value(flags, true))
-print(has_value(flags, false))
+print(includes(flags, true))
+print(includes(flags, false))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
-    assert_eq!(exit_code, 0, "contains() should work with bools");
+    assert_eq!(exit_code, 0, "includes() should work with bools");
     let lines: Vec<&str> = stdout.trim().lines().collect();
     assert_eq!(lines[0], "true", "true is in [true, false]");
     assert_eq!(lines[1], "true", "false is in [true, false]");
@@ -4034,5 +4034,90 @@ print(r["body"])
         stdout.contains("\"name\":\"test\"") || stdout.contains("\"name\": \"test\""),
         "json() should serialize map directly, got: {}",
         stdout
+    );
+}
+
+// === Syntax Consistency: renamed/deprecated functions ===
+
+#[test]
+fn test_collections_includes_replaces_has_value() {
+    let code = r#"
+import { includes } from "std/collections"
+let fruits = ["apple", "banana", "cherry"]
+print(includes(fruits, "banana"))
+print(includes(fruits, "grape"))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "true");
+    assert_eq!(lines[1], "false");
+}
+
+#[test]
+fn test_has_value_deprecated_still_works() {
+    let code = r#"
+import { has_value } from "std/collections"
+print(has_value([1, 2, 3], 2))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "true");
+    assert!(
+        stderr.contains("DEPRECATED"),
+        "Should show deprecation warning, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_join_path_renamed() {
+    let code = r#"
+import { join_path } from "std/path"
+print(join_path(["src", "lib", "main.tnt"]))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "src/lib/main.tnt");
+}
+
+#[test]
+fn test_join_url_renamed() {
+    let code = r#"
+import { join_url } from "std/url"
+print(join_url("https://example.com", "/api/v1"))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "https://example.com/api/v1");
+}
+
+#[test]
+fn test_to_lower_deprecated_shows_warning() {
+    let code = r#"
+import { to_lower } from "std/string"
+print(to_lower("HELLO"))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "hello");
+    assert!(
+        stderr.contains("DEPRECATED"),
+        "Should show deprecation warning for to_lower"
+    );
+}
+
+#[test]
+fn test_trim_left_deprecated_shows_warning() {
+    let code = r#"
+import { trim_left } from "std/string"
+print(trim_left("  hello"))
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "hello");
+    assert!(
+        stderr.contains("DEPRECATED"),
+        "Should show deprecation warning for trim_left"
     );
 }

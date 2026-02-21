@@ -2670,7 +2670,8 @@ impl TypeContext {
         sig!("sort", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
         sig!("sort_desc", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
         sig!("reverse", ["value" => Type::Any], Type::Any);
-        sig!("has_value", ["haystack" => Type::Any, "needle" => Type::Any], Type::Bool);
+        sig!("includes", ["haystack" => Type::Any, "needle" => Type::Any], Type::Bool);
+        sig!("has_value", ["haystack" => Type::Any, "needle" => Type::Any], Type::Bool); // deprecated alias
         sig!("merge", ["map1" => Type::Any, "map2" => Type::Any], Type::Any);
         sig!("get_or", ["map" => Type::Any, "key" => Type::String, "default" => Type::Any], Type::Any);
         sig!("filter", ["array" => Type::Array(Box::new(Type::Any)), "predicate" => Type::Any], Type::Array(Box::new(Type::Any)));
@@ -2947,10 +2948,13 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("parse", ["url" => Type::String], Type::Any);
             sig!("parse_query", ["query" => Type::String], Type::Any);
             sig!("build_query", ["params" => Type::Any], Type::String);
+            sig!("join_url", ["base" => Type::String, "path" => Type::String], Type::String);
             sig!("join", ["base" => Type::String, "path" => Type::String], Type::String);
+            // deprecated alias
         }
         "std/path" => {
-            sig!("join", ["parts" => Type::String], Type::String, variadic);
+            sig!("join_path", ["parts" => Type::String], Type::String, variadic);
+            sig!("join", ["parts" => Type::String], Type::String, variadic); // deprecated alias
             sig!("dirname", ["path" => Type::String], Type::String);
             sig!("basename", ["path" => Type::String], Type::String);
             sig!("extname", ["path" => Type::String], Type::String);

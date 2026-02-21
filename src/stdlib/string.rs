@@ -226,11 +226,14 @@ pub fn init() -> HashMap<String, Value> {
             name: "trim_left".to_string(),
             arity: 1,
             max_arity: 1,
-            func: |args| match &args[0] {
-                Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
-                _ => Err(IntentError::TypeError(
-                    "trim_left() requires a string".to_string(),
-                )),
+            func: |args| {
+                eprintln!("[DEPRECATED] trim_left() is deprecated. Use trim_start() instead.");
+                match &args[0] {
+                    Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
+                    _ => Err(IntentError::TypeError(
+                        "trim_left() requires a string".to_string(),
+                    )),
+                }
             },
         },
     );
@@ -250,11 +253,14 @@ pub fn init() -> HashMap<String, Value> {
             name: "trim_right".to_string(),
             arity: 1,
             max_arity: 1,
-            func: |args| match &args[0] {
-                Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
-                _ => Err(IntentError::TypeError(
-                    "trim_right() requires a string".to_string(),
-                )),
+            func: |args| {
+                eprintln!("[DEPRECATED] trim_right() is deprecated. Use trim_end() instead.");
+                match &args[0] {
+                    Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
+                    _ => Err(IntentError::TypeError(
+                        "trim_right() requires a string".to_string(),
+                    )),
+                }
             },
         },
     );
@@ -306,11 +312,14 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_upper".to_string(),
             arity: 1,
             max_arity: 1,
-            func: |args| match &args[0] {
-                Value::String(s) => Ok(Value::String(s.to_uppercase())),
-                _ => Err(IntentError::TypeError(
-                    "to_upper() requires a string".to_string(),
-                )),
+            func: |args| {
+                eprintln!("[DEPRECATED] to_upper() is deprecated. Use upper() instead.");
+                match &args[0] {
+                    Value::String(s) => Ok(Value::String(s.to_uppercase())),
+                    _ => Err(IntentError::TypeError(
+                        "to_upper() requires a string".to_string(),
+                    )),
+                }
             },
         },
     );
@@ -330,11 +339,14 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_lower".to_string(),
             arity: 1,
             max_arity: 1,
-            func: |args| match &args[0] {
-                Value::String(s) => Ok(Value::String(s.to_lowercase())),
-                _ => Err(IntentError::TypeError(
-                    "to_lower() requires a string".to_string(),
-                )),
+            func: |args| {
+                eprintln!("[DEPRECATED] to_lower() is deprecated. Use lower() instead.");
+                match &args[0] {
+                    Value::String(s) => Ok(Value::String(s.to_lowercase())),
+                    _ => Err(IntentError::TypeError(
+                        "to_lower() requires a string".to_string(),
+                    )),
+                }
             },
         },
     );
