@@ -1124,7 +1124,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "html".to_string(),
             arity: 1,
-            max_arity: 2,
+            max_arity: 3,
             func: |args| {
                 if args.is_empty() || args.len() > 3 {
                     return Err(IntentError::TypeError(
@@ -1141,7 +1141,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                let status_code = if args.len() == 2 {
+                let status_code = if args.len() >= 2 {
                     match &args[1] {
                         Value::Int(code) => *code,
                         _ => {

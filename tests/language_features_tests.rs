@@ -4036,6 +4036,40 @@ print(r["body"])
     );
 }
 
+#[test]
+fn test_html_accepts_custom_headers() {
+    // html() accepts 3 args: body, status, headers
+    let code = r#"
+import { html } from "std/http/server"
+let r = html("<h1>Hi</h1>", 201, map { "x-custom": "value" })
+print(r["status"])
+print(r["headers"]["x-custom"])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "html() with 3 args should work");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "201");
+    assert_eq!(lines[1], "value");
+}
+
+#[test]
+fn test_html_arity_error_too_many_args() {
+    // html() accepts 1-3 args; 4 should error
+    let code = r#"
+import { html } from "std/http/server"
+let r = html("<h1>Hi</h1>", 200, map {}, "extra")
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0);
+    assert!(
+        stderr.contains("1-3")
+            || stderr.contains("arity")
+            || stderr.contains("argument"),
+        "Should report arity error for html() (accepts 1-3 args), got: {}",
+        stderr
+    );
+}
+
 // === Syntax Consistency: renamed/deprecated functions ===
 
 #[test]
