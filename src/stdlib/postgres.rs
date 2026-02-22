@@ -492,7 +492,11 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         Ok(Some(row)) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
             variant: "Ok".to_string(),
-            values: vec![row_to_value(&row)],
+            values: vec![Value::EnumValue {
+                enum_name: "Option".to_string(),
+                variant: "Some".to_string(),
+                values: vec![row_to_value(&row)],
+            }],
         }),
         Ok(None) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),

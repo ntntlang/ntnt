@@ -6734,9 +6734,11 @@ impl Interpreter {
             (BinaryOp::Eq, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a == b)),
             (BinaryOp::Ne, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a != b)),
 
-            // Mixed numeric comparison
+            // Mixed numeric comparison (Int ↔ Float auto-promotion)
             (BinaryOp::Eq, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((a as f64) == b)),
             (BinaryOp::Eq, Value::Float(a), Value::Int(b)) => Ok(Value::Bool(a == (b as f64))),
+            (BinaryOp::Ne, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((a as f64) != b)),
+            (BinaryOp::Ne, Value::Float(a), Value::Int(b)) => Ok(Value::Bool(a != (b as f64))),
             (BinaryOp::Lt, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((a as f64) < b)),
             (BinaryOp::Lt, Value::Float(a), Value::Int(b)) => Ok(Value::Bool(a < (b as f64))),
             (BinaryOp::Le, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((a as f64) <= b)),
