@@ -46,11 +46,47 @@ impl ToSql for SqlParam {
         out: &mut postgres::types::private::BytesMut,
     ) -> std::result::Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>>
     {
+        use postgres::types::Type;
         match self {
             SqlParam::Int(v) => v.to_sql(ty, out),
             SqlParam::BigInt(v) => v.to_sql(ty, out),
             SqlParam::Float(v) => v.to_sql(ty, out),
-            SqlParam::String(v) => v.to_sql(ty, out),
+            // Auto-coerce strings to target column type (#32)
+            SqlParam::String(v) => match *ty {
+                Type::INT2 => {
+                    let parsed: i16 = v.parse().map_err(|_| {
+                        format!("Cannot coerce string \"{}\" to SMALLINT", v)
+                    })?;
+                    parsed.to_sql(ty, out)
+                }
+                Type::INT4 => {
+                    let parsed: i32 = v.parse().map_err(|_| {
+                        format!("Cannot coerce string \"{}\" to INTEGER", v)
+                    })?;
+                    parsed.to_sql(ty, out)
+                }
+                Type::INT8 => {
+                    let parsed: i64 = v.parse().map_err(|_| {
+                        format!("Cannot coerce string \"{}\" to BIGINT", v)
+                    })?;
+                    parsed.to_sql(ty, out)
+                }
+                Type::FLOAT4 | Type::FLOAT8 => {
+                    let parsed: f64 = v.parse().map_err(|_| {
+                        format!("Cannot coerce string \"{}\" to FLOAT", v)
+                    })?;
+                    parsed.to_sql(ty, out)
+                }
+                Type::BOOL => {
+                    let parsed = match v.to_lowercase().as_str() {
+                        "true" | "t" | "1" | "yes" => true,
+                        "false" | "f" | "0" | "no" => false,
+                        _ => return Err(format!("Cannot coerce string \"{}\" to BOOLEAN", v).into()),
+                    };
+                    parsed.to_sql(ty, out)
+                }
+                _ => v.to_sql(ty, out),
+            },
             SqlParam::Bool(v) => v.to_sql(ty, out),
             SqlParam::Null => Ok(postgres::types::IsNull::Yes),
             SqlParam::IntArray(v) => v.to_sql(ty, out),
@@ -58,14 +94,9 @@ impl ToSql for SqlParam {
         }
     }
 
-    fn accepts(ty: &postgres::types::Type) -> bool {
-        <i32 as ToSql>::accepts(ty)
-            || <i64 as ToSql>::accepts(ty)
-            || <f64 as ToSql>::accepts(ty)
-            || <String as ToSql>::accepts(ty)
-            || <bool as ToSql>::accepts(ty)
-            || <Vec<i32> as ToSql>::accepts(ty)
-            || <Vec<String> as ToSql>::accepts(ty)
+    fn accepts(_ty: &postgres::types::Type) -> bool {
+        // Accept all types — we handle coercion in to_sql
+        true
     }
 
     postgres::types::to_sql_checked!();
@@ -386,6 +417,31 @@ fn get_client(conn: &Value) -> Result<Arc<Mutex<Client>>> {
     }
 }
 
+/// Format a postgres error with full detail from the database (#33)
+fn format_pg_error(prefix: &str, e: &postgres::Error) -> String {
+    if let Some(db_err) = e.as_db_error() {
+        let mut msg = format!("{}: {}", prefix, db_err.message());
+        if let Some(detail) = db_err.detail() {
+            msg.push_str(&format!(" DETAIL: {}", detail));
+        }
+        if let Some(hint) = db_err.hint() {
+            msg.push_str(&format!(" HINT: {}", hint));
+        }
+        if let Some(column) = db_err.column() {
+            msg.push_str(&format!(" COLUMN: {}", column));
+        }
+        if let Some(constraint) = db_err.constraint() {
+            msg.push_str(&format!(" CONSTRAINT: {}", constraint));
+        }
+        if let Some(table) = db_err.table() {
+            msg.push_str(&format!(" TABLE: {}", table));
+        }
+        msg
+    } else {
+        format!("{}: {}", prefix, e)
+    }
+}
+
 /// Execute a query and return rows
 fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     let client_arc = get_client(conn)?;
@@ -414,7 +470,7 @@ fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         Err(e) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
             variant: "Err".to_string(),
-            values: vec![Value::String(format!("Query failed: {}", e))],
+            values: vec![Value::String(format_pg_error("Query failed", &e))],
         }),
     }
 }
@@ -446,7 +502,7 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         Err(e) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
             variant: "Err".to_string(),
-            values: vec![Value::String(format!("Query failed: {}", e))],
+            values: vec![Value::String(format_pg_error("Query failed", &e))],
         }),
     }
 }
@@ -473,7 +529,7 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         Err(e) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
             variant: "Err".to_string(),
-            values: vec![Value::String(format!("Execute failed: {}", e))],
+            values: vec![Value::String(format_pg_error("Execute failed", &e))],
         }),
     }
 }
