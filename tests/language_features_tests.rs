@@ -4075,7 +4075,9 @@ print(join_path(["src", "lib", "main.tnt"]))
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0);
-    assert_eq!(stdout.trim(), "src/lib/main.tnt");
+    // On Windows, join_path uses backslashes; on Unix, forward slashes
+    let expected = std::path::PathBuf::from("src").join("lib").join("main.tnt");
+    assert_eq!(stdout.trim(), expected.to_str().unwrap());
 }
 
 #[test]
