@@ -206,9 +206,9 @@ pub struct AuthConfig {
     pub cookie_secure: bool,
     pub cookie_same_site: String,
     pub session_ttl: i64,
-    pub refresh_ttl: i64,            // How long refresh tokens can extend sessions (default: 30 days)
-    pub store_tokens: bool,          // Store access/refresh tokens in session
-    pub session_secret: String,      // Secret for session signing
+    pub refresh_ttl: i64, // How long refresh tokens can extend sessions (default: 30 days)
+    pub store_tokens: bool, // Store access/refresh tokens in session
+    pub session_secret: String, // Secret for session signing
     pub session_store: SessionStore, // Session storage backend
 }
 
@@ -222,7 +222,7 @@ impl Default for AuthConfig {
             cookie_name: "ntnt_session".to_string(),
             cookie_secure: true,
             cookie_same_site: "lax".to_string(),
-            session_ttl: 86400 * 7, // 7 days
+            session_ttl: 86400 * 7,  // 7 days
             refresh_ttl: 86400 * 30, // 30 days — how long refresh tokens can extend sessions
             store_tokens: false,
             session_secret: DEFAULT_SESSION_SECRET.to_string(),
@@ -2142,16 +2142,24 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
     if let Some(config) = &config {
         if config.store_tokens {
             let expired_session = match &config.session_store {
-                SessionStore::Sqlite(_) => get_expired_session_sqlite(id, config.refresh_ttl).ok().flatten(),
-                SessionStore::Postgres(_) => get_expired_session_postgres(id, config.refresh_ttl).ok().flatten(),
-                SessionStore::Redis(_) => get_expired_session_redis(id, config.refresh_ttl).ok().flatten(),
+                SessionStore::Sqlite(_) => get_expired_session_sqlite(id, config.refresh_ttl)
+                    .ok()
+                    .flatten(),
+                SessionStore::Postgres(_) => get_expired_session_postgres(id, config.refresh_ttl)
+                    .ok()
+                    .flatten(),
+                SessionStore::Redis(_) => get_expired_session_redis(id, config.refresh_ttl)
+                    .ok()
+                    .flatten(),
                 _ => None, // Memory store already filters in get_session
             };
 
             if let Some(expired) = expired_session {
                 if let Some(ref refresh_token) = expired.refresh_token {
                     // Find the provider config for this session
-                    if let Some(provider) = config.providers.iter().find(|p| p.name == expired.provider) {
+                    if let Some(provider) =
+                        config.providers.iter().find(|p| p.name == expired.provider)
+                    {
                         match refresh_access_token(provider, refresh_token) {
                             Ok(tokens) => {
                                 // Extend session expiry by session_ttl
@@ -2162,7 +2170,10 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
                                 update_session_tokens(&expired.id, &tokens);
                                 extend_session_expiry(&expired.id, new_expires_at);
 
-                                eprintln!("[auth] Session {} auto-refreshed via refresh token", &expired.id[..8]);
+                                eprintln!(
+                                    "[auth] Session {} auto-refreshed via refresh token",
+                                    &expired.id[..8]
+                                );
 
                                 // Return the refreshed session
                                 let mut refreshed = expired;
@@ -2175,7 +2186,11 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
                                 return Some(refreshed);
                             }
                             Err(e) => {
-                                eprintln!("[auth] Auto-refresh failed for session {}: {}", &expired.id[..8], e);
+                                eprintln!(
+                                    "[auth] Auto-refresh failed for session {}: {}",
+                                    &expired.id[..8],
+                                    e
+                                );
                             }
                         }
                     }
@@ -2193,9 +2208,15 @@ fn extend_session_expiry(id: &str, new_expires_at: i64) {
     let store_type = config.as_ref().map(|c| &c.session_store);
 
     match store_type {
-        Some(SessionStore::Sqlite(_)) => { let _ = extend_session_expiry_sqlite(id, new_expires_at); }
-        Some(SessionStore::Postgres(_)) => { let _ = extend_session_expiry_postgres(id, new_expires_at); }
-        Some(SessionStore::Redis(_)) => { let _ = extend_session_expiry_redis(id, new_expires_at); }
+        Some(SessionStore::Sqlite(_)) => {
+            let _ = extend_session_expiry_sqlite(id, new_expires_at);
+        }
+        Some(SessionStore::Postgres(_)) => {
+            let _ = extend_session_expiry_postgres(id, new_expires_at);
+        }
+        Some(SessionStore::Redis(_)) => {
+            let _ = extend_session_expiry_redis(id, new_expires_at);
+        }
         _ => {
             let mut store = SESSION_STORE.lock().unwrap();
             if let Some(session) = store.get_session_mut(id) {
@@ -2211,26 +2232,35 @@ fn extend_session_expiry_sqlite(id: &str, new_expires_at: i64) -> std::result::R
     conn.execute(
         "UPDATE auth_sessions SET expires_at = ?1 WHERE id = ?2",
         rusqlite::params![new_expires_at, id],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-fn extend_session_expiry_postgres(id: &str, new_expires_at: i64) -> std::result::Result<(), String> {
+fn extend_session_expiry_postgres(
+    id: &str,
+    new_expires_at: i64,
+) -> std::result::Result<(), String> {
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
     let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
-    client.execute(
-        "UPDATE auth_sessions SET expires_at = $1 WHERE id = $2",
-        &[&new_expires_at, &id],
-    ).map_err(|e| e.to_string())?;
+    client
+        .execute(
+            "UPDATE auth_sessions SET expires_at = $1 WHERE id = $2",
+            &[&new_expires_at, &id],
+        )
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 fn extend_session_expiry_redis(id: &str, new_expires_at: i64) -> std::result::Result<(), String> {
     let url_guard = REDIS_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("Redis not initialized")?;
-    let client = redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
-    let mut conn = client.get_connection().map_err(|e| format!("Redis connection error: {}", e))?;
+    let client =
+        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
+    let mut conn = client
+        .get_connection()
+        .map_err(|e| format!("Redis connection error: {}", e))?;
     let key = format!("ntnt:session:{}", id);
     let now = chrono::Utc::now().timestamp();
     let new_ttl = new_expires_at - now;
@@ -2292,7 +2322,10 @@ fn get_session_sqlite(id: &str) -> std::result::Result<Option<Session>, String> 
 }
 
 /// Retrieve an expired session that's still within the refresh window
-fn get_expired_session_sqlite(id: &str, refresh_ttl: i64) -> std::result::Result<Option<Session>, String> {
+fn get_expired_session_sqlite(
+    id: &str,
+    refresh_ttl: i64,
+) -> std::result::Result<Option<Session>, String> {
     let conn_guard = SQLITE_CONN.lock().unwrap();
     let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
     let now = chrono::Utc::now().timestamp();
@@ -2321,7 +2354,10 @@ fn get_expired_session_sqlite(id: &str, refresh_ttl: i64) -> std::result::Result
     }
 }
 
-fn get_expired_session_postgres(id: &str, refresh_ttl: i64) -> std::result::Result<Option<Session>, String> {
+fn get_expired_session_postgres(
+    id: &str,
+    refresh_ttl: i64,
+) -> std::result::Result<Option<Session>, String> {
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
     let now = chrono::Utc::now().timestamp();
@@ -2337,19 +2373,30 @@ fn get_expired_session_postgres(id: &str, refresh_ttl: i64) -> std::result::Resu
 
     if let Some(row) = rows.first() {
         Ok(Some(Session {
-            id: row.get(0), user_id: row.get(1), provider: row.get(2),
-            email: row.get(3), name: row.get(4), picture: row.get(5),
-            raw_json: row.get(6), data_json: row.get(7),
+            id: row.get(0),
+            user_id: row.get(1),
+            provider: row.get(2),
+            email: row.get(3),
+            name: row.get(4),
+            picture: row.get(5),
+            raw_json: row.get(6),
+            data_json: row.get(7),
             csrf_token: row.get::<_, Option<String>>(8).unwrap_or_default(),
-            access_token: row.get(9), refresh_token: row.get(10),
-            token_expires_at: row.get(11), created_at: row.get(12), expires_at: row.get(13),
+            access_token: row.get(9),
+            refresh_token: row.get(10),
+            token_expires_at: row.get(11),
+            created_at: row.get(12),
+            expires_at: row.get(13),
         }))
     } else {
         Ok(None)
     }
 }
 
-fn get_expired_session_redis(id: &str, refresh_ttl: i64) -> std::result::Result<Option<Session>, String> {
+fn get_expired_session_redis(
+    id: &str,
+    refresh_ttl: i64,
+) -> std::result::Result<Option<Session>, String> {
     // Redis sessions use TTL-based expiry, so expired sessions are already deleted.
     // For Redis to support refresh, we'd need a separate refresh token key with longer TTL.
     // For now, return None — Redis users should set session_ttl = refresh_ttl.
@@ -3627,10 +3674,14 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
     if config.store_tokens {
         if !provider_for_url.extra_params.contains_key("access_type") {
             if provider_for_url.authorize_url.contains("google") {
-                provider_for_url.extra_params.insert("access_type".to_string(), "offline".to_string());
+                provider_for_url
+                    .extra_params
+                    .insert("access_type".to_string(), "offline".to_string());
                 // prompt=consent forces Google to return a new refresh token every time
                 if !provider_for_url.extra_params.contains_key("prompt") {
-                    provider_for_url.extra_params.insert("prompt".to_string(), "consent".to_string());
+                    provider_for_url
+                        .extra_params
+                        .insert("prompt".to_string(), "consent".to_string());
                 }
             }
         }

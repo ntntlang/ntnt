@@ -79,15 +79,9 @@ fn serialize_value(value: &Value) -> (String, String) {
 fn serialize_value_envelope(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
-        Value::Int(i) => {
-            serde_json::json!({"__ntnt_t": "int", "v": i}).to_string()
-        }
-        Value::Float(f) => {
-            serde_json::json!({"__ntnt_t": "float", "v": f}).to_string()
-        }
-        Value::Bool(b) => {
-            serde_json::json!({"__ntnt_t": "bool", "v": b}).to_string()
-        }
+        Value::Int(i) => serde_json::json!({"__ntnt_t": "int", "v": i}).to_string(),
+        Value::Float(f) => serde_json::json!({"__ntnt_t": "float", "v": f}).to_string(),
+        Value::Bool(b) => serde_json::json!({"__ntnt_t": "bool", "v": b}).to_string(),
         Value::Array(_) | Value::Map(_) => {
             let type_name = match value {
                 Value::Array(_) => "array",

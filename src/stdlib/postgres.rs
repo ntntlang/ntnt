@@ -54,34 +54,36 @@ impl ToSql for SqlParam {
             // Auto-coerce strings to target column type (#32)
             SqlParam::String(v) => match *ty {
                 Type::INT2 => {
-                    let parsed: i16 = v.parse().map_err(|_| {
-                        format!("Cannot coerce string \"{}\" to SMALLINT", v)
-                    })?;
+                    let parsed: i16 = v
+                        .parse()
+                        .map_err(|_| format!("Cannot coerce string \"{}\" to SMALLINT", v))?;
                     parsed.to_sql(ty, out)
                 }
                 Type::INT4 => {
-                    let parsed: i32 = v.parse().map_err(|_| {
-                        format!("Cannot coerce string \"{}\" to INTEGER", v)
-                    })?;
+                    let parsed: i32 = v
+                        .parse()
+                        .map_err(|_| format!("Cannot coerce string \"{}\" to INTEGER", v))?;
                     parsed.to_sql(ty, out)
                 }
                 Type::INT8 => {
-                    let parsed: i64 = v.parse().map_err(|_| {
-                        format!("Cannot coerce string \"{}\" to BIGINT", v)
-                    })?;
+                    let parsed: i64 = v
+                        .parse()
+                        .map_err(|_| format!("Cannot coerce string \"{}\" to BIGINT", v))?;
                     parsed.to_sql(ty, out)
                 }
                 Type::FLOAT4 | Type::FLOAT8 => {
-                    let parsed: f64 = v.parse().map_err(|_| {
-                        format!("Cannot coerce string \"{}\" to FLOAT", v)
-                    })?;
+                    let parsed: f64 = v
+                        .parse()
+                        .map_err(|_| format!("Cannot coerce string \"{}\" to FLOAT", v))?;
                     parsed.to_sql(ty, out)
                 }
                 Type::BOOL => {
                     let parsed = match v.to_lowercase().as_str() {
                         "true" | "t" | "1" | "yes" => true,
                         "false" | "f" | "0" | "no" => false,
-                        _ => return Err(format!("Cannot coerce string \"{}\" to BOOLEAN", v).into()),
+                        _ => {
+                            return Err(format!("Cannot coerce string \"{}\" to BOOLEAN", v).into())
+                        }
                     };
                     parsed.to_sql(ty, out)
                 }
