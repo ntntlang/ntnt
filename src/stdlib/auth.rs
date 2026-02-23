@@ -3842,11 +3842,18 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
     let signed_session_id = sign_session_id(&session_id, &config.session_secret);
 
     // Create session cookie
+    // Cookie Max-Age uses refresh_ttl (not session_ttl) so the browser retains the cookie
+    // long enough for server-side auto-refresh to work when the session expires.
+    let cookie_max_age = if config.store_tokens && config.refresh_ttl > config.session_ttl {
+        config.refresh_ttl
+    } else {
+        config.session_ttl
+    };
     let cookie = format!(
         "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite={}{}",
         config.cookie_name,
         signed_session_id,
-        config.session_ttl,
+        cookie_max_age,
         config.cookie_same_site,
         if config.cookie_secure { "; Secure" } else { "" }
     );
@@ -6034,13 +6041,18 @@ pub fn init() -> HashMap<String, Value> {
                 let user_id = session.user_id.clone();
                 store_session(session);
 
-                // Build cookie
+                // Build cookie — use refresh_ttl for Max-Age when refresh tokens are enabled
                 let signed_session_id = sign_session_id(&session_id, &config.session_secret);
+                let cookie_max_age = if config.store_tokens && config.refresh_ttl > config.session_ttl {
+                    config.refresh_ttl
+                } else {
+                    config.session_ttl
+                };
                 let cookie = format!(
                     "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite={}{}",
                     config.cookie_name,
                     signed_session_id,
-                    config.session_ttl,
+                    cookie_max_age,
                     config.cookie_same_site,
                     if config.cookie_secure { "; Secure" } else { "" }
                 );
