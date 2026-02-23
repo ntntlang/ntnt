@@ -3392,6 +3392,13 @@ pub fn user_to_value(session: &Session) -> Value {
         "raw".to_string(),
         Value::Map(json_string_to_value_map(&session.raw_json)),
     );
+    // Include CSRF token so apps can embed it in forms: {{user.csrf_token}}
+    if !session.csrf_token.is_empty() {
+        map.insert(
+            "csrf_token".to_string(),
+            Value::String(session.csrf_token.clone()),
+        );
+    }
     Value::Map(map)
 }
 
@@ -4836,6 +4843,160 @@ pub fn init() -> HashMap<String, Value> {
                 }
 
                 Ok(make_none())
+            },
+        },
+    );
+
+    // @ntnt validate_csrf
+    // @module std/auth
+    // @signature validate_csrf(req: Request) -> Result<Bool, Map>
+    // Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH).
+    //
+    // Compares the CSRF token from the request (form field `_csrf_token` or header
+    // `X-CSRF-Token`) against the token stored in the session. Returns `true` if
+    // valid. Returns an error response map (403) if invalid, which can be returned
+    // directly from a route handler.
+    //
+    // Skips validation for:
+    // - GET, HEAD, OPTIONS requests (safe methods)
+    // - API key auth (Bearer token) — CSRF only applies to cookie-based sessions
+    // - Requests with no session (will fail auth check separately)
+    //
+    // Usage in middleware:
+    // ```ntnt
+    // let csrf_ok = validate_csrf(req)
+    // if typeof(csrf_ok) == "Map" { return csrf_ok }  // Return 403 response
+    // ```
+    //
+    // Usage in forms:
+    // ```html
+    // <input type="hidden" name="_csrf_token" value="{{user.csrf_token}}">
+    // ```
+    // @param req The HTTP request object
+    // @returns true if valid or safe method; a 403 error response Map if invalid
+    // @see_also get_user, get_session
+    // @since v0.4.0
+    // @tags #auth, #csrf, #security
+    // @example validate_csrf(req) ~ "Check CSRF token on POST"
+    module.insert(
+        "validate_csrf".to_string(),
+        Value::NativeFunction {
+            name: "validate_csrf".to_string(),
+            arity: 1,
+            max_arity: 1,
+            func: |args| {
+                if args.is_empty() {
+                    return Err(IntentError::TypeError(
+                        "[auth] validate_csrf() requires a request".to_string(),
+                    ));
+                }
+
+                let req = &args[0];
+                let req_map = match req {
+                    Value::Map(m) => m,
+                    _ => return Ok(Value::Bool(true)), // Not a valid request, let other checks handle it
+                };
+
+                // Skip safe methods (GET, HEAD, OPTIONS)
+                let method = match req_map.get("method") {
+                    Some(Value::String(m)) => m.to_uppercase(),
+                    _ => return Ok(Value::Bool(true)),
+                };
+                if method == "GET" || method == "HEAD" || method == "OPTIONS" {
+                    return Ok(Value::Bool(true));
+                }
+
+                // Skip if request has Bearer token (API key auth, not session-based)
+                if let Some(Value::Map(headers)) = req_map.get("headers") {
+                    if let Some(Value::String(auth_header)) = headers.get("authorization") {
+                        if auth_header.starts_with("Bearer ") {
+                            return Ok(Value::Bool(true));
+                        }
+                    }
+                }
+
+                // Get session CSRF token
+                let session_id = get_session_id_from_request(req);
+                let session_csrf = match session_id {
+                    Some(ref id) => match get_session_by_id(id) {
+                        Some(session) if !session.csrf_token.is_empty() => {
+                            session.csrf_token.clone()
+                        }
+                        _ => return Ok(Value::Bool(true)), // No session = no CSRF to validate
+                    },
+                    None => return Ok(Value::Bool(true)), // No cookie = not a browser session
+                };
+
+                // Extract CSRF token from request:
+                // 1. Form field: _csrf_token
+                // 2. Header: X-CSRF-Token
+                let mut request_csrf = None;
+
+                // Check form body (URL-encoded or JSON)
+                if let Some(Value::String(body)) = req_map.get("body") {
+                    // Try URL-encoded form: _csrf_token=value
+                    for param in body.split('&') {
+                        let parts: Vec<&str> = param.splitn(2, '=').collect();
+                        if parts.len() == 2 && parts[0] == "_csrf_token" {
+                            request_csrf = Some(
+                                urlencoding::decode(parts[1])
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            );
+                            break;
+                        }
+                    }
+                    // Try JSON body: {"_csrf_token": "value"}
+                    if request_csrf.is_none() {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+                            if let Some(token) = json.get("_csrf_token").and_then(|v| v.as_str()) {
+                                request_csrf = Some(token.to_string());
+                            }
+                        }
+                    }
+                }
+
+                // Check X-CSRF-Token header (for AJAX requests)
+                if request_csrf.is_none() {
+                    if let Some(Value::Map(headers)) = req_map.get("headers") {
+                        if let Some(Value::String(token)) = headers.get("x-csrf-token") {
+                            request_csrf = Some(token.clone());
+                        }
+                    }
+                }
+
+                // Validate
+                match request_csrf {
+                    Some(token) if token == session_csrf => Ok(Value::Bool(true)),
+                    _ => {
+                        eprintln!(
+                            "[auth] CSRF validation failed for {} {}",
+                            method,
+                            req_map
+                                .get("path")
+                                .and_then(|v| if let Value::String(s) = v {
+                                    Some(s.as_str())
+                                } else {
+                                    None
+                                })
+                                .unwrap_or("?")
+                        );
+                        // Return a 403 response map that can be returned directly from handlers
+                        let mut response = HashMap::new();
+                        response.insert("status".to_string(), Value::Int(403));
+                        let mut headers = HashMap::new();
+                        headers.insert(
+                            "content-type".to_string(),
+                            Value::String("text/html; charset=utf-8".to_string()),
+                        );
+                        response.insert("headers".to_string(), Value::Map(headers));
+                        response.insert(
+                            "body".to_string(),
+                            Value::String("CSRF token missing or invalid".to_string()),
+                        );
+                        Ok(Value::Map(response))
+                    }
+                }
             },
         },
     );

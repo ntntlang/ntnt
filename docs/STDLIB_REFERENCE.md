@@ -1262,6 +1262,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`totp_secret`](#totpsecret) | Generate a new TOTP secret for MFA setup. |
 | [`totp_uri`](#totpuri) | Generate an otpauth:// URI for QR codes. |
 | [`user_sessions`](#usersessions) | Get all active sessions for the current user. |
+| [`validate_csrf`](#validatecsrf) | Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH). |
 | [`verify_csrf`](#verifycsrf) | Verify a CSRF token against the session's token. |
 | [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
 | [`verify_totp`](#verifytotp) | Verify a TOTP code against a secret. |
@@ -2132,6 +2133,40 @@ user_sessions(req)  // List all user's active sessions
 **See also:** `logout_all`, `get_session`
 
 *Since v0.3.11*
+
+---
+
+#### `validate_csrf`
+
+```ntnt
+validate_csrf(req: Request) -> Result<Bool, Map>
+```
+
+Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH).
+
+Compares the CSRF token from the request (form field `_csrf_token` or header `X-CSRF-Token`) against the token stored in the session. Returns `true` if valid. Returns an error response map (403) if invalid, which can be returned directly from a route handler.
+
+Skips validation for: - GET, HEAD, OPTIONS requests (safe methods) - API key auth (Bearer token) — CSRF only applies to cookie-based sessions - Requests with no session (will fail auth check separately)
+
+Usage in middleware: ```ntnt let csrf_ok = validate_csrf(req) if typeof(csrf_ok) == "Map" { return csrf_ok }  // Return 403 response ```
+
+Usage in forms: ```html <input type="hidden" name="_csrf_token" value="{{user.csrf_token}}"> ```
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** true if valid or safe method; a 403 error response Map if invalid
+
+**Examples:**
+
+```ntnt
+validate_csrf(req)  // Check CSRF token on POST
+```
+
+**See also:** `get_user`, `get_session`
+
+*Since v0.4.0*
 
 ---
 

@@ -93,9 +93,22 @@ pub fn get_security_config() -> &'static SecurityConfig {
     SECURITY_CONFIG.get_or_init(SecurityConfig::default)
 }
 
-/// Default security headers added to all responses
+/// Default security headers added to all responses.
+///
+/// These are sensible defaults that protect against common web vulnerabilities.
+/// All headers can be overridden by the application — if the app sets a header
+/// with the same name, the app's value takes precedence.
+///
+/// To disable all security headers: `NTNT_SECURITY_HEADERS=false`
+///
+/// Individual headers can be overridden in route handlers by returning them
+/// in the response map's `headers` field.
 pub fn get_default_security_headers() -> HashMap<String, Value> {
     let mut headers = HashMap::new();
+
+    let is_production = std::env::var("NTNT_ENV")
+        .map(|v| v == "production" || v == "prod")
+        .unwrap_or(false);
 
     // Prevent MIME type sniffing
     headers.insert(
@@ -103,7 +116,7 @@ pub fn get_default_security_headers() -> HashMap<String, Value> {
         Value::String("nosniff".to_string()),
     );
 
-    // Prevent clickjacking (can be overridden by app if needed for iframes)
+    // Prevent clickjacking (override with SAMEORIGIN if your app uses iframes)
     headers.insert(
         "x-frame-options".to_string(),
         Value::String("DENY".to_string()),
@@ -121,8 +134,24 @@ pub fn get_default_security_headers() -> HashMap<String, Value> {
         Value::String("1; mode=block".to_string()),
     );
 
-    // Don't expose server software in production (overridden below)
-    // Note: We don't add Server header here - let tiny_http's default or none
+    // HSTS: Force HTTPS in production (browsers remember for 1 year)
+    // Disabled in dev to avoid breaking localhost HTTP
+    if is_production {
+        headers.insert(
+            "strict-transport-security".to_string(),
+            Value::String("max-age=31536000; includeSubDomains".to_string()),
+        );
+    }
+
+    // Restrict browser features (camera, mic, geolocation, etc.)
+    // Apps that need these can override with specific permissions
+    headers.insert(
+        "permissions-policy".to_string(),
+        Value::String(
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()"
+                .to_string(),
+        ),
+    );
 
     headers
 }
