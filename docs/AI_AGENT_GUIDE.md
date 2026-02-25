@@ -1101,21 +1101,37 @@ let page = """
 <style>h1 { color: blue; }</style>
 <h1>Hello, {{name}}!</h1>
 
+{{! This is a comment — not rendered }}
+
 {{#for item in items}}
-<p>{{item.name}}: ${{item.price}}</p>
+<p>{{@index1}}. {{item.name}}: ${{item.price}}</p>
+{{#empty}}
+<p>No items found.</p>
 {{/for}}
 
-{{#if logged_in}}
-<a href="/logout">Logout</a>
+{{#if status == "active"}}
+<span class="active">Active</span>
+{{#elif status == "draft"}}
+<span class="draft">Draft</span>
 {{#else}}
-<a href="/login">Login</a>
+<span>Unknown</span>
 {{/if}}
 """
 ```
 
-**Available filters:** `uppercase`, `lowercase`, `capitalize`, `trim`, `truncate(n)`, `escape`, `json`, `url_encode`
+**Output modes:**
+- `{{expr}}` — HTML-escaped output
+- `{{{expr}}}` — Raw/unescaped output (use for HTML content like layout slots)
 
-**Loop metadata:** `@index`, `@length`, `@first`, `@last`, `@even`, `@odd`
+**Optional variables:** Undefined variables render as empty string (not an error). Undefined vars in `{{#if}}` are falsy.
+
+**Comparisons in conditions:** `{{#if x == "val"}}`, `{{#if count > 0}}` — full expression support.
+
+**Filters:** `uppercase`/`upper`, `lowercase`/`lower`, `capitalize`, `trim`, `truncate(n)`, `replace(old, new)`, `escape`, `raw`/`safe`, `default(val)`, `length`, `first`, `last`, `reverse`, `join(sep)`, `slice(start, end)`, `json`, `number(decimals)`, `url_encode`
+
+Filter args use parens or spaces: `{{var | truncate(100)}}` or `{{var | default "N/A"}}`
+
+**Loop metadata:** `@index` (0-based), `@index1` (1-based), `@length`, `@first`, `@last`, `@even`, `@odd`
 
 ---
 
