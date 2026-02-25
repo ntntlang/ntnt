@@ -4281,3 +4281,109 @@ print(trim_left("  hello"))
         "Should show deprecation warning for trim_left"
     );
 }
+
+#[test]
+fn test_template_partial_basic() {
+    // Create a temp directory with views/partials/
+    let temp_dir = std::env::temp_dir().join(format!("ntnt_partial_test_{}", std::process::id()));
+    let partials_dir = temp_dir.join("views/partials");
+    fs::create_dir_all(&partials_dir).expect("create partials dir");
+
+    // Write a partial
+    fs::write(
+        partials_dir.join("header.html"),
+        r#"<header><h1>{{title}}</h1></header>"#,
+    )
+    .expect("write partial");
+
+    // Write the main script
+    let main_tnt = temp_dir.join("app.tnt");
+    fs::write(
+        &main_tnt,
+        r#"
+let title = "Hello World"
+let result = """<html>{{> header}}<body>content</body></html>"""
+print(result)
+"#,
+    )
+    .expect("write main tnt");
+
+    let exe = std::env::consts::EXE_SUFFIX;
+    let debug_path = format!("./target/debug/ntnt{}", exe);
+    let release_path = format!("./target/release/ntnt{}", exe);
+    let binary = if std::path::Path::new(&debug_path).exists() {
+        debug_path
+    } else {
+        release_path
+    };
+
+    let output = Command::new(binary)
+        .args(&["run", main_tnt.to_str().unwrap()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("Failed to execute ntnt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    // Cleanup
+    fs::remove_dir_all(&temp_dir).ok();
+
+    assert_eq!(exit_code, 0, "Partial test should succeed. stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        stdout.contains("<header><h1>Hello World</h1></header>"),
+        "Partial should render with parent scope data. Got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_template_partial_with_data() {
+    let temp_dir = std::env::temp_dir().join(format!("ntnt_partial_data_test_{}", std::process::id()));
+    let partials_dir = temp_dir.join("views/partials");
+    fs::create_dir_all(&partials_dir).expect("create partials dir");
+
+    // Write a partial that uses its own data
+    fs::write(
+        partials_dir.join("card.html"),
+        r#"<div class="card"><h2>{{name}}</h2><p>{{desc}}</p></div>"#,
+    )
+    .expect("write partial");
+
+    let main_tnt = temp_dir.join("app.tnt");
+    fs::write(
+        &main_tnt,
+        r#"
+let result = """{{> card map { "name": "Test Card", "desc": "A description" }}}"""
+print(result)
+"#,
+    )
+    .expect("write main tnt");
+
+    let exe = std::env::consts::EXE_SUFFIX;
+    let debug_path = format!("./target/debug/ntnt{}", exe);
+    let release_path = format!("./target/release/ntnt{}", exe);
+    let binary = if std::path::Path::new(&debug_path).exists() {
+        debug_path
+    } else {
+        release_path
+    };
+
+    let output = Command::new(binary)
+        .args(&["run", main_tnt.to_str().unwrap()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("Failed to execute ntnt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    fs::remove_dir_all(&temp_dir).ok();
+
+    assert_eq!(exit_code, 0, "Partial with data should succeed. stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        stdout.contains(r#"<div class="card"><h2>Test Card</h2><p>A description</p></div>"#),
+        "Partial should render with provided data. Got: {}",
+        stdout
+    );
+}

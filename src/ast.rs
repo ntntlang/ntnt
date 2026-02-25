@@ -428,6 +428,11 @@ pub enum TemplatePart {
         elif_chains: Vec<(Expression, Vec<TemplatePart>)>,
         else_parts: Vec<TemplatePart>,
     },
+    /// Partial include: {{> name}} or {{> name data_expr}}
+    Partial {
+        name: String,
+        data_expr: Option<Expression>,
+    },
 }
 
 /// A filter applied to a template expression

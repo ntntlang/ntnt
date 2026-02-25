@@ -2279,6 +2279,32 @@ impl Parser {
                         else_parts: else_ast,
                     });
                 }
+                LexerTemplatePart::Partial { name, data_expr } => {
+                    let data_ast = if let Some(expr_str) = data_expr {
+                        let lexer = crate::lexer::Lexer::new(expr_str);
+                        let tokens: Vec<_> = lexer.collect();
+                        let mut expr_parser = crate::parser::Parser::new(tokens);
+                        match expr_parser.expression() {
+                            Ok(expr) => Some(expr),
+                            Err(e) => {
+                                return Err(crate::error::IntentError::ParserError {
+                                    line,
+                                    column: 0,
+                                    message: format!(
+                                        "Invalid partial data expression '{}': {}",
+                                        expr_str, e
+                                    ),
+                                });
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    ast_parts.push(TemplatePart::Partial {
+                        name: name.clone(),
+                        data_expr: data_ast,
+                    });
+                }
             }
         }
 

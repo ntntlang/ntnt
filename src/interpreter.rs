@@ -304,6 +304,20 @@ impl Environment {
         }
     }
 
+    /// Collect all bindings from this scope and parent scopes (child overrides parent)
+    pub fn all_bindings(&self) -> HashMap<String, Value> {
+        let mut bindings = if let Some(ref parent) = self.parent {
+            parent.borrow().all_bindings()
+        } else {
+            HashMap::new()
+        };
+        // Current scope overrides parent
+        for (k, v) in &self.values {
+            bindings.insert(k.clone(), v.clone());
+        }
+        bindings
+    }
+
     pub fn set(&mut self, name: &str, value: Value) -> bool {
         if self.values.contains_key(name) {
             self.values.insert(name.to_string(), value);
@@ -4707,6 +4721,68 @@ impl Interpreter {
     }
 
     /// Render a template string with the given data
+    /// Resolve a partial name to a file path and load its content.
+    /// Resolution order:
+    /// 1. views/partials/{name}.html (relative to script dir)
+    /// 2. views/partials/{name} (with extension already included)
+    /// 3. {name}.html (relative to script dir)
+    /// 4. {name} (exact path relative to script dir)
+    fn resolve_and_load_partial(&self, name: &str, base_path: Option<&str>) -> Result<String> {
+        let script_dir = if let Some(base) = base_path {
+            std::path::Path::new(base)
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf()
+        } else {
+            std::path::PathBuf::from(".")
+        };
+
+        // Find the project root by looking for a directory that contains "views/"
+        // Walk up from script_dir
+        let project_root = {
+            let mut dir = script_dir.clone();
+            loop {
+                if dir.join("views").is_dir() {
+                    break dir;
+                }
+                if !dir.pop() {
+                    break script_dir.clone();
+                }
+            }
+        };
+
+        let candidates = [
+            project_root.join(format!("views/partials/{}.html", name)),
+            project_root.join(format!("views/partials/{}", name)),
+            project_root.join(format!("views/{}.html", name)),
+            script_dir.join(format!("{}.html", name)),
+            script_dir.join(name),
+        ];
+
+        for candidate in &candidates {
+            if candidate.is_file() {
+                return std::fs::read_to_string(candidate).map_err(|e| {
+                    IntentError::RuntimeError(format!(
+                        "Failed to read partial '{}' from {}: {}",
+                        name,
+                        candidate.display(),
+                        e
+                    ))
+                });
+            }
+        }
+
+        Err(IntentError::RuntimeError(format!(
+            "Partial '{}' not found. Searched:\n{}",
+            name,
+            candidates
+                .iter()
+                .map(|p| format!("  - {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )))
+    }
+
     fn render_template_with_data(
         &mut self,
         content: &str,
@@ -4991,6 +5067,35 @@ impl Interpreter {
                                 result.push_str(&s);
                             }
                         }
+                    }
+                }
+                TemplatePart::Partial { name, data_expr } => {
+                    // Resolve partial file path
+                    let base_path = self.current_file.as_deref();
+                    let partial_content = self.resolve_and_load_partial(name, base_path)?;
+
+                    // Build data map: start with current scope variables
+                    // If data_expr is provided, use that as the data (merged with current scope)
+                    let data_map = if let Some(expr) = data_expr {
+                        match self.eval_expression(expr)? {
+                            Value::Map(m) => m,
+                            other => {
+                                return Err(IntentError::TypeError(format!(
+                                    "Partial '{}' data expression must be a map, got {}",
+                                    name,
+                                    other.type_name()
+                                )));
+                            }
+                        }
+                    } else {
+                        // No data expr — collect current scope variables
+                        self.environment.borrow().all_bindings()
+                    };
+
+                    // Render the partial template with data
+                    let rendered = self.render_template_with_data(&partial_content, &data_map)?;
+                    if let Value::String(s) = rendered {
+                        result.push_str(&s);
                     }
                 }
             }

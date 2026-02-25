@@ -3434,6 +3434,11 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                                 }
                                 collect_from_template_parts(else_parts, names, collect_fn);
                             }
+                            TemplatePart::Partial { data_expr, .. } => {
+                                if let Some(expr) = data_expr {
+                                    collect_fn(expr, names);
+                                }
+                            }
                         }
                     }
                 }
