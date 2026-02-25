@@ -961,10 +961,27 @@ impl<'a> Lexer<'a> {
                     });
                 }
             } else {
-                filters.push(TemplateFilter {
-                    name: filter_str.to_string(),
-                    args: Vec::new(),
-                });
+                // Check for space-separated args: name "arg" or name arg1, arg2
+                // Common pattern: default "fallback", truncate 100
+                let first_space = filter_str.find(|c: char| c.is_whitespace());
+                if let Some(space_pos) = first_space {
+                    let name = filter_str[..space_pos].trim().to_string();
+                    let args_str = filter_str[space_pos..].trim();
+                    if !args_str.is_empty() {
+                        let args = self.split_filter_args(args_str);
+                        filters.push(TemplateFilter { name, args });
+                    } else {
+                        filters.push(TemplateFilter {
+                            name,
+                            args: Vec::new(),
+                        });
+                    }
+                } else {
+                    filters.push(TemplateFilter {
+                        name: filter_str.to_string(),
+                        args: Vec::new(),
+                    });
+                }
             }
         }
 

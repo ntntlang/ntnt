@@ -5013,11 +5013,11 @@ impl Interpreter {
 
         match filter.name.as_str() {
             // String filters
-            "uppercase" => {
+            "uppercase" | "upper" => {
                 let s = value.to_string();
                 Ok(Value::String(s.to_uppercase()))
             }
-            "lowercase" => {
+            "lowercase" | "lower" => {
                 let s = value.to_string();
                 Ok(Value::String(s.to_lowercase()))
             }
