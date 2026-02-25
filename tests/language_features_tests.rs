@@ -675,6 +675,114 @@ print(page)
     assert!(stdout.contains("<html>"), "Should preserve HTML tags");
 }
 
+/// @since v0.3.16
+/// Finding #36: Undefined template variables should render as empty string
+#[test]
+fn test_template_undefined_var_renders_empty() {
+    let code = r#"
+let name = "Josh"
+let page = """Hello {{name}}, {{title}}!"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Undefined template var should not crash");
+    assert!(
+        stdout.contains("Hello Josh, !"),
+        "Undefined var should render as empty string, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #36: Undefined raw template variables should render as empty string
+#[test]
+fn test_template_undefined_raw_var_renders_empty() {
+    let code = r#"
+let content = "<b>Hello</b>"
+let page = """{{{content}}}{{{extra_head}}}"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Undefined raw template var should not crash");
+    assert!(
+        stdout.contains("<b>Hello</b>"),
+        "Defined raw var should render, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #36: Undefined vars in {{#if}} should be falsy, not crash
+#[test]
+fn test_template_undefined_var_in_if_is_falsy() {
+    let code = r#"
+let page = """{{#if show_header}}<header>Hello</header>{{/if}}Footer"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "Undefined var in if condition should not crash"
+    );
+    assert!(
+        !stdout.contains("<header>"),
+        "Undefined if condition should be falsy, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Footer"),
+        "Content after if block should render, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #36: {{#if}} with undefined var should fall through to {{#else}}
+#[test]
+fn test_template_undefined_var_if_else_falls_to_else() {
+    let code = r#"
+let page = """{{#if page_css}}HAS CSS{{#else}}NO CSS{{/if}}"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Undefined var in if/else should not crash");
+    assert!(
+        stdout.contains("NO CSS"),
+        "Should fall through to else branch, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #36: Shared layout pattern with optional slots
+#[test]
+fn test_template_optional_layout_slots() {
+    let code = r#"
+let title = "My Page"
+let content = "<p>Hello World</p>"
+let page = """<!DOCTYPE html>
+<html>
+<head><title>{{title}}</title>{{{extra_head}}}</head>
+<body>{{{content}}}</body>
+</html>"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Optional layout slots should not crash");
+    assert!(
+        stdout.contains("<title>My Page</title>"),
+        "Defined var should render"
+    );
+    assert!(
+        stdout.contains("<body><p>Hello World</p></body>"),
+        "Defined raw var should render"
+    );
+    assert!(
+        stdout.contains("</title></head>"),
+        "Undefined extra_head should render as empty"
+    );
+}
+
 /// @since v0.3.13
 #[test]
 fn test_template_nested_if_both_true() {

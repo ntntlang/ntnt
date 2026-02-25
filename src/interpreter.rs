@@ -4755,12 +4755,22 @@ impl Interpreter {
             match part {
                 TemplatePart::Literal(s) => result.push_str(s),
                 TemplatePart::Expr(expr) => {
-                    let value = self.eval_expression(expr)?;
+                    // Undefined variables render as empty string (standard Mustache behavior)
+                    let value = match self.eval_expression(expr) {
+                        Ok(v) => v,
+                        Err(IntentError::UndefinedVariable { .. }) => Value::String(String::new()),
+                        Err(e) => return Err(e),
+                    };
                     let s = value.to_string();
                     result.push_str(&html_escape_string(&s));
                 }
                 TemplatePart::RawExpr(expr) => {
-                    let value = self.eval_expression(expr)?;
+                    // Undefined variables render as empty string (standard Mustache behavior)
+                    let value = match self.eval_expression(expr) {
+                        Ok(v) => v,
+                        Err(IntentError::UndefinedVariable { .. }) => Value::String(String::new()),
+                        Err(e) => return Err(e),
+                    };
                     result.push_str(&value.to_string());
                 }
                 TemplatePart::FilteredExpr { expr, filters } => {
@@ -4943,7 +4953,12 @@ impl Interpreter {
                     elif_chains,
                     else_parts,
                 } => {
-                    let condition_value = self.eval_expression(condition)?;
+                    // Undefined variables in conditions are falsy (not an error)
+                    let condition_value = match self.eval_expression(condition) {
+                        Ok(v) => v,
+                        Err(IntentError::UndefinedVariable { .. }) => Value::Bool(false),
+                        Err(e) => return Err(e),
+                    };
 
                     if condition_value.is_truthy() {
                         let then_result = self.eval_template_parts(then_parts)?;
@@ -4954,7 +4969,11 @@ impl Interpreter {
                         // Check elif chains
                         let mut handled = false;
                         for (elif_condition, elif_body) in elif_chains {
-                            let elif_value = self.eval_expression(elif_condition)?;
+                            let elif_value = match self.eval_expression(elif_condition) {
+                                Ok(v) => v,
+                                Err(IntentError::UndefinedVariable { .. }) => Value::Bool(false),
+                                Err(e) => return Err(e),
+                            };
                             if elif_value.is_truthy() {
                                 let elif_result = self.eval_template_parts(elif_body)?;
                                 if let Value::String(s) = elif_result {
