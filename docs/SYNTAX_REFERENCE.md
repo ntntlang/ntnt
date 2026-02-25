@@ -167,6 +167,8 @@ Template string (triple-quoted) features
 | elif | `{{#if cond}}...{{#elif cond2}}...{{#else}}...{{/if}}` | Elif chains |
 | comments | `{{! comment }}` | Template comments (not rendered) |
 | escape_braces | `\{{ and \}}` | Literal {{ and }} in output |
+| partials | `{{> name}}` | Include a partial template (inherits current scope) |
+| partials_data | `{{> name data_expr}}` | Include a partial with explicit data map |
 
 ### Optional Variables
 

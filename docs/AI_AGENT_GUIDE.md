@@ -1133,6 +1133,25 @@ Filter args use parens or spaces: `{{var | truncate(100)}}` or `{{var | default 
 
 **Loop metadata:** `@index` (0-based), `@index1` (1-based), `@length`, `@first`, `@last`, `@even`, `@odd`
 
+**Partials:** Include reusable template fragments with `{{> name}}`:
+
+```ntnt
+{{! Include a partial — inherits current scope variables }}
+{{> header}}
+
+{{! Include with explicit data }}
+{{> card map { "title": item.name, "desc": item.summary } }}
+```
+
+Partial resolution order (relative to project root):
+1. `views/partials/{name}.html`
+2. `views/partials/{name}` (if name includes extension)
+3. `views/{name}.html`
+4. `{name}.html` (relative to script)
+5. `{name}` (exact path relative to script)
+
+Without a data expression, partials inherit all variables from the current scope. With a data expression (must be a map), only that data is available inside the partial.
+
 ---
 
 ## External Templates
