@@ -1,6 +1,6 @@
 <!-- NTNT coding guide sections are sourced from docs/AI_AGENT_GUIDE.md -->
 <!-- To update NTNT coding instructions, edit AI_AGENT_GUIDE.md and copy to all agent files -->
-<!-- Last synced: 2026-02-23 -->
+<!-- Last synced: 2026-02-25 -->
 
 # NTNT Language - GitHub Copilot Instructions
 
@@ -1108,21 +1108,56 @@ let page = """
 <style>h1 { color: blue; }</style>
 <h1>Hello, {{name}}!</h1>
 
+{{! This is a comment — not rendered }}
+
 {{#for item in items}}
-<p>{{item.name}}: ${{item.price}}</p>
+<p>{{@index1}}. {{item.name}}: ${{item.price}}</p>
+{{#empty}}
+<p>No items found.</p>
 {{/for}}
 
-{{#if logged_in}}
-<a href="/logout">Logout</a>
+{{#if status == "active"}}
+<span class="active">Active</span>
+{{#elif status == "draft"}}
+<span class="draft">Draft</span>
 {{#else}}
-<a href="/login">Login</a>
+<span>Unknown</span>
 {{/if}}
 """
 ```
 
-**Available filters:** `uppercase`, `lowercase`, `capitalize`, `trim`, `truncate(n)`, `escape`, `json`, `url_encode`
+**Output modes:**
+- `{{expr}}` — HTML-escaped output
+- `{{{expr}}}` — Raw/unescaped output (use for HTML content like layout slots)
 
-**Loop metadata:** `@index`, `@length`, `@first`, `@last`, `@even`, `@odd`
+**Optional variables:** Undefined variables render as empty string (not an error). Undefined vars in `{{#if}}` are falsy.
+
+**Comparisons in conditions:** `{{#if x == "val"}}`, `{{#if count > 0}}` — full expression support.
+
+**Filters:** `uppercase`/`upper`, `lowercase`/`lower`, `capitalize`, `trim`, `truncate(n)`, `replace(old, new)`, `escape`, `raw`/`safe`, `default(val)`, `length`, `first`, `last`, `reverse`, `join(sep)`, `slice(start, end)`, `json`, `number(decimals)`, `url_encode`
+
+Filter args use parens or spaces: `{{var | truncate(100)}}` or `{{var | default "N/A"}}`
+
+**Loop metadata:** `@index` (0-based), `@index1` (1-based), `@length`, `@first`, `@last`, `@even`, `@odd`
+
+**Partials:** Include reusable template fragments with `{{> name}}`:
+
+```ntnt
+{{! Include a partial — inherits current scope variables }}
+{{> header}}
+
+{{! Include with explicit data }}
+{{> card map { "title": item.name, "desc": item.summary } }}
+```
+
+Partial resolution order (relative to project root):
+1. `views/partials/{name}.html`
+2. `views/partials/{name}` (if name includes extension)
+3. `views/{name}.html`
+4. `{name}.html` (relative to script)
+5. `{name}` (exact path relative to script)
+
+Without a data expression, partials inherit all variables from the current scope. With a data expression (must be a map), only that data is available inside the partial.
 
 ---
 

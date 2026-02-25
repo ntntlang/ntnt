@@ -4705,6 +4705,8 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             "elif",
             "comments",
             "escape_braces",
+            "partials",
+            "partials_data",
         ];
 
         for feat in &features {

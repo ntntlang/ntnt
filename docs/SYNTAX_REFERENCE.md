@@ -156,13 +156,11 @@ Template string (triple-quoted) features
 
 | Feature | Syntax | Description |
 |---------|--------|-------------|
-| interpolation | `{{expr}}` | HTML-escaped output |
-| raw_output | `{{{expr}}}` | Raw/unescaped output (for HTML content) |
+| interpolation | `{{expr}}` | Interpolate any expression |
 | filters | `{{expr \| filter}}` | Apply filter to expression |
-| loops | `{{#for item in items}}...{{/for}}` | Loop over arrays and maps |
-| empty_fallback | `{{#for item in items}}...{{#empty}}...{{/for}}` | Fallback content when array/map is empty |
+| loops | `{{#for item in items}}...{{/for}}` | Loop over arrays |
+| empty_fallback | `{{#for item in items}}...{{#empty}}...{{/for}}` | Fallback content when array is empty |
 | conditionals | `{{#if cond}}...{{/if}}` | Conditional rendering |
-| comparisons | `{{#if x == "val"}}...{{/if}}` | Comparisons in conditions (`==`, `!=`, `>`, `<`, `>=`, `<=`) |
 | if_else | `{{#if cond}}...{{#else}}...{{/if}}` | If-else rendering |
 | elif | `{{#if cond}}...{{#elif cond2}}...{{#else}}...{{/if}}` | Elif chains |
 | comments | `{{! comment }}` | Template comments (not rendered) |
@@ -170,56 +168,18 @@ Template string (triple-quoted) features
 | partials | `{{> name}}` | Include a partial template (inherits current scope) |
 | partials_data | `{{> name data_expr}}` | Include a partial with explicit data map |
 
-### Optional Variables
-
-Undefined template variables render as empty string (not an error). This enables shared layouts with optional slots:
-
-```html
-<!-- layout.html -->
-<head>{{{extra_head}}}</head>   <!-- renders empty if not passed -->
-<body>{{{content}}}</body>
-```
-
-Undefined variables in `{{#if}}` conditions evaluate as falsy:
-
-```html
-{{#if show_header}}<header>...</header>{{/if}}  <!-- skipped if show_header not defined -->
-```
-
 ### Available Filters
 
-Filters can use parenthesized or space-separated args: `{{var | truncate(100)}}` or `{{var | default "fallback"}}`.
-
-| Filter | Aliases | Description |
-|--------|---------|-------------|
-| `uppercase` | `upper` | Convert to uppercase |
-| `lowercase` | `lower` | Convert to lowercase |
-| `capitalize` | | Capitalize first letter |
-| `trim` | | Remove leading/trailing whitespace |
-| `truncate(n)` | | Truncate to n characters, append `...` |
-| `replace(old, new)` | | String replacement |
-| `escape` | | HTML-escape (`&`, `<`, `>`, `"`, `'`) |
-| `raw` / `safe` | | Skip auto-escaping |
-| `default(val)` | | Fallback value for empty/undefined/None |
-| `length` | | Length of string, array, or map |
-| `first` | | First element of array or string |
-| `last` | | Last element of array or string |
-| `reverse` | | Reverse array or string |
-| `join(sep)` | | Join array elements with separator |
-| `slice(start, end)` | | Slice array or string |
-| `json` | | Serialize to JSON string |
-| `number(decimals)` | | Format number with decimal places |
-| `url_encode` | | URL-encode a string |
+`uppercase`, `lowercase`, `capitalize`, `trim`, `truncate(n)`, `replace(old, new)`, `escape`, `raw`, `default(val)`, `length`, `first`, `last`, `reverse`, `join(sep)`, `slice(start, end)`, `json`, `number`, `url_encode`
 
 ### Loop Metadata Variables
 
-- `@index` — 0-based index
-- `@index1` — 1-based index
-- `@length` — total items
-- `@first` — true if first iteration (bool)
-- `@last` — true if last iteration (bool)
-- `@even` — true if even index (bool)
-- `@odd` — true if odd index (bool)
+- `@index (0-based)`
+- `@length (total)`
+- `@first (bool)`
+- `@last (bool)`
+- `@even (bool)`
+- `@odd (bool)`
 
 ---
 
