@@ -93,9 +93,22 @@ pub fn get_security_config() -> &'static SecurityConfig {
     SECURITY_CONFIG.get_or_init(SecurityConfig::default)
 }
 
-/// Default security headers added to all responses
+/// Default security headers added to all responses.
+///
+/// These are sensible defaults that protect against common web vulnerabilities.
+/// All headers can be overridden by the application — if the app sets a header
+/// with the same name, the app's value takes precedence.
+///
+/// To disable all security headers: `NTNT_SECURITY_HEADERS=false`
+///
+/// Individual headers can be overridden in route handlers by returning them
+/// in the response map's `headers` field.
 pub fn get_default_security_headers() -> HashMap<String, Value> {
     let mut headers = HashMap::new();
+
+    let is_production = std::env::var("NTNT_ENV")
+        .map(|v| v == "production" || v == "prod")
+        .unwrap_or(false);
 
     // Prevent MIME type sniffing
     headers.insert(
@@ -103,7 +116,7 @@ pub fn get_default_security_headers() -> HashMap<String, Value> {
         Value::String("nosniff".to_string()),
     );
 
-    // Prevent clickjacking (can be overridden by app if needed for iframes)
+    // Prevent clickjacking (override with SAMEORIGIN if your app uses iframes)
     headers.insert(
         "x-frame-options".to_string(),
         Value::String("DENY".to_string()),
@@ -121,8 +134,24 @@ pub fn get_default_security_headers() -> HashMap<String, Value> {
         Value::String("1; mode=block".to_string()),
     );
 
-    // Don't expose server software in production (overridden below)
-    // Note: We don't add Server header here - let tiny_http's default or none
+    // HSTS: Force HTTPS in production (browsers remember for 1 year)
+    // Disabled in dev to avoid breaking localhost HTTP
+    if is_production {
+        headers.insert(
+            "strict-transport-security".to_string(),
+            Value::String("max-age=31536000; includeSubDomains".to_string()),
+        );
+    }
+
+    // Restrict browser features (camera, mic, geolocation, etc.)
+    // Apps that need these can override with specific permissions
+    headers.insert(
+        "permissions-policy".to_string(),
+        Value::String(
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()"
+                .to_string(),
+        ),
+    );
 
     headers
 }
@@ -1073,6 +1102,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "text".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 match &args[0] {
                     Value::String(body) => {
@@ -1122,7 +1152,8 @@ pub fn init() -> HashMap<String, Value> {
         "html".to_string(),
         Value::NativeFunction {
             name: "html".to_string(),
-            arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
+            arity: 1,
+            max_arity: 2,
             func: |args| {
                 if args.is_empty() || args.len() > 3 {
                     return Err(IntentError::TypeError(
@@ -1213,7 +1244,8 @@ pub fn init() -> HashMap<String, Value> {
         "json".to_string(),
         Value::NativeFunction {
             name: "json".to_string(),
-            arity: 0, // Accepts 1 or 2 arguments (0 = variadic)
+            arity: 1,
+            max_arity: 3,
             func: |args| {
                 if args.is_empty() || args.len() > 3 {
                     return Err(IntentError::TypeError(
@@ -1233,6 +1265,21 @@ pub fn init() -> HashMap<String, Value> {
                 } else {
                     200
                 };
+
+                // Warn if a string that looks like JSON is passed — likely double-encoding
+                // (user did json(stringify(data)) instead of json(data))
+                if let Value::String(s) = &args[0] {
+                    let trimmed = s.trim();
+                    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+                    {
+                        eprintln!(
+                            "[WARN] json() received a string that looks like JSON. \
+                             This will double-encode it. Pass the map/array directly \
+                             to json() instead of calling stringify() first."
+                        );
+                    }
+                }
 
                 let json_value = intent_value_to_json(&args[0]);
                 let body = json_value.to_string();
@@ -1288,6 +1335,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "status".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(code), Value::String(body)) => {
                     let mut headers = HashMap::new();
@@ -1328,6 +1376,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "redirect".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(url) => {
                     let mut headers = HashMap::new();
@@ -1367,7 +1416,8 @@ pub fn init() -> HashMap<String, Value> {
         "redirect_safe".to_string(),
         Value::NativeFunction {
             name: "redirect_safe".to_string(),
-            arity: 0, // Variadic: 1 or 2 args
+            arity: 1,
+            max_arity: 2,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::TypeError(
@@ -1425,6 +1475,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "not_found".to_string(),
             arity: 0,
+            max_arity: 1,
             func: |_args| {
                 let mut headers = HashMap::new();
                 headers.insert(
@@ -1455,6 +1506,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "error".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(msg) => {
                     let mut headers = HashMap::new();
@@ -1495,7 +1547,8 @@ pub fn init() -> HashMap<String, Value> {
     // @error TypeError ~ "static_file() max_age must be an integer" fix: "Pass an Int as the third argument"
     module.insert("static_file".to_string(), Value::NativeFunction {
         name: "static_file".to_string(),
-        arity: 0, // Accepts 2 or 3 arguments
+        arity: 2,
+        max_arity: 3,
         func: |args| {
             if args.len() < 2 || args.len() > 3 {
                 return Err(IntentError::TypeError(
@@ -1559,6 +1612,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "response".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| {
                 let status = match &args[0] {
                     Value::Int(code) => *code,
@@ -1620,6 +1674,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "parse_json".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let body = match &args[0] {
                     Value::Map(map) => match map.get("body") {
@@ -1680,6 +1735,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "parse_form".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let body = match &args[0] {
                     Value::Map(map) => match map.get("body") {
@@ -1764,7 +1820,8 @@ pub fn init() -> HashMap<String, Value> {
         "set_cookie".to_string(),
         Value::NativeFunction {
             name: "set_cookie".to_string(),
-            arity: 0, // Variadic: 2-3 args
+            arity: 2,
+            max_arity: 3,
             func: |args| {
                 if args.len() < 2 || args.len() > 3 {
                     return Err(IntentError::TypeError(
@@ -1838,6 +1895,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "get_cookie".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let headers = match &args[0] {
                     Value::Map(map) => match map.get("headers") {
@@ -1917,6 +1975,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "get_cookies".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let headers = match &args[0] {
                     Value::Map(map) => match map.get("headers") {
@@ -1975,7 +2034,8 @@ pub fn init() -> HashMap<String, Value> {
         "delete_cookie".to_string(),
         Value::NativeFunction {
             name: "delete_cookie".to_string(),
-            arity: 0, // Variadic: 1-2 args
+            arity: 1,
+            max_arity: 2,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::TypeError(
@@ -2039,7 +2099,8 @@ pub fn init() -> HashMap<String, Value> {
         "with_cookie".to_string(),
         Value::NativeFunction {
             name: "with_cookie".to_string(),
-            arity: 0, // Variadic: 3-4 args
+            arity: 3,
+            max_arity: 4,
             func: |args| {
                 if args.len() < 3 || args.len() > 4 {
                     return Err(IntentError::TypeError(
@@ -2160,6 +2221,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "parse_multipart".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let (content_type, body) = match &args[0] {
                     Value::Map(map) => {
@@ -2272,6 +2334,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "save_upload".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let data = match &args[0] {
                     Value::Map(map) => match map.get("data") {

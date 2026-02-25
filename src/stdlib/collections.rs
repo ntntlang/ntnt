@@ -29,6 +29,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "push".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match &args[0] {
                 Value::Array(arr) => {
                     let mut new_arr = arr.clone();
@@ -62,6 +63,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "pop".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 match &args[0] {
                     Value::Array(arr) => {
@@ -112,6 +114,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "first".to_string(),
             arity: 0, // Variable: 1 or 2 args
+            max_arity: 0,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::TypeError(
@@ -172,6 +175,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "last".to_string(),
             arity: 0, // Variable: 1 or 2 args
+            max_arity: 0,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::TypeError(
@@ -228,6 +232,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "reverse".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Array(arr) => {
                     let mut new_arr = arr.clone();
@@ -263,6 +268,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "slice".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::Array(arr), Value::Int(start), Value::Int(end)) => {
                     let start = *start as usize;
@@ -299,6 +305,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "concat".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Array(arr1), Value::Array(arr2)) => {
                     let mut new_arr = arr1.clone();
@@ -332,6 +339,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_empty".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Array(arr) => Ok(Value::Bool(arr.is_empty())),
                 Value::String(s) => Ok(Value::Bool(s.is_empty())),
@@ -362,6 +370,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "keys".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Map(map) => {
                     let keys: Vec<Value> = map.keys().map(|k| Value::String(k.clone())).collect();
@@ -391,6 +400,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "values".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Map(map) => {
                     let values: Vec<Value> = map.values().cloned().collect();
@@ -422,6 +432,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "entries".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Map(map) => {
                     let entries: Vec<Value> = map
@@ -455,8 +466,12 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "has_key".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Map(map), Value::String(key)) => Ok(Value::Bool(map.contains_key(key))),
+                // Non-map first argument: return false instead of crashing.
+                // has_key() is a check — it should be safe to call on anything.
+                (_, Value::String(_)) => Ok(Value::Bool(false)),
                 _ => Err(IntentError::TypeError(
                     "has_key() requires a map and string key".to_string(),
                 )),
@@ -484,8 +499,10 @@ pub fn init() -> HashMap<String, Value> {
     // @error TypeError ~ "get_key() requires a map and string key" fix: "Pass a map and a string key"
     module.insert("get_key".to_string(), Value::NativeFunction {
         name: "get_key".to_string(),
-        arity: 0, // Variable arity: 2 or 3 arguments
+        arity: 2,
+        max_arity: 3,
         func: |args| {
+            eprintln!("[DEPRECATED] get_key() is deprecated. Use get_or() instead.");
             if args.len() < 2 || args.len() > 3 {
                 return Err(IntentError::TypeError(
                     "get_key() requires 2 or 3 arguments: get_key(map, key) or get_key(map, key, default)".to_string()
@@ -553,6 +570,7 @@ pub fn init() -> HashMap<String, Value> {
     module.insert("get_index".to_string(), Value::NativeFunction {
         name: "get_index".to_string(),
         arity: 0, // Variable arity: 2 or 3 arguments
+        max_arity: 0,
         func: |args| {
             if args.len() < 2 || args.len() > 3 {
                 return Err(IntentError::TypeError(
@@ -635,6 +653,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "merge".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Map(map1), Value::Map(map2)) => {
                     let mut result = map1.clone();
@@ -672,12 +691,54 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "get_or".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Map(map), Value::String(key)) => {
                     Ok(map.get(key).cloned().unwrap_or_else(|| args[2].clone()))
                 }
+                // Non-map first argument: return the default value instead of crashing.
+                // get_or() exists for defensive access — it should never be the thing that crashes.
+                (_, Value::String(_)) => Ok(args[2].clone()),
                 _ => Err(IntentError::TypeError(
-                    "get_or() requires a map, string key, and default value".to_string(),
+                    "get_or() requires a map (or any value), string key, and default value"
+                        .to_string(),
+                )),
+            },
+        },
+    );
+
+    // @ntnt includes
+    // @module std/collections
+    // @signature includes(arr: Array, value: Any) -> Bool
+    // Returns true if the array includes the specified value (deep equality).
+    //
+    // Iterates through the array and checks each element for equality with the
+    // given value. Supports all value types including nested arrays and enums.
+    // Named `includes` (not `contains`) to avoid collision with contains() in
+    // std/string which checks substrings. Follows JavaScript convention.
+    // @param arr The array to search
+    // @param value The value to look for
+    // @returns true if the value is found in the array, false otherwise
+    // @see_also has_key, first, last, is_empty
+    // @since v0.4.0
+    // @tags #pure, #deterministic
+    // @example includes(["red", "green", "blue"], "green") => true ~ "Value found"
+    // @example includes([1, 2, 3], 5) => false ~ "Value not found"
+    // @error TypeError ~ "includes() requires an array as first argument" fix: "Ensure first argument is an array"
+    module.insert(
+        "includes".to_string(),
+        Value::NativeFunction {
+            name: "includes".to_string(),
+            arity: 2,
+            max_arity: 2,
+            func: |args| match &args[0] {
+                Value::Array(arr) => {
+                    let needle = &args[1];
+                    let found = arr.iter().any(|item| values_equal(item, needle));
+                    Ok(Value::Bool(found))
+                }
+                _ => Err(IntentError::TypeError(
+                    "includes() requires an array as first argument".to_string(),
                 )),
             },
         },
@@ -686,33 +747,32 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt has_value
     // @module std/collections
     // @signature has_value(arr: Array, value: Any) -> Bool
-    // Returns true if the array contains the specified value (deep equality).
-    //
-    // Iterates through the array and checks each element for equality with the
-    // given value. Supports all value types including nested arrays and enums.
+    // Deprecated: use includes() instead. Alias for backward compatibility.
     // @param arr The array to search
     // @param value The value to look for
     // @returns true if the value is found in the array, false otherwise
-    // @see_also has_key, first, last, is_empty
+    // @see_also includes
     // @since v0.4.0
-    // @tags #pure, #deterministic
-    // @example has_value(["red", "green", "blue"], "green") => true ~ "Value found"
-    // @example has_value([1, 2, 3], 5) => false ~ "Value not found"
-    // @error TypeError ~ "has_value() requires an array as first argument" fix: "Ensure first argument is an array"
+    // @tags #pure, #deterministic, #deprecated
+    // @example has_value([1, 2, 3], 2) => true ~ "Deprecated alias for includes"
     module.insert(
         "has_value".to_string(),
         Value::NativeFunction {
             name: "has_value".to_string(),
             arity: 2,
-            func: |args| match &args[0] {
-                Value::Array(arr) => {
-                    let needle = &args[1];
-                    let found = arr.iter().any(|item| values_equal(item, needle));
-                    Ok(Value::Bool(found))
+            max_arity: 2,
+            func: |args| {
+                eprintln!("[DEPRECATED] has_value() is deprecated. Use includes() from std/collections instead.");
+                match &args[0] {
+                    Value::Array(arr) => {
+                        let needle = &args[1];
+                        let found = arr.iter().any(|item| values_equal(item, needle));
+                        Ok(Value::Bool(found))
+                    }
+                    _ => Err(IntentError::TypeError(
+                        "has_value() requires an array as first argument".to_string(),
+                    )),
                 }
-                _ => Err(IntentError::TypeError(
-                    "has_value() requires an array as first argument".to_string(),
-                )),
             },
         },
     );

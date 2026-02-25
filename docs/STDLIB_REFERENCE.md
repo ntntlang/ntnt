@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.3.14
+> Last updated: v0.3.15
 
 ## Table of Contents
 
@@ -19,6 +19,7 @@
 - [std/json](#stdjson)
 - [std/kv](#stdkv)
 - [std/log](#stdlog)
+- [std/markdown](#stdmarkdown)
 - [std/math](#stdmath)
 - [std/path](#stdpath)
 - [std/postgres](#stdpostgres)
@@ -69,6 +70,7 @@ These functions are available everywhere without importing.
 | [`str(x: Any)`](#str) | Converts any value to its string representation. |
 | [`trunc(x: Int \| Float)`](#trunc) | Truncates a number toward zero. |
 | [`type(x: Any)`](#type) | Returns the type name of a value as a string. |
+| [`typeof(x: Any)`](#typeof) | Returns the type name of a value as a string. |
 | [`unwrap(x: Option<Any> \| Result<Any, Any>)`](#unwrap) | Extracts the value from Some or Ok, panics on None or Err. |
 | [`unwrap_or(x: Option<Any> \| Result<Any, Any>, default: Any)`](#unwrapor) | Extracts the value from Some or Ok, returns default on None or Err. |
 
@@ -626,11 +628,12 @@ For strings, returns the number of bytes. For arrays, returns the number of elem
 ```ntnt
 len("hello")  // => 5  // String length
 len([1, 2, 3])  // => 3  // Array length
+len(map { "a": 1, "b": 2 })  // => 2  // Map length
 ```
 
 **Errors:**
 
-- **TypeError**: len() requires a string or array — *Fix: Pass a String, Array, or Map*
+- **TypeError**: len() requires a string, array, or map — *Fix: Pass a String, Array, or Map*
 
 **See also:** `type`, `is_empty`
 
@@ -1117,6 +1120,37 @@ type("hello")  // => "String"  // String type
 
 ---
 
+#### `typeof`
+
+```ntnt
+typeof(x: Any) -> String
+```
+
+Returns the type name of a value as a string.
+
+Alias for `type()` that works in all contexts, including where `type` is parsed as a keyword (type alias declarations). Use `typeof()` for runtime type checking in conditional logic. Returns one of: "Int", "Float", "String", "Bool", "Array", "Map", "Function", "Unit", or the enum/struct name.
+
+**Parameters:**
+
+- `x` — The value to inspect
+
+**Returns:** The type name as a string
+
+**Examples:**
+
+```ntnt
+typeof(42)  // => "Int"  // Integer type
+typeof("hello")  // => "String"  // String type
+typeof(map { "a": 1 })  // => "Map"  // Map type
+typeof([1, 2])  // => "Array"  // Array type
+```
+
+**See also:** `type`, `str`, `len`
+
+*Since v0.4.0*
+
+---
+
 #### `unwrap`
 
 ```ntnt
@@ -1228,6 +1262,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`totp_secret`](#totpsecret) | Generate a new TOTP secret for MFA setup. |
 | [`totp_uri`](#totpuri) | Generate an otpauth:// URI for QR codes. |
 | [`user_sessions`](#usersessions) | Get all active sessions for the current user. |
+| [`validate_csrf`](#validatecsrf) | Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH). |
 | [`verify_csrf`](#verifycsrf) | Verify a CSRF token against the session's token. |
 | [`verify_password`](#verifypassword) | Verify a password against a bcrypt hash. |
 | [`verify_totp`](#verifytotp) | Verify a TOTP code against a secret. |
@@ -2101,6 +2136,40 @@ user_sessions(req)  // List all user's active sessions
 
 ---
 
+#### `validate_csrf`
+
+```ntnt
+validate_csrf(req: Request) -> Result<Bool, Map>
+```
+
+Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH).
+
+Compares the CSRF token from the request (form field `_csrf_token` or header `X-CSRF-Token`) against the token stored in the session. Returns `true` if valid. Returns an error response map (403) if invalid, which can be returned directly from a route handler.
+
+Skips validation for: - GET, HEAD, OPTIONS requests (safe methods) - API key auth (Bearer token) — CSRF only applies to cookie-based sessions - Requests with no session (will fail auth check separately)
+
+Usage in middleware: ```ntnt let csrf_ok = validate_csrf(req) if typeof(csrf_ok) == "Map" { return csrf_ok }  // Return 403 response ```
+
+Usage in forms: ```html <input type="hidden" name="_csrf_token" value="{{user.csrf_token}}"> ```
+
+**Parameters:**
+
+- `req` — The HTTP request object
+
+**Returns:** true if valid or safe method; a 403 error response Map if invalid
+
+**Examples:**
+
+```ntnt
+validate_csrf(req)  // Check CSRF token on POST
+```
+
+**See also:** `get_user`, `get_session`
+
+*Since v0.4.0*
+
+---
+
 #### `verify_csrf`
 
 ```ntnt
@@ -2207,7 +2276,8 @@ import { push, pop, first } from "std/collections"
 | [`get_key`](#getkey) | Gets a value from a map by key with safe access. |
 | [`get_or`](#getor) | Gets a value from a map by key, returning a default if the key is missing. |
 | [`has_key`](#haskey) | Returns true if the map contains the specified key. |
-| [`has_value`](#hasvalue) | Returns true if the array contains the specified value (deep equality). |
+| [`has_value`](#hasvalue) | Deprecated: use includes() instead. Alias for backward compatibility. |
+| [`includes`](#includes) | Returns true if the array includes the specified value (deep equality). |
 | [`is_empty`](#isempty) | Returns true if the array or string is empty. |
 | [`keys`](#keys) | Returns an array of all keys in the map. |
 | [`last`](#last) | Returns the last element of an array. |
@@ -2463,9 +2533,7 @@ has_key(map { "a": 1 }, "b")  // => false  // Key does not exist
 has_value(arr: Array, value: Any) -> Bool
 ```
 
-Returns true if the array contains the specified value (deep equality).
-
-Iterates through the array and checks each element for equality with the given value. Supports all value types including nested arrays and enums.
+Deprecated: use includes() instead. Alias for backward compatibility.
 
 **Parameters:**
 
@@ -2477,13 +2545,42 @@ Iterates through the array and checks each element for equality with the given v
 **Examples:**
 
 ```ntnt
-has_value(["red", "green", "blue"], "green")  // => true  // Value found
-has_value([1, 2, 3], 5)  // => false  // Value not found
+has_value([1, 2, 3], 2)  // => true  // Deprecated alias for includes
+```
+
+**See also:** `includes`
+
+*Since v0.4.0*
+
+---
+
+#### `includes`
+
+```ntnt
+includes(arr: Array, value: Any) -> Bool
+```
+
+Returns true if the array includes the specified value (deep equality).
+
+Iterates through the array and checks each element for equality with the given value. Supports all value types including nested arrays and enums. Named `includes` (not `contains`) to avoid collision with contains() in std/string which checks substrings. Follows JavaScript convention.
+
+**Parameters:**
+
+- `arr` — The array to search
+- `value` — The value to look for
+
+**Returns:** true if the value is found in the array, false otherwise
+
+**Examples:**
+
+```ntnt
+includes(["red", "green", "blue"], "green")  // => true  // Value found
+includes([1, 2, 3], 5)  // => false  // Value not found
 ```
 
 **Errors:**
 
-- **TypeError**: has_value() requires an array as first argument — *Fix: Ensure first argument is an array*
+- **TypeError**: includes() requires an array as first argument — *Fix: Ensure first argument is an array*
 
 **See also:** `has_key`, `first`, `last`, `is_empty`
 
@@ -5904,6 +6001,39 @@ set_log_level("error")  // Only show errors
 
 ---
 
+## std/markdown
+
+```ntnt
+import { to_html, to_html_safe } from "std/markdown"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`to_html`](#tohtml) | Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags pass through as-is. Use to_html_safe() if the input is untrusted. |
+| [`to_html_safe`](#tohtmlsafe) | Convert a Markdown string to HTML with embedded HTML tags stripped. Use this when rendering user-supplied or untrusted Markdown content. |
+
+#### `to_html`
+
+```ntnt
+to_html(markdown: String) -> String
+```
+
+Convert a Markdown string to HTML. Supports GitHub Flavored Markdown: tables, strikethrough, task lists, footnotes, heading attributes. Does NOT sanitize HTML — embedded HTML tags pass through as-is. Use to_html_safe() if the input is untrusted.
+
+---
+
+#### `to_html_safe`
+
+```ntnt
+to_html_safe(markdown: String) -> String
+```
+
+Convert a Markdown string to HTML with embedded HTML tags stripped. Use this when rendering user-supplied or untrusted Markdown content.
+
+---
+
 ## std/math
 
 Mathematical functions and constants
@@ -6771,7 +6901,7 @@ tanh(1)  // => 0.7615941559557649  // Hyperbolic tangent of one
 File path manipulation and resolution
 
 ```ntnt
-import { join, dirname, basename } from "std/path"
+import { join_path, join, dirname } from "std/path"
 ```
 
 ### Functions
@@ -6783,7 +6913,8 @@ import { join, dirname, basename } from "std/path"
 | [`extension`](#extension) | Returns the file extension without the leading dot. |
 | [`is_absolute`](#isabsolute) | Returns true if the path is absolute. |
 | [`is_relative`](#isrelative) | Returns true if the path is relative. |
-| [`join`](#join) | Joins path segments into a single path string. |
+| [`join`](#join) | Deprecated: use join_path() instead. Alias for backward compatibility. |
+| [`join_path`](#joinpath) | Joins path segments into a single path string. |
 | [`normalize`](#normalize) | Cleans up `..` and `.` path components without touching the filesystem. |
 | [`resolve`](#resolve) | Resolves a path to an absolute path using filesystem canonicalize. |
 | [`stem`](#stem) | Returns the filename without its extension. |
@@ -6917,7 +7048,7 @@ is_relative("/usr/bin")  // => false  // Absolute path is not relative
 join(parts: Array<String>) -> String
 ```
 
-Joins path segments into a single path string.
+Deprecated: use join_path() instead. Alias for backward compatibility.
 
 **Parameters:**
 
@@ -6926,12 +7057,38 @@ Joins path segments into a single path string.
 **Examples:**
 
 ```ntnt
-join(["src", "lib", "main.tnt"])  // => "src/lib/main.tnt"  // Joins path segments
+join(["src", "lib"])  // => "src/lib"  // Deprecated: use join_path()
+```
+
+**See also:** `join_path`
+
+*Since v0.1.0*
+
+---
+
+#### `join_path`
+
+```ntnt
+join_path(parts: Array<String>) -> String
+```
+
+Joins path segments into a single path string.
+
+Renamed from join() to avoid ambiguity with join() in std/string and std/url.
+
+**Parameters:**
+
+- `parts` — Array of path segments to join
+
+**Examples:**
+
+```ntnt
+join_path(["src", "lib", "main.tnt"])  // => "src/lib/main.tnt"  // Joins path segments
 ```
 
 **See also:** `dirname`, `basename`, `normalize`
 
-*Since v0.1.0*
+*Since v0.4.0*
 
 ---
 
@@ -10650,7 +10807,8 @@ import { parse_url, encode, encode_component } from "std/url"
 | [`decode`](#decode) | URL-decodes a percent-encoded string. |
 | [`encode`](#encode) | URL-encodes a string, preserving URL-safe characters. |
 | [`encode_component`](#encodecomponent) | URL-encodes a string component aggressively, safe for query parameters. |
-| [`join`](#join) | Joins a base URL with a path, handling trailing/leading slashes. |
+| [`join`](#join) | Deprecated: use join_url() instead. Alias for backward compatibility. |
+| [`join_url`](#joinurl) | Joins a base URL with a path, handling trailing/leading slashes. |
 | [`parse_query`](#parsequery) | Parses a URL query string into a map of key-value pairs. |
 | [`parse_url`](#parseurl) | Parses a URL into its components: scheme, host, port, path, query, fragment. |
 
@@ -10772,9 +10930,7 @@ encode_component("a=b&c=d")  // => "a%3Db%26c%3Dd"  // Encode special chars
 join(base: String, path: String) -> String
 ```
 
-Joins a base URL with a path, handling trailing/leading slashes.
-
-Trims trailing slashes from the base and leading slashes from the path, then joins them with a single slash.
+Deprecated: use join_url() instead. Alias for backward compatibility.
 
 **Parameters:**
 
@@ -10786,10 +10942,37 @@ Trims trailing slashes from the base and leading slashes from the path, then joi
 **Examples:**
 
 ```ntnt
-join("https://example.com", "/api/v1")  // => "https://example.com/api/v1"  // Join base and path
+join("https://example.com", "/api")  // => "https://example.com/api"  // Deprecated: use join_url()
 ```
 
 *Since v0.2.0*
+
+---
+
+#### `join_url`
+
+```ntnt
+join_url(base: String, path: String) -> String
+```
+
+Joins a base URL with a path, handling trailing/leading slashes.
+
+Trims trailing slashes from the base and leading slashes from the path, then joins them with a single slash. Renamed from join() to avoid ambiguity with join() in std/string and std/path.
+
+**Parameters:**
+
+- `base` — The base URL
+- `path` — The path to append
+
+**Returns:** Combined URL string
+
+**Examples:**
+
+```ntnt
+join_url("https://example.com", "/api/v1")  // => "https://example.com/api/v1"  // Join base and path
+```
+
+*Since v0.4.0*
 
 ---
 

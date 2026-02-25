@@ -9,21 +9,24 @@ use std::path::{Path, PathBuf};
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
 
-    // @ntnt join
+    // @ntnt join_path
     // @module std/path
     // @module_description File path manipulation and resolution
-    // @signature join(parts: Array<String>) -> String
+    // @signature join_path(parts: Array<String>) -> String
     // Joins path segments into a single path string.
+    //
+    // Renamed from join() to avoid ambiguity with join() in std/string and std/url.
     // @param parts Array of path segments to join
     // @see_also dirname, basename, normalize
-    // @since v0.1.0
+    // @since v0.4.0
     // @tags #pure, #deterministic
-    // @example join(["src", "lib", "main.tnt"]) => "src/lib/main.tnt" ~ "Joins path segments"
+    // @example join_path(["src", "lib", "main.tnt"]) => "src/lib/main.tnt" ~ "Joins path segments"
     module.insert(
-        "join".to_string(),
+        "join_path".to_string(),
         Value::NativeFunction {
-            name: "join".to_string(),
+            name: "join_path".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::Array(parts) => {
                     let mut path = PathBuf::new();
@@ -46,6 +49,48 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt join
+    // @module std/path
+    // @signature join(parts: Array<String>) -> String
+    // Deprecated: use join_path() instead. Alias for backward compatibility.
+    // @param parts Array of path segments to join
+    // @see_also join_path
+    // @since v0.1.0
+    // @tags #pure, #deterministic, #deprecated
+    // @example join(["src", "lib"]) => "src/lib" ~ "Deprecated: use join_path()"
+    module.insert(
+        "join".to_string(),
+        Value::NativeFunction {
+            name: "join".to_string(),
+            arity: 1,
+            max_arity: 1,
+            func: |args| {
+                eprintln!(
+                    "[DEPRECATED] join() in std/path is deprecated. Use join_path() instead."
+                );
+                match &args[0] {
+                    Value::Array(parts) => {
+                        let mut path = std::path::PathBuf::new();
+                        for part in parts {
+                            match part {
+                                Value::String(s) => path.push(s),
+                                _ => {
+                                    return Err(IntentError::TypeError(
+                                        "join() requires array of strings".to_string(),
+                                    ))
+                                }
+                            }
+                        }
+                        Ok(Value::String(path.to_string_lossy().to_string()))
+                    }
+                    _ => Err(IntentError::TypeError(
+                        "join() requires an array of path parts".to_string(),
+                    )),
+                }
+            },
+        },
+    );
+
     // @ntnt dirname
     // @module std/path
     // @signature dirname(path: String) -> Option<String>
@@ -60,6 +105,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "dirname".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).parent() {
                     Some(p) => Ok(Value::EnumValue {
@@ -94,6 +140,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "basename".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).file_name() {
                     Some(name) => Ok(Value::EnumValue {
@@ -128,6 +175,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "extension".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).extension() {
                     Some(ext) => Ok(Value::EnumValue {
@@ -162,6 +210,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "stem".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).file_stem() {
                     Some(stem) => Ok(Value::EnumValue {
@@ -197,6 +246,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "resolve".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match std::fs::canonicalize(path) {
                     Ok(abs) => Ok(Value::EnumValue {
@@ -232,6 +282,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_absolute".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(Path::new(path).is_absolute())),
                 _ => Err(IntentError::TypeError(
@@ -256,6 +307,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_relative".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(Path::new(path).is_relative())),
                 _ => Err(IntentError::TypeError(
@@ -280,6 +332,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "with_extension".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(path), Value::String(ext)) => {
                     let new_path = Path::new(path).with_extension(ext);
@@ -306,6 +359,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "normalize".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => {
                     let p = Path::new(path);

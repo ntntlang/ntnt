@@ -50,6 +50,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "sin".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -84,6 +85,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "cos".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -117,6 +119,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "tan".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -152,6 +155,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "asin".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -187,6 +191,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "acos".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -221,6 +226,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "atan".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -258,6 +264,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "atan2".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let y = match &args[0] {
                     Value::Float(f) => *f,
@@ -301,6 +308,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "sinh".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -335,6 +343,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "cosh".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -369,6 +378,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "tanh".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -405,6 +415,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "log".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -446,6 +457,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "log10".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -487,6 +499,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "log2".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -526,6 +539,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "exp".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -561,6 +575,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "exp2".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -596,6 +611,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "cbrt".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -632,6 +648,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "hypot".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -675,6 +692,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "degrees".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -709,6 +727,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "radians".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -741,6 +760,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "random".to_string(),
             arity: 0,
+            max_arity: 0,
             func: |_args| {
                 let mut rng = rand::thread_rng();
                 Ok(Value::Float(rng.gen::<f64>()))
@@ -769,6 +789,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "random_int".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let min = match &args[0] {
                     Value::Int(i) => *i,
@@ -819,6 +840,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "random_range".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 let min = match &args[0] {
                     Value::Float(f) => *f,
@@ -869,6 +891,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_nan".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let result = match &args[0] {
                     Value::Float(f) => f.is_nan(),
@@ -904,6 +927,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_infinite".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let result = match &args[0] {
                     Value::Float(f) => f.is_infinite(),
@@ -939,6 +963,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "is_finite".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let result = match &args[0] {
                     Value::Float(f) => f.is_finite(),

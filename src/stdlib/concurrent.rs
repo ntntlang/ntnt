@@ -395,6 +395,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "channel".to_string(),
             arity: 0,
+            max_arity: 0,
             func: |_args| concurrent_channel(),
         },
     );
@@ -413,6 +414,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "send".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| concurrent_send(&args[0], &args[1]),
         },
     );
@@ -430,6 +432,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "recv".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| concurrent_recv(&args[0]),
         },
     );
@@ -448,6 +451,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "recv_timeout".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| match &args[1] {
                 Value::Int(ms) => concurrent_recv_timeout(&args[0], *ms),
                 _ => Err(IntentError::TypeError(
@@ -470,6 +474,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "try_recv".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| concurrent_try_recv(&args[0]),
         },
     );
@@ -487,6 +492,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "close".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| concurrent_close(&args[0]),
         },
     );
@@ -503,11 +509,17 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "sleep_ms".to_string(),
             arity: 1,
-            func: |args| match &args[0] {
-                Value::Int(ms) => concurrent_sleep_ms(*ms),
-                _ => Err(IntentError::TypeError(
-                    "sleep_ms requires an integer".to_string(),
-                )),
+            max_arity: 1,
+            func: |args| {
+                eprintln!(
+                    "[DEPRECATED] sleep_ms() is deprecated. Use sleep() from std/time instead."
+                );
+                match &args[0] {
+                    Value::Int(ms) => concurrent_sleep_ms(*ms),
+                    _ => Err(IntentError::TypeError(
+                        "sleep_ms requires an integer".to_string(),
+                    )),
+                }
             },
         },
     );
@@ -523,6 +535,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "thread_count".to_string(),
             arity: 0,
+            max_arity: 0,
             func: |_args| concurrent_thread_count(),
         },
     );

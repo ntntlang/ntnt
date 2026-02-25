@@ -80,9 +80,15 @@ pub enum Value {
     },
 
     /// Native/built-in function
+    ///
+    /// Arity checking:
+    /// - `arity == max_arity`: exact argument count required
+    /// - `arity < max_arity`: accepts between `arity` (min) and `max_arity` args
+    /// - `max_arity == 0 && arity == 0`: legacy variadic (no checking) — being phased out
     NativeFunction {
         name: String,
         arity: usize,
+        max_arity: usize,
         func: fn(&[Value]) -> Result<Value>,
     },
 
@@ -191,11 +197,41 @@ impl fmt::Display for Value {
                 variant,
                 values,
             } => {
-                if values.is_empty() {
-                    write!(f, "{}::{}", enum_name, variant)
-                } else {
-                    let vals: Vec<String> = values.iter().map(|v| v.to_string()).collect();
-                    write!(f, "{}::{}({})", enum_name, variant, vals.join(", "))
+                // Auto-unwrap Option and Result in display contexts for better DX:
+                // Option::Some(x) → x, Option::None → "none"
+                // Result::Ok(x) → x, Result::Err(e) → "error: e"
+                // All other enums display as EnumName::Variant(values)
+                match (enum_name.as_str(), variant.as_str()) {
+                    ("Option", "Some") => {
+                        if let Some(inner) = values.first() {
+                            write!(f, "{}", inner)
+                        } else {
+                            write!(f, "none")
+                        }
+                    }
+                    ("Option", "None") => write!(f, "none"),
+                    ("Result", "Ok") => {
+                        if let Some(inner) = values.first() {
+                            write!(f, "{}", inner)
+                        } else {
+                            write!(f, "ok")
+                        }
+                    }
+                    ("Result", "Err") => {
+                        if let Some(inner) = values.first() {
+                            write!(f, "error: {}", inner)
+                        } else {
+                            write!(f, "error")
+                        }
+                    }
+                    _ => {
+                        if values.is_empty() {
+                            write!(f, "{}::{}", enum_name, variant)
+                        } else {
+                            let vals: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+                            write!(f, "{}::{}({})", enum_name, variant, vals.join(", "))
+                        }
+                    }
                 }
             }
             Value::EnumConstructor {
@@ -893,6 +929,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "print".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| {
                     for arg in args {
                         println!("{}", arg);
@@ -915,17 +952,20 @@ impl Interpreter {
         // @since v0.1.0
         // @example len("hello") => 5 ~ "String length"
         // @example len([1, 2, 3]) => 3 ~ "Array length"
-        // @error TypeError ~ "len() requires a string or array" fix: "Pass a String, Array, or Map"
+        // @example len(map { "a": 1, "b": 2 }) => 2 ~ "Map length"
+        // @error TypeError ~ "len() requires a string, array, or map" fix: "Pass a String, Array, or Map"
         self.environment.borrow_mut().define(
             "len".to_string(),
             Value::NativeFunction {
                 name: "len".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::String(s) => Ok(Value::Int(s.len() as i64)),
                     Value::Array(a) => Ok(Value::Int(a.len() as i64)),
+                    Value::Map(m) => Ok(Value::Int(m.len() as i64)),
                     _ => Err(IntentError::TypeError(
-                        "len() requires a string or array".to_string(),
+                        "len() requires a string, array, or map".to_string(),
                     )),
                 },
             },
@@ -949,6 +989,35 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "type".to_string(),
                 arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::String(args[0].type_name().to_string())),
+            },
+        );
+
+        // @ntnt typeof
+        // @signature typeof(x: Any) -> String
+        // Returns the type name of a value as a string.
+        //
+        // Alias for `type()` that works in all contexts, including where `type`
+        // is parsed as a keyword (type alias declarations). Use `typeof()` for
+        // runtime type checking in conditional logic.
+        // Returns one of: "Int", "Float", "String", "Bool", "Array",
+        // "Map", "Function", "Unit", or the enum/struct name.
+        // @param x The value to inspect
+        // @returns The type name as a string
+        // @tags #pure, #deterministic
+        // @see_also type, str, len
+        // @since v0.4.0
+        // @example typeof(42) => "Int" ~ "Integer type"
+        // @example typeof("hello") => "String" ~ "String type"
+        // @example typeof(map { "a": 1 }) => "Map" ~ "Map type"
+        // @example typeof([1, 2]) => "Array" ~ "Array type"
+        self.environment.borrow_mut().define(
+            "typeof".to_string(),
+            Value::NativeFunction {
+                name: "typeof".to_string(),
+                arity: 1,
+                max_arity: 1,
                 func: |args| Ok(Value::String(args[0].type_name().to_string())),
             },
         );
@@ -971,6 +1040,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "str".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| Ok(Value::String(args[0].to_string())),
             },
         );
@@ -995,6 +1065,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "int".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(*f as i64)),
@@ -1027,6 +1098,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "float".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Float(*n as f64)),
                     Value::Float(f) => Ok(Value::Float(*f)),
@@ -1060,6 +1132,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "push".to_string(),
                 arity: 2,
+                max_arity: 2,
                 func: |args| {
                     if let Value::Array(mut arr) = args[0].clone() {
                         arr.push(args[1].clone());
@@ -1088,6 +1161,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "assert".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| {
                     if args[0].is_truthy() {
                         Ok(Value::Unit)
@@ -1121,6 +1195,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "abs".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(n.abs())),
                     Value::Float(f) => Ok(Value::Float(f.abs())),
@@ -1150,6 +1225,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "min".to_string(),
                 arity: 2,
+                max_arity: 2,
                 func: |args| match (&args[0], &args[1]) {
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.min(b))),
                     (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.min(*b))),
@@ -1179,6 +1255,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "max".to_string(),
                 arity: 2,
+                max_arity: 2,
                 func: |args| match (&args[0], &args[1]) {
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.max(b))),
                     (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.max(*b))),
@@ -1211,6 +1288,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "round".to_string(),
                 arity: 0, // Variable arity: 1 or 2 args
+                max_arity: 0,
                 func: |args| {
                     if args.is_empty() || args.len() > 2 {
                         return Err(IntentError::TypeError(
@@ -1274,6 +1352,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "floor".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
@@ -1302,6 +1381,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "ceil".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
@@ -1332,6 +1412,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "trunc".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.trunc() as i64)),
@@ -1361,6 +1442,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "sqrt".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::Int(n) => {
                         if *n < 0 {
@@ -1406,6 +1488,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "pow".to_string(),
                 arity: 2,
+                max_arity: 2,
                 func: |args| match (&args[0], &args[1]) {
                     (Value::Int(base), Value::Int(exp)) => {
                         if *exp >= 0 {
@@ -1446,6 +1529,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "sign".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(n.signum())),
                     Value::Float(f) => {
@@ -1486,6 +1570,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "clamp".to_string(),
                 arity: 3,
+                max_arity: 3,
                 func: |args| match (&args[0], &args[1], &args[2]) {
                     (Value::Int(val), Value::Int(min), Value::Int(max)) => {
                         Ok(Value::Int(*val.max(min).min(max)))
@@ -1551,6 +1636,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "Some".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| {
                     Ok(Value::EnumValue {
                         enum_name: "Option".to_string(),
@@ -1588,6 +1674,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "Ok".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| {
                     Ok(Value::EnumValue {
                         enum_name: "Result".to_string(),
@@ -1616,6 +1703,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "Err".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| {
                     Ok(Value::EnumValue {
                         enum_name: "Result".to_string(),
@@ -1644,6 +1732,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "is_some".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -1673,6 +1762,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "is_none".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -1702,6 +1792,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "is_ok".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -1731,6 +1822,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "is_err".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -1763,6 +1855,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "unwrap".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name,
@@ -1814,6 +1907,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "unwrap_or".to_string(),
                 arity: 2,
+                max_arity: 2,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name,
@@ -1853,6 +1947,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "listen".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: |_args| {
                     // This is a placeholder - actual implementation is in eval_call
                     // because we need access to the interpreter to call handlers
@@ -1880,6 +1975,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "get".to_string(),
                 arity: 2,
+                max_arity: 2,
                 func: |_args| {
                     Err(IntentError::RuntimeError(
                         "HTTP route functions must be called directly".to_string(),
@@ -1905,6 +2001,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "post".to_string(),
                 arity: 2,
+                max_arity: 2,
                 func: |_args| {
                     Err(IntentError::RuntimeError(
                         "HTTP route functions must be called directly".to_string(),
@@ -1930,6 +2027,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "put".to_string(),
                 arity: 2,
+                max_arity: 2,
                 func: |_args| {
                     Err(IntentError::RuntimeError(
                         "HTTP route functions must be called directly".to_string(),
@@ -1955,6 +2053,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "delete".to_string(),
                 arity: 2,
+                max_arity: 2,
                 func: |_args| {
                     Err(IntentError::RuntimeError(
                         "HTTP route functions must be called directly".to_string(),
@@ -1980,6 +2079,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "patch".to_string(),
                 arity: 2,
+                max_arity: 2,
                 func: |_args| {
                     Err(IntentError::RuntimeError(
                         "HTTP route functions must be called directly".to_string(),
@@ -2003,6 +2103,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "new_server".to_string(),
                 arity: 0,
+                max_arity: 0,
                 func: |_args| {
                     // Placeholder - actual implementation clears server_state
                     Err(IntentError::RuntimeError(
@@ -2038,6 +2139,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "enable_cors".to_string(),
                 arity: 0, // Variadic: 0-1 args
+                max_arity: 0,
                 func: |_args| {
                     // Placeholder - actual implementation is in eval_call
                     Err(IntentError::RuntimeError(
@@ -3920,10 +4022,14 @@ impl Interpreter {
                             })
                     }
                     // Map access with string key: map["key"]
-                    (Value::Map(map), Value::String(key)) => map
-                        .get(&key)
-                        .cloned()
-                        .ok_or_else(|| IntentError::RuntimeError(format!("Unknown key: {}", key))),
+                    // Returns None for missing keys instead of throwing (DX improvement)
+                    (Value::Map(map), Value::String(key)) => {
+                        Ok(map.get(&key).cloned().unwrap_or_else(|| Value::EnumValue {
+                            enum_name: "Option".to_string(),
+                            variant: "None".to_string(),
+                            values: vec![],
+                        }))
+                    }
                     // Struct access with string key: struct["field"]
                     (Value::Struct { fields, .. }, Value::String(key)) => {
                         fields.get(&key).cloned().ok_or_else(|| {
@@ -3942,9 +4048,13 @@ impl Interpreter {
                     Value::Struct { fields, .. } => fields.get(field).cloned().ok_or_else(|| {
                         IntentError::RuntimeError(format!("Unknown field: {}", field))
                     }),
-                    Value::Map(map) => map.get(field).cloned().ok_or_else(|| {
-                        IntentError::RuntimeError(format!("Unknown key: {}", field))
-                    }),
+                    Value::Map(map) => {
+                        Ok(map.get(field).cloned().unwrap_or_else(|| Value::EnumValue {
+                            enum_name: "Option".to_string(),
+                            variant: "None".to_string(),
+                            values: vec![],
+                        }))
+                    }
                     _ => Err(IntentError::TypeError(
                         "Field access on non-struct value".to_string(),
                     )),
@@ -4564,6 +4674,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "_auth_start".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: crate::stdlib::auth::handle_auth_start,
             },
         );
@@ -4575,6 +4686,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "_auth_callback".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: crate::stdlib::auth::handle_auth_callback,
             },
         );
@@ -4586,6 +4698,7 @@ impl Interpreter {
             Value::NativeFunction {
                 name: "_auth_logout".to_string(),
                 arity: 1,
+                max_arity: 1,
                 func: crate::stdlib::auth::handle_auth_logout,
             },
         );
@@ -5491,14 +5604,31 @@ impl Interpreter {
             Value::NativeFunction {
                 name: fn_name,
                 arity,
+                max_arity,
                 func,
             } => {
-                if args.len() != arity && arity != 0 {
-                    return Err(IntentError::ArityMismatch {
-                        name: fn_name.clone(),
-                        expected: format!("{}", arity),
-                        got: args.len(),
-                    });
+                if arity == max_arity {
+                    // Exact arity (most functions)
+                    if args.len() != arity && arity != 0 {
+                        return Err(IntentError::ArityMismatch {
+                            name: fn_name.clone(),
+                            expected: format!("{}", arity),
+                            got: args.len(),
+                        });
+                    }
+                } else {
+                    // Range arity: min..=max
+                    if args.len() < arity || args.len() > max_arity {
+                        return Err(IntentError::ArityMismatch {
+                            name: fn_name.clone(),
+                            expected: if arity == max_arity - 1 {
+                                format!("{} or {}", arity, max_arity)
+                            } else {
+                                format!("{}-{}", arity, max_arity)
+                            },
+                            got: args.len(),
+                        });
+                    }
                 }
                 func(&args)
             }
@@ -6604,9 +6734,11 @@ impl Interpreter {
             (BinaryOp::Eq, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a == b)),
             (BinaryOp::Ne, Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(a != b)),
 
-            // Mixed numeric comparison
+            // Mixed numeric comparison (Int ↔ Float auto-promotion)
             (BinaryOp::Eq, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((a as f64) == b)),
             (BinaryOp::Eq, Value::Float(a), Value::Int(b)) => Ok(Value::Bool(a == (b as f64))),
+            (BinaryOp::Ne, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((a as f64) != b)),
+            (BinaryOp::Ne, Value::Float(a), Value::Int(b)) => Ok(Value::Bool(a != (b as f64))),
             (BinaryOp::Lt, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((a as f64) < b)),
             (BinaryOp::Lt, Value::Float(a), Value::Int(b)) => Ok(Value::Bool(a < (b as f64))),
             (BinaryOp::Le, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((a as f64) <= b)),
@@ -8777,6 +8909,70 @@ c")
         )
         .unwrap();
         assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_map_bracket_missing_key_returns_none() {
+        // Missing key should return None instead of throwing
+        let result = eval(
+            r#"
+            let m = map { "a": 1 }
+            is_none(m["b"])
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_map_bracket_missing_key_with_get_or() {
+        // get_or should work as fallback for missing keys
+        let result = eval(
+            r#"
+            import { get_or } from "std/collections"
+            let m = map { "a": 1 }
+            get_or(m, "missing", "default")
+        "#,
+        )
+        .unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "default");
+        } else {
+            panic!("Expected String 'default'");
+        }
+    }
+
+    #[test]
+    fn test_map_bracket_missing_key_in_loop() {
+        // Iterating over maps with potentially missing keys should not crash
+        // Use get_or as the safe pattern since missing returns None (Option type)
+        // but present returns the raw value (not wrapped in Some)
+        let result = eval(
+            r#"
+            import { get_or } from "std/collections"
+            let items = [map { "name": "a", "score": 1 }, map { "name": "b" }]
+            let mut total = 0
+            for item in items {
+                total = total + get_or(item, "score", 0)
+            }
+            total
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(1)));
+    }
+
+    #[test]
+    fn test_map_dot_access_missing_key_returns_none() {
+        // Dot access on map should also return None for missing keys
+        let result = eval(
+            r#"
+            let m = map { "a": 1 }
+            is_none(m.b)
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Bool(true)));
     }
 
     #[test]

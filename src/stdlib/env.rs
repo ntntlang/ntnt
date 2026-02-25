@@ -27,6 +27,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "get_env".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(name) => match std::env::var(name) {
                     Ok(val) => Ok(Value::EnumValue {
@@ -62,6 +63,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "args".to_string(),
             arity: 0,
+            max_arity: 0,
             func: |_args| {
                 let args: Vec<Value> = std::env::args().map(Value::String).collect();
                 Ok(Value::Array(args))
@@ -83,6 +85,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "cwd".to_string(),
             arity: 0,
+            max_arity: 0,
             func: |_args| match std::env::current_dir() {
                 Ok(path) => Ok(Value::String(path.to_string_lossy().to_string())),
                 Err(e) => Err(IntentError::RuntimeError(format!(
@@ -112,6 +115,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "load_env".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 match &args[0] {
                     Value::String(path) => {

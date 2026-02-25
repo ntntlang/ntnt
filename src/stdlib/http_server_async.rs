@@ -44,6 +44,32 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 
+use super::http_server::get_default_security_headers;
+
+/// Apply security headers to a built Response<Body>.
+/// Only adds headers not already set by the application (app can override).
+fn apply_async_security_headers(response: &mut Response<Body>) {
+    let disabled = std::env::var("NTNT_SECURITY_HEADERS")
+        .map(|v| v == "0" || v.to_lowercase() == "false")
+        .unwrap_or(false);
+    if disabled {
+        return;
+    }
+    let security_headers = get_default_security_headers();
+    let headers = response.headers_mut();
+    for (key, value) in security_headers {
+        if let Ok(name) = header::HeaderName::try_from(key.as_str()) {
+            if !headers.contains_key(&name) {
+                if let Value::String(val) = value {
+                    if let Ok(hv) = header::HeaderValue::from_str(&val) {
+                        headers.insert(name, hv);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Route segment for pattern matching (mirrors sync version)
 #[derive(Debug, Clone)]
 pub enum RouteSegment {
@@ -371,19 +397,21 @@ fn bridge_to_axum_response(resp: BridgeResponse) -> Response<Body> {
     // Add server header
     response = response.header("server", "ntnt-async");
 
-    response.body(Body::from(resp.body)).unwrap_or_else(|_| {
+    let mut resp = response.body(Body::from(resp.body)).unwrap_or_else(|_| {
         Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .body(Body::from("Failed to build response"))
             .unwrap()
-    })
+    });
+    apply_async_security_headers(&mut resp);
+    resp
 }
 
 /// Serve a static file with proper headers
 fn serve_static_file(file_path: &str) -> Response<Body> {
     use std::fs;
 
-    match fs::read(file_path) {
+    let mut resp = match fs::read(file_path) {
         Ok(contents) => {
             let mime_type = guess_mime_type(file_path);
             let len = contents.len();
@@ -407,7 +435,9 @@ fn serve_static_file(file_path: &str) -> Response<Body> {
             .header("content-type", "text/plain")
             .body(Body::from("File not found"))
             .unwrap(),
-    }
+    };
+    apply_async_security_headers(&mut resp);
+    resp
 }
 
 /// Guess MIME type from file extension
@@ -608,7 +638,7 @@ Set <code>NTNT_ENV=production</code> to show a clean error page to users.
     };
 
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    Response::builder()
+    let mut resp = Response::builder()
         .status(status_code)
         .header("content-type", "text/html; charset=utf-8")
         .header("server", "ntnt-async")
@@ -618,7 +648,9 @@ Set <code>NTNT_ENV=production</code> to show a clean error page to users.
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Body::from("Internal Server Error"))
                 .unwrap()
-        })
+        });
+    apply_async_security_headers(&mut resp);
+    resp
 }
 
 /// Escape HTML special characters in error messages

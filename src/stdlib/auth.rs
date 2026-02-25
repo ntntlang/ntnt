@@ -206,8 +206,9 @@ pub struct AuthConfig {
     pub cookie_secure: bool,
     pub cookie_same_site: String,
     pub session_ttl: i64,
-    pub store_tokens: bool,          // Store access/refresh tokens in session
-    pub session_secret: String,      // Secret for session signing
+    pub refresh_ttl: i64, // How long refresh tokens can extend sessions (default: 30 days)
+    pub store_tokens: bool, // Store access/refresh tokens in session
+    pub session_secret: String, // Secret for session signing
     pub session_store: SessionStore, // Session storage backend
 }
 
@@ -221,7 +222,8 @@ impl Default for AuthConfig {
             cookie_name: "ntnt_session".to_string(),
             cookie_secure: true,
             cookie_same_site: "lax".to_string(),
-            session_ttl: 86400 * 7, // 7 days
+            session_ttl: 86400 * 7,  // 7 days
+            refresh_ttl: 86400 * 30, // 30 days — how long refresh tokens can extend sessions
             store_tokens: false,
             session_secret: DEFAULT_SESSION_SECRET.to_string(),
             session_store: SessionStore::Memory,
@@ -2115,7 +2117,7 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
     let config = get_auth_config();
     let store_type = config.as_ref().map(|c| &c.session_store);
 
-    match store_type {
+    let session = match store_type {
         Some(SessionStore::Sqlite(_)) => get_session_sqlite(id)
             .ok()
             .flatten()
@@ -2129,7 +2131,157 @@ pub fn get_session_by_id(id: &str) -> Option<Session> {
             .flatten()
             .or_else(|| SESSION_STORE.lock().unwrap().get_session(id).cloned()),
         _ => SESSION_STORE.lock().unwrap().get_session(id).cloned(),
+    };
+
+    // If we got a valid session, return it
+    if session.is_some() {
+        return session;
     }
+
+    // Session not found (expired or missing). Try to find an expired-but-refreshable session.
+    if let Some(config) = &config {
+        if config.store_tokens {
+            let expired_session = match &config.session_store {
+                SessionStore::Sqlite(_) => get_expired_session_sqlite(id, config.refresh_ttl)
+                    .ok()
+                    .flatten(),
+                SessionStore::Postgres(_) => get_expired_session_postgres(id, config.refresh_ttl)
+                    .ok()
+                    .flatten(),
+                SessionStore::Redis(_) => get_expired_session_redis(id, config.refresh_ttl)
+                    .ok()
+                    .flatten(),
+                _ => None, // Memory store already filters in get_session
+            };
+
+            if let Some(expired) = expired_session {
+                if let Some(ref refresh_token) = expired.refresh_token {
+                    // Find the provider config for this session
+                    if let Some(provider) =
+                        config.providers.iter().find(|p| p.name == expired.provider)
+                    {
+                        match refresh_access_token(provider, refresh_token) {
+                            Ok(tokens) => {
+                                // Extend session expiry by session_ttl
+                                let now = chrono::Utc::now().timestamp();
+                                let new_expires_at = now + config.session_ttl;
+
+                                // Update tokens and extend session
+                                update_session_tokens(&expired.id, &tokens);
+                                extend_session_expiry(&expired.id, new_expires_at);
+
+                                eprintln!(
+                                    "[auth] Session {} auto-refreshed via refresh token",
+                                    &expired.id[..8]
+                                );
+
+                                // Return the refreshed session
+                                let mut refreshed = expired;
+                                refreshed.access_token = Some(tokens.access_token);
+                                if let Some(rt) = tokens.refresh_token {
+                                    refreshed.refresh_token = Some(rt);
+                                }
+                                refreshed.token_expires_at = tokens.expires_in.map(|e| now + e);
+                                refreshed.expires_at = new_expires_at;
+                                return Some(refreshed);
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[auth] Auto-refresh failed for session {}: {}",
+                                    &expired.id[..8],
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extend a session's expires_at timestamp (used after successful refresh)
+fn extend_session_expiry(id: &str, new_expires_at: i64) {
+    let config = get_auth_config();
+    let store_type = config.as_ref().map(|c| &c.session_store);
+
+    match store_type {
+        Some(SessionStore::Sqlite(_)) => {
+            let _ = extend_session_expiry_sqlite(id, new_expires_at);
+        }
+        Some(SessionStore::Postgres(_)) => {
+            let _ = extend_session_expiry_postgres(id, new_expires_at);
+        }
+        Some(SessionStore::Redis(_)) => {
+            let _ = extend_session_expiry_redis(id, new_expires_at);
+        }
+        _ => {
+            let mut store = SESSION_STORE.lock().unwrap();
+            if let Some(session) = store.get_session_mut(id) {
+                session.expires_at = new_expires_at;
+            }
+        }
+    }
+}
+
+fn extend_session_expiry_sqlite(id: &str, new_expires_at: i64) -> std::result::Result<(), String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+    conn.execute(
+        "UPDATE auth_sessions SET expires_at = ?1 WHERE id = ?2",
+        rusqlite::params![new_expires_at, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn extend_session_expiry_postgres(
+    id: &str,
+    new_expires_at: i64,
+) -> std::result::Result<(), String> {
+    let url_guard = POSTGRES_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
+    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    client
+        .execute(
+            "UPDATE auth_sessions SET expires_at = $1 WHERE id = $2",
+            &[&new_expires_at, &id],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn extend_session_expiry_redis(id: &str, new_expires_at: i64) -> std::result::Result<(), String> {
+    let url_guard = REDIS_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("Redis not initialized")?;
+    let client =
+        redis::Client::open(url.as_str()).map_err(|e| format!("Redis client error: {}", e))?;
+    let mut conn = client
+        .get_connection()
+        .map_err(|e| format!("Redis connection error: {}", e))?;
+    let key = format!("ntnt:session:{}", id);
+    let now = chrono::Utc::now().timestamp();
+    let new_ttl = new_expires_at - now;
+    if new_ttl > 0 {
+        // Read-modify-write with new expiry
+        let lua_script = r#"
+            local session = redis.call('GET', KEYS[1])
+            if not session then return nil end
+            local data = cjson.decode(session)
+            data.expires_at = tonumber(ARGV[1])
+            redis.call('SETEX', KEYS[1], tonumber(ARGV[2]), cjson.encode(data))
+            return 1
+        "#;
+        let _: Option<i32> = redis::Script::new(lua_script)
+            .key(&key)
+            .arg(new_expires_at)
+            .arg(new_ttl)
+            .invoke(&mut conn)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn get_session_sqlite(id: &str) -> std::result::Result<Option<Session>, String> {
@@ -2167,6 +2319,89 @@ fn get_session_sqlite(id: &str) -> std::result::Result<Option<Session>, String> 
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Retrieve an expired session that's still within the refresh window
+fn get_expired_session_sqlite(
+    id: &str,
+    refresh_ttl: i64,
+) -> std::result::Result<Option<Session>, String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+    let now = chrono::Utc::now().timestamp();
+    let refresh_cutoff = now - refresh_ttl;
+
+    let result = conn.query_row(
+        "SELECT id, user_id, provider, email, name, picture, raw_json, data_json, csrf_token,
+                access_token, refresh_token, token_expires_at, created_at, expires_at
+         FROM auth_sessions WHERE id = ?1 AND expires_at <= ?2 AND created_at > ?3 AND refresh_token IS NOT NULL",
+        rusqlite::params![id, now, refresh_cutoff],
+        |row| {
+            Ok(Session {
+                id: row.get(0)?, user_id: row.get(1)?, provider: row.get(2)?,
+                email: row.get(3)?, name: row.get(4)?, picture: row.get(5)?,
+                raw_json: row.get(6)?, data_json: row.get(7)?,
+                csrf_token: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                access_token: row.get(9)?, refresh_token: row.get(10)?,
+                token_expires_at: row.get(11)?, created_at: row.get(12)?, expires_at: row.get(13)?,
+            })
+        },
+    );
+    match result {
+        Ok(session) => Ok(Some(session)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn get_expired_session_postgres(
+    id: &str,
+    refresh_ttl: i64,
+) -> std::result::Result<Option<Session>, String> {
+    let url_guard = POSTGRES_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
+    let now = chrono::Utc::now().timestamp();
+    let refresh_cutoff = now - refresh_ttl;
+
+    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+    let rows = client.query(
+        "SELECT id, user_id, provider, email, name, picture, raw_json, data_json, csrf_token,
+                access_token, refresh_token, token_expires_at, created_at, expires_at
+         FROM auth_sessions WHERE id = $1 AND expires_at <= $2 AND created_at > $3 AND refresh_token IS NOT NULL",
+        &[&id, &now, &refresh_cutoff],
+    ).map_err(|e| e.to_string())?;
+
+    if let Some(row) = rows.first() {
+        Ok(Some(Session {
+            id: row.get(0),
+            user_id: row.get(1),
+            provider: row.get(2),
+            email: row.get(3),
+            name: row.get(4),
+            picture: row.get(5),
+            raw_json: row.get(6),
+            data_json: row.get(7),
+            csrf_token: row.get::<_, Option<String>>(8).unwrap_or_default(),
+            access_token: row.get(9),
+            refresh_token: row.get(10),
+            token_expires_at: row.get(11),
+            created_at: row.get(12),
+            expires_at: row.get(13),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn get_expired_session_redis(
+    id: &str,
+    refresh_ttl: i64,
+) -> std::result::Result<Option<Session>, String> {
+    // Redis sessions use TTL-based expiry, so expired sessions are already deleted.
+    // For Redis to support refresh, we'd need a separate refresh token key with longer TTL.
+    // For now, return None — Redis users should set session_ttl = refresh_ttl.
+    let _ = (id, refresh_ttl);
+    Ok(None)
 }
 
 fn get_session_postgres(id: &str) -> std::result::Result<Option<Session>, String> {
@@ -3157,6 +3392,13 @@ pub fn user_to_value(session: &Session) -> Value {
         "raw".to_string(),
         Value::Map(json_string_to_value_map(&session.raw_json)),
     );
+    // Include CSRF token so apps can embed it in forms: {{user.csrf_token}}
+    if !session.csrf_token.is_empty() {
+        map.insert(
+            "csrf_token".to_string(),
+            Value::String(session.csrf_token.clone()),
+        );
+    }
     Value::Map(map)
 }
 
@@ -3333,7 +3575,18 @@ fn value_map_to_provider(
         issuer: get_str("issuer"),
         jwks_uri: get_str("jwks_uri"),
         use_pkce: get_bool("use_pkce"),
-        extra_params: HashMap::new(),
+        extra_params: {
+            let mut params = HashMap::new();
+            // Parse extra_params from config if provided
+            if let Some(Value::Map(ep)) = map.get("extra_params") {
+                for (k, v) in ep {
+                    if let Value::String(s) = v {
+                        params.insert(k.clone(), s.clone());
+                    }
+                }
+            }
+            params
+        },
     })
 }
 
@@ -3423,9 +3676,27 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
         pkce_verifier.as_deref(),
     );
 
+    // When store_tokens is enabled and provider is Google, ensure we request refresh tokens
+    let mut provider_for_url = provider.clone();
+    if config.store_tokens {
+        if !provider_for_url.extra_params.contains_key("access_type") {
+            if provider_for_url.authorize_url.contains("google") {
+                provider_for_url
+                    .extra_params
+                    .insert("access_type".to_string(), "offline".to_string());
+                // prompt=consent forces Google to return a new refresh token every time
+                if !provider_for_url.extra_params.contains_key("prompt") {
+                    provider_for_url
+                        .extra_params
+                        .insert("prompt".to_string(), "consent".to_string());
+                }
+            }
+        }
+    }
+
     // Generate auth URL
     let auth_url = generate_auth_url(
-        provider,
+        &provider_for_url,
         &redirect_uri,
         &state,
         nonce.as_deref(),
@@ -3578,11 +3849,18 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
     let signed_session_id = sign_session_id(&session_id, &config.session_secret);
 
     // Create session cookie
+    // Cookie Max-Age uses refresh_ttl (not session_ttl) so the browser retains the cookie
+    // long enough for server-side auto-refresh to work when the session expires.
+    let cookie_max_age = if config.store_tokens && config.refresh_ttl > config.session_ttl {
+        config.refresh_ttl
+    } else {
+        config.session_ttl
+    };
     let cookie = format!(
         "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite={}{}",
         config.cookie_name,
         signed_session_id,
-        config.session_ttl,
+        cookie_max_age,
         config.cookie_same_site,
         if config.cookie_secure { "; Secure" } else { "" }
     );
@@ -3793,6 +4071,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth".to_string(),
             arity: 0,  // Variadic: 2-4 args (provider, client_id, client_secret?, options?)
+            max_arity: 0,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4023,6 +4302,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_discover".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -4158,6 +4438,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_m2m".to_string(),
             arity: 4,
+            max_arity: 4,
             func: |args| {
                 if args.len() < 4 {
                     return Err(IntentError::TypeError(
@@ -4248,6 +4529,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_refresh".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4326,6 +4608,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_validate".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -4413,6 +4696,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_introspect".to_string(),
             arity: 4,
+            max_arity: 4,
             func: |args| {
                 if args.len() < 4 {
                     return Err(IntentError::TypeError(
@@ -4463,6 +4747,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "get_user".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4499,6 +4784,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "get_session".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4537,6 +4823,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "session_data".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4560,6 +4847,160 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt validate_csrf
+    // @module std/auth
+    // @signature validate_csrf(req: Request) -> Result<Bool, Map>
+    // Validate CSRF token on state-changing requests (POST, PUT, DELETE, PATCH).
+    //
+    // Compares the CSRF token from the request (form field `_csrf_token` or header
+    // `X-CSRF-Token`) against the token stored in the session. Returns `true` if
+    // valid. Returns an error response map (403) if invalid, which can be returned
+    // directly from a route handler.
+    //
+    // Skips validation for:
+    // - GET, HEAD, OPTIONS requests (safe methods)
+    // - API key auth (Bearer token) — CSRF only applies to cookie-based sessions
+    // - Requests with no session (will fail auth check separately)
+    //
+    // Usage in middleware:
+    // ```ntnt
+    // let csrf_ok = validate_csrf(req)
+    // if typeof(csrf_ok) == "Map" { return csrf_ok }  // Return 403 response
+    // ```
+    //
+    // Usage in forms:
+    // ```html
+    // <input type="hidden" name="_csrf_token" value="{{user.csrf_token}}">
+    // ```
+    // @param req The HTTP request object
+    // @returns true if valid or safe method; a 403 error response Map if invalid
+    // @see_also get_user, get_session
+    // @since v0.4.0
+    // @tags #auth, #csrf, #security
+    // @example validate_csrf(req) ~ "Check CSRF token on POST"
+    module.insert(
+        "validate_csrf".to_string(),
+        Value::NativeFunction {
+            name: "validate_csrf".to_string(),
+            arity: 1,
+            max_arity: 1,
+            func: |args| {
+                if args.is_empty() {
+                    return Err(IntentError::TypeError(
+                        "[auth] validate_csrf() requires a request".to_string(),
+                    ));
+                }
+
+                let req = &args[0];
+                let req_map = match req {
+                    Value::Map(m) => m,
+                    _ => return Ok(Value::Bool(true)), // Not a valid request, let other checks handle it
+                };
+
+                // Skip safe methods (GET, HEAD, OPTIONS)
+                let method = match req_map.get("method") {
+                    Some(Value::String(m)) => m.to_uppercase(),
+                    _ => return Ok(Value::Bool(true)),
+                };
+                if method == "GET" || method == "HEAD" || method == "OPTIONS" {
+                    return Ok(Value::Bool(true));
+                }
+
+                // Skip if request has Bearer token (API key auth, not session-based)
+                if let Some(Value::Map(headers)) = req_map.get("headers") {
+                    if let Some(Value::String(auth_header)) = headers.get("authorization") {
+                        if auth_header.starts_with("Bearer ") {
+                            return Ok(Value::Bool(true));
+                        }
+                    }
+                }
+
+                // Get session CSRF token
+                let session_id = get_session_id_from_request(req);
+                let session_csrf = match session_id {
+                    Some(ref id) => match get_session_by_id(id) {
+                        Some(session) if !session.csrf_token.is_empty() => {
+                            session.csrf_token.clone()
+                        }
+                        _ => return Ok(Value::Bool(true)), // No session = no CSRF to validate
+                    },
+                    None => return Ok(Value::Bool(true)), // No cookie = not a browser session
+                };
+
+                // Extract CSRF token from request:
+                // 1. Form field: _csrf_token
+                // 2. Header: X-CSRF-Token
+                let mut request_csrf = None;
+
+                // Check form body (URL-encoded or JSON)
+                if let Some(Value::String(body)) = req_map.get("body") {
+                    // Try URL-encoded form: _csrf_token=value
+                    for param in body.split('&') {
+                        let parts: Vec<&str> = param.splitn(2, '=').collect();
+                        if parts.len() == 2 && parts[0] == "_csrf_token" {
+                            request_csrf = Some(
+                                urlencoding::decode(parts[1])
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            );
+                            break;
+                        }
+                    }
+                    // Try JSON body: {"_csrf_token": "value"}
+                    if request_csrf.is_none() {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+                            if let Some(token) = json.get("_csrf_token").and_then(|v| v.as_str()) {
+                                request_csrf = Some(token.to_string());
+                            }
+                        }
+                    }
+                }
+
+                // Check X-CSRF-Token header (for AJAX requests)
+                if request_csrf.is_none() {
+                    if let Some(Value::Map(headers)) = req_map.get("headers") {
+                        if let Some(Value::String(token)) = headers.get("x-csrf-token") {
+                            request_csrf = Some(token.clone());
+                        }
+                    }
+                }
+
+                // Validate
+                match request_csrf {
+                    Some(token) if token == session_csrf => Ok(Value::Bool(true)),
+                    _ => {
+                        eprintln!(
+                            "[auth] CSRF validation failed for {} {}",
+                            method,
+                            req_map
+                                .get("path")
+                                .and_then(|v| if let Value::String(s) = v {
+                                    Some(s.as_str())
+                                } else {
+                                    None
+                                })
+                                .unwrap_or("?")
+                        );
+                        // Return a 403 response map that can be returned directly from handlers
+                        let mut response = HashMap::new();
+                        response.insert("status".to_string(), Value::Int(403));
+                        let mut headers = HashMap::new();
+                        headers.insert(
+                            "content-type".to_string(),
+                            Value::String("text/html; charset=utf-8".to_string()),
+                        );
+                        response.insert("headers".to_string(), Value::Map(headers));
+                        response.insert(
+                            "body".to_string(),
+                            Value::String("CSRF token missing or invalid".to_string()),
+                        );
+                        Ok(Value::Map(response))
+                    }
+                }
+            },
+        },
+    );
+
     // @ntnt set_session
     // @module std/auth
     // @signature set_session(req: Request, data: Map) -> Result<Unit, String>
@@ -4579,6 +5020,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "set_session".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -4627,6 +5069,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "sessions_cleanup".to_string(),
             arity: 0,
+            max_arity: 0,
             func: |_args| {
                 let mut total = 0u64;
 
@@ -4676,6 +5119,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "user_sessions".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4739,6 +5183,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "logout_all".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -4793,6 +5238,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "csrf_token".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4830,6 +5276,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "csrf_field".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -4873,6 +5320,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "verify_csrf".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -4925,6 +5373,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "jwt_sign".to_string(),
             arity: 2, // 2-3 args (options is optional)
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -5022,6 +5471,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "jwt_verify".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -5086,6 +5536,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "jwt_decode".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -5192,6 +5643,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "logout_user".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -5243,6 +5695,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "enable_auth".to_string(),
             arity: 0, // Variadic: 1-2 args (providers, options?)
+            max_arity: 0,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
@@ -5423,7 +5876,22 @@ pub fn init() -> HashMap<String, Value> {
                     cookie_secure,
                     cookie_same_site: "Lax".to_string(),
                     session_ttl,
-                    store_tokens: false,
+                    store_tokens: options
+                        .as_ref()
+                        .and_then(|o| o.get("store_tokens"))
+                        .and_then(|v| match v {
+                            Value::Bool(b) => Some(*b),
+                            _ => None,
+                        })
+                        .unwrap_or(false),
+                    refresh_ttl: options
+                        .as_ref()
+                        .and_then(|o| o.get("refresh_ttl"))
+                        .and_then(|v| match v {
+                            Value::Int(n) => Some(*n),
+                            _ => None,
+                        })
+                        .unwrap_or(86400 * 30), // 30 days default
                     session_secret,
                     session_store,
                 };
@@ -5460,6 +5928,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_start".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -5547,6 +6016,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "oauth_exchange".to_string(),
             arity: 4,
+            max_arity: 4,
             func: |args| {
                 if args.len() < 4 {
                     return Err(IntentError::TypeError(
@@ -5669,6 +6139,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "create_session_from_oauth".to_string(),
             arity: 0, // Variadic: 2-3 args
+            max_arity: 0,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
@@ -5731,13 +6202,18 @@ pub fn init() -> HashMap<String, Value> {
                 let user_id = session.user_id.clone();
                 store_session(session);
 
-                // Build cookie
+                // Build cookie — use refresh_ttl for Max-Age when refresh tokens are enabled
                 let signed_session_id = sign_session_id(&session_id, &config.session_secret);
+                let cookie_max_age = if config.store_tokens && config.refresh_ttl > config.session_ttl {
+                    config.refresh_ttl
+                } else {
+                    config.session_ttl
+                };
                 let cookie = format!(
                     "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite={}{}",
                     config.cookie_name,
                     signed_session_id,
-                    config.session_ttl,
+                    cookie_max_age,
                     config.cookie_same_site,
                     if config.cookie_secure { "; Secure" } else { "" }
                 );
@@ -5775,6 +6251,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "auth_start".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| handle_auth_start(&args),
         },
     );
@@ -5797,6 +6274,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "auth_callback".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| handle_auth_callback(&args),
         },
     );
@@ -5819,6 +6297,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "auth_logout".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| handle_auth_logout(&args),
         },
     );
@@ -5841,6 +6320,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "auth_me".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
                 let user = get_user_from_request(&args[0]);
                 match user {
@@ -5879,7 +6359,9 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "hash_password".to_string(),
             arity: 1,
+            max_arity: 1,
             func: |args| {
+                eprintln!("[DEPRECATED] hash_password() in std/auth is deprecated. Use hash_password() from std/crypto instead.");
                 if args.is_empty() {
                     return Err(IntentError::TypeError(
                         "[auth] hash_password() requires a password".to_string(),
@@ -5921,7 +6403,9 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "verify_password".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
+                eprintln!("[DEPRECATED] verify_password() in std/auth is deprecated. Use verify_password() from std/crypto instead.");
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
                         "[auth] verify_password() requires (password, hash)".to_string(),
@@ -5972,6 +6456,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "totp_secret".to_string(),
             arity: 0,
+            max_arity: 0,
             func: |_args| Ok(Value::String(generate_totp_secret())),
         },
     );
@@ -5996,6 +6481,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "totp_uri".to_string(),
             arity: 3,
+            max_arity: 3,
             func: |args| {
                 if args.len() < 3 {
                     return Err(IntentError::TypeError(
@@ -6057,6 +6543,7 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "verify_totp".to_string(),
             arity: 2,
+            max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::TypeError(
