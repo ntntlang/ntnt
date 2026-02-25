@@ -263,6 +263,16 @@ syntax = "\\{{ and \\}}"
 description = "Literal {{ and }} in output"
 example = "Use \\{{ for literal braces"
 
+[templates.partials]
+syntax = "{{> name}}"
+description = "Include a partial template (inherits current scope)"
+example = "{{> header}}"
+
+[templates.partials_data]
+syntax = "{{> name data_expr}}"
+description = "Include a partial with explicit data map"
+example = '{{> card map { "title": item.name, "desc": item.summary } }}'
+
 # =============================================================================
 # TRUTHY/FALSY VALUES
 # =============================================================================
