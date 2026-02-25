@@ -27,6 +27,13 @@ description = "Request timeout for HTTP server in seconds."
 example = "NTNT_TIMEOUT=60 ntnt run server.tnt"
 cli_override = "--timeout"
 
+[env_vars.NTNT_ALLOW_PRIVATE_IPS]
+values = ["true"]
+default = "unset (disabled — private IPs blocked)"
+description = "Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x). Required for Docker inter-container communication (e.g., calling a sidecar at 172.19.0.1). Disabled by default to prevent SSRF attacks."
+example = "NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt"
+affects = ["http-client", "security"]
+
 [env_vars.NTNT_STRICT]
 values = ["1", "true"]
 default = "unset (disabled)"

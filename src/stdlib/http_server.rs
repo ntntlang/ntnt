@@ -1032,6 +1032,9 @@ pub fn request_to_value(
         headers_get_string(&req_map, "x-forwarded-proto").unwrap_or_else(|| "http".to_string());
     req_map.insert("protocol".to_string(), Value::String(protocol));
 
+    // Empty context map for middleware to populate (e.g., authenticated user, feature flags)
+    req_map.insert("context".to_string(), Value::Map(HashMap::new()));
+
     Value::Map(req_map)
 }
 
