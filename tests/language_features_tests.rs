@@ -676,6 +676,59 @@ print(page)
 }
 
 /// @since v0.3.16
+/// Finding #35: Template filter aliases (upper/lower) and space-separated args
+#[test]
+fn test_template_filter_aliases() {
+    let code = r#"
+let name = "hello"
+let result = """{{name | upper}} {{name | lower}}"""
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Filter aliases should work");
+    assert!(
+        stdout.contains("HELLO hello"),
+        "upper/lower aliases should work, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #35: Template filter with space-separated arguments
+#[test]
+fn test_template_filter_space_args() {
+    let code = r#"
+let page = """{{missing | default "fallback"}}"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Default filter with space args should work");
+    assert!(
+        stdout.contains("fallback"),
+        "Default filter should provide fallback, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #35: Comparisons work in template {{#if}} conditions
+#[test]
+fn test_template_if_comparison() {
+    let code = r#"
+let status = "draft"
+let page = """{{#if status == "active"}}ACTIVE{{#elif status == "draft"}}DRAFT{{#else}}OTHER{{/if}}"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Comparisons in if should work");
+    assert!(
+        stdout.contains("DRAFT"),
+        "Should match elif branch, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
 /// Finding #36: Undefined template variables should render as empty string
 #[test]
 fn test_template_undefined_var_renders_empty() {
