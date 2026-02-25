@@ -3123,18 +3123,18 @@ pub fn serve_static_file(file_path: &str) -> Result<Value> {
         Value::String(mime_type.to_string()),
     );
 
-    // Add cache control for static files
+    // Add cache control based on file type
     headers.insert(
         "cache-control".to_string(),
-        Value::String("public, max-age=3600".to_string()),
+        Value::String(sync_cache_control_for(file_path).to_string()),
     );
 
     Ok(create_response_value(200, headers, content))
 }
 
-/// Send a binary response (for static files)
+/// Send a binary response (for static files) with ETag/conditional request support
 pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Result<()> {
-    use std::fs::File;
+    use std::fs::{self, File};
     use std::io::Read;
 
     let path = std::path::Path::new(file_path);
@@ -3143,6 +3143,44 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
     if !path.exists() || !path.is_file() {
         let not_found = create_error_response(404, "File not found");
         return send_response(request, &not_found);
+    }
+
+    // Generate ETag from file metadata (size + mtime)
+    let metadata = fs::metadata(path)
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to stat file: {}", e)))?;
+    let etag = if let Ok(mtime) = metadata.modified() {
+        let duration = mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        format!("\"{}{}\"", metadata.len(), duration.as_secs())
+    } else {
+        format!("\"{}\"", metadata.len())
+    };
+
+    // Check If-None-Match header for conditional request
+    let if_none_match = request
+        .headers()
+        .iter()
+        .find(|h| h.field.as_str() == "If-None-Match" || h.field.as_str() == "if-none-match")
+        .map(|h| h.value.as_str().to_string());
+
+    if let Some(ref client_etag) = if_none_match {
+        if client_etag == &etag || client_etag == "*" {
+            let etag_header = tiny_http::Header::from_bytes(b"ETag", etag.as_bytes())
+                .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+            let cache_header = tiny_http::Header::from_bytes(
+                b"Cache-Control",
+                sync_cache_control_for(file_path).as_bytes(),
+            )
+            .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+            let response = tiny_http::Response::from_data(Vec::<u8>::new())
+                .with_status_code(304)
+                .with_header(etag_header)
+                .with_header(cache_header);
+            return request
+                .respond(response)
+                .map_err(|e| IntentError::RuntimeError(format!("Failed to send response: {}", e)));
+        }
     }
 
     // Get MIME type
@@ -3158,7 +3196,12 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
     // Build response with proper headers
     let content_type = tiny_http::Header::from_bytes(b"Content-Type", mime_type.as_bytes())
         .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
-    let cache_control = tiny_http::Header::from_bytes(b"Cache-Control", b"public, max-age=3600")
+    let cache_control = tiny_http::Header::from_bytes(
+        b"Cache-Control",
+        sync_cache_control_for(file_path).as_bytes(),
+    )
+    .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+    let etag_header = tiny_http::Header::from_bytes(b"ETag", etag.as_bytes())
         .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
     let connection_close = tiny_http::Header::from_bytes(b"Connection", b"close")
         .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
@@ -3169,12 +3212,25 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
         .with_status_code(200)
         .with_header(content_type)
         .with_header(cache_control)
+        .with_header(etag_header)
         .with_header(connection_close)
         .with_header(server_header);
 
     request
         .respond(response)
         .map_err(|e| IntentError::RuntimeError(format!("Failed to send response: {}", e)))
+}
+
+/// Returns appropriate Cache-Control value based on file type (sync server).
+fn sync_cache_control_for(file_path: &str) -> &'static str {
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "webp" | "avif" | "woff" | "woff2"
+        | "ttf" | "eot" => "public, max-age=31536000, immutable",
+        "css" | "js" => "public, max-age=86400",
+        "html" | "htm" => "no-cache",
+        _ => "public, max-age=3600",
+    }
 }
 
 #[cfg(test)]
@@ -3980,6 +4036,43 @@ mod tests {
         // Path doesn't match prefix
         let result = state.find_static_file("/other/file.txt");
         assert!(result.is_none());
+    }
+
+    // ===========================================
+    // Cache Control Tests
+    // ===========================================
+
+    #[test]
+    fn test_cache_control_images_immutable() {
+        assert_eq!(
+            sync_cache_control_for("photo.jpg"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            sync_cache_control_for("icon.svg"),
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(
+            sync_cache_control_for("font.woff2"),
+            "public, max-age=31536000, immutable"
+        );
+    }
+
+    #[test]
+    fn test_cache_control_css_js_daily() {
+        assert_eq!(sync_cache_control_for("style.css"), "public, max-age=86400");
+        assert_eq!(sync_cache_control_for("app.js"), "public, max-age=86400");
+    }
+
+    #[test]
+    fn test_cache_control_html_no_cache() {
+        assert_eq!(sync_cache_control_for("index.html"), "no-cache");
+    }
+
+    #[test]
+    fn test_cache_control_default() {
+        assert_eq!(sync_cache_control_for("data.json"), "public, max-age=3600");
+        assert_eq!(sync_cache_control_for("readme.txt"), "public, max-age=3600");
     }
 
     // ===========================================
