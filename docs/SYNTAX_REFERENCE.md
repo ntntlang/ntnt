@@ -257,6 +257,15 @@ Compound types
 
 Built-in sum types for optional values and error handling
 
+| Function | Description | Example |
+|----------|-------------|---------|
+| `unwrap(x)` | Extract value from Some/Ok, panic on None/Err | `unwrap(Some(42)) → 42` |
+| `unwrap_or(x, default)` | Extract value or return default | `unwrap_or(None, 0) → 0` |
+| `is_some(x)` | Check if Option is Some | `is_some(Some(1)) → true` |
+| `is_none(x)` | Check if Option is None | `is_none(None) → true` |
+| `is_ok(x)` | Check if Result is Ok | `is_ok(Ok(1)) → true` |
+| `is_err(x)` | Check if Result is Err | `is_err(Err("fail")) → true` |
+
 ### UNION
 
 Syntax: `T1 | T2 | T3`

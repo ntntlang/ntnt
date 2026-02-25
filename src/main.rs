@@ -4846,6 +4846,25 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                 if let Some(desc) = t.get("description").and_then(|v| v.as_str()) {
                     md.push_str(&format!("{}\n\n", desc));
                 }
+                // Render functions table if present
+                if let Some(functions) = t.get("functions").and_then(|v| v.as_array()) {
+                    if !functions.is_empty() {
+                        md.push_str("| Function | Description | Example |\n");
+                        md.push_str("|----------|-------------|---------|\n");
+                        for func in functions {
+                            let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let desc =
+                                func.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                            let example =
+                                func.get("example").and_then(|v| v.as_str()).unwrap_or("");
+                            md.push_str(&format!(
+                                "| `{}` | {} | `{}` |\n",
+                                name, desc, example
+                            ));
+                        }
+                        md.push_str("\n");
+                    }
+                }
             }
         }
         md.push_str("---\n\n");

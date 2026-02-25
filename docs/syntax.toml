@@ -342,6 +342,36 @@ description = "Compound types"
 types = ["Option<T> (Some/None)", "Result<T, E> (Ok/Err)"]
 description = "Built-in sum types for optional values and error handling"
 
+[[types.option_result.functions]]
+name = "unwrap(x)"
+description = "Extract value from Some/Ok, panic on None/Err"
+example = "unwrap(Some(42)) → 42"
+
+[[types.option_result.functions]]
+name = "unwrap_or(x, default)"
+description = "Extract value or return default"
+example = "unwrap_or(None, 0) → 0"
+
+[[types.option_result.functions]]
+name = "is_some(x)"
+description = "Check if Option is Some"
+example = "is_some(Some(1)) → true"
+
+[[types.option_result.functions]]
+name = "is_none(x)"
+description = "Check if Option is None"
+example = "is_none(None) → true"
+
+[[types.option_result.functions]]
+name = "is_ok(x)"
+description = "Check if Result is Ok"
+example = "is_ok(Ok(1)) → true"
+
+[[types.option_result.functions]]
+name = "is_err(x)"
+description = "Check if Result is Err"
+example = "is_err(Err(\"fail\")) → true"
+
 [types.union]
 syntax = "T1 | T2 | T3"
 description = "Union types for values that can be multiple types"
