@@ -833,6 +833,34 @@ fn find_user_email(id) {
 - `None?` → early-returns `None` from the enclosing function
 - Non-Result/Option values pass through unchanged (gradual typing)
 
+### The `??` Operator (Null Coalescing)
+
+The `??` operator provides a default value when the left side is `None`:
+
+```ntnt
+// Map access returns None for missing keys — ?? provides a default
+let name = user["name"] ?? "Anonymous"
+let port = get_env("PORT") ?? "8080"
+
+// Replaces verbose get_or() pattern:
+// Before: let name = get_or(user, "name", "Anonymous")
+// After:  let name = user["name"] ?? "Anonymous"
+
+// Chain with ? for Result<Option<T>> (e.g., database queries):
+// pg_query_one returns Result<Option<Map>>
+// First ? unwraps Result (early-returns Err)
+// Second ? unwraps Option (early-returns None)
+fn get_user(id) {
+    let row = pg_query_one(pg, "SELECT * FROM users WHERE id = $1", [id])??
+    return Some(row)
+}
+```
+
+**Behavior:**
+- `Some(v) ?? default` → `v` (unwrapped)
+- `None ?? default` → `default`
+- Non-Option values pass through unchanged
+
 ### The `otherwise` Keyword (Inline Error Handling)
 
 `otherwise` unwraps `Ok`/`Some` or runs a diverging block for `Err`/`None`. Unlike `?`, it handles errors at the call site with custom recovery logic:

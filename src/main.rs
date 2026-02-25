@@ -4571,6 +4571,7 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             "arithmetic",
             "unary",
             "range",
+            "null_coalesce",
             "postfix",
             "member",
             "pipe",
