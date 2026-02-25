@@ -718,6 +718,7 @@ server 8080 {
 |----------|--------|-------------|
 | `NTNT_ENV` | `production`, `prod` | Disables hot-reload for better performance |
 | `NTNT_STRICT` | `1`, `true` | Blocks execution on type errors (runs type checker before `ntnt run`) |
+| `NTNT_ALLOW_PRIVATE_IPS` | `true` | Allows `fetch()` to connect to private/internal IPs (see below) |
 
 ```bash
 # Development (default) - hot-reload enabled
@@ -728,6 +729,22 @@ NTNT_ENV=production ntnt run server.tnt
 ```
 
 **Hot-reload** watches your `.tnt` files and imported modules for changes, automatically reloading on the next request. Disable in production for zero filesystem overhead per request.
+
+### SSRF Protection (Private IP Blocking)
+
+By default, `fetch()` blocks requests to private/internal IP ranges (`10.x`, `172.16-31.x`, `192.168.x`, `127.x`, `localhost`). This prevents Server-Side Request Forgery attacks.
+
+**In Docker**, this blocks inter-container communication (e.g., calling a sidecar service at `172.19.0.1:8889`). Set `NTNT_ALLOW_PRIVATE_IPS=true` to allow it:
+
+```yaml
+# docker-compose.yml
+services:
+  ntnt:
+    environment:
+      - NTNT_ALLOW_PRIVATE_IPS=true
+```
+
+⚠️ Only enable this when your app needs to call internal services. Keep disabled in public-facing apps that don't need internal network access.
 
 ### Response Builder Functions
 
@@ -1181,6 +1198,42 @@ use_middleware(fn(req) {
 })
 ```
 
+### Middleware Request Context
+
+Every request includes an empty `context` map that middleware can populate. Use `merge()` to pass data (like the authenticated user) to downstream handlers — this avoids re-fetching in every route.
+
+```ntnt
+import { merge, get_or } from "std/collections"
+
+// middleware/01_auth.tnt
+fn middleware(req) {
+    let session = get_session(req)
+    if is_none(session) {
+        return merge(req, map { "context": map { "user": None } })
+    }
+    let user = get_user_by_session(unwrap(session))
+    return merge(req, map { "context": map { "user": user } })
+}
+```
+
+```ntnt
+// routes/admin/index.tnt — handler reads from context
+fn get(req) {
+    let user = get_or(req.context, "user", None)
+    if is_none(user) {
+        return redirect("/login")
+    }
+    // user is available — no need to re-fetch from session
+    template("views/admin.html", map { "user": unwrap(user) })
+}
+```
+
+**Rules:**
+- Middleware must `return merge(req, map { "context": ... })` to pass context forward
+- Returning a map with `"status"` key short-circuits (treated as HTTP response)
+- Returning `Unit` (nothing) passes the original request unchanged
+- Context keys are convention-based — use `"user"`, `"permissions"`, `"feature_flags"`, etc.
+
 ---
 
 ## Debugging
@@ -1420,6 +1473,59 @@ m["a"]            // None (key exists, value is None)
 m["b"]            // None (key doesn't exist)
 has_key(m, "a")   // true
 has_key(m, "b")   // false
+```
+
+### Truthy/Falsy Values
+
+NTNT's truthy/falsy rules differ from JavaScript and Python:
+
+| Value | Truthy? | Notes |
+|-------|---------|-------|
+| `true` | ✅ | |
+| `false` | ❌ | |
+| `0` | ✅ | **Unlike JS/Python, `0` is truthy!** |
+| `""` (empty string) | ❌ | |
+| `None` | ❌ | |
+| `[]` (empty array) | ❌ | |
+| `map {}` (empty map) | ❌ | |
+| Any non-empty string | ✅ | |
+| Any non-empty array/map | ✅ | |
+| Any number (including 0) | ✅ | |
+
+⚠️ **`0` is truthy** — this catches people coming from JS/Python. If you need to check for zero, use explicit comparison: `if value == 0 { ... }`.
+
+### Map Iteration
+
+`for k in map` iterates over **keys**, not entries:
+
+```ntnt
+let users = map { "alice": 30, "bob": 25 }
+
+// Iterates keys
+for name in users {
+    print("{name}: {users[name]}")
+}
+// Output: alice: 30, bob: 25
+```
+
+To iterate key-value pairs, use `entries()` from `std/collections`:
+
+```ntnt
+import { entries } from "std/collections"
+
+for entry in entries(users) {
+    print("{entry[0]}: {entry[1]}")
+}
+```
+
+To get just values, use `values()`:
+
+```ntnt
+import { values } from "std/collections"
+
+for age in values(users) {
+    print(age)
+}
 ```
 
 ### Option/Result Display in Strings

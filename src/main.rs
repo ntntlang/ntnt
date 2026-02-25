@@ -4846,14 +4846,13 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                         md.push_str("|----------|-------------|---------|\n");
                         for func in functions {
                             let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                            let desc =
-                                func.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                            let desc = func
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             let example =
                                 func.get("example").and_then(|v| v.as_str()).unwrap_or("");
-                            md.push_str(&format!(
-                                "| `{}` | {} | `{}` |\n",
-                                name, desc, example
-                            ));
+                            md.push_str(&format!("| `{}` | {} | `{}` |\n", name, desc, example));
                         }
                         md.push_str("\n");
                     }
@@ -5459,6 +5458,30 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             ));
         }
 
+        // NTNT_ALLOW_PRIVATE_IPS
+        if let Some(env) = env_vars.get("NTNT_ALLOW_PRIVATE_IPS") {
+            let values = env
+                .get("values")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| format!("`{}`", s))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
+            let desc = env
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            md.push_str(&format!(
+                "| `NTNT_ALLOW_PRIVATE_IPS` | {} | {} | {} |\n",
+                values, default, desc
+            ));
+        }
+
         md.push_str("\n### Examples\n\n```bash\n");
         md.push_str("# Development (default) - hot-reload enabled\n");
         md.push_str("ntnt run server.tnt\n\n");
@@ -5467,7 +5490,9 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
         md.push_str("# Custom timeout (60 seconds)\n");
         md.push_str("NTNT_TIMEOUT=60 ntnt run server.tnt\n\n");
         md.push_str("# Strict type checking - blocks execution on type errors\n");
-        md.push_str("NTNT_STRICT=1 ntnt run server.tnt\n");
+        md.push_str("NTNT_STRICT=1 ntnt run server.tnt\n\n");
+        md.push_str("# Allow fetch() to connect to Docker internal services\n");
+        md.push_str("NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt\n");
         md.push_str("```\n\n");
         md.push_str("---\n\n");
     }

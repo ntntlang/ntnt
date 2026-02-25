@@ -105,6 +105,9 @@ impl BridgeRequest {
             .collect();
         map.insert("headers".to_string(), Value::Map(headers));
 
+        // Empty context map for middleware to populate (e.g., authenticated user, feature flags)
+        map.insert("context".to_string(), Value::Map(HashMap::new()));
+
         Value::Map(map)
     }
 }
