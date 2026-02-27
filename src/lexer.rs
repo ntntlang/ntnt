@@ -669,8 +669,11 @@ impl<'a> Lexer<'a> {
                                 Vec::new()
                             };
 
-                            // Advance past the body and closing tag
-                            for _ in 0..(endfor + 8) {
+                            // Advance past the body and closing tag.
+                            // Use char count (not byte offset) because chars.next() advances
+                            // by Unicode code point, but find_matching_end returns byte offsets.
+                            let chars_to_skip = rest[..endfor].chars().count() + 8;
+                            for _ in 0..chars_to_skip {
                                 chars.next();
                             }
 
@@ -703,8 +706,11 @@ impl<'a> Lexer<'a> {
                         let (then_parts, elif_chains, else_parts) =
                             self.parse_if_block_content(block_content);
 
-                        // Advance past everything including closing tag
-                        for _ in 0..(endif + 7) {
+                        // Advance past everything including closing tag.
+                        // Use char count (not byte offset) because chars.next() advances
+                        // by Unicode code point, but find_matching_end returns byte offsets.
+                        let chars_to_skip = rest[..endif].chars().count() + 7;
+                        for _ in 0..chars_to_skip {
                             chars.next();
                         }
 
