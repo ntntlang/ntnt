@@ -567,12 +567,33 @@ impl<'a> Lexer<'a> {
                     literal.clear();
                 }
 
-                // Read until }}} (if raw) or }} (if normal)
+                // Read until }}} (if raw) or }} (if normal).
+                // Track string literals so }} inside "a}}" doesn't close the tag.
                 let mut expr = String::new();
                 let mut brace_depth = 0;
+                let mut in_str = false;
+                let mut str_char = '"';
+                let mut prev_backslash = false;
 
                 while let Some(c) = chars.next() {
-                    if c == '{' {
+                    if in_str {
+                        expr.push(c);
+                        if prev_backslash {
+                            prev_backslash = false;
+                        } else if c == '\\' {
+                            prev_backslash = true;
+                        } else if c == str_char {
+                            in_str = false;
+                        }
+                        continue;
+                    }
+
+                    if c == '"' || c == '\'' {
+                        in_str = true;
+                        str_char = c;
+                        prev_backslash = false;
+                        expr.push(c);
+                    } else if c == '{' {
                         brace_depth += 1;
                         expr.push(c);
                     } else if c == '}' {
@@ -778,7 +799,8 @@ impl<'a> Lexer<'a> {
 
     /// Find matching closing tag, respecting nested blocks
     fn find_matching_end(&self, content: &str, block_type: &str) -> Option<usize> {
-        let open_tag = format!("{{{{#{}", block_type);
+        // Use a space-terminated prefix so "{{#for" doesn't match "{{#format}}" etc.
+        let open_tag = format!("{{{{#{} ", block_type);
         let close_tag = format!("{{{{/{}}}}}", block_type);
 
         let mut depth = 0;
@@ -808,7 +830,7 @@ impl<'a> Lexer<'a> {
     fn find_directive_at_level(&self, content: &str, directive: &str) -> Option<usize> {
         let target = format!("{{{{{}}}}}", directive);
         let mut pos = 0;
-        let mut depth = 0;
+        let mut depth: i32 = 0;
 
         while pos < content.len() {
             // Track nesting depth for for/if blocks
@@ -817,7 +839,10 @@ impl<'a> Lexer<'a> {
             } else if content[pos..].starts_with("{{/for}}")
                 || content[pos..].starts_with("{{/if}}")
             {
-                depth -= 1;
+                // Guard against underflow on malformed templates
+                if depth > 0 {
+                    depth -= 1;
+                }
             } else if depth == 0 && content[pos..].starts_with(&target) {
                 return Some(pos);
             }
@@ -845,7 +870,7 @@ impl<'a> Lexer<'a> {
         // Find all elif and else positions at the current level
         let mut sections: Vec<(&str, usize)> = Vec::new(); // (type, position)
         let mut pos = 0;
-        let mut depth = 0;
+        let mut depth: i32 = 0;
 
         while pos < content.len() {
             if content[pos..].starts_with("{{#for ") || content[pos..].starts_with("{{#if ") {
@@ -855,7 +880,10 @@ impl<'a> Lexer<'a> {
             } else if content[pos..].starts_with("{{/for}}")
                 || content[pos..].starts_with("{{/if}}")
             {
-                depth -= 1;
+                // Guard against underflow on malformed templates
+                if depth > 0 {
+                    depth -= 1;
+                }
                 let ch = content[pos..].chars().next().unwrap();
                 pos += ch.len_utf8();
             } else if depth == 0 {
