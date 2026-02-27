@@ -425,7 +425,7 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also keys, values, has_key, get_key
     // @since v0.1.0
     // @tags #pure, #deterministic
-    // @example entries(map { "a": 1 }) => [["a", 1]] ~ "Get map entries as pairs"
+    // @example entries(map { "a": 1 }) => [map { "key": "a", "value": 1 }] ~ "Get map entries as {key, value} maps"
     // @error TypeError ~ "entries() requires a map" fix: "Ensure argument is a map"
     module.insert(
         "entries".to_string(),
@@ -437,7 +437,12 @@ pub fn init() -> HashMap<String, Value> {
                 Value::Map(map) => {
                     let entries: Vec<Value> = map
                         .iter()
-                        .map(|(k, v)| Value::Array(vec![Value::String(k.clone()), v.clone()]))
+                        .map(|(k, v)| {
+                            let mut entry = HashMap::new();
+                            entry.insert("key".to_string(), Value::String(k.clone()));
+                            entry.insert("value".to_string(), v.clone());
+                            Value::Map(entry)
+                        })
                         .collect();
                     Ok(Value::Array(entries))
                 }

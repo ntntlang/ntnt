@@ -200,6 +200,15 @@ pub enum Statement {
         /// Nested route groups
         groups: Vec<ServerGroup>,
     },
+
+    /// Source location wrapper — annotates a statement with its file/line/col.
+    /// Emitted by the parser for every top-level and block statement so the
+    /// interpreter can report accurate positions in runtime error messages.
+    Located {
+        line: usize,
+        col: usize,
+        stmt: Box<Statement>,
+    },
 }
 
 /// Expression nodes

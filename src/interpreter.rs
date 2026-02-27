@@ -394,6 +394,10 @@ pub struct Interpreter {
     routes_dir: Option<String>,
     /// Tracked routes directory mtimes for detecting new/deleted files (dir_path -> mtime)
     routes_dir_mtimes: HashMap<String, std::time::SystemTime>,
+    /// Last known source line being executed (for runtime error reporting)
+    current_line: usize,
+    /// Last known source column being executed (for runtime error reporting)
+    current_col: usize,
 }
 
 /// Information about a trait definition
@@ -442,6 +446,8 @@ impl Interpreter {
             middleware_files: HashMap::new(),
             routes_dir: None,
             routes_dir_mtimes: HashMap::new(),
+            current_line: 0,
+            current_col: 0,
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
@@ -2959,6 +2965,11 @@ impl Interpreter {
 
     fn eval_statement(&mut self, stmt: &Statement) -> Result<Value> {
         match stmt {
+            Statement::Located { line, col, stmt } => {
+                self.current_line = *line;
+                self.current_col = *col;
+                return self.eval_statement(stmt);
+            }
             Statement::Let {
                 name,
                 mutable,
@@ -6050,9 +6061,16 @@ impl Interpreter {
                                         .get_route_source(route_index)
                                         .and_then(|s| s.file_path.clone())
                                         .unwrap_or_default();
+                                    let loc = if self.current_line > 0 {
+                                        format!("line {}", self.current_line)
+                                    } else {
+                                        String::new()
+                                    };
                                     eprintln!(
-                                        "[ERROR] {} {} | handler: {} | {}",
-                                        method, path, handler_file, e
+                                        "[ERROR] {} {} | handler: {}{} | {}",
+                                        method, path, handler_file,
+                                        if loc.is_empty() { String::new() } else { format!(":{}", loc) },
+                                        e
                                     );
                                     let method_path = format!("{} {}", method, path);
                                     // Check for contract violations and return appropriate HTTP status
@@ -6435,9 +6453,14 @@ impl Interpreter {
                                         .get_route_source(route_index)
                                         .and_then(|s| s.file_path.clone())
                                         .unwrap_or_default();
+                                    let loc = if self.current_line > 0 {
+                                        format!(":{}", self.current_line)
+                                    } else {
+                                        String::new()
+                                    };
                                     eprintln!(
-                                        "[ERROR] {} {} | handler: {} | {}",
-                                        method, path, handler_file, e
+                                        "[ERROR] {} {} | handler: {}{} | {}",
+                                        method, path, handler_file, loc, e
                                     );
                                     crate::stdlib::http_server::create_error_response_with_context(
                                         500,
