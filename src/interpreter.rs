@@ -1852,6 +1852,136 @@ impl Interpreter {
             },
         );
 
+        // @ntnt is_map
+        // @signature is_map(val: Any) -> Bool
+        // Returns true if the value is a Map (dictionary/object).
+        //
+        // Use to distinguish maps from other value types, especially when
+        // a function accepts either a Map or a primitive. Pairs with
+        // is_array(), is_string(), is_int(), is_float(), is_bool().
+        // @param val Any value to test.
+        // @returns Bool — true if val is a Map, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_array, is_string, is_int, typeof
+        // @since v0.3.16
+        // @example is_map(map { "a": 1 }) => true ~ "Map is a map"
+        // @example is_map([1, 2, 3]) => false ~ "Array is not a map"
+        // @example is_map("hello") => false ~ "String is not a map"
+        // @example is_map(None) => false ~ "None is not a map"
+        self.environment.borrow_mut().define(
+            "is_map".to_string(),
+            Value::NativeFunction {
+                name: "is_map".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::Map(_)))),
+            },
+        );
+
+        // @ntnt is_array
+        // @signature is_array(val: Any) -> Bool
+        // Returns true if the value is an Array.
+        //
+        // Use to distinguish arrays from other value types. Pairs with
+        // is_map(), is_string(), is_int(), is_float(), is_bool().
+        // @param val Any value to test.
+        // @returns Bool — true if val is an Array, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_map, is_string, is_int, typeof
+        // @since v0.3.16
+        // @example is_array([1, 2, 3]) => true ~ "Array is an array"
+        // @example is_array(map { "a": 1 }) => false ~ "Map is not an array"
+        // @example is_array("hello") => false ~ "String is not an array"
+        self.environment.borrow_mut().define(
+            "is_array".to_string(),
+            Value::NativeFunction {
+                name: "is_array".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::Array(_)))),
+            },
+        );
+
+        // @ntnt is_string
+        // @signature is_string(val: Any) -> Bool
+        // Returns true if the value is a String.
+        // @param val Any value to test.
+        // @returns Bool — true if val is a String, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_map, is_array, is_int, typeof
+        // @since v0.3.16
+        // @example is_string("hello") => true ~ "String is a string"
+        // @example is_string(42) => false ~ "Int is not a string"
+        self.environment.borrow_mut().define(
+            "is_string".to_string(),
+            Value::NativeFunction {
+                name: "is_string".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::String(_)))),
+            },
+        );
+
+        // @ntnt is_int
+        // @signature is_int(val: Any) -> Bool
+        // Returns true if the value is an integer.
+        // @param val Any value to test.
+        // @returns Bool — true if val is an Int, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_map, is_array, is_string, is_float, typeof
+        // @since v0.3.16
+        // @example is_int(42) => true ~ "Int is an int"
+        // @example is_int(3.14) => false ~ "Float is not an int"
+        self.environment.borrow_mut().define(
+            "is_int".to_string(),
+            Value::NativeFunction {
+                name: "is_int".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::Int(_)))),
+            },
+        );
+
+        // @ntnt is_float
+        // @signature is_float(val: Any) -> Bool
+        // Returns true if the value is a Float.
+        // @param val Any value to test.
+        // @returns Bool — true if val is a Float, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_int, is_string, typeof
+        // @since v0.3.16
+        // @example is_float(3.14) => true ~ "Float is a float"
+        // @example is_float(42) => false ~ "Int is not a float"
+        self.environment.borrow_mut().define(
+            "is_float".to_string(),
+            Value::NativeFunction {
+                name: "is_float".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::Float(_)))),
+            },
+        );
+
+        // @ntnt is_bool
+        // @signature is_bool(val: Any) -> Bool
+        // Returns true if the value is a Bool.
+        // @param val Any value to test.
+        // @returns Bool — true if val is a Bool, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_int, is_string, typeof
+        // @since v0.3.16
+        // @example is_bool(true) => true ~ "Bool is a bool"
+        // @example is_bool(1) => false ~ "Int is not a bool"
+        self.environment.borrow_mut().define(
+            "is_bool".to_string(),
+            Value::NativeFunction {
+                name: "is_bool".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::Bool(_)))),
+            },
+        );
+
         // @ntnt unwrap
         // @signature unwrap(x: Option<Any> | Result<Any, Any>) -> Any
         // Extracts the value from Some or Ok, panics on None or Err.
