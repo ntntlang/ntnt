@@ -1125,6 +1125,21 @@ impl Parser {
     }
 
     fn statement(&mut self) -> Result<Statement> {
+        let stmt_line = self.current_line();
+        let stmt_col = self.current_column();
+        let inner = self.statement_inner()?;
+        // Skip wrapping Located inside Located to avoid double-wrapping in recursive calls
+        Ok(match inner {
+            Statement::Located { .. } => inner,
+            other => Statement::Located {
+                line: stmt_line,
+                col: stmt_col,
+                stmt: Box::new(other),
+            },
+        })
+    }
+
+    fn statement_inner(&mut self) -> Result<Statement> {
         if self.match_token(&[TokenKind::Return]) {
             let return_line = self.previous().map(|t| t.line).unwrap_or(0);
             let next_is_new_line = self.peek().map(|t| t.line != return_line).unwrap_or(true);

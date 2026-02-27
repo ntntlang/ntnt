@@ -613,6 +613,7 @@ impl TypeContext {
                     self.collect_declaration(method);
                 }
             }
+            Statement::Located { stmt, .. } => self.collect_declaration(stmt),
             _ => {}
         }
     }
@@ -1059,6 +1060,7 @@ impl TypeContext {
             | Statement::Intent { .. }
             | Statement::Defer(_)
             | Statement::Server { .. } => {}
+            Statement::Located { stmt, .. } => self.check_statement(stmt),
         }
     }
 
@@ -1279,7 +1281,11 @@ impl TypeContext {
         if block.statements.is_empty() {
             return false;
         }
-        match block.statements.last() {
+        let last = block.statements.last().map(|s| match s {
+            Statement::Located { stmt, .. } => stmt.as_ref(),
+            other => other,
+        });
+        match last {
             Some(Statement::Return(_)) => true,
             Some(Statement::Break) | Some(Statement::Continue) => true,
             Some(Statement::If {
@@ -1297,10 +1303,15 @@ impl TypeContext {
         let mut last_type = Type::Unit;
         for stmt in &block.statements {
             self.check_statement(stmt);
+            // Unwrap Located to inspect the inner statement for type tracking
+            let inner = match stmt {
+                Statement::Located { stmt, .. } => stmt.as_ref(),
+                other => other,
+            };
             // Track the type of expression statements (for implicit return)
-            if let Statement::Expression(expr) = stmt {
+            if let Statement::Expression(expr) = inner {
                 last_type = self.infer_expression(expr);
-            } else if let Statement::Return(Some(expr)) = stmt {
+            } else if let Statement::Return(Some(expr)) = inner {
                 last_type = self.infer_expression(expr);
             } else {
                 last_type = Type::Unit;

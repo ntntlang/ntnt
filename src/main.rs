@@ -1184,7 +1184,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
         let line_map = build_line_number_map(&source);
 
         for stmt in &ast.statements {
-            match stmt {
+            match unwrap_located(stmt) {
                 Statement::Function {
                     name,
                     params,
@@ -1276,7 +1276,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
             let http_methods = ["get", "post", "put", "delete", "patch", "head", "options"];
 
             for stmt in &ast.statements {
-                if let Statement::Function { name, .. } = stmt {
+                if let Statement::Function { name, .. } = unwrap_located(stmt) {
                     let method = name.to_lowercase();
                     if http_methods.contains(&method.as_str()) {
                         let line = line_map.get(&format!("fn {}", name)).copied();
@@ -1338,6 +1338,15 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
 }
 
 /// Build a map of declaration patterns to line numbers
+/// Unwrap a `Statement::Located` wrapper, returning the inner statement.
+/// Allows all AST-walking code to be transparent to source-location annotations.
+fn unwrap_located(stmt: &ntnt::ast::Statement) -> &ntnt::ast::Statement {
+    match stmt {
+        ntnt::ast::Statement::Located { stmt, .. } => unwrap_located(stmt),
+        other => other,
+    }
+}
+
 fn build_line_number_map(source: &str) -> std::collections::HashMap<String, usize> {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -3700,6 +3709,7 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
             }
             collect_from_groups(groups, names);
         }
+        Statement::Located { stmt, .. } => collect_used_names(stmt, names),
     }
 }
 
