@@ -49,10 +49,16 @@ These functions are available everywhere without importing.
 | [`floor(x: Int \| Float)`](#floor) | Rounds down to the nearest integer. |
 | [`get(pattern: String, handler: Function)`](#get) | Registers a GET route handler. |
 | [`int(x: Int \| Float \| String \| Bool)`](#int) | Converts a value to integer. |
+| [`is_array(val: Any)`](#isarray) | Returns true if the value is an Array. |
+| [`is_bool(val: Any)`](#isbool) | Returns true if the value is a Bool. |
 | [`is_err(res: Result<Any, Any>)`](#iserr) | Checks if a Result is Err. |
+| [`is_float(val: Any)`](#isfloat) | Returns true if the value is a Float. |
+| [`is_int(val: Any)`](#isint) | Returns true if the value is an integer. |
+| [`is_map(val: Any)`](#ismap) | Returns true if the value is a Map (dictionary/object). |
 | [`is_none(opt: Option<Any>)`](#isnone) | Checks if an Option is None. |
 | [`is_ok(res: Result<Any, Any>)`](#isok) | Checks if a Result is Ok. |
 | [`is_some(opt: Option<Any>)`](#issome) | Checks if an Option is Some. |
+| [`is_string(val: Any)`](#isstring) | Returns true if the value is a String. |
 | [`len(x: String \| Array \| Map)`](#len) | Returns the length of a string, array, or map. |
 | [`listen(port: Int)`](#listen) | Starts an HTTP server on the given port. |
 | [`max(a: Int \| Float, b: Int \| Float)`](#max) | Returns the larger of two numbers. |
@@ -475,6 +481,63 @@ int("42")  // => 42  // String parsed to int
 
 ---
 
+#### `is_array`
+
+```ntnt
+is_array(val: Any) -> Bool
+```
+
+Returns true if the value is an Array.
+
+Use to distinguish arrays from other value types. Pairs with is_map(), is_string(), is_int(), is_float(), is_bool().
+
+**Parameters:**
+
+- `val` — Any value to test.
+
+**Returns:** Bool — true if val is an Array, false otherwise.
+
+**Examples:**
+
+```ntnt
+is_array([1, 2, 3])  // => true  // Array is an array
+is_array(map { "a": 1 })  // => false  // Map is not an array
+is_array("hello")  // => false  // String is not an array
+```
+
+**See also:** `is_map`, `is_string`, `is_int`, `typeof`
+
+*Since v0.3.16*
+
+---
+
+#### `is_bool`
+
+```ntnt
+is_bool(val: Any) -> Bool
+```
+
+Returns true if the value is a Bool.
+
+**Parameters:**
+
+- `val` — Any value to test.
+
+**Returns:** Bool — true if val is a Bool, false otherwise.
+
+**Examples:**
+
+```ntnt
+is_bool(true)  // => true  // Bool is a bool
+is_bool(1)  // => false  // Int is not a bool
+```
+
+**See also:** `is_int`, `is_string`, `typeof`
+
+*Since v0.3.16*
+
+---
+
 #### `is_err`
 
 ```ntnt
@@ -505,6 +568,91 @@ is_err(Ok(42))  // => false  // Ok is not err
 **See also:** `is_ok`, `Ok`, `Err`, `unwrap`, `unwrap_or`
 
 *Since v0.1.0*
+
+---
+
+#### `is_float`
+
+```ntnt
+is_float(val: Any) -> Bool
+```
+
+Returns true if the value is a Float.
+
+**Parameters:**
+
+- `val` — Any value to test.
+
+**Returns:** Bool — true if val is a Float, false otherwise.
+
+**Examples:**
+
+```ntnt
+is_float(3.14)  // => true  // Float is a float
+is_float(42)  // => false  // Int is not a float
+```
+
+**See also:** `is_int`, `is_string`, `typeof`
+
+*Since v0.3.16*
+
+---
+
+#### `is_int`
+
+```ntnt
+is_int(val: Any) -> Bool
+```
+
+Returns true if the value is an integer.
+
+**Parameters:**
+
+- `val` — Any value to test.
+
+**Returns:** Bool — true if val is an Int, false otherwise.
+
+**Examples:**
+
+```ntnt
+is_int(42)  // => true  // Int is an int
+is_int(3.14)  // => false  // Float is not an int
+```
+
+**See also:** `is_map`, `is_array`, `is_string`, `is_float`, `typeof`
+
+*Since v0.3.16*
+
+---
+
+#### `is_map`
+
+```ntnt
+is_map(val: Any) -> Bool
+```
+
+Returns true if the value is a Map (dictionary/object).
+
+Use to distinguish maps from other value types, especially when a function accepts either a Map or a primitive. Pairs with is_array(), is_string(), is_int(), is_float(), is_bool().
+
+**Parameters:**
+
+- `val` — Any value to test.
+
+**Returns:** Bool — true if val is a Map, false otherwise.
+
+**Examples:**
+
+```ntnt
+is_map(map { "a": 1 })  // => true  // Map is a map
+is_map([1, 2, 3])  // => false  // Array is not a map
+is_map("hello")  // => false  // String is not a map
+is_map(None)  // => false  // None is not a map
+```
+
+**See also:** `is_array`, `is_string`, `is_int`, `typeof`
+
+*Since v0.3.16*
 
 ---
 
@@ -604,6 +752,33 @@ is_some(None)  // => false  // None is not some
 **See also:** `is_none`, `Some`, `unwrap`, `unwrap_or`
 
 *Since v0.1.0*
+
+---
+
+#### `is_string`
+
+```ntnt
+is_string(val: Any) -> Bool
+```
+
+Returns true if the value is a String.
+
+**Parameters:**
+
+- `val` — Any value to test.
+
+**Returns:** Bool — true if val is a String, false otherwise.
+
+**Examples:**
+
+```ntnt
+is_string("hello")  // => true  // String is a string
+is_string(42)  // => false  // Int is not a string
+```
+
+**See also:** `is_map`, `is_array`, `is_int`, `typeof`
+
+*Since v0.3.16*
 
 ---
 
@@ -2340,7 +2515,7 @@ Each entry is a two-element array where the first element is the string key and 
 **Examples:**
 
 ```ntnt
-entries(map { "a": 1 })  // => [["a", 1]]  // Get map entries as pairs
+entries(map { "a": 1 })  // => [map { "key": "a", "value": 1 }]  // Get map entries as {key, value} maps
 ```
 
 **Errors:**

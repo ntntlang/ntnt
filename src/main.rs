@@ -3286,7 +3286,7 @@ fn analyze_ast_warnings(ast: &ntnt::ast::Program, _source: &str) -> Vec<serde_js
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for stmt in &ast.statements {
-        match stmt {
+        match unwrap_located(stmt) {
             Statement::Import { items, .. } => {
                 for item in items {
                     imports.push(item.name.clone());
