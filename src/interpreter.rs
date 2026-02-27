@@ -827,8 +827,7 @@ impl Interpreter {
         // Middleware change requires full route re-discovery
         // (middleware is re-loaded during load_file_based_routes)
         if let Some(dir_path) = self.routes_dir.clone() {
-            self.server_state.routes.clear();
-            self.server_state.middleware.clear();
+            self.server_state.clear_routes_and_middleware();
             self.middleware_files.clear();
 
             match self.load_file_based_routes(&dir_path) {
@@ -901,10 +900,12 @@ impl Interpreter {
         let dir_path = self.routes_dir.clone().unwrap();
         println!("\n[hot-reload] Routes directory changed, re-discovering routes...");
 
-        // Clear routes and middleware (both are re-discovered by load_file_based_routes)
-        // Preserve static dirs and shutdown handlers
-        self.server_state.routes.clear();
-        self.server_state.middleware.clear();
+        // Clear routes, route_index, and middleware (all re-discovered by load_file_based_routes).
+        // Preserve static dirs and shutdown handlers.
+        // IMPORTANT: route_index MUST be cleared alongside routes — if load_file_based_routes
+        // fails, routes is empty but route_index would still have stale indices, causing an
+        // index-out-of-bounds panic on the next request (ntnt-findings #64).
+        self.server_state.clear_routes_and_middleware();
 
         // Re-discover routes from the directory
         match self.load_file_based_routes(&dir_path) {
@@ -920,6 +921,9 @@ impl Interpreter {
             }
             Err(e) => {
                 eprintln!("[hot-reload] Error re-discovering routes: {}", e);
+                // Routes and route_index are already cleared above — server will return 404
+                // for all routes until the next successful reload. This is safer than serving
+                // requests with a stale/corrupt route_index pointing into an empty routes vec.
                 false
             }
         }
