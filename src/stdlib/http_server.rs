@@ -485,6 +485,15 @@ impl ServerState {
         // Note: cors_config is NOT cleared - it's typically configured once at startup
     }
 
+    /// Clear routes and middleware for hot-reload, preserving static dirs and shutdown handlers.
+    /// Always clears route_index together with routes — they must stay in sync.
+    /// If route_index has stale indices pointing into an empty routes vec, find_route panics.
+    pub fn clear_routes_and_middleware(&mut self) {
+        self.routes.clear();
+        self.route_index.clear();
+        self.middleware.clear();
+    }
+
     /// Enable CORS with the given configuration
     pub fn enable_cors(&mut self, config: CorsConfig) {
         self.cors_config = Some(config);
