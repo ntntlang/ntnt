@@ -625,13 +625,14 @@ impl<'a> Lexer<'a> {
                     let stripped = stripped.trim();
                     // Split into name and optional data expression
                     // Name is the first token (no spaces), rest is data expr
-                    let (name, data_expr) = if let Some(space_pos) = stripped.find(|c: char| c.is_whitespace()) {
-                        let name = stripped[..space_pos].trim().to_string();
-                        let data = stripped[space_pos..].trim().to_string();
-                        (name, if data.is_empty() { None } else { Some(data) })
-                    } else {
-                        (stripped.to_string(), None)
-                    };
+                    let (name, data_expr) =
+                        if let Some(space_pos) = stripped.find(|c: char| c.is_whitespace()) {
+                            let name = stripped[..space_pos].trim().to_string();
+                            let data = stripped[space_pos..].trim().to_string();
+                            (name, if data.is_empty() { None } else { Some(data) })
+                        } else {
+                            (stripped.to_string(), None)
+                        };
                     parts.push(TemplatePart::Partial { name, data_expr });
                     continue;
                 }

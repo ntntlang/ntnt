@@ -4333,7 +4333,12 @@ print(result)
     // Cleanup
     fs::remove_dir_all(&temp_dir).ok();
 
-    assert_eq!(exit_code, 0, "Partial test should succeed. stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        exit_code,
+        0,
+        "Partial test should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         stdout.contains("<header><h1>Hello World</h1></header>"),
         "Partial should render with parent scope data. Got: {}",
@@ -4343,7 +4348,8 @@ print(result)
 
 #[test]
 fn test_template_partial_with_data() {
-    let temp_dir = std::env::temp_dir().join(format!("ntnt_partial_data_test_{}", std::process::id()));
+    let temp_dir =
+        std::env::temp_dir().join(format!("ntnt_partial_data_test_{}", std::process::id()));
     let partials_dir = temp_dir.join("views/partials");
     fs::create_dir_all(&partials_dir).expect("create partials dir");
 
@@ -4384,7 +4390,12 @@ print(result)
 
     fs::remove_dir_all(&temp_dir).ok();
 
-    assert_eq!(exit_code, 0, "Partial with data should succeed. stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        exit_code,
+        0,
+        "Partial with data should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         stdout.contains(r#"<div class="card"><h2>Test Card</h2><p>A description</p></div>"#),
         "Partial should render with provided data. Got: {}",

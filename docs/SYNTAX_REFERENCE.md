@@ -89,6 +89,7 @@ NTNT operators by precedence (lowest to highest)
 | arithmetic | `+`, `-`, `*`, `/`, `%` | Arithmetic operators | `a + b, x * y, n % 2` |
 | unary | `-`, `!` | Unary negation and logical NOT | `-x, !condition` |
 | range | `..`, `..=` | Range operators (exclusive and inclusive) | `0..10 (0-9), 0..=10 (0-10)` |
+| null coalesce | `??` | Null coalescing — unwraps Some(x) to x, returns right side for None | `map["key"] ?? "default", get_env("PORT") ?? "8080"` |
 | postfix | `?` | Try operator — unwraps Ok/Some or early-returns Err/None from enclosing function | `let data = parse_json(body)?, let row = pg_query_one(pg, sql, params)??` |
 | member | `.`, `[]` | Member access and indexing | `user.name, arr[0], map["key"]` |
 | pipe | `|>` | Pipeline operator (passes left as first arg to right) | `data |> transform |> validate` |
@@ -165,6 +166,8 @@ Template string (triple-quoted) features
 | elif | `{{#if cond}}...{{#elif cond2}}...{{#else}}...{{/if}}` | Elif chains |
 | comments | `{{! comment }}` | Template comments (not rendered) |
 | escape_braces | `\{{ and \}}` | Literal {{ and }} in output |
+| partials | `{{> name}}` | Include a partial template (inherits current scope) |
+| partials_data | `{{> name data_expr}}` | Include a partial with explicit data map |
 
 ### Available Filters
 
@@ -254,6 +257,15 @@ Compound types
 `Option<T> (Some/None)`, `Result<T, E> (Ok/Err)`
 
 Built-in sum types for optional values and error handling
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `unwrap(x)` | Extract value from Some/Ok, panic on None/Err | `unwrap(Some(42)) → 42` |
+| `unwrap_or(x, default)` | Extract value or return default | `unwrap_or(None, 0) → 0` |
+| `is_some(x)` | Check if Option is Some | `is_some(Some(1)) → true` |
+| `is_none(x)` | Check if Option is None | `is_none(None) → true` |
+| `is_ok(x)` | Check if Result is Ok | `is_ok(Ok(1)) → true` |
+| `is_err(x)` | Check if Result is Err | `is_err(Err("fail")) → true` |
 
 ### UNION
 

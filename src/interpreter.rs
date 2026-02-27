@@ -6192,8 +6192,14 @@ impl Interpreter {
                                     };
                                     eprintln!(
                                         "[ERROR] {} {} | handler: {}{} | {}",
-                                        method, path, handler_file,
-                                        if loc.is_empty() { String::new() } else { format!(":{}", loc) },
+                                        method,
+                                        path,
+                                        handler_file,
+                                        if loc.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(":{}", loc)
+                                        },
                                         e
                                     );
                                     let method_path = format!("{} {}", method, path);
