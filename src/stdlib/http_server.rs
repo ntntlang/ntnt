@@ -20,8 +20,9 @@
 //! listen(8080)
 //! ```
 
+use crate::ast::{EnumVariant, Field, TypeExpr};
 use crate::error::{IntentError, Result};
-use crate::interpreter::Value;
+use crate::interpreter::{StoredHandler, TraitInfo, Value};
 use crate::stdlib::json::json_to_intent_value;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -436,7 +437,7 @@ impl CorsConfig {
 pub enum RouteMatchResult {
     /// Route matched successfully
     Matched {
-        handler: Value,
+        handler: StoredHandler,
         params: HashMap<String, String>,
         route_index: usize,
     },
@@ -450,29 +451,56 @@ pub enum RouteMatchResult {
     NotFound,
 }
 
-/// Server state stored in the interpreter
+/// Shared server state — extracted from the interpreter after startup.
+/// Contains all data needed to serve requests: routes, middleware, config, and type context.
+/// Designed to be wrapped in `Arc<RwLock<SharedState>>` for per-request interpreter architecture.
 #[derive(Debug, Clone)]
-pub struct ServerState {
-    pub routes: Vec<(Route, Value, RouteSource)>, // Routes with handlers and source info
+pub struct SharedState {
+    // Routing
+    pub routes: Vec<(Route, StoredHandler, RouteSource)>,
     /// Route index for O(1) lookup by (method, segment_count) -> route indices
-    route_index: HashMap<(String, usize), Vec<usize>>,
-    pub static_dirs: Vec<(String, String)>, // (url_prefix, filesystem_path)
-    pub middleware: Vec<Value>,             // Middleware functions to run before handlers
-    pub hot_reload: bool,                   // Whether hot-reload is enabled
-    pub shutdown_handlers: Vec<Value>,      // Functions to call on server shutdown
-    pub cors_config: Option<CorsConfig>,    // Optional CORS configuration
+    pub route_index: HashMap<(String, usize), Vec<usize>>,
+    pub middleware: Vec<StoredHandler>,
+    pub shutdown_handlers: Vec<StoredHandler>,
+    // Static assets
+    pub static_dirs: Vec<(String, String)>,
+    // Network config
+    pub cors_config: Option<CorsConfig>,
+    // Hot-reload
+    pub hot_reload: bool,
+    // Type context — carried into every per-request interpreter
+    // so handlers can use user-defined structs, enums, traits, and type aliases
+    pub structs: HashMap<String, Vec<Field>>,
+    pub enums: HashMap<String, Vec<EnumVariant>>,
+    pub type_aliases: HashMap<String, TypeExpr>,
+    pub trait_definitions: HashMap<String, TraitInfo>,
+    pub trait_implementations: HashMap<String, Vec<String>>,
+    // Source context for error messages
+    pub main_source_file: Option<String>,
 }
 
-impl ServerState {
+// SAFETY: SharedState contains StoredHandler (which is Send+Sync — no Rc after flatten_value()),
+// and all other fields are standard Send+Sync types (HashMap, Vec, String, Option, bool).
+// Type context fields (Field, EnumVariant, TypeExpr, TraitInfo) contain only AST types (no Rc).
+unsafe impl Send for SharedState {}
+unsafe impl Sync for SharedState {}
+
+impl SharedState {
     pub fn new() -> Self {
-        ServerState {
+        SharedState {
             routes: Vec::new(),
             route_index: HashMap::new(),
             static_dirs: Vec::new(),
             middleware: Vec::new(),
-            hot_reload: true, // Enable hot-reload by default in dev
+            hot_reload: true,
             shutdown_handlers: Vec::new(),
             cors_config: None,
+            structs: HashMap::new(),
+            enums: HashMap::new(),
+            type_aliases: HashMap::new(),
+            trait_definitions: HashMap::new(),
+            trait_implementations: HashMap::new(),
+            main_source_file: None,
         }
     }
 
@@ -482,7 +510,7 @@ impl ServerState {
         self.static_dirs.clear();
         self.middleware.clear();
         self.shutdown_handlers.clear();
-        // Note: cors_config is NOT cleared - it's typically configured once at startup
+        // Note: cors_config and type context are NOT cleared
     }
 
     /// Clear routes and middleware for hot-reload, preserving static dirs and shutdown handlers.
@@ -504,17 +532,25 @@ impl ServerState {
         self.cors_config.as_ref()
     }
 
-    pub fn add_shutdown_handler(&mut self, handler: Value) {
+    pub fn add_shutdown_handler(&mut self, handler: StoredHandler) {
         self.shutdown_handlers.push(handler);
     }
 
-    pub fn get_shutdown_handlers(&self) -> &[Value] {
+    pub fn get_shutdown_handlers(&self) -> &[StoredHandler] {
         &self.shutdown_handlers
     }
 
     /// Add a route without source file info (inline routes)
-    pub fn add_route(&mut self, method: &str, pattern: &str, handler: Value) {
+    pub fn add_route(&mut self, method: &str, pattern: &str, handler: StoredHandler) {
         self.add_route_with_source(method, pattern, handler, None, HashMap::new());
+    }
+
+    /// Add a route from a Value handler (flattens to StoredHandler).
+    /// Convenience method for callers that have a Value::Function.
+    pub fn add_route_from_value(&mut self, method: &str, pattern: &str, handler: Value) {
+        let stored =
+            StoredHandler::from_function(handler).expect("route handler must be a function value");
+        self.add_route(method, pattern, stored);
     }
 
     /// Detect if a new route would conflict with existing routes
@@ -576,7 +612,7 @@ impl ServerState {
         &mut self,
         method: &str,
         pattern: &str,
-        handler: Value,
+        handler: StoredHandler,
         file_path: Option<String>,
         imported_files: HashMap<String, SystemTime>,
     ) {
@@ -617,7 +653,7 @@ impl ServerState {
         &self,
         method: &str,
         path: &str,
-    ) -> Option<(Value, HashMap<String, String>, usize)> {
+    ) -> Option<(StoredHandler, HashMap<String, String>, usize)> {
         match self.find_route_typed(method, path) {
             RouteMatchResult::Matched {
                 handler,
@@ -709,7 +745,7 @@ impl ServerState {
     pub fn update_route_handler(
         &mut self,
         route_index: usize,
-        new_handler: Value,
+        new_handler: StoredHandler,
         new_imported_files: HashMap<String, SystemTime>,
     ) {
         if let Some((_, handler, source)) = self.routes.get_mut(route_index) {
@@ -734,8 +770,15 @@ impl ServerState {
         self.static_dirs.push((prefix, directory));
     }
 
-    pub fn add_middleware(&mut self, handler: Value) {
+    pub fn add_middleware(&mut self, handler: StoredHandler) {
         self.middleware.push(handler);
+    }
+
+    /// Add middleware from a Value handler (flattens to StoredHandler).
+    pub fn add_middleware_from_value(&mut self, handler: Value) {
+        let stored = StoredHandler::from_function(handler)
+            .expect("middleware handler must be a function value");
+        self.middleware.push(stored);
     }
 
     pub fn find_static_file(&self, path: &str) -> Option<(String, String)> {
@@ -798,12 +841,33 @@ impl ServerState {
         None
     }
 
-    pub fn get_middleware(&self) -> &[Value] {
+    pub fn get_middleware(&self) -> &[StoredHandler] {
         &self.middleware
+    }
+
+    /// Add a shutdown handler from a Value handler (flattens to StoredHandler).
+    pub fn add_shutdown_handler_from_value(&mut self, handler: Value) {
+        let stored = StoredHandler::from_function(handler)
+            .expect("shutdown handler must be a function value");
+        self.shutdown_handlers.push(stored);
+    }
+
+    /// Add a route from a Value with source file info (flattens to StoredHandler).
+    pub fn add_route_with_source_from_value(
+        &mut self,
+        method: &str,
+        pattern: &str,
+        handler: Value,
+        file_path: Option<String>,
+        imported_files: HashMap<String, SystemTime>,
+    ) {
+        let stored =
+            StoredHandler::from_function(handler).expect("route handler must be a function value");
+        self.add_route_with_source(method, pattern, stored, file_path, imported_files);
     }
 }
 
-impl Default for ServerState {
+impl Default for SharedState {
     fn default() -> Self {
         Self::new()
     }
@@ -3270,6 +3334,28 @@ mod tests {
         }
     }
 
+    /// Create a dummy StoredHandler with the given name (for routing tests)
+    fn dummy_handler(name: &str) -> StoredHandler {
+        StoredHandler {
+            name: name.to_string(),
+            params: vec![],
+            body: crate::ast::Block { statements: vec![] },
+            contract: None,
+            type_params: vec![],
+            closure_snapshot: std::collections::HashMap::new(),
+            mutable_names: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Assert a StoredHandler has the expected name
+    fn assert_handler_name(h: &StoredHandler, expected: &str) {
+        assert_eq!(
+            h.name, expected,
+            "Expected handler name '{}', got '{}'",
+            expected, h.name
+        );
+    }
+
     fn get_map_int(map: &HashMap<String, Value>, key: &str) -> i64 {
         match map.get(key) {
             Some(Value::Int(n)) => *n,
@@ -3448,38 +3534,38 @@ mod tests {
     }
 
     // ===========================================
-    // ServerState Tests
+    // SharedState Tests
     // ===========================================
 
     #[test]
     fn test_server_state_new() {
-        let state = ServerState::new();
+        let state = SharedState::new();
         assert_eq!(state.route_count(), 0);
     }
 
     #[test]
     fn test_server_state_add_route() {
-        let mut state = ServerState::new();
-        state.add_route("GET", "/users", Value::Unit);
+        let mut state = SharedState::new();
+        state.add_route("GET", "/users", dummy_handler("users"));
         assert_eq!(state.route_count(), 1);
     }
 
     #[test]
     fn test_server_state_find_route() {
-        let mut state = ServerState::new();
-        state.add_route("GET", "/users/{id}", Value::String("handler".to_string()));
+        let mut state = SharedState::new();
+        state.add_route("GET", "/users/{id}", dummy_handler("handler"));
 
         let result = state.find_route("GET", "/users/123");
         assert!(result.is_some());
         let (handler, params, _index) = result.unwrap();
-        assert_value_string(&handler, "handler");
+        assert_handler_name(&handler, "handler");
         assert_eq!(params.get("id"), Some(&"123".to_string()));
     }
 
     #[test]
     fn test_server_state_find_route_wrong_method() {
-        let mut state = ServerState::new();
-        state.add_route("GET", "/users", Value::Unit);
+        let mut state = SharedState::new();
+        state.add_route("GET", "/users", dummy_handler("users"));
 
         let result = state.find_route("POST", "/users");
         assert!(result.is_none());
@@ -3487,8 +3573,8 @@ mod tests {
 
     #[test]
     fn test_server_state_find_route_no_match() {
-        let mut state = ServerState::new();
-        state.add_route("GET", "/users", Value::Unit);
+        let mut state = SharedState::new();
+        state.add_route("GET", "/users", dummy_handler("users"));
 
         let result = state.find_route("GET", "/posts");
         assert!(result.is_none());
@@ -3496,9 +3582,9 @@ mod tests {
 
     #[test]
     fn test_server_state_clear() {
-        let mut state = ServerState::new();
-        state.add_route("GET", "/users", Value::Unit);
-        state.add_route("POST", "/users", Value::Unit);
+        let mut state = SharedState::new();
+        state.add_route("GET", "/users", dummy_handler("u1"));
+        state.add_route("POST", "/users", dummy_handler("u2"));
         assert_eq!(state.route_count(), 2);
 
         state.clear();
@@ -3507,27 +3593,27 @@ mod tests {
 
     #[test]
     fn test_server_state_multiple_routes() {
-        let mut state = ServerState::new();
-        state.add_route("GET", "/", Value::String("home".to_string()));
-        state.add_route("GET", "/users", Value::String("list_users".to_string()));
-        state.add_route("GET", "/users/{id}", Value::String("get_user".to_string()));
-        state.add_route("POST", "/users", Value::String("create_user".to_string()));
+        let mut state = SharedState::new();
+        state.add_route("GET", "/", dummy_handler("home"));
+        state.add_route("GET", "/users", dummy_handler("list_users"));
+        state.add_route("GET", "/users/{id}", dummy_handler("get_user"));
+        state.add_route("POST", "/users", dummy_handler("create_user"));
 
         assert_eq!(state.route_count(), 4);
 
         // Test finding each route
         let (handler, _, _) = state.find_route("GET", "/").unwrap();
-        assert_value_string(&handler, "home");
+        assert_handler_name(&handler, "home");
 
         let (handler, _, _) = state.find_route("GET", "/users").unwrap();
-        assert_value_string(&handler, "list_users");
+        assert_handler_name(&handler, "list_users");
 
         let (handler, params, _) = state.find_route("GET", "/users/42").unwrap();
-        assert_value_string(&handler, "get_user");
+        assert_handler_name(&handler, "get_user");
         assert_eq!(params.get("id"), Some(&"42".to_string()));
 
         let (handler, _, _) = state.find_route("POST", "/users").unwrap();
-        assert_value_string(&handler, "create_user");
+        assert_handler_name(&handler, "create_user");
     }
 
     // ===========================================
@@ -3956,19 +4042,19 @@ mod tests {
     }
 
     // ===========================================
-    // ServerState Static Directory Tests
+    // SharedState Static Directory Tests
     // ===========================================
 
     #[test]
     fn test_server_state_add_static_dir() {
-        let mut state = ServerState::new();
+        let mut state = SharedState::new();
         state.add_static_dir("/static".to_string(), "./public".to_string());
         assert_eq!(state.static_dirs.len(), 1);
     }
 
     #[test]
     fn test_server_state_multiple_static_dirs() {
-        let mut state = ServerState::new();
+        let mut state = SharedState::new();
         state.add_static_dir("/static".to_string(), "./public".to_string());
         state.add_static_dir("/assets".to_string(), "./assets".to_string());
         assert_eq!(state.static_dirs.len(), 2);
@@ -3976,10 +4062,10 @@ mod tests {
 
     #[test]
     fn test_server_state_clear_includes_static_dirs() {
-        let mut state = ServerState::new();
-        state.add_route("GET", "/", Value::Unit);
+        let mut state = SharedState::new();
+        state.add_route("GET", "/", dummy_handler("home"));
         state.add_static_dir("/static".to_string(), "./public".to_string());
-        state.add_middleware(Value::Unit);
+        state.add_middleware(dummy_handler("mw"));
 
         state.clear();
 
@@ -3989,30 +4075,30 @@ mod tests {
     }
 
     // ===========================================
-    // ServerState Middleware Tests
+    // SharedState Middleware Tests
     // ===========================================
 
     #[test]
     fn test_server_state_add_middleware() {
-        let mut state = ServerState::new();
-        state.add_middleware(Value::String("logger".to_string()));
+        let mut state = SharedState::new();
+        state.add_middleware(dummy_handler("logger"));
         assert_eq!(state.middleware.len(), 1);
     }
 
     #[test]
     fn test_server_state_multiple_middleware() {
-        let mut state = ServerState::new();
-        state.add_middleware(Value::String("logger".to_string()));
-        state.add_middleware(Value::String("auth".to_string()));
-        state.add_middleware(Value::String("cors".to_string()));
+        let mut state = SharedState::new();
+        state.add_middleware(dummy_handler("logger"));
+        state.add_middleware(dummy_handler("auth"));
+        state.add_middleware(dummy_handler("cors"));
         assert_eq!(state.middleware.len(), 3);
     }
 
     #[test]
     fn test_server_state_get_middleware() {
-        let mut state = ServerState::new();
-        state.add_middleware(Value::String("logger".to_string()));
-        state.add_middleware(Value::String("auth".to_string()));
+        let mut state = SharedState::new();
+        state.add_middleware(dummy_handler("logger"));
+        state.add_middleware(dummy_handler("auth"));
 
         let middleware = state.get_middleware();
         assert_eq!(middleware.len(), 2);
@@ -4024,7 +4110,7 @@ mod tests {
 
     #[test]
     fn test_find_static_file_basic() {
-        let mut state = ServerState::new();
+        let mut state = SharedState::new();
         // Use temp directory for testing
         let temp_dir = std::env::temp_dir();
         let test_dir = temp_dir.join("intent_test_static");
@@ -4047,7 +4133,7 @@ mod tests {
 
     #[test]
     fn test_find_static_file_no_match() {
-        let mut state = ServerState::new();
+        let mut state = SharedState::new();
         state.add_static_dir("/static".to_string(), "./nonexistent".to_string());
 
         // Path doesn't match prefix

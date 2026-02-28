@@ -574,13 +574,46 @@ impl StoredHandler {
     }
 
     /// Create a StoredHandler from a Value::Function by flattening it.
+    /// Also accepts Value::NativeFunction — stored with the native fn pointer
+    /// in the closure snapshot so to_call_value() can restore it.
     pub fn from_function(value: Value) -> Option<StoredHandler> {
-        let flat = flatten_value(value);
-        StoredHandler::from_flat(flat)
+        match &value {
+            Value::NativeFunction {
+                name,
+                arity: _,
+                max_arity: _,
+                func: _,
+            } => {
+                // Store native functions with the original Value in the closure snapshot
+                // so to_call_value() can detect and return them directly.
+                let mut snapshot = HashMap::new();
+                snapshot.insert("__native_fn__".to_string(), value.clone());
+                Some(StoredHandler {
+                    name: name.clone(),
+                    params: vec![],
+                    body: Block { statements: vec![] },
+                    contract: None,
+                    type_params: vec![],
+                    closure_snapshot: snapshot,
+                    mutable_names: std::collections::HashSet::new(),
+                })
+            }
+            _ => {
+                let flat = flatten_value(value);
+                StoredHandler::from_flat(flat)
+            }
+        }
     }
 
     /// Convert back to a live Value::Function for use in a per-request interpreter.
+    /// If the stored handler wraps a NativeFunction, returns that directly.
     pub fn to_call_value(&self) -> Value {
+        // Check for stored native function
+        if let Some(native_fn) = self.closure_snapshot.get("__native_fn__") {
+            if matches!(native_fn, Value::NativeFunction { .. }) {
+                return native_fn.clone();
+            }
+        }
         // Unflatten any FlatFunction values nested in the closure snapshot
         let unflat_snapshot: HashMap<String, Value> = self
             .closure_snapshot
@@ -637,8 +670,8 @@ pub struct Interpreter {
     loaded_modules: HashMap<String, HashMap<String, Value>>,
     /// Current file path (for relative imports)
     current_file: Option<String>,
-    /// HTTP server state for routing
-    server_state: crate::stdlib::http_server::ServerState,
+    /// HTTP server shared state for routing, middleware, config, and type context
+    server_state: crate::stdlib::http_server::SharedState,
     /// Test mode: if Some, contains (port, max_requests, shutdown_flag)
     test_mode: Option<(u16, usize, std::sync::Arc<std::sync::atomic::AtomicBool>)>,
     /// Main source file path for hot-reload (single-file apps)
@@ -701,7 +734,7 @@ impl Interpreter {
             current_result: None,
             loaded_modules: HashMap::new(),
             current_file: None,
-            server_state: crate::stdlib::http_server::ServerState::new(),
+            server_state: crate::stdlib::http_server::SharedState::new(),
             test_mode: None,
             main_source_file: None,
             main_source_mtime: None,
@@ -2853,7 +2886,7 @@ impl Interpreter {
                         if let Some(handler) =
                             exports.get("middleware").or_else(|| exports.get("handler"))
                         {
-                            self.server_state.add_middleware(handler.clone());
+                            self.server_state.add_middleware_from_value(handler.clone());
                             // Track file mtime for hot-reload
                             if let Ok(metadata) = std::fs::metadata(&path) {
                                 if let Ok(mtime) = metadata.modified() {
@@ -2877,7 +2910,7 @@ impl Interpreter {
 
         // Register all discovered routes with source info for hot-reload
         for (method, pattern, handler, file, imports) in &routes {
-            self.server_state.add_route_with_source(
+            self.server_state.add_route_with_source_from_value(
                 method,
                 pattern,
                 handler.clone(),
@@ -3110,7 +3143,7 @@ impl Interpreter {
         &mut self,
         file_path: &str,
         method: &str,
-    ) -> Result<(Value, HashMap<String, std::time::SystemTime>)> {
+    ) -> Result<(StoredHandler, HashMap<String, std::time::SystemTime>)> {
         use crate::lexer::Lexer;
         use crate::parser::Parser;
         use std::fs;
@@ -3178,7 +3211,14 @@ impl Interpreter {
             ))
         })?;
 
-        Ok((handler, route_imports))
+        let stored = StoredHandler::from_function(handler).ok_or_else(|| {
+            IntentError::RuntimeError(format!(
+                "Handler '{}' in {} is not a function",
+                method_name, file_path
+            ))
+        })?;
+
+        Ok((stored, route_imports))
     }
 
     /// Convert a file path to a URL pattern
@@ -3876,7 +3916,7 @@ impl Interpreter {
                             return Ok(Value::Unit);
                         }
                         let handler = self.eval_expression(&arguments[0])?;
-                        self.server_state.add_middleware(handler);
+                        self.server_state.add_middleware_from_value(handler);
                         return Ok(Value::Unit);
                     }
 
@@ -3886,7 +3926,7 @@ impl Interpreter {
                             return Ok(Value::Unit);
                         }
                         let handler = self.eval_expression(&arguments[0])?;
-                        self.server_state.add_shutdown_handler(handler);
+                        self.server_state.add_shutdown_handler_from_value(handler);
                         return Ok(Value::Unit);
                     }
 
@@ -4381,7 +4421,11 @@ impl Interpreter {
                                 }
                                 let handler = self.eval_expression(&arguments[1])?;
                                 let method = name.to_uppercase();
-                                self.server_state.add_route(&method, pattern_str, handler);
+                                self.server_state.add_route_from_value(
+                                    &method,
+                                    pattern_str,
+                                    handler,
+                                );
                                 return Ok(Value::Unit);
                             }
                             // Otherwise fall through to normal function call (HTTP client)
@@ -5086,7 +5130,7 @@ impl Interpreter {
     fn setup_auth_routes(&mut self, _config: &crate::stdlib::auth::AuthConfig) -> Result<()> {
         // Create handlers for each provider - use dynamic route with provider param
         // Register a single route with {provider} parameter
-        self.server_state.add_route(
+        self.server_state.add_route_from_value(
             "GET",
             "/auth/{provider}",
             Value::NativeFunction {
@@ -5098,7 +5142,7 @@ impl Interpreter {
         );
 
         // Create callback handler: GET /auth/callback
-        self.server_state.add_route(
+        self.server_state.add_route_from_value(
             "GET",
             "/auth/callback",
             Value::NativeFunction {
@@ -5110,7 +5154,7 @@ impl Interpreter {
         );
 
         // Create logout handler: POST /auth/logout
-        self.server_state.add_route(
+        self.server_state.add_route_from_value(
             "POST",
             "/auth/logout",
             Value::NativeFunction {
@@ -6396,12 +6440,19 @@ impl Interpreter {
                     }
                 }
 
+                // Convert StoredHandler to live Value for execution
+                let handler_value = handler.to_call_value();
+
                 // Process request to get request Value
                 match http_server::process_request(request, route_params) {
                     Ok((mut req_value, http_request)) => {
                         // Run middleware chain and determine final response
-                        let middleware_handlers: Vec<Value> =
-                            self.server_state.get_middleware().to_vec();
+                        let middleware_handlers: Vec<Value> = self
+                            .server_state
+                            .get_middleware()
+                            .iter()
+                            .map(|sh| sh.to_call_value())
+                            .collect();
                         let mut early_response: Option<Value> = None;
 
                         for mw in middleware_handlers {
@@ -6442,7 +6493,7 @@ impl Interpreter {
                             resp
                         } else {
                             // Call the route handler
-                            match self.call_function(handler, vec![req_value]) {
+                            match self.call_function(handler_value, vec![req_value]) {
                                 Ok(response) => response,
                                 Err(e) => {
                                     let handler_file = self
@@ -6569,11 +6620,12 @@ impl Interpreter {
         }
 
         // Server is shutting down - call shutdown handlers
-        let shutdown_handlers: Vec<Value> = self.server_state.get_shutdown_handlers().to_vec();
+        let shutdown_handlers: Vec<StoredHandler> =
+            self.server_state.get_shutdown_handlers().to_vec();
         if !shutdown_handlers.is_empty() {
             println!("\nRunning shutdown handlers...");
             for handler in shutdown_handlers {
-                if let Err(e) = self.call_function(handler, vec![]) {
+                if let Err(e) = self.call_function(handler.to_call_value(), vec![]) {
                     eprintln!("Shutdown handler error: {}", e);
                 }
             }
@@ -6626,7 +6678,7 @@ impl Interpreter {
 
         // Helper function to sync routes from interpreter to async state
         fn sync_routes_to_async(
-            server_state: &crate::stdlib::http_server::ServerState,
+            server_state: &crate::stdlib::http_server::SharedState,
             async_routes: &AsyncServerState,
             rt: &tokio::runtime::Runtime,
         ) {
@@ -6795,6 +6847,9 @@ impl Interpreter {
                             }
                         }
 
+                        // Convert StoredHandler to live Value for execution
+                        let handler_value = handler.to_call_value();
+
                         // Merge route params with request params
                         let mut full_request = request.clone();
                         for (k, v) in route_params {
@@ -6805,8 +6860,12 @@ impl Interpreter {
                         let req_value = full_request.to_value();
 
                         // Run middleware
-                        let middleware_handlers: Vec<Value> =
-                            self.server_state.get_middleware().to_vec();
+                        let middleware_handlers: Vec<Value> = self
+                            .server_state
+                            .get_middleware()
+                            .iter()
+                            .map(|sh| sh.to_call_value())
+                            .collect();
                         let mut current_req = req_value;
                         let mut early_response: Option<Value> = None;
 
@@ -6840,7 +6899,7 @@ impl Interpreter {
                         let final_response = if let Some(resp) = early_response {
                             resp
                         } else {
-                            match self.call_function(handler, vec![current_req]) {
+                            match self.call_function(handler_value, vec![current_req]) {
                                 Ok(response) => response,
                                 Err(e) => {
                                     let handler_file = self
@@ -7375,11 +7434,11 @@ impl Interpreter {
                     match mw_val {
                         Value::Array(fns) => {
                             for f in fns {
-                                self.server_state.add_middleware(f);
+                                self.server_state.add_middleware_from_value(f);
                             }
                         }
                         Value::Function { .. } | Value::NativeFunction { .. } => {
-                            self.server_state.add_middleware(mw_val);
+                            self.server_state.add_middleware_from_value(mw_val);
                         }
                         _ => {
                             return Err(IntentError::TypeError(
@@ -7464,9 +7523,11 @@ impl Interpreter {
             imported_files: std::collections::HashMap::new(),
         };
 
+        let stored =
+            StoredHandler::from_function(handler).expect("route handler must be a function value");
         self.server_state
             .routes
-            .push((compiled_route, handler, source));
+            .push((compiled_route, stored, source));
         Ok(())
     }
 
@@ -7482,11 +7543,11 @@ impl Interpreter {
             match mw_val {
                 Value::Array(fns) => {
                     for f in fns {
-                        self.server_state.add_middleware(f);
+                        self.server_state.add_middleware_from_value(f);
                     }
                 }
                 Value::Function { .. } | Value::NativeFunction { .. } => {
-                    self.server_state.add_middleware(mw_val);
+                    self.server_state.add_middleware_from_value(mw_val);
                 }
                 _ => {
                     return Err(IntentError::TypeError(
@@ -10946,6 +11007,56 @@ fn handler(n) { return helper(n) }"#,
         // Actually send it across a thread boundary
         let handle = std::thread::spawn(move || {
             assert_eq!(stored.name, "test");
+        });
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_shared_state_arc_rwlock_compiles() {
+        // Phase 3 compile check: SharedState must be wrappable in Arc<RwLock<>>
+        let mut state = crate::stdlib::http_server::SharedState::new();
+        state.add_route(
+            "GET",
+            "/test",
+            super::StoredHandler {
+                name: "test_handler".to_string(),
+                params: vec![],
+                body: crate::ast::Block { statements: vec![] },
+                contract: None,
+                type_params: vec![],
+                closure_snapshot: HashMap::new(),
+                mutable_names: std::collections::HashSet::new(),
+            },
+        );
+        state.add_middleware(super::StoredHandler {
+            name: "test_mw".to_string(),
+            params: vec![],
+            body: crate::ast::Block { statements: vec![] },
+            contract: None,
+            type_params: vec![],
+            closure_snapshot: HashMap::new(),
+            mutable_names: std::collections::HashSet::new(),
+        });
+        // Type context fields
+        state.structs.insert(
+            "User".to_string(),
+            vec![crate::ast::Field {
+                name: "name".to_string(),
+                type_annotation: crate::ast::TypeExpr::Named("String".to_string()),
+                public: true,
+            }],
+        );
+
+        let shared: std::sync::Arc<std::sync::RwLock<crate::stdlib::http_server::SharedState>> =
+            std::sync::Arc::new(std::sync::RwLock::new(state));
+
+        // Verify it can be cloned and read across threads
+        let shared_clone = shared.clone();
+        let handle = std::thread::spawn(move || {
+            let s = shared_clone.read().unwrap();
+            assert_eq!(s.route_count(), 1);
+            assert_eq!(s.middleware.len(), 1);
+            assert!(s.structs.contains_key("User"));
         });
         handle.join().unwrap();
     }
