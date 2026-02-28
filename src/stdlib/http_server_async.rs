@@ -2,18 +2,14 @@
 //!
 //! High-concurrency HTTP server using Axum + Tokio for production workloads.
 //!
-//! ## Architecture
+//! ## Architecture (DD-006: Per-Request Interpreter)
 //!
-//! The NTNT interpreter uses `Rc<RefCell<>>` for closures, which is not thread-safe.
-//! This module bridges async Axum to the sync interpreter via message passing:
-//!
-//! 1. Async handlers receive HTTP requests
-//! 2. Requests are converted to BridgeRequest and sent via channel
-//! 3. Interpreter thread processes the request and sends response back
-//! 4. Async handler receives BridgeResponse and converts to HTTP response
+//! Each HTTP request gets its own `Interpreter` instance via `spawn_blocking`.
+//! No bridge channel, no single interpreter thread — true parallel execution.
 //!
 //! ## Features
 //!
+//! - Per-request interpreter instances for true parallelism
 //! - High-concurrency via Tokio async runtime
 //! - Static file serving with caching headers
 //! - Request timeouts
@@ -28,7 +24,6 @@
 
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
-use crate::stdlib::http_bridge::{BridgeRequest, BridgeResponse, SharedHandle};
 use axum::{
     body::Body,
     extract::State,
@@ -44,7 +39,138 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
 
-use super::http_server::get_default_security_headers;
+use super::http_server::{get_default_security_headers, SharedState};
+
+/// A serializable HTTP request that can be sent across thread boundaries
+#[derive(Debug, Clone)]
+pub struct BridgeRequest {
+    pub method: String,
+    pub path: String,
+    pub url: String,
+    pub query: String,
+    pub query_params: HashMap<String, String>,
+    pub params: HashMap<String, String>,
+    pub headers: HashMap<String, String>,
+    pub body: String,
+    pub id: String,
+    pub ip: String,
+    pub protocol: String,
+}
+
+impl BridgeRequest {
+    /// Convert to NTNT Value for handler invocation
+    pub fn to_value(&self) -> Value {
+        let mut map: HashMap<String, Value> = HashMap::new();
+
+        map.insert("method".to_string(), Value::String(self.method.clone()));
+        map.insert("path".to_string(), Value::String(self.path.clone()));
+        map.insert("url".to_string(), Value::String(self.url.clone()));
+        map.insert("query".to_string(), Value::String(self.query.clone()));
+        map.insert("body".to_string(), Value::String(self.body.clone()));
+        map.insert("id".to_string(), Value::String(self.id.clone()));
+        map.insert("ip".to_string(), Value::String(self.ip.clone()));
+        map.insert("protocol".to_string(), Value::String(self.protocol.clone()));
+
+        let query_params: HashMap<String, Value> = self
+            .query_params
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        map.insert("query_params".to_string(), Value::Map(query_params));
+
+        let params: HashMap<String, Value> = self
+            .params
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        map.insert("params".to_string(), Value::Map(params));
+
+        let headers: HashMap<String, Value> = self
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        map.insert("headers".to_string(), Value::Map(headers));
+
+        map.insert("context".to_string(), Value::Map(HashMap::new()));
+
+        Value::Map(map)
+    }
+}
+
+/// A serializable HTTP response that can be sent back from the interpreter
+#[derive(Debug, Clone)]
+pub struct BridgeResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+impl BridgeResponse {
+    /// Create from NTNT Value (handler response)
+    pub fn from_value(value: &Value) -> Self {
+        match value {
+            Value::Map(map) => {
+                let status = match map.get("status") {
+                    Some(Value::Int(s)) => *s as u16,
+                    _ => 200,
+                };
+
+                let body = match map.get("body") {
+                    Some(Value::String(b)) => b.clone(),
+                    _ => String::new(),
+                };
+
+                let mut headers = Vec::new();
+                if let Some(Value::Map(h)) = map.get("headers") {
+                    for (k, v) in h {
+                        match v {
+                            Value::String(val) => {
+                                headers.push((k.clone(), val.clone()));
+                            }
+                            Value::Array(arr) => {
+                                for item in arr {
+                                    if let Value::String(val) = item {
+                                        headers.push((k.clone(), val.clone()));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                BridgeResponse {
+                    status,
+                    headers,
+                    body,
+                }
+            }
+            _ => BridgeResponse {
+                status: 500,
+                headers: Vec::new(),
+                body: "Handler did not return a valid response".to_string(),
+            },
+        }
+    }
+
+    /// Create an error response
+    pub fn error(status: u16, message: &str) -> Self {
+        BridgeResponse {
+            status,
+            headers: vec![(
+                "content-type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            )],
+            body: message.to_string(),
+        }
+    }
+
+    /// Create a not found response
+    pub fn not_found() -> Self {
+        Self::error(404, "Not Found")
+    }
+}
 
 /// Apply security headers to a built Response<Body>.
 /// Only adds headers not already set by the application (app can override).
@@ -310,17 +436,6 @@ pub fn match_route(path: &str, route: &Route) -> Option<HashMap<String, String>>
     Some(params)
 }
 
-/// State shared between all request handlers
-#[derive(Clone)]
-pub struct AppState {
-    /// Handle to send requests to the interpreter
-    pub interpreter: SharedHandle,
-    /// Route registry for matching requests
-    pub routes: Arc<AsyncServerState>,
-    /// Whether running in production mode (controls error page detail)
-    pub is_production: bool,
-}
-
 /// Convert Axum request to BridgeRequest
 async fn axum_to_bridge_request(
     req: Request<Body>,
@@ -520,82 +635,6 @@ fn guess_mime_type(path: &str) -> &'static str {
     }
 }
 
-/// Main request handler - catches all requests and forwards to interpreter
-async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> impl IntoResponse {
-    let method = req.method().clone();
-    let path = req.uri().path().to_string();
-
-    // Extract If-None-Match header for ETag/conditional request support (static files)
-    let if_none_match = req
-        .headers()
-        .get("if-none-match")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    // First, check for dynamic route match
-    let route_match = state.routes.find_route(method.as_str(), &path).await;
-
-    match route_match {
-        Some((handler_name, params)) => {
-            // Convert request and send to interpreter
-            match axum_to_bridge_request(req, params).await {
-                Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
-                    Ok(response) => bridge_to_axum_response(response),
-                    Err(e) => {
-                        let error_msg = format!("{}", e);
-                        // Structured error log — always printed regardless of mode
-                        eprintln!(
-                            "[ERROR] {} {} | handler: {} | {}",
-                            method, path, handler_name, error_msg
-                        );
-                        error_response(
-                            500,
-                            &error_msg,
-                            &method.to_string(),
-                            &path,
-                            &handler_name,
-                            state.is_production,
-                        )
-                    }
-                },
-                Err(e) => {
-                    let error_msg = format!("{}", e);
-                    eprintln!(
-                        "[ERROR] {} {} | request parse | {}",
-                        method, path, error_msg
-                    );
-                    error_response(
-                        400,
-                        &error_msg,
-                        &method.to_string(),
-                        &path,
-                        "",
-                        state.is_production,
-                    )
-                }
-            }
-        }
-        None => {
-            // No dynamic route - check static files (GET only)
-            if method == axum::http::Method::GET {
-                if let Some((file_path, _prefix)) = state.routes.find_static_file(&path).await {
-                    return serve_static_file(&file_path, if_none_match.as_deref());
-                }
-            }
-
-            // No route or static file - return 404
-            error_response(
-                404,
-                "Not Found",
-                &method.to_string(),
-                &path,
-                "",
-                state.is_production,
-            )
-        }
-    }
-}
-
 /// Generate an error response with proper HTML page.
 /// In dev mode: shows full error details for debugging.
 /// In prod mode: shows a clean, user-friendly page without internals.
@@ -773,6 +812,23 @@ pub async fn start_per_request_server(
         .map(|v| v == "production" || v == "prod")
         .unwrap_or(false);
 
+    // Spawn hot-reload watcher if not in production
+    if !is_production {
+        let source_file = shared.read().unwrap().main_source_file.clone();
+        if let Some(source_file) = source_file {
+            let poll_ms: u64 = std::env::var("NTNT_HOT_RELOAD_INTERVAL_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(500);
+            let shared_clone = shared.clone();
+            tokio::spawn(hot_reload_watcher(
+                shared_clone,
+                source_file,
+                Duration::from_millis(poll_ms),
+            ));
+        }
+    }
+
     let state = PerRequestState {
         shared: shared.clone(),
         is_production,
@@ -803,6 +859,9 @@ pub async fn start_per_request_server(
         "   Routes: {}  |  Static: {}  |  Mode: per-request",
         route_count, static_count
     );
+    if !is_production {
+        println!("   Hot-reload: enabled (background watcher)");
+    }
     println!();
     println!("Press Ctrl+C to stop");
 
@@ -825,7 +884,6 @@ async fn handle_per_request(
     req: Request<Body>,
 ) -> impl IntoResponse {
     use crate::interpreter::Interpreter;
-    use crate::stdlib::http_bridge::BridgeResponse;
 
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -1028,77 +1086,6 @@ async fn shutdown_signal_with_handlers(
     .await;
 }
 
-/// Start the async HTTP server with interpreter bridge
-///
-/// This is the legacy entry point — kept for backward compatibility.
-/// New code should use `start_per_request_server` instead.
-pub async fn start_server_with_bridge(
-    config: AsyncServerConfig,
-    interpreter_handle: SharedHandle,
-    routes: Arc<AsyncServerState>,
-) -> Result<()> {
-    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
-        .parse()
-        .map_err(|e| IntentError::RuntimeError(format!("Invalid address: {}", e)))?;
-
-    let route_count = routes.route_count().await;
-    let static_count = routes.static_dir_count().await;
-
-    let is_production = std::env::var("NTNT_ENV")
-        .map(|v| v == "production" || v == "prod")
-        .unwrap_or(false);
-
-    let state = AppState {
-        interpreter: interpreter_handle,
-        routes,
-        is_production,
-    };
-
-    // Build the router with catch-all handler
-    let mut app = Router::new().fallback(handle_request).with_state(state);
-
-    // Add middleware layers (order matters - applied bottom to top)
-    // 1. Request timeout
-    app = app.layer(TimeoutLayer::new(Duration::from_secs(
-        config.request_timeout_secs,
-    )));
-
-    // 2. Compression
-    if config.enable_compression {
-        app = app.layer(CompressionLayer::new());
-    }
-
-    // 3. Tracing
-    app = app.layer(TraceLayer::new_for_http());
-
-    // Show user-friendly URL (0.0.0.0 means all interfaces, so use localhost for display)
-    let display_url = if addr.ip().is_unspecified() {
-        format!("http://localhost:{}", addr.port())
-    } else {
-        format!("http://{}", addr)
-    };
-
-    println!();
-    println!("🚀 Server running — visit {}", display_url);
-    println!(
-        "   Routes: {}  |  Static: {}  |  Hot-reload: enabled",
-        route_count, static_count
-    );
-    println!();
-    println!("Press Ctrl+C to stop");
-
-    // Create the listener
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to bind: {}", e)))?;
-
-    // Run the server with graceful shutdown
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| IntentError::RuntimeError(format!("Server error: {}", e)))
-}
-
 /// Signal handler for graceful shutdown
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -1175,6 +1162,160 @@ pub fn create_error_response(status: i64, message: &str) -> Value {
     response.insert("headers".to_string(), Value::Map(headers));
     response.insert("body".to_string(), Value::String(message.to_string()));
     Value::Map(response)
+}
+
+/// Rebuild SharedState from a source file by re-parsing and re-evaluating everything.
+///
+/// Creates a fresh Interpreter, evaluates the .tnt source (which registers routes,
+/// middleware, etc.), then extracts the resulting SharedState including type context.
+/// This is a full startup re-run — no diffing of old state.
+pub fn rebuild_shared_state(source_file: &str) -> Result<SharedState> {
+    use crate::interpreter::Interpreter;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+
+    let source = std::fs::read_to_string(source_file).map_err(|e| {
+        IntentError::RuntimeError(format!(
+            "Failed to read source file '{}': {}",
+            source_file, e
+        ))
+    })?;
+
+    let mut interp = Interpreter::new();
+    interp.set_main_source_file(source_file);
+
+    // Set test_mode so listen() captures SharedState instead of starting a server
+    let shutdown_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    interp.set_test_mode(0, 0, shutdown_flag);
+
+    let lexer = Lexer::new(&source);
+    let tokens: Vec<_> = lexer.collect();
+    let mut parser = Parser::new(tokens);
+    let ast = parser
+        .parse()
+        .map_err(|e| IntentError::RuntimeError(format!("Parse error during hot-reload: {}", e)))?;
+
+    // Eval registers routes/middleware/etc. into server_state.
+    // listen() in test_mode returns immediately without starting a server.
+    let _ = interp.eval(&ast);
+
+    // Copy type context from interpreter to server_state
+    interp.server_state.structs = interp.structs.clone();
+    interp.server_state.enums = interp.enums.clone();
+    interp.server_state.type_aliases = interp.type_aliases.clone();
+    interp.server_state.trait_definitions = interp.trait_definitions.clone();
+    interp.server_state.trait_implementations = interp.trait_implementations.clone();
+    interp.server_state.main_source_file = Some(source_file.to_string());
+
+    Ok(std::mem::take(&mut interp.server_state))
+}
+
+/// Collect modification times for all .tnt files in a directory tree.
+fn collect_file_mtimes(
+    source_file: &str,
+    shared: &SharedState,
+) -> HashMap<PathBuf, std::time::SystemTime> {
+    let mut mtimes = HashMap::new();
+
+    // Track the main source file
+    let main_path = PathBuf::from(source_file);
+    if let Ok(meta) = std::fs::metadata(&main_path) {
+        if let Ok(mtime) = meta.modified() {
+            mtimes.insert(main_path, mtime);
+        }
+    }
+
+    // Track routes directory
+    if let Some(ref routes_dir) = shared.routes_dir {
+        collect_tnt_mtimes_recursive(&PathBuf::from(routes_dir), &mut mtimes);
+    }
+
+    // Track lib modules
+    for lib_path in &shared.lib_modules {
+        let p = PathBuf::from(lib_path);
+        if let Ok(meta) = std::fs::metadata(&p) {
+            if let Ok(mtime) = meta.modified() {
+                mtimes.insert(p, mtime);
+            }
+        }
+    }
+
+    // Track middleware files
+    for mw_path in &shared.middleware_files {
+        let p = PathBuf::from(mw_path);
+        if let Ok(meta) = std::fs::metadata(&p) {
+            if let Ok(mtime) = meta.modified() {
+                mtimes.insert(p, mtime);
+            }
+        }
+    }
+
+    mtimes
+}
+
+/// Recursively collect .tnt file mtimes from a directory.
+fn collect_tnt_mtimes_recursive(
+    dir: &PathBuf,
+    mtimes: &mut HashMap<PathBuf, std::time::SystemTime>,
+) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_tnt_mtimes_recursive(&path, mtimes);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("tnt") {
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    if let Ok(mtime) = meta.modified() {
+                        mtimes.insert(path, mtime);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Background hot-reload watcher task.
+///
+/// Polls for .tnt file changes at `poll_interval` and atomically swaps the
+/// SharedState when changes are detected. Failed reloads log an error and
+/// keep the old state running. In-flight requests complete with their cloned
+/// StoredHandler — the write lock is only held during the swap.
+pub async fn hot_reload_watcher(
+    shared: Arc<std::sync::RwLock<SharedState>>,
+    source_file: String,
+    poll_interval: Duration,
+) {
+    let mut last_mtimes = {
+        let s = shared.read().unwrap_or_else(|e| e.into_inner());
+        collect_file_mtimes(&source_file, &s)
+    };
+
+    loop {
+        tokio::time::sleep(poll_interval).await;
+
+        let current_mtimes = {
+            let s = shared.read().unwrap_or_else(|e| e.into_inner());
+            collect_file_mtimes(&source_file, &s)
+        };
+
+        if current_mtimes != last_mtimes {
+            match rebuild_shared_state(&source_file) {
+                Ok(new_state) => {
+                    let route_count = new_state.route_count();
+                    // Write lock only during swap — in-flight requests have their cloned handlers
+                    {
+                        let mut guard = shared.write().unwrap_or_else(|e| e.into_inner());
+                        *guard = new_state;
+                    }
+                    eprintln!("[hot-reload] Reloaded — {} routes", route_count);
+                }
+                Err(e) => {
+                    eprintln!("[hot-reload] Failed: {} — keeping old state", e);
+                }
+            }
+            last_mtimes = current_mtimes;
+        }
+    }
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@ pub mod csv;
 pub mod env;
 pub mod fs;
 pub mod http;
-pub mod http_bridge;
+
 pub mod http_server;
 pub mod http_server_async;
 pub mod json;

@@ -2731,7 +2731,7 @@ impl TypeContext {
             value_type: Box::new(Type::String),
         };
 
-        // Request — matches BridgeRequest fields from http_bridge.rs
+        // Request — matches BridgeRequest fields from http_server_async.rs
         self.structs.insert(
             "Request".to_string(),
             vec![
