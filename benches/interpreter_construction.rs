@@ -58,13 +58,16 @@ fn bench_shared_state_read_lock(c: &mut Criterion) {
     use std::sync::{Arc, RwLock};
     let shared = Arc::new(RwLock::new(SharedState::default()));
 
-    c.bench_function("SharedState read lock acquire (per-request overhead)", |b| {
-        b.iter(|| {
-            let guard = black_box(shared.read().unwrap());
-            let _ = guard.route_count();
-            drop(guard);
-        })
-    });
+    c.bench_function(
+        "SharedState read lock acquire (per-request overhead)",
+        |b| {
+            b.iter(|| {
+                let guard = black_box(shared.read().unwrap());
+                let _ = guard.route_count();
+                drop(guard);
+            })
+        },
+    );
 }
 
 criterion_group!(

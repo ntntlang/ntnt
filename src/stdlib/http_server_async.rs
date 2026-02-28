@@ -23,6 +23,7 @@
 //! ```
 
 use crate::error::{IntentError, Result};
+use crate::interpreter::Interpreter;
 use crate::interpreter::Value;
 use axum::{
     body::Body,
@@ -31,6 +32,7 @@ use axum::{
     response::{IntoResponse, Response},
     Router,
 };
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -876,16 +878,23 @@ pub async fn start_per_request_server(
         .map_err(|e| IntentError::RuntimeError(format!("Server error: {}", e)))
 }
 
+/// Thread-local interpreter cache for the spawn_blocking thread pool (DD-006).
+///
+/// Each blocking thread caches one Interpreter instance, resetting it between
+/// requests via `reset_for_reuse()` instead of constructing a new one (~52µs savings).
+/// Safe because `Interpreter` is `!Send` and never leaves the blocking thread.
+thread_local! {
+    static CACHED_INTERPRETER: RefCell<Option<Interpreter>> = RefCell::new(None);
+}
+
 /// Handle a request using per-request interpreter (DD-006 Phase 4).
 ///
 /// Route lookup happens under a read lock, then lock is released.
-/// Handler execution happens in spawn_blocking with a fresh Interpreter.
+/// Handler execution happens in spawn_blocking with a cached or fresh Interpreter.
 async fn handle_per_request(
     State(state): State<PerRequestState>,
     req: Request<Body>,
 ) -> impl IntoResponse {
-    use crate::interpreter::Interpreter;
-
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
@@ -1030,8 +1039,27 @@ async fn handle_per_request(
 
         // Read shared state to seed interpreter (brief read lock)
         let shared_guard = shared_clone.read().unwrap_or_else(|e| e.into_inner());
-        let result = Interpreter::execute_request(&shared_guard, &handler, &middleware, req_value);
-        drop(shared_guard);
+
+        // Use thread-local cached interpreter or construct fresh (DD-006 pool)
+        let result = CACHED_INTERPRETER.with(|cache| {
+            let mut interp = cache
+                .borrow_mut()
+                .take()
+                .map(|mut i| {
+                    i.reset_for_reuse(&shared_guard);
+                    i
+                })
+                .unwrap_or_else(|| Interpreter::new_for_request(&shared_guard));
+            drop(shared_guard);
+
+            let result =
+                Interpreter::execute_request_with(&mut interp, &handler, &middleware, req_value);
+
+            // Return interpreter to cache for reuse
+            cache.borrow_mut().replace(interp);
+
+            result
+        });
 
         // Convert to BridgeResponse inside spawn_blocking so Result<Value> (which is !Send)
         // never crosses the thread boundary. Only BridgeResponse (Send) is returned.

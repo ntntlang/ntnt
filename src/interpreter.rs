@@ -364,6 +364,15 @@ impl Environment {
         Rc::new(RefCell::new(env))
     }
 
+    /// Clear all bindings and reset to a fresh root environment.
+    /// Drops the parent chain and clears all values and mutable_vars.
+    /// Used by `Interpreter::reset_for_reuse()` to recycle environments without reallocation.
+    pub fn clear_to_root(&mut self) {
+        self.values.clear();
+        self.mutable_vars.clear();
+        self.parent = None;
+    }
+
     pub fn set(&mut self, name: &str, value: Value) -> bool {
         if self.values.contains_key(name) {
             self.values.insert(name.to_string(), value);
@@ -811,6 +820,38 @@ impl Interpreter {
         interp
     }
 
+    /// Reset this interpreter for reuse without reallocation.
+    ///
+    /// Used by the thread-local interpreter pool (DD-006) to avoid the ~52µs
+    /// construction cost per request. Clears per-request state and re-seeds
+    /// type context from SharedState, but reuses the allocated HashMap capacity.
+    pub fn reset_for_reuse(&mut self, shared: &crate::stdlib::http_server::SharedState) {
+        // Clear environment back to root and re-register builtins
+        self.environment.borrow_mut().clear_to_root();
+        self.define_builtins();
+        self.define_builtin_types();
+        self.define_stdlib();
+
+        // Re-seed type context from SharedState
+        self.structs = shared.structs.clone();
+        self.enums = shared.enums.clone();
+        self.type_aliases = shared.type_aliases.clone();
+        self.trait_definitions = shared.trait_definitions.clone();
+        self.trait_implementations = shared.trait_implementations.clone();
+        self.current_file = shared.main_source_file.clone();
+
+        // Reset per-request fields
+        self.deferred_statements.clear();
+        self.current_result = None;
+        self.current_old_values = None;
+        self.current_line = 0;
+        self.current_col = 0;
+
+        // Reset contract checker
+        self.contracts = ContractChecker::new();
+        self.struct_invariants.clear();
+    }
+
     /// Execute a single HTTP request using a fresh per-request interpreter.
     ///
     /// This is the core of the per-request execution engine (DD-006 Phase 4).
@@ -826,6 +867,34 @@ impl Interpreter {
     ) -> Result<Value> {
         let mut interp = Interpreter::new_for_request(shared);
 
+        // Run middleware chain
+        let mut current_req = req;
+        for mw in middleware {
+            let mw_value = mw.to_call_value();
+            current_req = interp.call_function(mw_value, vec![current_req])?;
+            // Middleware short-circuit: if it returns a response (has "status" key), stop
+            if let Value::Map(ref map) = current_req {
+                if map.contains_key("status") {
+                    return Ok(current_req);
+                }
+            }
+        }
+
+        // Execute handler
+        let handler_value = handler.to_call_value();
+        interp.call_function(handler_value, vec![current_req])
+    }
+
+    /// Execute a single HTTP request using a provided interpreter.
+    ///
+    /// Used by the thread-local interpreter pool to reuse a cached interpreter
+    /// instead of constructing a fresh one each request.
+    pub fn execute_request_with(
+        interp: &mut Interpreter,
+        handler: &StoredHandler,
+        middleware: &[StoredHandler],
+        req: Value,
+    ) -> Result<Value> {
         // Run middleware chain
         let mut current_req = req;
         for mw in middleware {
