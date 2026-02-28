@@ -92,6 +92,19 @@ pub enum Value {
         func: fn(&[Value]) -> Result<Value>,
     },
 
+    /// Send-safe flattened function — no Rc, no RefCell.
+    /// Used in StoredHandler and SharedState for cross-thread storage.
+    /// Converted back to Value::Function via Environment::from_snapshot() at request time.
+    FlatFunction {
+        name: String,
+        params: Vec<Parameter>,
+        body: Block,
+        contract: Option<FunctionContract>,
+        type_params: Vec<TypeParam>,
+        closure_snapshot: HashMap<String, Value>,
+        mutable_names: std::collections::HashSet<String>,
+    },
+
     /// Return value (for control flow)
     Return(Box<Value>),
 
@@ -150,6 +163,7 @@ impl Value {
             Value::EnumValue { enum_name, .. } => enum_name,
             Value::EnumConstructor { .. } => "EnumConstructor",
             Value::Function { .. } => "Function",
+            Value::FlatFunction { .. } => "Function",
             Value::NativeFunction { .. } => "NativeFunction",
             Value::Return(_) => "Return",
             Value::Break => "Break",
@@ -242,6 +256,7 @@ impl fmt::Display for Value {
                 write!(f, "<constructor {}::{}({})>", enum_name, variant, arity)
             }
             Value::Function { name, .. } => write!(f, "<fn {}>", name),
+            Value::FlatFunction { name, .. } => write!(f, "<flat fn {}>", name),
             Value::NativeFunction { name, .. } => write!(f, "<native fn {}>", name),
             Value::Return(v) => write!(f, "{}", v),
             Value::Break => write!(f, "<break>"),
@@ -318,6 +333,37 @@ impl Environment {
         bindings
     }
 
+    /// Collect all mutable variable names from this scope and parent scopes.
+    /// Mirrors all_bindings() but walks mutable_vars instead of values.
+    pub fn all_mutable_names(&self) -> std::collections::HashSet<String> {
+        let mut names = if let Some(ref parent) = self.parent {
+            parent.borrow().all_mutable_names()
+        } else {
+            std::collections::HashSet::new()
+        };
+        for name in &self.mutable_vars {
+            names.insert(name.clone());
+        }
+        names
+    }
+
+    /// Create a fresh Environment seeded from a flat snapshot.
+    /// Restores mutability for names in mutable_names.
+    pub fn from_snapshot(
+        snapshot: &HashMap<String, Value>,
+        mutable_names: &std::collections::HashSet<String>,
+    ) -> Rc<RefCell<Environment>> {
+        let mut env = Environment::new();
+        for (name, value) in snapshot {
+            if mutable_names.contains(name) {
+                env.define_mutable(name.clone(), value.clone());
+            } else {
+                env.define(name.clone(), value.clone());
+            }
+        }
+        Rc::new(RefCell::new(env))
+    }
+
     pub fn set(&mut self, name: &str, value: Value) -> bool {
         if self.values.contains_key(name) {
             self.values.insert(name.to_string(), value);
@@ -343,6 +389,213 @@ impl Environment {
 impl Default for Environment {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Recursively convert all Value::Function instances to Value::FlatFunction.
+/// This removes all Rc<RefCell<Environment>> references, making the value Send-safe.
+/// Uses a visited set to break self-referential closure cycles.
+pub fn flatten_value(v: Value) -> Value {
+    let mut visited = std::collections::HashSet::new();
+    flatten_value_visited(v, &mut visited)
+}
+
+fn flatten_value_visited(v: Value, visited: &mut std::collections::HashSet<String>) -> Value {
+    match v {
+        Value::Function {
+            name,
+            params,
+            body,
+            closure,
+            contract,
+            type_params,
+        } => {
+            if !visited.insert(name.clone()) {
+                // Cycle detected — emit a no-op FlatFunction stub
+                return Value::FlatFunction {
+                    name,
+                    params,
+                    body: Block { statements: vec![] },
+                    contract: None,
+                    type_params: vec![],
+                    closure_snapshot: HashMap::new(),
+                    mutable_names: std::collections::HashSet::new(),
+                };
+            }
+            let snapshot = closure.borrow().all_bindings();
+            let mutable_names = closure.borrow().all_mutable_names();
+            let flat_snapshot = snapshot
+                .into_iter()
+                .map(|(k, v)| (k, flatten_value_visited(v, visited)))
+                .collect();
+            Value::FlatFunction {
+                name,
+                params,
+                body,
+                contract,
+                type_params,
+                closure_snapshot: flat_snapshot,
+                mutable_names,
+            }
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(|v| flatten_value_visited(v, visited))
+                .collect(),
+        ),
+        Value::Map(m) => Value::Map(
+            m.into_iter()
+                .map(|(k, v)| (k, flatten_value_visited(v, visited)))
+                .collect(),
+        ),
+        Value::Struct { name, fields } => Value::Struct {
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(k, v)| (k, flatten_value_visited(v, visited)))
+                .collect(),
+        },
+        Value::EnumValue {
+            enum_name,
+            variant,
+            values,
+        } => Value::EnumValue {
+            enum_name,
+            variant,
+            values: values
+                .into_iter()
+                .map(|v| flatten_value_visited(v, visited))
+                .collect(),
+        },
+        Value::Return(v) => Value::Return(Box::new(flatten_value_visited(*v, visited))),
+        // All other variants (Int, Float, String, Bool, Unit, NativeFunction, Range,
+        // EnumConstructor, FlatFunction, Break, Continue) contain no Rc — pass through.
+        other => other,
+    }
+}
+
+/// Unflatten a Value::FlatFunction back into a live Value::Function.
+/// Creates a fresh Rc<RefCell<Environment>> from the closure snapshot.
+pub fn unflatten_value(v: Value) -> Value {
+    match v {
+        Value::FlatFunction {
+            name,
+            params,
+            body,
+            contract,
+            type_params,
+            closure_snapshot,
+            mutable_names,
+        } => {
+            let unflat_snapshot: HashMap<String, Value> = closure_snapshot
+                .into_iter()
+                .map(|(k, v)| (k, unflatten_value(v)))
+                .collect();
+            let closure = Environment::from_snapshot(&unflat_snapshot, &mutable_names);
+            Value::Function {
+                name,
+                params,
+                body,
+                closure,
+                contract,
+                type_params,
+            }
+        }
+        Value::Array(items) => Value::Array(items.into_iter().map(unflatten_value).collect()),
+        Value::Map(m) => Value::Map(
+            m.into_iter()
+                .map(|(k, v)| (k, unflatten_value(v)))
+                .collect(),
+        ),
+        Value::Struct { name, fields } => Value::Struct {
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(k, v)| (k, unflatten_value(v)))
+                .collect(),
+        },
+        Value::EnumValue {
+            enum_name,
+            variant,
+            values,
+        } => Value::EnumValue {
+            enum_name,
+            variant,
+            values: values.into_iter().map(unflatten_value).collect(),
+        },
+        Value::Return(v) => Value::Return(Box::new(unflatten_value(*v))),
+        other => other,
+    }
+}
+
+/// A Send-safe representation of a registered handler.
+/// The closure is stored as a flat snapshot with no Rc, no RefCell.
+#[derive(Debug, Clone)]
+pub struct StoredHandler {
+    pub name: String,
+    pub params: Vec<Parameter>,
+    pub body: Block,
+    pub contract: Option<FunctionContract>,
+    pub type_params: Vec<TypeParam>,
+    pub closure_snapshot: HashMap<String, Value>,
+    pub mutable_names: std::collections::HashSet<String>,
+}
+
+// SAFETY: StoredHandler contains no Rc — all Value::Function instances are
+// converted to Value::FlatFunction via flatten_value() before storage.
+// Value::NativeFunction contains fn pointers which are Send+Sync.
+unsafe impl Send for StoredHandler {}
+unsafe impl Sync for StoredHandler {}
+
+impl StoredHandler {
+    /// Create a StoredHandler from a Value::FlatFunction.
+    pub fn from_flat(value: Value) -> Option<StoredHandler> {
+        match value {
+            Value::FlatFunction {
+                name,
+                params,
+                body,
+                contract,
+                type_params,
+                closure_snapshot,
+                mutable_names,
+            } => Some(StoredHandler {
+                name,
+                params,
+                body,
+                contract,
+                type_params,
+                closure_snapshot,
+                mutable_names,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Create a StoredHandler from a Value::Function by flattening it.
+    pub fn from_function(value: Value) -> Option<StoredHandler> {
+        let flat = flatten_value(value);
+        StoredHandler::from_flat(flat)
+    }
+
+    /// Convert back to a live Value::Function for use in a per-request interpreter.
+    pub fn to_call_value(&self) -> Value {
+        // Unflatten any FlatFunction values nested in the closure snapshot
+        let unflat_snapshot: HashMap<String, Value> = self
+            .closure_snapshot
+            .iter()
+            .map(|(k, v)| (k.clone(), unflatten_value(v.clone())))
+            .collect();
+        let closure = Environment::from_snapshot(&unflat_snapshot, &self.mutable_names);
+        Value::Function {
+            name: self.name.clone(),
+            params: self.params.clone(),
+            body: self.body.clone(),
+            closure,
+            contract: self.contract.clone(),
+            type_params: self.type_params.clone(),
+        }
     }
 }
 
@@ -578,6 +831,12 @@ impl Interpreter {
         }
 
         // Call the function
+        self.call_function(func, args)
+    }
+
+    /// Call a function value directly (public wrapper for call_function).
+    /// Accepts Function, FlatFunction, NativeFunction, or EnumConstructor values.
+    pub fn call_function_by_value(&mut self, func: Value, args: Vec<Value>) -> Result<Value> {
         self.call_function(func, args)
     }
 
@@ -5921,6 +6180,12 @@ impl Interpreter {
                 })
             }
 
+            Value::FlatFunction { .. } => {
+                // Unflatten to a live Function and recurse
+                let live = unflatten_value(callee);
+                self.call_function(live, args)
+            }
+
             _ => Err(IntentError::TypeError(
                 "Can only call functions".to_string(),
             )),
@@ -10398,5 +10663,290 @@ c")
     fn test_deep_mutation_new_map_key() {
         let result = eval(r#"let mut m = map { "a": 1 }; m["b"] = 2; m["b"]"#).unwrap();
         assert!(matches!(result, Value::Int(2)));
+    }
+
+    // ========== Phase 2: Send-Safe Value Representation Tests ==========
+
+    /// Helper: parse and eval source, returning the interpreter for inspection.
+    fn eval_with_interp(source: &str) -> (Interpreter, Value) {
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+        let mut interp = Interpreter::new();
+        let val = interp.eval(&ast).unwrap();
+        (interp, val)
+    }
+
+    #[test]
+    fn test_flatten_value_function_to_flat() {
+        let (interp, _) = eval_with_interp(
+            r#"let greeting = "hello"
+fn home() { return greeting }"#,
+        );
+        let val = interp.environment.borrow().get("home").unwrap();
+        assert!(matches!(val, Value::Function { .. }));
+
+        let flat = super::flatten_value(val);
+        assert!(matches!(flat, Value::FlatFunction { .. }));
+        if let Value::FlatFunction {
+            ref name,
+            ref closure_snapshot,
+            ..
+        } = flat
+        {
+            assert_eq!(name, "home");
+            assert!(closure_snapshot.contains_key("greeting"));
+        }
+    }
+
+    #[test]
+    fn test_flatten_value_preserves_primitives() {
+        assert!(matches!(
+            super::flatten_value(Value::Int(42)),
+            Value::Int(42)
+        ));
+        assert!(matches!(
+            super::flatten_value(Value::Bool(true)),
+            Value::Bool(true)
+        ));
+        assert!(matches!(super::flatten_value(Value::Unit), Value::Unit));
+        let s = super::flatten_value(Value::String("hi".to_string()));
+        assert!(matches!(s, Value::String(ref v) if v == "hi"));
+    }
+
+    #[test]
+    fn test_flatten_value_array_with_function() {
+        let (interp, _) = eval_with_interp(
+            r#"fn double(x) { return x * 2 }
+let arr = [double, 42]"#,
+        );
+        let val = interp.environment.borrow().get("arr").unwrap();
+        let flat = super::flatten_value(val);
+        if let Value::Array(items) = flat {
+            assert!(matches!(items[0], Value::FlatFunction { .. }));
+            assert!(matches!(items[1], Value::Int(42)));
+        } else {
+            panic!("Expected Array");
+        }
+    }
+
+    #[test]
+    fn test_flatten_value_map_with_function() {
+        let (interp, _) = eval_with_interp(
+            r#"fn greet() { return "hi" }
+let m = map { "handler": greet, "count": 5 }"#,
+        );
+        let val = interp.environment.borrow().get("m").unwrap();
+        let flat = super::flatten_value(val);
+        if let Value::Map(m) = flat {
+            assert!(matches!(m["handler"], Value::FlatFunction { .. }));
+            assert!(matches!(m["count"], Value::Int(5)));
+        } else {
+            panic!("Expected Map");
+        }
+    }
+
+    #[test]
+    fn test_flatten_value_struct_with_function() {
+        let (interp, _) = eval_with_interp(r#"fn action() { return "done" }"#);
+        let action_val = interp.environment.borrow().get("action").unwrap();
+        let mut fields = HashMap::new();
+        fields.insert("handler".to_string(), action_val);
+        let struct_val = Value::Struct {
+            name: "Route".to_string(),
+            fields,
+        };
+        let flat = super::flatten_value(struct_val);
+        if let Value::Struct { fields, .. } = flat {
+            assert!(matches!(fields["handler"], Value::FlatFunction { .. }));
+        } else {
+            panic!("Expected Struct");
+        }
+    }
+
+    #[test]
+    fn test_flatten_value_enum_with_function() {
+        let (interp, _) = eval_with_interp(r#"fn action() { return "done" }"#);
+        let action_val = interp.environment.borrow().get("action").unwrap();
+        let enum_val = Value::EnumValue {
+            enum_name: "Option".to_string(),
+            variant: "Some".to_string(),
+            values: vec![action_val],
+        };
+        let flat = super::flatten_value(enum_val);
+        if let Value::EnumValue { values, .. } = flat {
+            assert!(matches!(values[0], Value::FlatFunction { .. }));
+        } else {
+            panic!("Expected EnumValue");
+        }
+    }
+
+    #[test]
+    fn test_flatten_value_return_with_function() {
+        let (interp, _) = eval_with_interp(r#"fn action() { return "done" }"#);
+        let action_val = interp.environment.borrow().get("action").unwrap();
+        let ret_val = Value::Return(Box::new(action_val));
+        let flat = super::flatten_value(ret_val);
+        if let Value::Return(inner) = flat {
+            assert!(matches!(*inner, Value::FlatFunction { .. }));
+        } else {
+            panic!("Expected Return");
+        }
+    }
+
+    #[test]
+    fn test_flatten_value_self_referential_no_infinite_recursion() {
+        let (interp, _) = eval_with_interp(
+            r#"fn fib(n) {
+    if n <= 1 { return n }
+    return fib(n - 1) + fib(n - 2)
+}"#,
+        );
+        let val = interp.environment.borrow().get("fib").unwrap();
+        // This must not hang or stack overflow
+        let flat = super::flatten_value(val);
+        assert!(matches!(flat, Value::FlatFunction { .. }));
+    }
+
+    #[test]
+    fn test_stored_handler_roundtrip() {
+        let (interp, _) = eval_with_interp(
+            r#"let greeting = "hello"
+fn home() { return greeting }"#,
+        );
+        let val = interp.environment.borrow().get("home").unwrap();
+
+        // Flatten and create StoredHandler
+        let stored = super::StoredHandler::from_function(val).unwrap();
+
+        // Verify Arc<RwLock<>> compiles with StoredHandler
+        let shared = std::sync::Arc::new(std::sync::RwLock::new(vec![stored.clone()]));
+        assert_eq!(shared.read().unwrap().len(), 1);
+
+        // Convert back to live function and call it
+        let live = stored.to_call_value();
+        assert!(matches!(live, Value::Function { .. }));
+
+        let mut interp2 = Interpreter::new();
+        let result = interp2.call_function_by_value(live, vec![]);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().to_string(), "hello");
+    }
+
+    #[test]
+    fn test_stored_handler_mutable_closure() {
+        let (interp, _) = eval_with_interp(
+            r#"let mut count = 0
+fn increment() { count = count + 1; return count }"#,
+        );
+        let val = interp.environment.borrow().get("increment").unwrap();
+        let stored = super::StoredHandler::from_function(val).unwrap();
+
+        // mutable_names should include "count"
+        assert!(stored.mutable_names.contains("count"));
+
+        // Each to_call_value gets a fresh environment — mutations are isolated
+        let live1 = stored.to_call_value();
+        let live2 = stored.to_call_value();
+
+        let mut interp1 = Interpreter::new();
+        let r1 = interp1.call_function_by_value(live1, vec![]).unwrap();
+        assert_eq!(r1.to_string(), "1");
+
+        let mut interp2 = Interpreter::new();
+        let r2 = interp2.call_function_by_value(live2, vec![]).unwrap();
+        assert_eq!(r2.to_string(), "1"); // isolated — also 1, not 2
+    }
+
+    #[test]
+    fn test_stored_handler_nested_closure() {
+        let (interp, _) = eval_with_interp(
+            r#"fn helper(x) { return x * 2 }
+fn handler(n) { return helper(n) }"#,
+        );
+        let val = interp.environment.borrow().get("handler").unwrap();
+        let stored = super::StoredHandler::from_function(val).unwrap();
+
+        // helper should be in the closure snapshot as a FlatFunction
+        assert!(stored.closure_snapshot.contains_key("helper"));
+        assert!(matches!(
+            stored.closure_snapshot["helper"],
+            Value::FlatFunction { .. }
+        ));
+
+        let live = stored.to_call_value();
+        let mut interp2 = Interpreter::new();
+        let result = interp2
+            .call_function_by_value(live, vec![Value::Int(5)])
+            .unwrap();
+        assert_eq!(result.to_string(), "10");
+    }
+
+    #[test]
+    fn test_environment_all_mutable_names() {
+        let parent = std::rc::Rc::new(std::cell::RefCell::new(Environment::new()));
+        parent
+            .borrow_mut()
+            .define_mutable("x".to_string(), Value::Int(1));
+        parent.borrow_mut().define("y".to_string(), Value::Int(2));
+
+        let mut child = Environment::with_parent(parent);
+        child.define_mutable("z".to_string(), Value::Int(3));
+
+        let names = child.all_mutable_names();
+        assert!(names.contains("x"));
+        assert!(!names.contains("y"));
+        assert!(names.contains("z"));
+    }
+
+    #[test]
+    fn test_environment_from_snapshot() {
+        let mut snapshot = HashMap::new();
+        snapshot.insert("a".to_string(), Value::Int(1));
+        snapshot.insert("b".to_string(), Value::Int(2));
+        let mut mutable = std::collections::HashSet::new();
+        mutable.insert("b".to_string());
+
+        let env = Environment::from_snapshot(&snapshot, &mutable);
+        let borrowed = env.borrow();
+        assert_eq!(borrowed.get("a").unwrap().to_string(), "1");
+        assert_eq!(borrowed.get("b").unwrap().to_string(), "2");
+        assert!(!borrowed.is_mutable("a"));
+        assert!(borrowed.is_mutable("b"));
+    }
+
+    #[test]
+    fn test_arc_rwlock_stored_handler_compiles() {
+        // Definition of Done: Arc<RwLock<SharedState>> must compile
+        let stored = super::StoredHandler {
+            name: "test".to_string(),
+            params: vec![],
+            body: crate::ast::Block { statements: vec![] },
+            contract: None,
+            type_params: vec![],
+            closure_snapshot: HashMap::new(),
+            mutable_names: std::collections::HashSet::new(),
+        };
+        let _shared: std::sync::Arc<std::sync::RwLock<Vec<super::StoredHandler>>> =
+            std::sync::Arc::new(std::sync::RwLock::new(vec![stored]));
+    }
+
+    #[test]
+    fn test_stored_handler_send_across_threads() {
+        let stored = super::StoredHandler {
+            name: "test".to_string(),
+            params: vec![],
+            body: crate::ast::Block { statements: vec![] },
+            contract: None,
+            type_params: vec![],
+            closure_snapshot: HashMap::new(),
+            mutable_names: std::collections::HashSet::new(),
+        };
+        // Actually send it across a thread boundary
+        let handle = std::thread::spawn(move || {
+            assert_eq!(stored.name, "test");
+        });
+        handle.join().unwrap();
     }
 }
