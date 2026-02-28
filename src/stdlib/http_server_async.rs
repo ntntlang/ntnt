@@ -428,7 +428,12 @@ fn serve_static_file(file_path: &str, if_none_match: Option<&str>) -> Response<B
         let duration = mtime
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        format!("\"{}_{}_{}\"", metadata.len(), duration.as_secs(), duration.subsec_nanos())
+        format!(
+            "\"{}_{}_{}\"",
+            metadata.len(),
+            duration.as_secs(),
+            duration.subsec_nanos()
+        )
     } else {
         format!("\"size-{}\"", metadata.len())
     };

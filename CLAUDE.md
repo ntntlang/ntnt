@@ -1,6 +1,6 @@
 <!-- NTNT coding guide sections are sourced from docs/AI_AGENT_GUIDE.md -->
 <!-- To update NTNT coding instructions, edit AI_AGENT_GUIDE.md and copy to all agent files -->
-<!-- Last synced: 2026-02-27 -->
+<!-- Last synced: 2026-02-28 -->
 
 # NTNT Language - Claude Code Instructions
 

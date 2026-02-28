@@ -3164,7 +3164,12 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
         let duration = mtime
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        format!("\"{}_{}_{}\"", metadata.len(), duration.as_secs(), duration.subsec_nanos())
+        format!(
+            "\"{}_{}_{}\"",
+            metadata.len(),
+            duration.as_secs(),
+            duration.subsec_nanos()
+        )
     } else {
         format!("\"size-{}\"", metadata.len())
     };
