@@ -100,6 +100,14 @@ path = "src/main.rs"
 default = []
 redis-tests = []  # Enable to run Redis integration tests (requires running Redis server)
 
+[[bench]]
+name = "interpreter_construction"
+harness = false
+
+[dev-dependencies.criterion]
+version = "0.5"
+features = ["html_reports"]
+
 [profile.release]
 opt-level = 3
 lto = true
