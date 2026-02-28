@@ -156,7 +156,34 @@ async fn check_update(State(state): State<Arc<StudioState>>) -> Json<ChangeStatu
 }
 
 /// Check app server status
+///
+/// If SharedState is available (direct execution mode), reports healthy based on route count.
+/// Falls back to HTTP health check against app_port for backward compatibility.
 async fn app_status(State(state): State<Arc<StudioState>>) -> Json<AppStatus> {
+    // Check SharedState first (direct execution mode)
+    {
+        let guard = state.shared_state.read().await;
+        if let Some(ref shared) = *guard {
+            let route_count = shared.route_count();
+            if route_count > 0 {
+                return Json(AppStatus {
+                    running: true,
+                    healthy: true,
+                    status: Some(200),
+                    error: None,
+                });
+            } else {
+                return Json(AppStatus {
+                    running: true,
+                    healthy: false,
+                    status: Some(404),
+                    error: Some("No routes registered".to_string()),
+                });
+            }
+        }
+    }
+
+    // Fallback: HTTP health check
     let app_url = format!("http://127.0.0.1:{}/", state.app_port);
 
     let client = reqwest::Client::builder()
@@ -226,8 +253,19 @@ async fn run_tests(State(state): State<Arc<StudioState>>) -> Response {
                 })
                 .collect();
 
-            let results =
-                intent::run_tests_against_server(&intent_file, state.app_port, &source_files);
+            // Rebuild SharedState for fresh execution
+            state.rebuild_shared_state().await;
+
+            let results = {
+                let shared_guard = state.shared_state.read().await;
+                if let Some(ref shared) = *shared_guard {
+                    // Use execute_request() directly — no subprocess needed
+                    intent::run_tests_with_shared_state(&intent_file, shared, &source_files)
+                } else {
+                    // Fallback to HTTP if no SharedState available
+                    intent::run_tests_against_server(&intent_file, state.app_port, &source_files)
+                }
+            };
 
             // Cache the results
             {

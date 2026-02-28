@@ -3800,9 +3800,7 @@ fn run_single_test_direct(
 
     match route_result {
         crate::stdlib::http_server::RouteMatchResult::Matched {
-            handler,
-            params,
-            ..
+            handler, params, ..
         } => {
             bridge_req.params = params;
             let req_value = bridge_req.to_value();
@@ -3818,15 +3816,22 @@ fn run_single_test_direct(
                         test: test.clone(),
                         passed: all_passed,
                         assertion_results,
-                        error: None,
+                        response_status: status_code,
+                        response_body: body,
+                        response_headers: headers,
                     }
                 }
-                Err(e) => TestResult {
-                    test: test.clone(),
-                    passed: false,
-                    assertion_results: vec![],
-                    error: Some(format!("Handler error: {}", e)),
-                },
+                Err(e) => {
+                    let err_body = format!("Handler error: {}", e);
+                    TestResult {
+                        test: test.clone(),
+                        passed: false,
+                        assertion_results: vec![],
+                        response_status: 500,
+                        response_body: err_body,
+                        response_headers: HashMap::new(),
+                    }
+                }
             }
         }
         crate::stdlib::http_server::RouteMatchResult::TypeMismatch {
@@ -3843,27 +3848,32 @@ fn run_single_test_direct(
                 ),
                 &HashMap::new(),
             );
-            let all_passed = assertion_results.iter().all(|r| r.passed);
-            TestResult {
-                test: test.clone(),
-                passed: all_passed,
-                assertion_results,
-                error: None,
-            }
-        }
-        crate::stdlib::http_server::RouteMatchResult::NotFound => {
-            let assertion_results = run_assertions(
-                &test.assertions,
-                404,
-                &format!("Not Found: {} {}", test.method, path),
-                &HashMap::new(),
+            let type_mismatch_body = format!(
+                "Bad Request: Parameter '{}' must be type {}, got '{}'",
+                param_name, expected, got
             );
             let all_passed = assertion_results.iter().all(|r| r.passed);
             TestResult {
                 test: test.clone(),
                 passed: all_passed,
                 assertion_results,
-                error: None,
+                response_status: 400,
+                response_body: type_mismatch_body,
+                response_headers: HashMap::new(),
+            }
+        }
+        crate::stdlib::http_server::RouteMatchResult::NotFound => {
+            let not_found_body = format!("Not Found: {} {}", test.method, path);
+            let assertion_results =
+                run_assertions(&test.assertions, 404, &not_found_body, &HashMap::new());
+            let all_passed = assertion_results.iter().all(|r| r.passed);
+            TestResult {
+                test: test.clone(),
+                passed: all_passed,
+                assertion_results,
+                response_status: 404,
+                response_body: not_found_body,
+                response_headers: HashMap::new(),
             }
         }
     }
@@ -5308,6 +5318,18 @@ pub fn run_tests_against_server(
     let base_path = Path::new(&intent.source_path).parent();
     let exec_test =
         |test: &TestCase| -> TestResult { run_single_test_with_base_dir(test, port, base_path) };
+    run_tests_core(intent, source_files, &exec_test)
+}
+
+/// Run tests using execute_request() directly — no HTTP server needed.
+pub fn run_tests_with_shared_state(
+    intent: &IntentFile,
+    shared: &crate::stdlib::http_server::SharedState,
+    source_files: &[(String, String)],
+) -> LiveTestResults {
+    let intent_path = Path::new(&intent.source_path);
+    let exec_test =
+        |test: &TestCase| -> TestResult { run_single_test_direct(test, shared, intent_path) };
     run_tests_core(intent, source_files, &exec_test)
 }
 
