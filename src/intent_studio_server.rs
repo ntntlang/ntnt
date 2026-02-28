@@ -38,12 +38,14 @@ pub struct StudioState {
     pub intent_path: PathBuf,
     /// Path to the .tnt file (optional)
     pub tnt_path: Option<PathBuf>,
-    /// Port where the app server is running
+    /// Port where the app server is running (legacy fallback)
     pub app_port: u16,
     /// Last modification time of the intent file
     pub last_modified: RwLock<SystemTime>,
     /// Cached test results
     pub cached_results: RwLock<Option<LiveTestResults>>,
+    /// SharedState for direct execute_request() — no subprocess needed
+    pub shared_state: RwLock<Option<crate::stdlib::http_server::SharedState>>,
 }
 
 impl StudioState {
@@ -52,12 +54,35 @@ impl StudioState {
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
+        // Build SharedState from .tnt source if available
+        let shared_state = tnt_path.as_ref().and_then(|tnt_file| {
+            crate::stdlib::http_server_async::rebuild_shared_state(&tnt_file.to_string_lossy()).ok()
+        });
+
         StudioState {
             intent_path,
             tnt_path,
             app_port,
             last_modified: RwLock::new(last_modified),
             cached_results: RwLock::new(None),
+            shared_state: RwLock::new(shared_state),
+        }
+    }
+
+    /// Rebuild the SharedState from the .tnt source file.
+    pub async fn rebuild_shared_state(&self) {
+        if let Some(ref tnt_path) = self.tnt_path {
+            match crate::stdlib::http_server_async::rebuild_shared_state(
+                &tnt_path.to_string_lossy(),
+            ) {
+                Ok(new_state) => {
+                    let mut guard = self.shared_state.write().await;
+                    *guard = Some(new_state);
+                }
+                Err(e) => {
+                    eprintln!("[intent-studio] Failed to rebuild SharedState: {}", e);
+                }
+            }
         }
     }
 }

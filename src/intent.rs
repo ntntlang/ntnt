@@ -3721,11 +3721,189 @@ impl IntentFile {
     }
 }
 
-/// Run intent checks against an NTNT file
+/// Build a SharedState from source code by parsing and evaluating the .tnt file.
+///
+/// Uses test_mode so listen() returns immediately without starting a server.
+/// Copies type context from interpreter into the resulting SharedState.
+fn build_shared_state_from_source(
+    source: &str,
+    ntnt_path: &Path,
+) -> Result<crate::stdlib::http_server::SharedState, IntentError> {
+    let mut interpreter = Interpreter::new();
+    interpreter.set_main_source_file(&ntnt_path.to_string_lossy());
+
+    // Set test_mode so listen() returns immediately
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    interpreter.set_test_mode(0, 0, shutdown_flag);
+
+    let lexer = Lexer::new(source);
+    let tokens: Vec<_> = lexer.collect();
+    let mut parser = IntentParser::new(tokens);
+    let ast = parser.parse()?;
+
+    // Eval registers routes/middleware. listen() returns immediately in test_mode.
+    let _ = interpreter.eval(&ast);
+
+    // Copy type context from interpreter into server_state
+    interpreter.server_state.structs = interpreter.structs.clone();
+    interpreter.server_state.enums = interpreter.enums.clone();
+    interpreter.server_state.type_aliases = interpreter.type_aliases.clone();
+    interpreter.server_state.trait_definitions = interpreter.trait_definitions.clone();
+    interpreter.server_state.trait_implementations = interpreter.trait_implementations.clone();
+    interpreter.server_state.main_source_file = Some(ntnt_path.to_string_lossy().to_string());
+
+    Ok(std::mem::take(&mut interpreter.server_state))
+}
+
+/// Run a single intent test directly via execute_request() — no HTTP server needed.
+fn run_single_test_direct(
+    test: &TestCase,
+    shared: &crate::stdlib::http_server::SharedState,
+    ntnt_path: &Path,
+) -> TestResult {
+    // Handle CODE_QUALITY tests (no HTTP needed)
+    if test.method == "CODE_QUALITY" {
+        return run_code_quality_test(test);
+    }
+
+    // Handle FUNCTION_CALL tests (unit tests)
+    if test.method == "FUNCTION_CALL" {
+        let base_dir = ntnt_path.parent();
+        return run_function_call_test(test, base_dir);
+    }
+
+    let path = if test.path.starts_with('/') {
+        test.path.clone()
+    } else {
+        format!("/{}", test.path)
+    };
+
+    let body_content = test.body.clone().unwrap_or_default();
+
+    // Build a BridgeRequest for execute_request()
+    let mut bridge_req = crate::stdlib::http_server_async::BridgeRequest {
+        method: test.method.clone(),
+        path: path.clone(),
+        url: path.clone(),
+        query: String::new(),
+        query_params: HashMap::new(),
+        params: HashMap::new(),
+        headers: HashMap::new(),
+        body: body_content,
+        id: uuid::Uuid::new_v4().to_string(),
+        ip: "127.0.0.1".to_string(),
+        protocol: "http".to_string(),
+    };
+
+    // Find matching route
+    let route_result = shared.find_route_typed(&test.method, &path);
+
+    match route_result {
+        crate::stdlib::http_server::RouteMatchResult::Matched {
+            handler,
+            params,
+            ..
+        } => {
+            bridge_req.params = params;
+            let req_value = bridge_req.to_value();
+            let middleware = shared.middleware.clone();
+
+            match Interpreter::execute_request(shared, &handler, &middleware, req_value) {
+                Ok(response) => {
+                    let (status_code, body, headers) = extract_response_parts(&response);
+                    let assertion_results =
+                        run_assertions(&test.assertions, status_code, &body, &headers);
+                    let all_passed = assertion_results.iter().all(|r| r.passed);
+                    TestResult {
+                        test: test.clone(),
+                        passed: all_passed,
+                        assertion_results,
+                        error: None,
+                    }
+                }
+                Err(e) => TestResult {
+                    test: test.clone(),
+                    passed: false,
+                    assertion_results: vec![],
+                    error: Some(format!("Handler error: {}", e)),
+                },
+            }
+        }
+        crate::stdlib::http_server::RouteMatchResult::TypeMismatch {
+            param_name,
+            expected,
+            got,
+        } => {
+            let assertion_results = run_assertions(
+                &test.assertions,
+                400,
+                &format!(
+                    "Bad Request: Parameter '{}' must be type {}, got '{}'",
+                    param_name, expected, got
+                ),
+                &HashMap::new(),
+            );
+            let all_passed = assertion_results.iter().all(|r| r.passed);
+            TestResult {
+                test: test.clone(),
+                passed: all_passed,
+                assertion_results,
+                error: None,
+            }
+        }
+        crate::stdlib::http_server::RouteMatchResult::NotFound => {
+            let assertion_results = run_assertions(
+                &test.assertions,
+                404,
+                &format!("Not Found: {} {}", test.method, path),
+                &HashMap::new(),
+            );
+            let all_passed = assertion_results.iter().all(|r| r.passed);
+            TestResult {
+                test: test.clone(),
+                passed: all_passed,
+                assertion_results,
+                error: None,
+            }
+        }
+    }
+}
+
+/// Extract status code, body, and headers from a response Value.
+fn extract_response_parts(
+    response: &crate::interpreter::Value,
+) -> (u16, String, HashMap<String, String>) {
+    use crate::interpreter::Value;
+    if let Value::Map(map) = response {
+        let status = match map.get("status") {
+            Some(Value::Int(s)) => *s as u16,
+            _ => 200,
+        };
+        let body = match map.get("body") {
+            Some(Value::String(b)) => b.clone(),
+            _ => String::new(),
+        };
+        let mut headers = HashMap::new();
+        if let Some(Value::Map(h)) = map.get("headers") {
+            for (k, v) in h {
+                if let Value::String(val) = v {
+                    headers.insert(k.to_lowercase(), val.clone());
+                }
+            }
+        }
+        (status, body, headers)
+    } else {
+        (200, format!("{}", response), HashMap::new())
+    }
+}
+
+/// Run intent checks against an NTNT file using execute_request() directly.
+///
+/// No server spin-up needed — builds SharedState and runs tests directly.
 pub fn run_intent_check(
     ntnt_path: &Path,
     intent_path: &Path,
-    port: u16,
+    _port: u16,
     _verbose: bool,
 ) -> Result<IntentCheckResult, IntentError> {
     // Parse intent file
@@ -3744,11 +3922,10 @@ pub fn run_intent_check(
         ));
     }
 
-    // Setup for server
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let shutdown_flag_clone = shutdown_flag.clone();
+    // Build SharedState from source — no server needed
+    let shared_state = build_shared_state_from_source(&source, ntnt_path)?;
 
-    // Collect all tests to run
+    // Run all tests directly via execute_request()
     let mut all_tests: Vec<(usize, usize, TestCase)> = Vec::new();
     for (fi, feature) in intent.features.iter().enumerate() {
         for (ti, test) in feature.tests.iter().enumerate() {
@@ -3756,42 +3933,13 @@ pub fn run_intent_check(
         }
     }
 
-    let all_tests_clone = all_tests.clone();
-    let results: Arc<std::sync::Mutex<Vec<(usize, usize, TestResult)>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let results_clone = results.clone();
-
-    // Spawn thread to run tests
-    let test_handle = thread::spawn(move || {
-        // Wait for server to start
-        thread::sleep(Duration::from_millis(300));
-
-        for (fi, ti, test) in all_tests_clone {
-            let result = run_single_test(&test, port);
-            results_clone.lock().unwrap().push((fi, ti, result));
-        }
-
-        // Signal shutdown
-        shutdown_flag_clone.store(true, Ordering::SeqCst);
-    });
-
-    // Start the server
-    let mut interpreter = Interpreter::new();
-    interpreter.set_test_mode(port, total_tests, shutdown_flag.clone());
-
-    let lexer = Lexer::new(&source);
-    let tokens: Vec<_> = lexer.collect();
-    let mut parser = IntentParser::new(tokens);
-    let ast = parser.parse()?;
-
-    // Run (will exit when shutdown_flag is set)
-    let _ = interpreter.eval(&ast);
-
-    // Wait for test thread
-    test_handle.join().ok();
-
-    // Collect results
-    let test_results = results.lock().unwrap();
+    let results: Vec<(usize, usize, TestResult)> = all_tests
+        .iter()
+        .map(|(fi, ti, test)| {
+            let result = run_single_test_direct(test, &shared_state, ntnt_path);
+            (*fi, *ti, result)
+        })
+        .collect();
 
     // Parse annotations from source to check for implementations
     let annotations = parse_annotations(&source, &ntnt_path.to_string_lossy());
@@ -3820,7 +3968,7 @@ pub fn run_intent_check(
         })
         .collect();
 
-    for (fi, _ti, result) in test_results.iter() {
+    for (fi, _ti, result) in results.iter() {
         if !result.passed {
             feature_results[*fi].passed = false;
         }
@@ -5155,7 +5303,18 @@ pub struct LiveCheckResult {
 pub fn run_tests_against_server(
     intent: &IntentFile,
     port: u16,
-    source_files: &[(String, String)], // (path, content) pairs
+    source_files: &[(String, String)],
+) -> LiveTestResults {
+    let base_path = Path::new(&intent.source_path).parent();
+    let exec_test =
+        |test: &TestCase| -> TestResult { run_single_test_with_base_dir(test, port, base_path) };
+    run_tests_core(intent, source_files, &exec_test)
+}
+
+fn run_tests_core(
+    intent: &IntentFile,
+    source_files: &[(String, String)],
+    exec_test: &dyn Fn(&TestCase) -> TestResult,
 ) -> LiveTestResults {
     let mut feature_results = Vec::new();
     let mut total_assertions = 0;
@@ -5167,9 +5326,6 @@ pub fn run_tests_against_server(
         .parent()
         .and_then(|p| p.to_str())
         .filter(|s| !s.is_empty());
-
-    // Also get it as a Path for unit tests
-    let base_path = Path::new(&intent.source_path).parent();
 
     // Parse annotations from all source files
     let mut annotations: Vec<Annotation> = Vec::new();
@@ -5223,8 +5379,7 @@ pub fn run_tests_against_server(
                                 scenario_name: None,
                             };
 
-                            let precond_result =
-                                run_single_test_with_base_dir(&precondition_test, port, base_path);
+                            let precond_result = exec_test(&precondition_test);
 
                             for ar in &precond_result.assertion_results {
                                 let assertion_text = format_assertion(&ar.assertion);
@@ -5269,7 +5424,7 @@ pub fn run_tests_against_server(
                         }
 
                         // Execute the resolved test
-                        let result = run_single_test_with_base_dir(&resolved_test, port, base_path);
+                        let result = exec_test(&resolved_test);
                         let mut assertion_results = Vec::new();
                         let mut test_passed = result.passed && preconditions_passed;
 
@@ -5368,7 +5523,7 @@ pub fn run_tests_against_server(
 
         // Process test: blocks (run in addition to scenario tests)
         for test in &feature.tests {
-            let result = run_single_test_with_base_dir(test, port, base_path);
+            let result = exec_test(test);
             let mut assertion_results = Vec::new();
             let mut test_passed = result.passed;
 
@@ -5469,8 +5624,7 @@ pub fn run_tests_against_server(
                                 scenario_name: None,
                             };
 
-                            let precond_result =
-                                run_single_test_with_base_dir(&precondition_test, port, base_path);
+                            let precond_result = exec_test(&precondition_test);
                             for ar in &precond_result.assertion_results {
                                 let assertion_text = format_assertion(&ar.assertion);
                                 precondition_results.push(LiveAssertionResult {
@@ -5487,7 +5641,7 @@ pub fn run_tests_against_server(
                         }
 
                         // Execute component scenario test
-                        let result = run_single_test_with_base_dir(&resolved_test, port, base_path);
+                        let result = exec_test(&resolved_test);
                         let mut assertion_results = Vec::new();
                         let mut test_passed = result.passed && preconditions_passed;
 

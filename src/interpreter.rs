@@ -6346,6 +6346,9 @@ impl Interpreter {
         use crate::stdlib::http_server_async::{start_per_request_server, AsyncServerConfig};
         use std::sync::Arc;
 
+        // Extract test-mode shutdown flag if present (used by ntnt intent check)
+        let test_shutdown_flag = self.test_mode.as_ref().map(|(_, _, flag)| flag.clone());
+
         // Check if any routes are registered
         if self.server_state.route_count() == 0 && self.server_state.static_dirs.is_empty() {
             return Err(IntentError::RuntimeError(
@@ -6413,7 +6416,9 @@ impl Interpreter {
             .build()
             .map_err(|e| IntentError::RuntimeError(format!("Failed to create runtime: {}", e)))?;
 
-        rt.block_on(async { start_per_request_server(server_config, shared).await })?;
+        rt.block_on(async {
+            start_per_request_server(server_config, shared, test_shutdown_flag).await
+        })?;
 
         Ok(Value::Unit)
     }

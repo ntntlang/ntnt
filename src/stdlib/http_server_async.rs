@@ -800,6 +800,7 @@ pub struct PerRequestState {
 pub async fn start_per_request_server(
     config: AsyncServerConfig,
     shared: Arc<std::sync::RwLock<super::http_server::SharedState>>,
+    test_shutdown_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
@@ -870,7 +871,7 @@ pub async fn start_per_request_server(
         .map_err(|e| IntentError::RuntimeError(format!("Failed to bind: {}", e)))?;
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal_with_handlers(shared))
+        .with_graceful_shutdown(shutdown_signal_with_handlers(shared, test_shutdown_flag))
         .await
         .map_err(|e| IntentError::RuntimeError(format!("Server error: {}", e)))
 }
@@ -1073,9 +1074,19 @@ async fn handle_per_request(
 /// Shutdown signal handler that runs shutdown handlers before exiting.
 async fn shutdown_signal_with_handlers(
     shared: Arc<std::sync::RwLock<super::http_server::SharedState>>,
+    test_shutdown_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) {
-    // Wait for shutdown signal
-    shutdown_signal().await;
+    // Wait for either Ctrl-C/SIGTERM or the test-mode shutdown flag
+    if let Some(flag) = test_shutdown_flag {
+        loop {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    } else {
+        shutdown_signal().await;
+    }
 
     // Run shutdown handlers in a blocking task
     let _ = tokio::task::spawn_blocking(move || {
