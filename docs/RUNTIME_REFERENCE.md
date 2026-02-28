@@ -27,6 +27,9 @@ Environment variables that control NTNT runtime behavior
 | `NTNT_TIMEOUT` | integer (seconds) | 30 | Request timeout for HTTP server in seconds. |
 | `NTNT_STRICT` | `1`, `true` | unset (disabled) | Enable strict type checking. For `ntnt run`, blocks execution if type errors are found. For `ntnt lint`, warns about untyped function signatures. Also configurable via `ntnt lint --strict` or `ntnt.toml` config. |
 | `NTNT_ALLOW_PRIVATE_IPS` | `true` | unset (disabled — private IPs blocked) | Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x). Required for Docker inter-container communication (e.g., calling a sidecar at 172.19.0.1). Disabled by default to prevent SSRF attacks. |
+| `NTNT_BLOCKING_THREADS` | integer | Tokio default (~512) | Size of the blocking thread pool used for per-request interpreter execution. Each HTTP request runs in a `spawn_blocking` task with its own interpreter instance. Size this based on your workload: `target_rps × avg_handler_ms / 1000`. For example, 10K rps with 10ms handlers needs ~100 threads. |
+| `NTNT_REQUEST_TIMEOUT` | integer (seconds) | 30 | Maximum time in seconds for a single HTTP request handler to execute. Returns 504 Gateway Timeout if exceeded. This wraps the `spawn_blocking` future, not the interpreter itself — the blocking thread may linger briefly after timeout. |
+| `NTNT_HOT_RELOAD_INTERVAL_MS` | integer (milliseconds) | 500 | Poll interval for the hot-reload file watcher in milliseconds. A background async task checks route files, middleware, and lib modules for changes at this interval. Lower values detect changes faster but increase filesystem polling. Only active in development mode (NTNT_ENV != production). |
 
 ### Examples
 
@@ -45,6 +48,15 @@ NTNT_STRICT=1 ntnt run server.tnt
 
 # Allow fetch() to connect to Docker internal services
 NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt
+
+# Set blocking thread pool size for high-throughput workloads
+NTNT_BLOCKING_THREADS=100 ntnt run server.tnt
+
+# Increase request timeout to 60 seconds
+NTNT_REQUEST_TIMEOUT=60 ntnt run server.tnt
+
+# Slower hot-reload polling (1 second)
+NTNT_HOT_RELOAD_INTERVAL_MS=1000 ntnt run server.tnt
 ```
 
 ---

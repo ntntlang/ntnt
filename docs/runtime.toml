@@ -41,6 +41,27 @@ description = "Enable strict type checking. For `ntnt run`, blocks execution if 
 example = "NTNT_STRICT=1 ntnt run server.tnt"
 affects = ["type-checking", "lint"]
 
+[env_vars.NTNT_BLOCKING_THREADS]
+type = "integer"
+default = "Tokio default (~512)"
+description = "Size of the blocking thread pool used for per-request interpreter execution. Each HTTP request runs in a `spawn_blocking` task with its own interpreter instance. Size this based on your workload: `target_rps × avg_handler_ms / 1000`. For example, 10K rps with 10ms handlers needs ~100 threads."
+example = "NTNT_BLOCKING_THREADS=100 ntnt run server.tnt"
+affects = ["http-server", "performance"]
+
+[env_vars.NTNT_REQUEST_TIMEOUT]
+type = "integer (seconds)"
+default = "30"
+description = "Maximum time in seconds for a single HTTP request handler to execute. Returns 504 Gateway Timeout if exceeded. This wraps the `spawn_blocking` future, not the interpreter itself — the blocking thread may linger briefly after timeout."
+example = "NTNT_REQUEST_TIMEOUT=60 ntnt run server.tnt"
+affects = ["http-server"]
+
+[env_vars.NTNT_HOT_RELOAD_INTERVAL_MS]
+type = "integer (milliseconds)"
+default = "500"
+description = "Poll interval for the hot-reload file watcher in milliseconds. A background async task checks route files, middleware, and lib modules for changes at this interval. Lower values detect changes faster but increase filesystem polling. Only active in development mode (NTNT_ENV != production)."
+example = "NTNT_HOT_RELOAD_INTERVAL_MS=1000 ntnt run server.tnt"
+affects = ["hot-reload", "development"]
+
 # =============================================================================
 # HOT-RELOAD
 # =============================================================================

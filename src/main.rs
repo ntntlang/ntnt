@@ -5500,6 +5500,48 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             ));
         }
 
+        // NTNT_BLOCKING_THREADS
+        if let Some(env) = env_vars.get("NTNT_BLOCKING_THREADS") {
+            let typ = env.get("type").and_then(|v| v.as_str()).unwrap_or("-");
+            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
+            let desc = env
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            md.push_str(&format!(
+                "| `NTNT_BLOCKING_THREADS` | {} | {} | {} |\n",
+                typ, default, desc
+            ));
+        }
+
+        // NTNT_REQUEST_TIMEOUT
+        if let Some(env) = env_vars.get("NTNT_REQUEST_TIMEOUT") {
+            let typ = env.get("type").and_then(|v| v.as_str()).unwrap_or("-");
+            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
+            let desc = env
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            md.push_str(&format!(
+                "| `NTNT_REQUEST_TIMEOUT` | {} | {} | {} |\n",
+                typ, default, desc
+            ));
+        }
+
+        // NTNT_HOT_RELOAD_INTERVAL_MS
+        if let Some(env) = env_vars.get("NTNT_HOT_RELOAD_INTERVAL_MS") {
+            let typ = env.get("type").and_then(|v| v.as_str()).unwrap_or("-");
+            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
+            let desc = env
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            md.push_str(&format!(
+                "| `NTNT_HOT_RELOAD_INTERVAL_MS` | {} | {} | {} |\n",
+                typ, default, desc
+            ));
+        }
+
         md.push_str("\n### Examples\n\n```bash\n");
         md.push_str("# Development (default) - hot-reload enabled\n");
         md.push_str("ntnt run server.tnt\n\n");
@@ -5510,7 +5552,13 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
         md.push_str("# Strict type checking - blocks execution on type errors\n");
         md.push_str("NTNT_STRICT=1 ntnt run server.tnt\n\n");
         md.push_str("# Allow fetch() to connect to Docker internal services\n");
-        md.push_str("NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt\n");
+        md.push_str("NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt\n\n");
+        md.push_str("# Set blocking thread pool size for high-throughput workloads\n");
+        md.push_str("NTNT_BLOCKING_THREADS=100 ntnt run server.tnt\n\n");
+        md.push_str("# Increase request timeout to 60 seconds\n");
+        md.push_str("NTNT_REQUEST_TIMEOUT=60 ntnt run server.tnt\n\n");
+        md.push_str("# Slower hot-reload polling (1 second)\n");
+        md.push_str("NTNT_HOT_RELOAD_INTERVAL_MS=1000 ntnt run server.tnt\n");
         md.push_str("```\n\n");
         md.push_str("---\n\n");
     }

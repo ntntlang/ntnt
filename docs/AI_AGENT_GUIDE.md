@@ -712,6 +712,9 @@ server 8080 {
 | `NTNT_ENV` | `production`, `prod` | Disables hot-reload for better performance |
 | `NTNT_STRICT` | `1`, `true` | Blocks execution on type errors (runs type checker before `ntnt run`) |
 | `NTNT_ALLOW_PRIVATE_IPS` | `true` | Allows `fetch()` to connect to private/internal IPs (see below) |
+| `NTNT_BLOCKING_THREADS` | integer | `spawn_blocking` thread pool size for per-request interpreters (default: Tokio default ~512) |
+| `NTNT_REQUEST_TIMEOUT` | integer (seconds) | Max handler execution time before 504 (default: 30) |
+| `NTNT_HOT_RELOAD_INTERVAL_MS` | integer (ms) | File watcher poll interval in dev mode (default: 500) |
 
 ```bash
 # Development (default) - hot-reload enabled
@@ -738,6 +741,63 @@ services:
 ```
 
 ⚠️ Only enable this when your app needs to call internal services. Keep disabled in public-facing apps that don't need internal network access.
+
+### Per-Request Interpreter Architecture
+
+ntnt uses a **per-request interpreter** model for HTTP serving. Each incoming HTTP request gets its own fresh `Interpreter` instance running in a `spawn_blocking` task, enabling true parallel request handling across all CPU cores.
+
+**Key implications:**
+
+- **Module-level mutable state is isolated per request.** Each request starts from a snapshot taken at server startup. Mutations to module-level variables in one request are not visible to other requests.
+- **Database connections work correctly.** PostgreSQL, Redis/KV, and SQLite use global static registries — connection handles are integer IDs, not live objects, so they resolve correctly in any interpreter instance.
+- **No migration needed for stateless handlers.** If your handler only reads module-level constants and uses database calls, it works identically.
+
+#### Migrating Module-Level Mutable State
+
+If your code relies on shared mutable state across requests, migrate to Redis:
+
+```ntnt
+// ❌ BROKEN: each request sees count=0 (isolated snapshot)
+let mut count = 0
+fn counter(req) {
+    count = count + 1
+    return text(str(count))
+}
+
+// ✅ CORRECT: use Redis for cross-request state
+fn counter(req) {
+    let count = int(kv_get("request_count") ?? "0") + 1
+    kv_set("request_count", str(count))
+    return text(str(count))
+}
+```
+
+The same applies to in-memory session stores — any middleware that writes session data to a module-level map must migrate to Redis-backed sessions using `kv_set`/`kv_get`.
+
+#### Thread Pool Sizing
+
+Size `NTNT_BLOCKING_THREADS` based on your workload:
+
+| Target RPS | Avg Handler Time | Threads Needed |
+|-----------|-----------------|----------------|
+| 1,000 | 10ms | 10 |
+| 5,000 | 10ms | 50 |
+| 10,000 | 10ms | 100 |
+| 30,000 | 5ms | 150 |
+
+Formula: `threads = target_rps × avg_handler_ms / 1000`
+
+#### Performance
+
+Interpreter construction benchmarks (release build, criterion):
+
+| Benchmark | Median |
+|-----------|--------|
+| `Interpreter::new()` — full construction + all 23 stdlib modules | **43.9 µs** |
+| `new()` + eval trivial expression | **44.1 µs** |
+| `new()` + define fn + call realistic handler | **53.3 µs** |
+
+At 43.9 µs per construction, the per-request model supports ~22K interpreter constructions/sec per core — well within budget for high-throughput deployments. Static files bypass the interpreter entirely via Axum/tower-http.
 
 ### Response Builder Functions
 

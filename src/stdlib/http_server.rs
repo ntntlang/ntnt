@@ -477,6 +477,10 @@ pub struct SharedState {
     pub trait_implementations: HashMap<String, Vec<String>>,
     // Source context for error messages
     pub main_source_file: Option<String>,
+    // Hot-reload context
+    pub routes_dir: Option<String>,
+    pub middleware_files: Vec<String>,
+    pub lib_modules: Vec<String>,
 }
 
 // SAFETY: SharedState contains StoredHandler (which is Send+Sync — no Rc after flatten_value()),
@@ -501,6 +505,9 @@ impl SharedState {
             trait_definitions: HashMap::new(),
             trait_implementations: HashMap::new(),
             main_source_file: None,
+            routes_dir: None,
+            middleware_files: Vec::new(),
+            lib_modules: Vec::new(),
         }
     }
 

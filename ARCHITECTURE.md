@@ -42,9 +42,9 @@ src/
     ├── crypto.rs        # std/crypto - SHA256, HMAC, UUID, random
     ├── url.rs           # std/url - URL encoding/parsing
     ├── http.rs          # std/http - HTTP client (fetch, download)
-    ├── http_server.rs   # std/http/server - Response builders
-    ├── http_server_async.rs  # Async HTTP server (Axum + Tokio)
-    ├── http_bridge.rs   # Bridge between async server and sync interpreter
+    ├── http_server.rs   # std/http/server - Route registration, SharedState, StoredHandler, response builders
+    ├── http_server_async.rs  # Axum server, per-request execution, hot-reload watcher
+    ├── http_bridge.rs   # Send-safe HTTP types (BridgeRequest/BridgeResponse)
     ├── template.rs      # External template loading
     ├── postgres.rs      # std/db/postgres - PostgreSQL client
     └── concurrent.rs    # std/concurrent - Channels, sleep
@@ -112,34 +112,57 @@ Runtime contract checking:
 
 ## HTTP Server Architecture
 
-The HTTP server uses a bridge pattern to connect async Axum handlers to the synchronous interpreter:
+The HTTP server uses a **per-request interpreter** model for true parallel request handling:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Tokio Async Runtime                         │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐                         │
-│  │ Task 1  │  │ Task 2  │  │ Task N  │  (async handlers)       │
-│  └────┬────┘  └────┬────┘  └────┬────┘                         │
-│       └────────────┼────────────┘                               │
-│                    │                                            │
-│              ┌─────▼─────┐                                      │
-│              │  Channel  │  (mpsc + oneshot reply)              │
-│              └─────┬─────┘                                      │
-└────────────────────┼────────────────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────────────────┐
-│                  Interpreter Thread                              │
-│  - Receives requests via channel                                 │
-│  - Finds and calls NTNT handler function                         │
-│  - Sends response back via oneshot channel                       │
-│  - Uses Rc<RefCell<>> (not thread-safe, hence single thread)     │
-└─────────────────────────────────────────────────────────────────┘
+Startup phase:
+  Parse .tnt files → register routes/middleware → snapshot closures into SharedState
+  Wrap SharedState in Arc<RwLock<SharedState>>
+
+Request phase (fully parallel):
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                     Tokio Async Runtime (Axum)                  │
+  │                                                                 │
+  │  Request 1 → route lookup → spawn_blocking → Interpreter → Resp│
+  │  Request 2 → route lookup → spawn_blocking → Interpreter → Resp│
+  │  Request N → route lookup → spawn_blocking → Interpreter → Resp│
+  │                                                                 │
+  │  Static files → Axum/tower-http directly (no interpreter)       │
+  └─────────────────────────────────────────────────────────────────┘
 ```
+
+Each request gets its own `Interpreter` instance with its own `Environment` chain. No locks during execution, no channels, no contention. The interpreter uses `Rc<RefCell<>>` internally (not thread-safe), but this is safe because each instance is confined to a single `spawn_blocking` task.
+
+### SharedState
+
+Route handlers are stored as `StoredHandler` — a `Send`-safe representation that snapshots the handler's closure environment at registration time, converting all `Value::Function` instances to `Value::FlatFunction` (no `Rc`). At request time, `StoredHandler::to_call_value()` reconstitutes a live `Value::Function` with a fresh `Rc<RefCell<Environment>>`.
+
+`SharedState` also carries type context (`structs`, `enums`, `type_aliases`, `trait_definitions`, `trait_implementations`) so per-request interpreters can use user-defined types.
+
+### Hot-Reload
+
+A background async task polls for file changes at `NTNT_HOT_RELOAD_INTERVAL_MS` (default: 500ms). On change, `rebuild_shared_state()` creates a fresh interpreter, re-parses all .tnt files, and atomically swaps the `Arc<RwLock<SharedState>>`. In-flight requests complete with the old state; new requests use the new state. Zero dropped requests.
+
+### Key Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NTNT_BLOCKING_THREADS` | Tokio default (~512) | `spawn_blocking` thread pool size |
+| `NTNT_REQUEST_TIMEOUT` | 30s | Max handler execution time (504 on breach) |
+| `NTNT_HOT_RELOAD_INTERVAL_MS` | 500ms | File watcher poll interval (dev mode only) |
+
+### Performance
+
+Interpreter construction: **43.9 µs** (full construction + 23 stdlib modules, release build). This enables ~22K constructions/sec per core. Static files bypass the interpreter entirely.
+
+### Behavioral Change: Module-Level Mutable State
+
+Module-level mutable state is snapshotted at registration time. Each request starts from that snapshot — mutations in one request are not visible to others. Use `kv_set`/`kv_get` (Redis) for cross-request state.
 
 **Key files:**
-- `http_server_async.rs` - Axum server setup, async handlers, static files
-- `http_bridge.rs` - Request/response types, channel communication
-- `http_server.rs` - Response builders (`json()`, `html()`, etc.)
+- `http_server.rs` - Route registration, `SharedState`, `StoredHandler`, response builders, stdlib HTTP functions
+- `http_server_async.rs` - Axum runner, `execute_request()`, static files, graceful shutdown, hot-reload watcher
+- `http_bridge.rs` - Bridge types (`BridgeRequest`/`BridgeResponse`) for `Send`-safe HTTP representation
 
 ## Intent Assertion Language (IAL)
 
