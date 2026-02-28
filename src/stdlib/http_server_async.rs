@@ -428,9 +428,9 @@ fn serve_static_file(file_path: &str, if_none_match: Option<&str>) -> Response<B
         let duration = mtime
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        format!("\"{}{}\"", metadata.len(), duration.as_secs())
+        format!("\"{}_{}_{}\"", metadata.len(), duration.as_secs(), duration.subsec_nanos())
     } else {
-        format!("\"{}\"", metadata.len())
+        format!("\"size-{}\"", metadata.len())
     };
 
     // Check If-None-Match — return 304 if ETag matches

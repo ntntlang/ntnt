@@ -858,7 +858,7 @@ let port = get_env("PORT") ?? "8080"
 // First ? unwraps Result (early-returns Err)
 // Second ? unwraps Option (early-returns None)
 fn get_user(id) {
-    let row = pg_query_one(pg, "SELECT * FROM users WHERE id = $1", [id])??
+    let row = pg_query_one(pg, "SELECT * FROM users WHERE id = $1", [id])? ?
     return Some(row)
 }
 ```
@@ -1577,7 +1577,7 @@ To iterate key-value pairs, use `entries()` from `std/collections`:
 import { entries } from "std/collections"
 
 for entry in entries(users) {
-    print("{entry[0]}: {entry[1]}")
+    print("{entry[\"key\"]}: {entry[\"value\"]}")
 }
 ```
 

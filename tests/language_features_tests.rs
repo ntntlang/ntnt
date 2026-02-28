@@ -1649,8 +1649,8 @@ print(rest[0])
 // ============================================================================
 
 #[test]
-fn test_for_loop_array_destructuring() {
-    // entries() returns [{key, value}] maps; destructure with named fields
+fn test_for_loop_entries_iteration() {
+    // entries() returns [{key, value}] maps; iterate and read key/value fields
     let code = r#"
 import { entries } from "std/collections"
 let data = map { "a": 1, "b": 2 }
@@ -4317,8 +4317,12 @@ print(result)
     let release_path = format!("./target/release/ntnt{}", exe);
     let binary = if std::path::Path::new(&debug_path).exists() {
         debug_path
-    } else {
+    } else if std::path::Path::new(&release_path).exists() {
         release_path
+    } else {
+        panic!(
+            "ntnt binary not found in either debug or release target directories. Run `cargo build` first."
+        )
     };
 
     let output = Command::new(binary)
@@ -4375,8 +4379,12 @@ print(result)
     let release_path = format!("./target/release/ntnt{}", exe);
     let binary = if std::path::Path::new(&debug_path).exists() {
         debug_path
-    } else {
+    } else if std::path::Path::new(&release_path).exists() {
         release_path
+    } else {
+        panic!(
+            "ntnt binary not found in either debug or release target directories. Run `cargo build` first."
+        )
     };
 
     let output = Command::new(binary)

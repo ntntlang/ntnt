@@ -95,7 +95,7 @@ example = "map[\"key\"] ?? \"default\", get_env(\"PORT\") ?? \"8080\""
 [operators.postfix]
 symbols = ["?"]
 description = "Try operator — unwraps Ok/Some or early-returns Err/None from enclosing function"
-example = "let data = parse_json(body)?, let row = pg_query_one(pg, sql, params)??"
+example = "let data = parse_json(body)?, let row = pg_query_one(pg, sql, params)? ?"
 
 [operators.member]
 symbols = [".", "[]"]

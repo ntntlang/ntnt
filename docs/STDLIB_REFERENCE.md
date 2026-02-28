@@ -2445,7 +2445,7 @@ import { push, pop, first } from "std/collections"
 | Function | Description |
 |----------|-------------|
 | [`concat`](#concat) | Concatenates two arrays into a new array. |
-| [`entries`](#entries) | Returns an array of [key, value] pairs from the map. |
+| [`entries`](#entries) | Returns an array of {key, value} maps from the map. |
 | [`first`](#first) | Returns the first element of an array. |
 | [`get_index`](#getindex) | Gets an element from an array by index with safe access. |
 | [`get_key`](#getkey) | Gets a value from a map by key with safe access. |
@@ -2499,10 +2499,12 @@ concat([1, 2], [3, 4])  // => [1, 2, 3, 4]  // Concatenate two arrays
 #### `entries`
 
 ```ntnt
-entries(m: Map) -> Array<Array>
+entries(m: Map) -> Array<Map>
 ```
 
-Returns an array of [key, value] pairs from the map.
+Returns an array of {key, value} maps from the map.
+
+Each element is a map with "key" and "value" fields. Access them as `entry["key"]` and `entry["value"]`.
 
 Each entry is a two-element array where the first element is the string key and the second is the corresponding value.
 
@@ -2510,7 +2512,7 @@ Each entry is a two-element array where the first element is the string key and 
 
 - `m` — The source map
 
-**Returns:** An array of two-element [key, value] arrays
+**Returns:** An array of maps, each with "key" and "value" fields
 
 **Examples:**
 

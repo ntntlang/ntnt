@@ -5220,7 +5220,7 @@ impl Interpreter {
                     let partial_content = self.resolve_and_load_partial(name, base_path)?;
 
                     // Build data map: start with current scope variables
-                    // If data_expr is provided, use that as the data (merged with current scope)
+                    // If data_expr is provided, use that map as the sole data scope for the partial.
                     let data_map = if let Some(expr) = data_expr {
                         match self.eval_expression(expr)? {
                             Value::Map(m) => m,

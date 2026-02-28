@@ -415,13 +415,14 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt entries
     // @module std/collections
-    // @signature entries(m: Map) -> Array<Array>
-    // Returns an array of [key, value] pairs from the map.
+    // @signature entries(m: Map) -> Array<Map>
+    // Returns an array of {key, value} maps from the map.
     //
-    // Each entry is a two-element array where the first element is the
-    // string key and the second is the corresponding value.
+    // Each entry is a map with a "key" field (the string key) and a
+    // "value" field (the corresponding value). Access them as entry["key"]
+    // and entry["value"].
     // @param m The source map
-    // @returns An array of two-element [key, value] arrays
+    // @returns An array of maps, each with "key" and "value" fields
     // @see_also keys, values, has_key, get_key
     // @since v0.1.0
     // @tags #pure, #deterministic

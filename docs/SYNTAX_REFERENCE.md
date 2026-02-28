@@ -90,7 +90,7 @@ NTNT operators by precedence (lowest to highest)
 | unary | `-`, `!` | Unary negation and logical NOT | `-x, !condition` |
 | range | `..`, `..=` | Range operators (exclusive and inclusive) | `0..10 (0-9), 0..=10 (0-10)` |
 | null coalesce | `??` | Null coalescing — unwraps Some(x) to x, returns right side for None | `map["key"] ?? "default", get_env("PORT") ?? "8080"` |
-| postfix | `?` | Try operator — unwraps Ok/Some or early-returns Err/None from enclosing function | `let data = parse_json(body)?, let row = pg_query_one(pg, sql, params)??` |
+| postfix | `?` | Try operator — unwraps Ok/Some or early-returns Err/None from enclosing function | `let data = parse_json(body)?, let row = pg_query_one(pg, sql, params)? ?` |
 | member | `.`, `[]` | Member access and indexing | `user.name, arr[0], map["key"]` |
 | pipe | `|>` | Pipeline operator (passes left as first arg to right) | `data |> transform |> validate` |
 
