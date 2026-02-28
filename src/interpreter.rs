@@ -826,8 +826,11 @@ impl Interpreter {
     /// construction cost per request. Clears per-request state and re-seeds
     /// type context from SharedState, but reuses the allocated HashMap capacity.
     pub fn reset_for_reuse(&mut self, shared: &crate::stdlib::http_server::SharedState) {
-        // Clear environment back to root and re-register builtins
-        self.environment.borrow_mut().clear_to_root();
+        // Replace environment with a fresh root rather than clearing in-place.
+        // Clearing in-place is unsafe: if a previous request errored mid-execution,
+        // self.environment may point to a nested scope. Clearing it would orphan the
+        // root and re-register builtins into the wrong scope level.
+        self.environment = Rc::new(RefCell::new(Environment::new()));
         self.define_builtins();
         self.define_builtin_types();
         self.define_stdlib();
@@ -839,6 +842,12 @@ impl Interpreter {
         self.trait_definitions = shared.trait_definitions.clone();
         self.trait_implementations = shared.trait_implementations.clone();
         self.current_file = shared.main_source_file.clone();
+
+        // Reset module tracking — must be cleared so the fresh environment doesn't
+        // skip re-importing modules whose bindings were wiped with the old environment.
+        self.loaded_modules.clear();
+        self.lib_modules.clear();
+        self.imported_files.clear();
 
         // Reset per-request fields
         self.deferred_statements.clear();
