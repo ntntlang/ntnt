@@ -151,13 +151,14 @@ print(sum)
 
 #[test]
 fn test_entries_function() {
+    // entries() now returns [{key, value}] maps so callers can use entry["key"] / entry["value"]
     let code = r#"
 import { entries } from "std/collections"
 let data = map { "name": "Alice", "age": 30 }
 let e = entries(data)
 print(len(e))
 for entry in e {
-    print("{entry[0]}: {entry[1]}")
+    print("{entry["key"]}: {entry["value"]}")
 }
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
@@ -673,6 +674,167 @@ print(page)
         "Should interpolate in multiline content"
     );
     assert!(stdout.contains("<html>"), "Should preserve HTML tags");
+}
+
+/// @since v0.3.16
+/// Finding #35: Template filter aliases (upper/lower) and space-separated args
+#[test]
+fn test_template_filter_aliases() {
+    let code = r#"
+let name = "hello"
+let result = """{{name | upper}} {{name | lower}}"""
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Filter aliases should work");
+    assert!(
+        stdout.contains("HELLO hello"),
+        "upper/lower aliases should work, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #35: Template filter with space-separated arguments
+#[test]
+fn test_template_filter_space_args() {
+    let code = r#"
+let page = """{{missing | default "fallback"}}"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Default filter with space args should work");
+    assert!(
+        stdout.contains("fallback"),
+        "Default filter should provide fallback, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #35: Comparisons work in template {{#if}} conditions
+#[test]
+fn test_template_if_comparison() {
+    let code = r#"
+let status = "draft"
+let page = """{{#if status == "active"}}ACTIVE{{#elif status == "draft"}}DRAFT{{#else}}OTHER{{/if}}"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Comparisons in if should work");
+    assert!(
+        stdout.contains("DRAFT"),
+        "Should match elif branch, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #36: Undefined template variables should render as empty string
+#[test]
+fn test_template_undefined_var_renders_empty() {
+    let code = r#"
+let name = "Josh"
+let page = """Hello {{name}}, {{title}}!"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Undefined template var should not crash");
+    assert!(
+        stdout.contains("Hello Josh, !"),
+        "Undefined var should render as empty string, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #36: Undefined raw template variables should render as empty string
+#[test]
+fn test_template_undefined_raw_var_renders_empty() {
+    let code = r#"
+let content = "<b>Hello</b>"
+let page = """{{{content}}}{{{extra_head}}}"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Undefined raw template var should not crash");
+    assert!(
+        stdout.contains("<b>Hello</b>"),
+        "Defined raw var should render, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #36: Undefined vars in {{#if}} should be falsy, not crash
+#[test]
+fn test_template_undefined_var_in_if_is_falsy() {
+    let code = r#"
+let page = """{{#if show_header}}<header>Hello</header>{{/if}}Footer"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "Undefined var in if condition should not crash"
+    );
+    assert!(
+        !stdout.contains("<header>"),
+        "Undefined if condition should be falsy, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Footer"),
+        "Content after if block should render, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #36: {{#if}} with undefined var should fall through to {{#else}}
+#[test]
+fn test_template_undefined_var_if_else_falls_to_else() {
+    let code = r#"
+let page = """{{#if page_css}}HAS CSS{{#else}}NO CSS{{/if}}"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Undefined var in if/else should not crash");
+    assert!(
+        stdout.contains("NO CSS"),
+        "Should fall through to else branch, got: {}",
+        stdout
+    );
+}
+
+/// @since v0.3.16
+/// Finding #36: Shared layout pattern with optional slots
+#[test]
+fn test_template_optional_layout_slots() {
+    let code = r#"
+let title = "My Page"
+let content = "<p>Hello World</p>"
+let page = """<!DOCTYPE html>
+<html>
+<head><title>{{title}}</title>{{{extra_head}}}</head>
+<body>{{{content}}}</body>
+</html>"""
+print(page)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Optional layout slots should not crash");
+    assert!(
+        stdout.contains("<title>My Page</title>"),
+        "Defined var should render"
+    );
+    assert!(
+        stdout.contains("<body><p>Hello World</p></body>"),
+        "Defined raw var should render"
+    );
+    assert!(
+        stdout.contains("</title></head>"),
+        "Undefined extra_head should render as empty"
+    );
 }
 
 /// @since v0.3.13
@@ -1487,16 +1649,19 @@ print(rest[0])
 // ============================================================================
 
 #[test]
-fn test_for_loop_array_destructuring() {
+fn test_for_loop_entries_iteration() {
+    // entries() returns [{key, value}] maps; iterate and read key/value fields
     let code = r#"
 import { entries } from "std/collections"
 let data = map { "a": 1, "b": 2 }
-for [k, v] in entries(data) {
+for entry in entries(data) {
+    let k = entry["key"]
+    let v = entry["value"]
     print("{k}={v}")
 }
 "#;
     let (stdout, _, exit_code) = run_ntnt_code(code);
-    assert_eq!(exit_code, 0, "For-loop array destructuring should work");
+    assert_eq!(exit_code, 0, "For-loop entries iteration should work");
     // Map order is not guaranteed, so check both are present
     assert!(stdout.contains("a=1"));
     assert!(stdout.contains("b=2"));
@@ -4118,5 +4283,130 @@ print(trim_left("  hello"))
     assert!(
         stderr.contains("DEPRECATED"),
         "Should show deprecation warning for trim_left"
+    );
+}
+
+#[test]
+fn test_template_partial_basic() {
+    // Create a temp directory with views/partials/
+    let temp_dir = std::env::temp_dir().join(format!("ntnt_partial_test_{}", std::process::id()));
+    let partials_dir = temp_dir.join("views/partials");
+    fs::create_dir_all(&partials_dir).expect("create partials dir");
+
+    // Write a partial
+    fs::write(
+        partials_dir.join("header.html"),
+        r#"<header><h1>{{title}}</h1></header>"#,
+    )
+    .expect("write partial");
+
+    // Write the main script
+    let main_tnt = temp_dir.join("app.tnt");
+    fs::write(
+        &main_tnt,
+        r#"
+let title = "Hello World"
+let result = """<html>{{> header}}<body>content</body></html>"""
+print(result)
+"#,
+    )
+    .expect("write main tnt");
+
+    let exe = std::env::consts::EXE_SUFFIX;
+    let debug_path = format!("./target/debug/ntnt{}", exe);
+    let release_path = format!("./target/release/ntnt{}", exe);
+    let binary = if std::path::Path::new(&debug_path).exists() {
+        debug_path
+    } else if std::path::Path::new(&release_path).exists() {
+        release_path
+    } else {
+        panic!(
+            "ntnt binary not found in either debug or release target directories. Run `cargo build` first."
+        )
+    };
+
+    let output = Command::new(binary)
+        .args(&["run", main_tnt.to_str().unwrap()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("Failed to execute ntnt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    // Cleanup
+    fs::remove_dir_all(&temp_dir).ok();
+
+    assert_eq!(
+        exit_code,
+        0,
+        "Partial test should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("<header><h1>Hello World</h1></header>"),
+        "Partial should render with parent scope data. Got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_template_partial_with_data() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("ntnt_partial_data_test_{}", std::process::id()));
+    let partials_dir = temp_dir.join("views/partials");
+    fs::create_dir_all(&partials_dir).expect("create partials dir");
+
+    // Write a partial that uses its own data
+    fs::write(
+        partials_dir.join("card.html"),
+        r#"<div class="card"><h2>{{name}}</h2><p>{{desc}}</p></div>"#,
+    )
+    .expect("write partial");
+
+    let main_tnt = temp_dir.join("app.tnt");
+    fs::write(
+        &main_tnt,
+        r#"
+let result = """{{> card map { "name": "Test Card", "desc": "A description" }}}"""
+print(result)
+"#,
+    )
+    .expect("write main tnt");
+
+    let exe = std::env::consts::EXE_SUFFIX;
+    let debug_path = format!("./target/debug/ntnt{}", exe);
+    let release_path = format!("./target/release/ntnt{}", exe);
+    let binary = if std::path::Path::new(&debug_path).exists() {
+        debug_path
+    } else if std::path::Path::new(&release_path).exists() {
+        release_path
+    } else {
+        panic!(
+            "ntnt binary not found in either debug or release target directories. Run `cargo build` first."
+        )
+    };
+
+    let output = Command::new(binary)
+        .args(&["run", main_tnt.to_str().unwrap()])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("Failed to execute ntnt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    fs::remove_dir_all(&temp_dir).ok();
+
+    assert_eq!(
+        exit_code,
+        0,
+        "Partial with data should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains(r#"<div class="card"><h2>Test Card</h2><p>A description</p></div>"#),
+        "Partial should render with provided data. Got: {}",
+        stdout
     );
 }

@@ -87,10 +87,15 @@ symbols = ["..", "..="]
 description = "Range operators (exclusive and inclusive)"
 example = "0..10 (0-9), 0..=10 (0-10)"
 
+[operators.null_coalesce]
+symbols = ["??"]
+description = "Null coalescing — unwraps Some(x) to x, returns right side for None"
+example = "map[\"key\"] ?? \"default\", get_env(\"PORT\") ?? \"8080\""
+
 [operators.postfix]
 symbols = ["?"]
-description = "Try operator — unwraps Ok/Some or early-returns Err/None"
-example = "parse_json(req)?"
+description = "Try operator — unwraps Ok/Some or early-returns Err/None from enclosing function"
+example = "let data = parse_json(body)?, let row = pg_query_one(pg, sql, params)? ?"
 
 [operators.member]
 symbols = [".", "[]"]
@@ -263,6 +268,16 @@ syntax = "\\{{ and \\}}"
 description = "Literal {{ and }} in output"
 example = "Use \\{{ for literal braces"
 
+[templates.partials]
+syntax = "{{> name}}"
+description = "Include a partial template (inherits current scope)"
+example = "{{> header}}"
+
+[templates.partials_data]
+syntax = "{{> name data_expr}}"
+description = "Include a partial with explicit data map"
+example = '{{> card map { "title": item.name, "desc": item.summary } }}'
+
 # =============================================================================
 # TRUTHY/FALSY VALUES
 # =============================================================================
@@ -331,6 +346,36 @@ description = "Compound types"
 [types.option_result]
 types = ["Option<T> (Some/None)", "Result<T, E> (Ok/Err)"]
 description = "Built-in sum types for optional values and error handling"
+
+[[types.option_result.functions]]
+name = "unwrap(x)"
+description = "Extract value from Some/Ok, panic on None/Err"
+example = "unwrap(Some(42)) → 42"
+
+[[types.option_result.functions]]
+name = "unwrap_or(x, default)"
+description = "Extract value or return default"
+example = "unwrap_or(None, 0) → 0"
+
+[[types.option_result.functions]]
+name = "is_some(x)"
+description = "Check if Option is Some"
+example = "is_some(Some(1)) → true"
+
+[[types.option_result.functions]]
+name = "is_none(x)"
+description = "Check if Option is None"
+example = "is_none(None) → true"
+
+[[types.option_result.functions]]
+name = "is_ok(x)"
+description = "Check if Result is Ok"
+example = "is_ok(Ok(1)) → true"
+
+[[types.option_result.functions]]
+name = "is_err(x)"
+description = "Check if Result is Err"
+example = "is_err(Err(\"fail\")) → true"
 
 [types.union]
 syntax = "T1 | T2 | T3"

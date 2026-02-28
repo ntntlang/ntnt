@@ -1,6 +1,6 @@
 <!-- NTNT coding guide sections are sourced from docs/AI_AGENT_GUIDE.md -->
 <!-- To update NTNT coding instructions, edit AI_AGENT_GUIDE.md and copy to all agent files -->
-<!-- Last synced: 2026-02-23 -->
+<!-- Last synced: 2026-02-28 -->
 
 # NTNT Language - GitHub Copilot Instructions
 
@@ -718,6 +718,7 @@ server 8080 {
 |----------|--------|-------------|
 | `NTNT_ENV` | `production`, `prod` | Disables hot-reload for better performance |
 | `NTNT_STRICT` | `1`, `true` | Blocks execution on type errors (runs type checker before `ntnt run`) |
+| `NTNT_ALLOW_PRIVATE_IPS` | `true` | Allows `fetch()` to connect to private/internal IPs (see below) |
 
 ```bash
 # Development (default) - hot-reload enabled
@@ -728,6 +729,22 @@ NTNT_ENV=production ntnt run server.tnt
 ```
 
 **Hot-reload** watches your `.tnt` files and imported modules for changes, automatically reloading on the next request. Disable in production for zero filesystem overhead per request.
+
+### SSRF Protection (Private IP Blocking)
+
+By default, `fetch()` blocks requests to private/internal IP ranges (`10.x`, `172.16-31.x`, `192.168.x`, `127.x`, `localhost`). This prevents Server-Side Request Forgery attacks.
+
+**In Docker**, this blocks inter-container communication (e.g., calling a sidecar service at `172.19.0.1:8889`). Set `NTNT_ALLOW_PRIVATE_IPS=true` to allow it:
+
+```yaml
+# docker-compose.yml
+services:
+  ntnt:
+    environment:
+      - NTNT_ALLOW_PRIVATE_IPS=true
+```
+
+⚠️ Only enable this when your app needs to call internal services. Keep disabled in public-facing apps that don't need internal network access.
 
 ### Response Builder Functions
 
@@ -822,6 +839,34 @@ fn find_user_email(id) {
 - `Some(v)?` → evaluates to `v`
 - `None?` → early-returns `None` from the enclosing function
 - Non-Result/Option values pass through unchanged (gradual typing)
+
+### The `??` Operator (Null Coalescing)
+
+The `??` operator provides a default value when the left side is `None`:
+
+```ntnt
+// Map access returns None for missing keys — ?? provides a default
+let name = user["name"] ?? "Anonymous"
+let port = get_env("PORT") ?? "8080"
+
+// Replaces verbose get_or() pattern:
+// Before: let name = get_or(user, "name", "Anonymous")
+// After:  let name = user["name"] ?? "Anonymous"
+
+// Chain with ? for Result<Option<T>> (e.g., database queries):
+// pg_query_one returns Result<Option<Map>>
+// First ? unwraps Result (early-returns Err)
+// Second ? unwraps Option (early-returns None)
+fn get_user(id) {
+    let row = pg_query_one(pg, "SELECT * FROM users WHERE id = $1", [id])? ?
+    return Some(row)
+}
+```
+
+**Behavior:**
+- `Some(v) ?? default` → `v` (unwrapped)
+- `None ?? default` → `default`
+- Non-Option values pass through unchanged
 
 ### The `otherwise` Keyword (Inline Error Handling)
 
@@ -1108,21 +1153,56 @@ let page = """
 <style>h1 { color: blue; }</style>
 <h1>Hello, {{name}}!</h1>
 
+{{! This is a comment — not rendered }}
+
 {{#for item in items}}
-<p>{{item.name}}: ${{item.price}}</p>
+<p>{{@index1}}. {{item.name}}: ${{item.price}}</p>
+{{#empty}}
+<p>No items found.</p>
 {{/for}}
 
-{{#if logged_in}}
-<a href="/logout">Logout</a>
+{{#if status == "active"}}
+<span class="active">Active</span>
+{{#elif status == "draft"}}
+<span class="draft">Draft</span>
 {{#else}}
-<a href="/login">Login</a>
+<span>Unknown</span>
 {{/if}}
 """
 ```
 
-**Available filters:** `uppercase`, `lowercase`, `capitalize`, `trim`, `truncate(n)`, `escape`, `json`, `url_encode`
+**Output modes:**
+- `{{expr}}` — HTML-escaped output
+- `{{{expr}}}` — Raw/unescaped output (use for HTML content like layout slots)
 
-**Loop metadata:** `@index`, `@length`, `@first`, `@last`, `@even`, `@odd`
+**Optional variables:** Undefined variables render as empty string (not an error). Undefined vars in `{{#if}}` are falsy.
+
+**Comparisons in conditions:** `{{#if x == "val"}}`, `{{#if count > 0}}` — full expression support.
+
+**Filters:** `uppercase`/`upper`, `lowercase`/`lower`, `capitalize`, `trim`, `truncate(n)`, `replace(old, new)`, `escape`, `raw`/`safe`, `default(val)`, `length`, `first`, `last`, `reverse`, `join(sep)`, `slice(start, end)`, `json`, `number(decimals)`, `url_encode`
+
+Filter args use parens or spaces: `{{var | truncate(100)}}` or `{{var | default "N/A"}}`
+
+**Loop metadata:** `@index` (0-based), `@index1` (1-based), `@length`, `@first`, `@last`, `@even`, `@odd`
+
+**Partials:** Include reusable template fragments with `{{> name}}`:
+
+```ntnt
+{{! Include a partial — inherits current scope variables }}
+{{> header}}
+
+{{! Include with explicit data }}
+{{> card map { "title": item.name, "desc": item.summary } }}
+```
+
+Partial resolution order (relative to project root):
+1. `views/partials/{name}.html`
+2. `views/partials/{name}` (if name includes extension)
+3. `views/{name}.html`
+4. `{name}.html` (relative to script)
+5. `{name}` (exact path relative to script)
+
+Without a data expression, partials inherit all variables from the current scope. With a data expression (must be a map), only that data is available inside the partial.
 
 ---
 
@@ -1180,6 +1260,42 @@ use_middleware(fn(req) {
     }
 })
 ```
+
+### Middleware Request Context
+
+Every request includes an empty `context` map that middleware can populate. Use `merge()` to pass data (like the authenticated user) to downstream handlers — this avoids re-fetching in every route.
+
+```ntnt
+import { merge, get_or } from "std/collections"
+
+// middleware/01_auth.tnt
+fn middleware(req) {
+    let session = get_session(req)
+    if is_none(session) {
+        return merge(req, map { "context": map { "user": None } })
+    }
+    let user = get_user_by_session(unwrap(session))
+    return merge(req, map { "context": map { "user": user } })
+}
+```
+
+```ntnt
+// routes/admin/index.tnt — handler reads from context
+fn get(req) {
+    let user = get_or(req.context, "user", None)
+    if is_none(user) {
+        return redirect("/login")
+    }
+    // user is available — no need to re-fetch from session
+    template("views/admin.html", map { "user": unwrap(user) })
+}
+```
+
+**Rules:**
+- Middleware must `return merge(req, map { "context": ... })` to pass context forward
+- Returning a map with `"status"` key short-circuits (treated as HTTP response)
+- Returning `Unit` (nothing) passes the original request unchanged
+- Context keys are convention-based — use `"user"`, `"permissions"`, `"feature_flags"`, etc.
 
 ---
 
@@ -1420,6 +1536,59 @@ m["a"]            // None (key exists, value is None)
 m["b"]            // None (key doesn't exist)
 has_key(m, "a")   // true
 has_key(m, "b")   // false
+```
+
+### Truthy/Falsy Values
+
+NTNT's truthy/falsy rules differ from JavaScript and Python:
+
+| Value | Truthy? | Notes |
+|-------|---------|-------|
+| `true` | ✅ | |
+| `false` | ❌ | |
+| `0` | ✅ | **Unlike JS/Python, `0` is truthy!** |
+| `""` (empty string) | ❌ | |
+| `None` | ❌ | |
+| `[]` (empty array) | ❌ | |
+| `map {}` (empty map) | ❌ | |
+| Any non-empty string | ✅ | |
+| Any non-empty array/map | ✅ | |
+| Any number (including 0) | ✅ | |
+
+⚠️ **`0` is truthy** — this catches people coming from JS/Python. If you need to check for zero, use explicit comparison: `if value == 0 { ... }`.
+
+### Map Iteration
+
+`for k in map` iterates over **keys**, not entries:
+
+```ntnt
+let users = map { "alice": 30, "bob": 25 }
+
+// Iterates keys
+for name in users {
+    print("{name}: {users[name]}")
+}
+// Output: alice: 30, bob: 25
+```
+
+To iterate key-value pairs, use `entries()` from `std/collections`:
+
+```ntnt
+import { entries } from "std/collections"
+
+for entry in entries(users) {
+    print("{entry[\"key\"]}: {entry[\"value\"]}")
+}
+```
+
+To get just values, use `values()`:
+
+```ntnt
+import { values } from "std/collections"
+
+for age in values(users) {
+    print(age)
+}
 ```
 
 ### Option/Result Display in Strings

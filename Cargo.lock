@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "ntnt"
-version = "0.3.15"
+version = "0.3.16"
 dependencies = [
  "aes-gcm",
  "anyhow",

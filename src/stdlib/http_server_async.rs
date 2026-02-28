@@ -408,8 +408,50 @@ fn bridge_to_axum_response(resp: BridgeResponse) -> Response<Body> {
 }
 
 /// Serve a static file with proper headers
-fn serve_static_file(file_path: &str) -> Response<Body> {
+fn serve_static_file(file_path: &str, if_none_match: Option<&str>) -> Response<Body> {
     use std::fs;
+
+    let path = std::path::Path::new(file_path);
+    let metadata = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header("content-type", "text/plain")
+                .body(Body::from("File not found"))
+                .unwrap();
+        }
+    };
+
+    // Generate ETag from file size + modification time
+    let etag = if let Ok(mtime) = metadata.modified() {
+        let duration = mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        format!(
+            "\"{}_{}_{}\"",
+            metadata.len(),
+            duration.as_secs(),
+            duration.subsec_nanos()
+        )
+    } else {
+        format!("\"size-{}\"", metadata.len())
+    };
+
+    // Check If-None-Match — return 304 if ETag matches
+    if let Some(client_etag) = if_none_match {
+        if client_etag == etag || client_etag == "*" {
+            let mut resp = Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header("etag", &etag)
+                .header("cache-control", cache_control_for(file_path))
+                .header("server", "ntnt-async")
+                .body(Body::empty())
+                .unwrap();
+            apply_async_security_headers(&mut resp);
+            return resp;
+        }
+    }
 
     let mut resp = match fs::read(file_path) {
         Ok(contents) => {
@@ -420,7 +462,8 @@ fn serve_static_file(file_path: &str) -> Response<Body> {
                 .status(StatusCode::OK)
                 .header("content-type", mime_type)
                 .header("content-length", len)
-                .header("cache-control", "public, max-age=3600")
+                .header("etag", &etag)
+                .header("cache-control", cache_control_for(file_path))
                 .header("server", "ntnt-async")
                 .body(Body::from(contents))
                 .unwrap_or_else(|_| {
@@ -438,6 +481,19 @@ fn serve_static_file(file_path: &str) -> Response<Body> {
     };
     apply_async_security_headers(&mut resp);
     resp
+}
+
+/// Returns appropriate Cache-Control header based on file type.
+/// Images/fonts get long cache (1 year, immutable). CSS/JS get 1 day. HTML gets no-cache.
+fn cache_control_for(file_path: &str) -> &'static str {
+    let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "svg" | "ico" | "webp" | "avif" | "woff" | "woff2"
+        | "ttf" | "eot" => "public, max-age=31536000, immutable",
+        "css" | "js" => "public, max-age=86400",
+        "html" | "htm" => "no-cache",
+        _ => "public, max-age=3600",
+    }
 }
 
 /// Guess MIME type from file extension
@@ -468,6 +524,13 @@ fn guess_mime_type(path: &str) -> &'static str {
 async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> impl IntoResponse {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+
+    // Extract If-None-Match header for ETag/conditional request support (static files)
+    let if_none_match = req
+        .headers()
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     // First, check for dynamic route match
     let route_match = state.routes.find_route(method.as_str(), &path).await;
@@ -516,7 +579,7 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
             // No dynamic route - check static files (GET only)
             if method == axum::http::Method::GET {
                 if let Some((file_path, _prefix)) = state.routes.find_static_file(&path).await {
-                    return serve_static_file(&file_path);
+                    return serve_static_file(&file_path, if_none_match.as_deref());
                 }
             }
 

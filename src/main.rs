@@ -1184,7 +1184,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
         let line_map = build_line_number_map(&source);
 
         for stmt in &ast.statements {
-            match stmt {
+            match unwrap_located(stmt) {
                 Statement::Function {
                     name,
                     params,
@@ -1276,7 +1276,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
             let http_methods = ["get", "post", "put", "delete", "patch", "head", "options"];
 
             for stmt in &ast.statements {
-                if let Statement::Function { name, .. } = stmt {
+                if let Statement::Function { name, .. } = unwrap_located(stmt) {
                     let method = name.to_lowercase();
                     if http_methods.contains(&method.as_str()) {
                         let line = line_map.get(&format!("fn {}", name)).copied();
@@ -1338,6 +1338,15 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
 }
 
 /// Build a map of declaration patterns to line numbers
+/// Unwrap a `Statement::Located` wrapper, returning the inner statement.
+/// Allows all AST-walking code to be transparent to source-location annotations.
+fn unwrap_located(stmt: &ntnt::ast::Statement) -> &ntnt::ast::Statement {
+    match stmt {
+        ntnt::ast::Statement::Located { stmt, .. } => unwrap_located(stmt),
+        other => other,
+    }
+}
+
 fn build_line_number_map(source: &str) -> std::collections::HashMap<String, usize> {
     use std::collections::HashMap;
     let mut map = HashMap::new();
@@ -3277,7 +3286,7 @@ fn analyze_ast_warnings(ast: &ntnt::ast::Program, _source: &str) -> Vec<serde_js
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for stmt in &ast.statements {
-        match stmt {
+        match unwrap_located(stmt) {
             Statement::Import { items, .. } => {
                 for item in items {
                     imports.push(item.name.clone());
@@ -3433,6 +3442,11 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                                     collect_from_template_parts(elif_body, names, collect_fn);
                                 }
                                 collect_from_template_parts(else_parts, names, collect_fn);
+                            }
+                            TemplatePart::Partial { data_expr, .. } => {
+                                if let Some(expr) = data_expr {
+                                    collect_fn(expr, names);
+                                }
                             }
                         }
                     }
@@ -3695,6 +3709,7 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
             }
             collect_from_groups(groups, names);
         }
+        Statement::Located { stmt, .. } => collect_used_names(stmt, names),
     }
 }
 
@@ -4566,6 +4581,7 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             "arithmetic",
             "unary",
             "range",
+            "null_coalesce",
             "postfix",
             "member",
             "pipe",
@@ -4700,6 +4716,8 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             "elif",
             "comments",
             "escape_braces",
+            "partials",
+            "partials_data",
         ];
 
         for feat in &features {
@@ -4838,6 +4856,24 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                 }
                 if let Some(desc) = t.get("description").and_then(|v| v.as_str()) {
                     md.push_str(&format!("{}\n\n", desc));
+                }
+                // Render functions table if present
+                if let Some(functions) = t.get("functions").and_then(|v| v.as_array()) {
+                    if !functions.is_empty() {
+                        md.push_str("| Function | Description | Example |\n");
+                        md.push_str("|----------|-------------|---------|\n");
+                        for func in functions {
+                            let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let desc = func
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let example =
+                                func.get("example").and_then(|v| v.as_str()).unwrap_or("");
+                            md.push_str(&format!("| `{}` | {} | `{}` |\n", name, desc, example));
+                        }
+                        md.push_str("\n");
+                    }
                 }
             }
         }
@@ -5440,6 +5476,30 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             ));
         }
 
+        // NTNT_ALLOW_PRIVATE_IPS
+        if let Some(env) = env_vars.get("NTNT_ALLOW_PRIVATE_IPS") {
+            let values = env
+                .get("values")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| format!("`{}`", s))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
+            let desc = env
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            md.push_str(&format!(
+                "| `NTNT_ALLOW_PRIVATE_IPS` | {} | {} | {} |\n",
+                values, default, desc
+            ));
+        }
+
         md.push_str("\n### Examples\n\n```bash\n");
         md.push_str("# Development (default) - hot-reload enabled\n");
         md.push_str("ntnt run server.tnt\n\n");
@@ -5448,7 +5508,9 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
         md.push_str("# Custom timeout (60 seconds)\n");
         md.push_str("NTNT_TIMEOUT=60 ntnt run server.tnt\n\n");
         md.push_str("# Strict type checking - blocks execution on type errors\n");
-        md.push_str("NTNT_STRICT=1 ntnt run server.tnt\n");
+        md.push_str("NTNT_STRICT=1 ntnt run server.tnt\n\n");
+        md.push_str("# Allow fetch() to connect to Docker internal services\n");
+        md.push_str("NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt\n");
         md.push_str("```\n\n");
         md.push_str("---\n\n");
     }

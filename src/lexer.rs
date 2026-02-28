@@ -47,6 +47,11 @@ pub enum TemplatePart {
         elif_chains: Vec<(String, Vec<TemplatePart>)>,
         else_parts: Vec<TemplatePart>,
     },
+    /// Partial include: {{> name}} or {{> name data_expr}}
+    Partial {
+        name: String,
+        data_expr: Option<String>,
+    },
 }
 
 /// A filter applied to a template expression
@@ -562,12 +567,33 @@ impl<'a> Lexer<'a> {
                     literal.clear();
                 }
 
-                // Read until }}} (if raw) or }} (if normal)
+                // Read until }}} (if raw) or }} (if normal).
+                // Track string literals so }} inside "a}}" doesn't close the tag.
                 let mut expr = String::new();
                 let mut brace_depth = 0;
+                let mut in_str = false;
+                let mut str_char = '"';
+                let mut prev_backslash = false;
 
                 while let Some(c) = chars.next() {
-                    if c == '{' {
+                    if in_str {
+                        expr.push(c);
+                        if prev_backslash {
+                            prev_backslash = false;
+                        } else if c == '\\' {
+                            prev_backslash = true;
+                        } else if c == str_char {
+                            in_str = false;
+                        }
+                        continue;
+                    }
+
+                    if c == '"' || c == '\'' {
+                        in_str = true;
+                        str_char = c;
+                        prev_backslash = false;
+                        expr.push(c);
+                    } else if c == '{' {
                         brace_depth += 1;
                         expr.push(c);
                     } else if c == '}' {
@@ -615,6 +641,23 @@ impl<'a> Lexer<'a> {
                     continue;
                 }
 
+                // Handle partials: {{> name}} or {{> name data_expr}}
+                if let Some(stripped) = expr.strip_prefix("> ").or_else(|| expr.strip_prefix(">")) {
+                    let stripped = stripped.trim();
+                    // Split into name and optional data expression
+                    // Name is the first token (no spaces), rest is data expr
+                    let (name, data_expr) =
+                        if let Some(space_pos) = stripped.find(|c: char| c.is_whitespace()) {
+                            let name = stripped[..space_pos].trim().to_string();
+                            let data = stripped[space_pos..].trim().to_string();
+                            (name, if data.is_empty() { None } else { Some(data) })
+                        } else {
+                            (stripped.to_string(), None)
+                        };
+                    parts.push(TemplatePart::Partial { name, data_expr });
+                    continue;
+                }
+
                 if let Some(stripped) = expr.strip_prefix("#for ") {
                     // Parse: #for x in items
                     if let Some((var_part, iter_part)) = stripped.split_once(" in ") {
@@ -647,8 +690,11 @@ impl<'a> Lexer<'a> {
                                 Vec::new()
                             };
 
-                            // Advance past the body and closing tag
-                            for _ in 0..(endfor + 8) {
+                            // Advance past the body and closing tag.
+                            // Use char count (not byte offset) because chars.next() advances
+                            // by Unicode code point, but find_matching_end returns byte offsets.
+                            let chars_to_skip = rest[..endfor].chars().count() + 8;
+                            for _ in 0..chars_to_skip {
                                 chars.next();
                             }
 
@@ -681,8 +727,11 @@ impl<'a> Lexer<'a> {
                         let (then_parts, elif_chains, else_parts) =
                             self.parse_if_block_content(block_content);
 
-                        // Advance past everything including closing tag
-                        for _ in 0..(endif + 7) {
+                        // Advance past everything including closing tag.
+                        // Use char count (not byte offset) because chars.next() advances
+                        // by Unicode code point, but find_matching_end returns byte offsets.
+                        let chars_to_skip = rest[..endif].chars().count() + 7;
+                        for _ in 0..chars_to_skip {
                             chars.next();
                         }
 
@@ -750,7 +799,8 @@ impl<'a> Lexer<'a> {
 
     /// Find matching closing tag, respecting nested blocks
     fn find_matching_end(&self, content: &str, block_type: &str) -> Option<usize> {
-        let open_tag = format!("{{{{#{}", block_type);
+        // Use a space-terminated prefix so "{{#for" doesn't match "{{#format}}" etc.
+        let open_tag = format!("{{{{#{} ", block_type);
         let close_tag = format!("{{{{/{}}}}}", block_type);
 
         let mut depth = 0;
@@ -780,7 +830,7 @@ impl<'a> Lexer<'a> {
     fn find_directive_at_level(&self, content: &str, directive: &str) -> Option<usize> {
         let target = format!("{{{{{}}}}}", directive);
         let mut pos = 0;
-        let mut depth = 0;
+        let mut depth: i32 = 0;
 
         while pos < content.len() {
             // Track nesting depth for for/if blocks
@@ -789,7 +839,10 @@ impl<'a> Lexer<'a> {
             } else if content[pos..].starts_with("{{/for}}")
                 || content[pos..].starts_with("{{/if}}")
             {
-                depth -= 1;
+                // Guard against underflow on malformed templates
+                if depth > 0 {
+                    depth -= 1;
+                }
             } else if depth == 0 && content[pos..].starts_with(&target) {
                 return Some(pos);
             }
@@ -817,7 +870,7 @@ impl<'a> Lexer<'a> {
         // Find all elif and else positions at the current level
         let mut sections: Vec<(&str, usize)> = Vec::new(); // (type, position)
         let mut pos = 0;
-        let mut depth = 0;
+        let mut depth: i32 = 0;
 
         while pos < content.len() {
             if content[pos..].starts_with("{{#for ") || content[pos..].starts_with("{{#if ") {
@@ -827,7 +880,10 @@ impl<'a> Lexer<'a> {
             } else if content[pos..].starts_with("{{/for}}")
                 || content[pos..].starts_with("{{/if}}")
             {
-                depth -= 1;
+                // Guard against underflow on malformed templates
+                if depth > 0 {
+                    depth -= 1;
+                }
                 let ch = content[pos..].chars().next().unwrap();
                 pos += ch.len_utf8();
             } else if depth == 0 {
@@ -961,10 +1017,27 @@ impl<'a> Lexer<'a> {
                     });
                 }
             } else {
-                filters.push(TemplateFilter {
-                    name: filter_str.to_string(),
-                    args: Vec::new(),
-                });
+                // Check for space-separated args: name "arg" or name arg1, arg2
+                // Common pattern: default "fallback", truncate 100
+                let first_space = filter_str.find(|c: char| c.is_whitespace());
+                if let Some(space_pos) = first_space {
+                    let name = filter_str[..space_pos].trim().to_string();
+                    let args_str = filter_str[space_pos..].trim();
+                    if !args_str.is_empty() {
+                        let args = self.split_filter_args(args_str);
+                        filters.push(TemplateFilter { name, args });
+                    } else {
+                        filters.push(TemplateFilter {
+                            name,
+                            args: Vec::new(),
+                        });
+                    }
+                } else {
+                    filters.push(TemplateFilter {
+                        name: filter_str.to_string(),
+                        args: Vec::new(),
+                    });
+                }
             }
         }
 

@@ -304,6 +304,20 @@ impl Environment {
         }
     }
 
+    /// Collect all bindings from this scope and parent scopes (child overrides parent)
+    pub fn all_bindings(&self) -> HashMap<String, Value> {
+        let mut bindings = if let Some(ref parent) = self.parent {
+            parent.borrow().all_bindings()
+        } else {
+            HashMap::new()
+        };
+        // Current scope overrides parent
+        for (k, v) in &self.values {
+            bindings.insert(k.clone(), v.clone());
+        }
+        bindings
+    }
+
     pub fn set(&mut self, name: &str, value: Value) -> bool {
         if self.values.contains_key(name) {
             self.values.insert(name.to_string(), value);
@@ -394,6 +408,10 @@ pub struct Interpreter {
     routes_dir: Option<String>,
     /// Tracked routes directory mtimes for detecting new/deleted files (dir_path -> mtime)
     routes_dir_mtimes: HashMap<String, std::time::SystemTime>,
+    /// Last known source line being executed (for runtime error reporting)
+    current_line: usize,
+    /// Last known source column being executed (for runtime error reporting)
+    current_col: usize,
 }
 
 /// Information about a trait definition
@@ -442,6 +460,8 @@ impl Interpreter {
             middleware_files: HashMap::new(),
             routes_dir: None,
             routes_dir_mtimes: HashMap::new(),
+            current_line: 0,
+            current_col: 0,
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
@@ -813,8 +833,7 @@ impl Interpreter {
         // Middleware change requires full route re-discovery
         // (middleware is re-loaded during load_file_based_routes)
         if let Some(dir_path) = self.routes_dir.clone() {
-            self.server_state.routes.clear();
-            self.server_state.middleware.clear();
+            self.server_state.clear_routes_and_middleware();
             self.middleware_files.clear();
 
             match self.load_file_based_routes(&dir_path) {
@@ -887,10 +906,12 @@ impl Interpreter {
         let dir_path = self.routes_dir.clone().unwrap();
         println!("\n[hot-reload] Routes directory changed, re-discovering routes...");
 
-        // Clear routes and middleware (both are re-discovered by load_file_based_routes)
-        // Preserve static dirs and shutdown handlers
-        self.server_state.routes.clear();
-        self.server_state.middleware.clear();
+        // Clear routes, route_index, and middleware (all re-discovered by load_file_based_routes).
+        // Preserve static dirs and shutdown handlers.
+        // IMPORTANT: route_index MUST be cleared alongside routes — if load_file_based_routes
+        // fails, routes is empty but route_index would still have stale indices, causing an
+        // index-out-of-bounds panic on the next request (ntnt-findings #64).
+        self.server_state.clear_routes_and_middleware();
 
         // Re-discover routes from the directory
         match self.load_file_based_routes(&dir_path) {
@@ -906,6 +927,9 @@ impl Interpreter {
             }
             Err(e) => {
                 eprintln!("[hot-reload] Error re-discovering routes: {}", e);
+                // Routes and route_index are already cleared above — server will return 404
+                // for all routes until the next successful reload. This is safer than serving
+                // requests with a stale/corrupt route_index pointing into an empty routes vec.
                 false
             }
         }
@@ -1831,6 +1855,136 @@ impl Interpreter {
                         "is_err() requires a Result".to_string(),
                     )),
                 },
+            },
+        );
+
+        // @ntnt is_map
+        // @signature is_map(val: Any) -> Bool
+        // Returns true if the value is a Map (dictionary/object).
+        //
+        // Use to distinguish maps from other value types, especially when
+        // a function accepts either a Map or a primitive. Pairs with
+        // is_array(), is_string(), is_int(), is_float(), is_bool().
+        // @param val Any value to test.
+        // @returns Bool — true if val is a Map, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_array, is_string, is_int, typeof
+        // @since v0.3.16
+        // @example is_map(map { "a": 1 }) => true ~ "Map is a map"
+        // @example is_map([1, 2, 3]) => false ~ "Array is not a map"
+        // @example is_map("hello") => false ~ "String is not a map"
+        // @example is_map(None) => false ~ "None is not a map"
+        self.environment.borrow_mut().define(
+            "is_map".to_string(),
+            Value::NativeFunction {
+                name: "is_map".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::Map(_)))),
+            },
+        );
+
+        // @ntnt is_array
+        // @signature is_array(val: Any) -> Bool
+        // Returns true if the value is an Array.
+        //
+        // Use to distinguish arrays from other value types. Pairs with
+        // is_map(), is_string(), is_int(), is_float(), is_bool().
+        // @param val Any value to test.
+        // @returns Bool — true if val is an Array, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_map, is_string, is_int, typeof
+        // @since v0.3.16
+        // @example is_array([1, 2, 3]) => true ~ "Array is an array"
+        // @example is_array(map { "a": 1 }) => false ~ "Map is not an array"
+        // @example is_array("hello") => false ~ "String is not an array"
+        self.environment.borrow_mut().define(
+            "is_array".to_string(),
+            Value::NativeFunction {
+                name: "is_array".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::Array(_)))),
+            },
+        );
+
+        // @ntnt is_string
+        // @signature is_string(val: Any) -> Bool
+        // Returns true if the value is a String.
+        // @param val Any value to test.
+        // @returns Bool — true if val is a String, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_map, is_array, is_int, typeof
+        // @since v0.3.16
+        // @example is_string("hello") => true ~ "String is a string"
+        // @example is_string(42) => false ~ "Int is not a string"
+        self.environment.borrow_mut().define(
+            "is_string".to_string(),
+            Value::NativeFunction {
+                name: "is_string".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::String(_)))),
+            },
+        );
+
+        // @ntnt is_int
+        // @signature is_int(val: Any) -> Bool
+        // Returns true if the value is an integer.
+        // @param val Any value to test.
+        // @returns Bool — true if val is an Int, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_map, is_array, is_string, is_float, typeof
+        // @since v0.3.16
+        // @example is_int(42) => true ~ "Int is an int"
+        // @example is_int(3.14) => false ~ "Float is not an int"
+        self.environment.borrow_mut().define(
+            "is_int".to_string(),
+            Value::NativeFunction {
+                name: "is_int".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::Int(_)))),
+            },
+        );
+
+        // @ntnt is_float
+        // @signature is_float(val: Any) -> Bool
+        // Returns true if the value is a Float.
+        // @param val Any value to test.
+        // @returns Bool — true if val is a Float, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_int, is_string, typeof
+        // @since v0.3.16
+        // @example is_float(3.14) => true ~ "Float is a float"
+        // @example is_float(42) => false ~ "Int is not a float"
+        self.environment.borrow_mut().define(
+            "is_float".to_string(),
+            Value::NativeFunction {
+                name: "is_float".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::Float(_)))),
+            },
+        );
+
+        // @ntnt is_bool
+        // @signature is_bool(val: Any) -> Bool
+        // Returns true if the value is a Bool.
+        // @param val Any value to test.
+        // @returns Bool — true if val is a Bool, false otherwise.
+        // @tags #pure, #deterministic
+        // @see_also is_int, is_string, typeof
+        // @since v0.3.16
+        // @example is_bool(true) => true ~ "Bool is a bool"
+        // @example is_bool(1) => false ~ "Int is not a bool"
+        self.environment.borrow_mut().define(
+            "is_bool".to_string(),
+            Value::NativeFunction {
+                name: "is_bool".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| Ok(Value::Bool(matches!(&args[0], Value::Bool(_)))),
             },
         );
 
@@ -2825,6 +2979,11 @@ impl Interpreter {
 
     fn eval_statement(&mut self, stmt: &Statement) -> Result<Value> {
         match stmt {
+            Statement::Located { line, col, stmt } => {
+                self.current_line = *line;
+                self.current_col = *col;
+                return self.eval_statement(stmt);
+            }
             Statement::Let {
                 name,
                 mutable,
@@ -4707,6 +4866,68 @@ impl Interpreter {
     }
 
     /// Render a template string with the given data
+    /// Resolve a partial name to a file path and load its content.
+    /// Resolution order:
+    /// 1. views/partials/{name}.html (relative to script dir)
+    /// 2. views/partials/{name} (with extension already included)
+    /// 3. {name}.html (relative to script dir)
+    /// 4. {name} (exact path relative to script dir)
+    fn resolve_and_load_partial(&self, name: &str, base_path: Option<&str>) -> Result<String> {
+        let script_dir = if let Some(base) = base_path {
+            std::path::Path::new(base)
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .to_path_buf()
+        } else {
+            std::path::PathBuf::from(".")
+        };
+
+        // Find the project root by looking for a directory that contains "views/"
+        // Walk up from script_dir
+        let project_root = {
+            let mut dir = script_dir.clone();
+            loop {
+                if dir.join("views").is_dir() {
+                    break dir;
+                }
+                if !dir.pop() {
+                    break script_dir.clone();
+                }
+            }
+        };
+
+        let candidates = [
+            project_root.join(format!("views/partials/{}.html", name)),
+            project_root.join(format!("views/partials/{}", name)),
+            project_root.join(format!("views/{}.html", name)),
+            script_dir.join(format!("{}.html", name)),
+            script_dir.join(name),
+        ];
+
+        for candidate in &candidates {
+            if candidate.is_file() {
+                return std::fs::read_to_string(candidate).map_err(|e| {
+                    IntentError::RuntimeError(format!(
+                        "Failed to read partial '{}' from {}: {}",
+                        name,
+                        candidate.display(),
+                        e
+                    ))
+                });
+            }
+        }
+
+        Err(IntentError::RuntimeError(format!(
+            "Partial '{}' not found. Searched:\n{}",
+            name,
+            candidates
+                .iter()
+                .map(|p| format!("  - {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )))
+    }
+
     fn render_template_with_data(
         &mut self,
         content: &str,
@@ -4755,12 +4976,22 @@ impl Interpreter {
             match part {
                 TemplatePart::Literal(s) => result.push_str(s),
                 TemplatePart::Expr(expr) => {
-                    let value = self.eval_expression(expr)?;
+                    // Undefined variables render as empty string (standard Mustache behavior)
+                    let value = match self.eval_expression(expr) {
+                        Ok(v) => v,
+                        Err(IntentError::UndefinedVariable { .. }) => Value::String(String::new()),
+                        Err(e) => return Err(e),
+                    };
                     let s = value.to_string();
                     result.push_str(&html_escape_string(&s));
                 }
                 TemplatePart::RawExpr(expr) => {
-                    let value = self.eval_expression(expr)?;
+                    // Undefined variables render as empty string (standard Mustache behavior)
+                    let value = match self.eval_expression(expr) {
+                        Ok(v) => v,
+                        Err(IntentError::UndefinedVariable { .. }) => Value::String(String::new()),
+                        Err(e) => return Err(e),
+                    };
                     result.push_str(&value.to_string());
                 }
                 TemplatePart::FilteredExpr { expr, filters } => {
@@ -4943,7 +5174,12 @@ impl Interpreter {
                     elif_chains,
                     else_parts,
                 } => {
-                    let condition_value = self.eval_expression(condition)?;
+                    // Undefined variables in conditions are falsy (not an error)
+                    let condition_value = match self.eval_expression(condition) {
+                        Ok(v) => v,
+                        Err(IntentError::UndefinedVariable { .. }) => Value::Bool(false),
+                        Err(e) => return Err(e),
+                    };
 
                     if condition_value.is_truthy() {
                         let then_result = self.eval_template_parts(then_parts)?;
@@ -4954,7 +5190,11 @@ impl Interpreter {
                         // Check elif chains
                         let mut handled = false;
                         for (elif_condition, elif_body) in elif_chains {
-                            let elif_value = self.eval_expression(elif_condition)?;
+                            let elif_value = match self.eval_expression(elif_condition) {
+                                Ok(v) => v,
+                                Err(IntentError::UndefinedVariable { .. }) => Value::Bool(false),
+                                Err(e) => return Err(e),
+                            };
                             if elif_value.is_truthy() {
                                 let elif_result = self.eval_template_parts(elif_body)?;
                                 if let Value::String(s) = elif_result {
@@ -4972,6 +5212,35 @@ impl Interpreter {
                                 result.push_str(&s);
                             }
                         }
+                    }
+                }
+                TemplatePart::Partial { name, data_expr } => {
+                    // Resolve partial file path
+                    let base_path = self.current_file.as_deref();
+                    let partial_content = self.resolve_and_load_partial(name, base_path)?;
+
+                    // Build data map: start with current scope variables
+                    // If data_expr is provided, use that map as the sole data scope for the partial.
+                    let data_map = if let Some(expr) = data_expr {
+                        match self.eval_expression(expr)? {
+                            Value::Map(m) => m,
+                            other => {
+                                return Err(IntentError::TypeError(format!(
+                                    "Partial '{}' data expression must be a map, got {}",
+                                    name,
+                                    other.type_name()
+                                )));
+                            }
+                        }
+                    } else {
+                        // No data expr — collect current scope variables
+                        self.environment.borrow().all_bindings()
+                    };
+
+                    // Render the partial template with data
+                    let rendered = self.render_template_with_data(&partial_content, &data_map)?;
+                    if let Value::String(s) = rendered {
+                        result.push_str(&s);
                     }
                 }
             }
@@ -4994,11 +5263,11 @@ impl Interpreter {
 
         match filter.name.as_str() {
             // String filters
-            "uppercase" => {
+            "uppercase" | "upper" => {
                 let s = value.to_string();
                 Ok(Value::String(s.to_uppercase()))
             }
-            "lowercase" => {
+            "lowercase" | "lower" => {
                 let s = value.to_string();
                 Ok(Value::String(s.to_lowercase()))
             }
@@ -5916,9 +6185,22 @@ impl Interpreter {
                                         .get_route_source(route_index)
                                         .and_then(|s| s.file_path.clone())
                                         .unwrap_or_default();
+                                    let loc = if self.current_line > 0 {
+                                        format!("line {}", self.current_line)
+                                    } else {
+                                        String::new()
+                                    };
                                     eprintln!(
-                                        "[ERROR] {} {} | handler: {} | {}",
-                                        method, path, handler_file, e
+                                        "[ERROR] {} {} | handler: {}{} | {}",
+                                        method,
+                                        path,
+                                        handler_file,
+                                        if loc.is_empty() {
+                                            String::new()
+                                        } else {
+                                            format!(":{}", loc)
+                                        },
+                                        e
                                     );
                                     let method_path = format!("{} {}", method, path);
                                     // Check for contract violations and return appropriate HTTP status
@@ -6301,9 +6583,14 @@ impl Interpreter {
                                         .get_route_source(route_index)
                                         .and_then(|s| s.file_path.clone())
                                         .unwrap_or_default();
+                                    let loc = if self.current_line > 0 {
+                                        format!(":{}", self.current_line)
+                                    } else {
+                                        String::new()
+                                    };
                                     eprintln!(
-                                        "[ERROR] {} {} | handler: {} | {}",
-                                        method, path, handler_file, e
+                                        "[ERROR] {} {} | handler: {}{} | {}",
+                                        method, path, handler_file, loc, e
                                     );
                                     crate::stdlib::http_server::create_error_response_with_context(
                                         500,
