@@ -746,9 +746,292 @@ impl Default for AsyncServerConfig {
     }
 }
 
+/// State for the per-request server (DD-006 Phase 4)
+#[derive(Clone)]
+pub struct PerRequestState {
+    pub shared: Arc<std::sync::RwLock<super::http_server::SharedState>>,
+    pub is_production: bool,
+    pub request_timeout_secs: u64,
+}
+
+/// Start the per-request HTTP server (DD-006 Phase 4).
+///
+/// Each request gets its own `Interpreter` via `spawn_blocking`.
+/// No bridge channel — true parallel execution.
+pub async fn start_per_request_server(
+    config: AsyncServerConfig,
+    shared: Arc<std::sync::RwLock<super::http_server::SharedState>>,
+) -> Result<()> {
+    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
+        .parse()
+        .map_err(|e| IntentError::RuntimeError(format!("Invalid address: {}", e)))?;
+
+    let route_count = shared.read().unwrap().route_count();
+    let static_count = shared.read().unwrap().static_dirs.len();
+
+    let is_production = std::env::var("NTNT_ENV")
+        .map(|v| v == "production" || v == "prod")
+        .unwrap_or(false);
+
+    let state = PerRequestState {
+        shared: shared.clone(),
+        is_production,
+        request_timeout_secs: config.request_timeout_secs,
+    };
+
+    // Build the router with catch-all handler
+    let mut app = Router::new().fallback(handle_per_request).with_state(state);
+
+    // Add middleware layers
+    app = app.layer(TimeoutLayer::new(Duration::from_secs(
+        config.request_timeout_secs,
+    )));
+    if config.enable_compression {
+        app = app.layer(CompressionLayer::new());
+    }
+    app = app.layer(TraceLayer::new_for_http());
+
+    let display_url = if addr.ip().is_unspecified() {
+        format!("http://localhost:{}", addr.port())
+    } else {
+        format!("http://{}", addr)
+    };
+
+    println!();
+    println!("🚀 Server running — visit {}", display_url);
+    println!(
+        "   Routes: {}  |  Static: {}  |  Mode: per-request",
+        route_count, static_count
+    );
+    println!();
+    println!("Press Ctrl+C to stop");
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| IntentError::RuntimeError(format!("Failed to bind: {}", e)))?;
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal_with_handlers(shared))
+        .await
+        .map_err(|e| IntentError::RuntimeError(format!("Server error: {}", e)))
+}
+
+/// Handle a request using per-request interpreter (DD-006 Phase 4).
+///
+/// Route lookup happens under a read lock, then lock is released.
+/// Handler execution happens in spawn_blocking with a fresh Interpreter.
+async fn handle_per_request(
+    State(state): State<PerRequestState>,
+    req: Request<Body>,
+) -> impl IntoResponse {
+    use crate::interpreter::Interpreter;
+    use crate::stdlib::http_bridge::BridgeResponse;
+
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+
+    let if_none_match = req
+        .headers()
+        .get("if-none-match")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Read lock to find route + get handler/middleware
+    let lookup_result = {
+        let shared = state.shared.read().unwrap_or_else(|e| e.into_inner());
+
+        // Check static files first for GET requests
+        if method == axum::http::Method::GET {
+            for (url_prefix, fs_path) in &shared.static_dirs {
+                if path.starts_with(url_prefix) {
+                    let relative = path.strip_prefix(url_prefix).unwrap_or("");
+                    let relative = relative.trim_start_matches('/');
+                    if !relative.contains("..") && !relative.contains('\0') {
+                        let decoded =
+                            urlencoding::decode(relative).unwrap_or_else(|_| relative.into());
+                        if !decoded.contains("..") {
+                            let file_path = std::path::PathBuf::from(fs_path).join(relative);
+                            if let Ok(canonical) = file_path.canonicalize() {
+                                if let Ok(base_canonical) =
+                                    std::path::Path::new(fs_path).canonicalize()
+                                {
+                                    if canonical.starts_with(&base_canonical) && canonical.is_file()
+                                    {
+                                        return serve_static_file(
+                                            &canonical.to_string_lossy(),
+                                            if_none_match.as_deref(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Get request origin for CORS
+        let request_origin = req
+            .headers()
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        // Handle CORS preflight
+        if method == axum::http::Method::OPTIONS {
+            if let Some(cors_config) = shared.get_cors_config() {
+                let preflight = cors_config.create_preflight_response(request_origin.as_deref());
+                let bridge_resp = BridgeResponse::from_value(&preflight);
+                return bridge_to_axum_response(bridge_resp);
+            }
+        }
+
+        // Find route
+        let route_result = shared.find_route_typed(method.as_str(), &path);
+
+        match route_result {
+            super::http_server::RouteMatchResult::Matched {
+                handler, params, ..
+            } => {
+                let middleware = shared.get_middleware().to_vec();
+                let cors_config = shared.get_cors_config().cloned();
+                Some((handler, params, middleware, cors_config, request_origin))
+            }
+            super::http_server::RouteMatchResult::TypeMismatch {
+                param_name,
+                expected,
+                got,
+            } => {
+                let error_msg = format!(
+                    "Bad Request: Parameter '{}' must be type {}, got '{}'",
+                    param_name, expected, got
+                );
+                let mut bad_request = super::http_server::create_error_response(400, &error_msg);
+                if let Some(cors_config) = shared.get_cors_config() {
+                    if let Value::Map(ref mut resp_map) = bad_request {
+                        cors_config.apply_to_response(resp_map, request_origin.as_deref());
+                    }
+                }
+                let bridge_resp = BridgeResponse::from_value(&bad_request);
+                return bridge_to_axum_response(bridge_resp);
+            }
+            super::http_server::RouteMatchResult::NotFound => {
+                // Check static files for non-GET too (already checked GET above)
+                let cors_config = shared.get_cors_config().cloned();
+                let mut not_found = super::http_server::create_error_response(
+                    404,
+                    &format!("Not Found: {} {}", method, path),
+                );
+                if let Some(ref cc) = cors_config {
+                    if let Value::Map(ref mut resp_map) = not_found {
+                        cc.apply_to_response(resp_map, request_origin.as_deref());
+                    }
+                }
+                let bridge_resp = BridgeResponse::from_value(&not_found);
+                return bridge_to_axum_response(bridge_resp);
+            }
+        }
+    };
+    // Lock released here
+
+    let (handler, route_params, middleware, cors_config, request_origin) = lookup_result.unwrap();
+
+    // Convert Axum request to BridgeRequest
+    let bridge_req = match axum_to_bridge_request(req, route_params).await {
+        Ok(r) => r,
+        Err(e) => {
+            let error_msg = format!("{}", e);
+            eprintln!(
+                "[ERROR] {} {} | request parse | {}",
+                method, path, error_msg
+            );
+            return error_response(
+                400,
+                &error_msg,
+                &method.to_string(),
+                &path,
+                "",
+                state.is_production,
+            );
+        }
+    };
+
+    // Execute in spawn_blocking — fresh interpreter per request
+    let shared_clone = state.shared.clone();
+    let method_str = method.to_string();
+    let path_clone = path.clone();
+
+    // Convert CORS config to Send-safe data before moving into spawn_blocking
+    let cors_origin = request_origin.clone();
+    let cors_config_clone = cors_config.clone();
+
+    let join_result = tokio::task::spawn_blocking(move || {
+        // Convert to Value inside spawn_blocking (Value is !Send, can't cross boundary)
+        let req_value = bridge_req.to_value();
+
+        // Read shared state to seed interpreter (brief read lock)
+        let shared_guard = shared_clone.read().unwrap_or_else(|e| e.into_inner());
+        let result = Interpreter::execute_request(&shared_guard, &handler, &middleware, req_value);
+        drop(shared_guard);
+
+        // Convert to BridgeResponse inside spawn_blocking so Result<Value> (which is !Send)
+        // never crosses the thread boundary. Only BridgeResponse (Send) is returned.
+        match result {
+            Ok(mut response) => {
+                // Apply CORS headers if enabled
+                if let Some(ref cc) = cors_config_clone {
+                    if let Value::Map(ref mut resp_map) = response {
+                        cc.apply_to_response(resp_map, cors_origin.as_deref());
+                    }
+                }
+                BridgeResponse::from_value(&response)
+            }
+            Err(e) => {
+                let error_msg = e.to_string();
+                eprintln!(
+                    "[ERROR] {} {} | handler | {}",
+                    method_str, path_clone, error_msg
+                );
+                BridgeResponse::error(500, &error_msg)
+            }
+        }
+    })
+    .await;
+
+    match join_result {
+        Ok(bridge_resp) => bridge_to_axum_response(bridge_resp),
+        Err(join_err) => {
+            // Handler panicked — return 500 instead of crashing
+            eprintln!(
+                "[ERROR] {} {} | handler panicked: {}",
+                method, path, join_err
+            );
+            let bridge_resp = BridgeResponse::error(500, "Internal Server Error: handler panicked");
+            bridge_to_axum_response(bridge_resp)
+        }
+    }
+}
+
+/// Shutdown signal handler that runs shutdown handlers before exiting.
+async fn shutdown_signal_with_handlers(
+    shared: Arc<std::sync::RwLock<super::http_server::SharedState>>,
+) {
+    // Wait for shutdown signal
+    shutdown_signal().await;
+
+    // Run shutdown handlers in a blocking task
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::interpreter::Interpreter::run_shutdown_handlers(
+            &shared.read().unwrap_or_else(|e| e.into_inner()),
+        );
+    })
+    .await;
+}
+
 /// Start the async HTTP server with interpreter bridge
 ///
-/// This is the main entry point for production async servers.
+/// This is the legacy entry point — kept for backward compatibility.
+/// New code should use `start_per_request_server` instead.
 pub async fn start_server_with_bridge(
     config: AsyncServerConfig,
     interpreter_handle: SharedHandle,
