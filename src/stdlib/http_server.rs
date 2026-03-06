@@ -183,6 +183,13 @@ pub fn apply_security_headers(response: &mut HashMap<String, Value>) {
             headers.insert(key, value);
         }
     }
+
+    // Dynamic responses should not be cached by browsers or CDNs.
+    // Static files set their own Cache-Control in serve_static().
+    let cc_key = "cache-control".to_string();
+    if !headers.contains_key(&cc_key) {
+        headers.insert(cc_key, Value::String("no-store".to_string()));
+    }
 }
 
 /// Represents a route segment - either static text or a parameter

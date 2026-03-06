@@ -68,6 +68,14 @@ fn apply_async_security_headers(response: &mut Response<Body>) {
             }
         }
     }
+    // Dynamic responses should not be cached by browsers or CDNs.
+    // Static files set their own Cache-Control in serve_static_file().
+    if !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        );
+    }
 }
 
 /// Route segment for pattern matching (mirrors sync version)
