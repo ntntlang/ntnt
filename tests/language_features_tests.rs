@@ -4436,6 +4436,8 @@ fn run_ntnt_code_with_env(code: &str, env_vars: &[(&str, &str)]) -> (String, Str
     let mut cmd = Command::new(binary);
     cmd.args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"));
+    // Ensure sufficient stack size for debug builds on Windows
+    cmd.env("RUST_MIN_STACK", "8388608");
     for (key, val) in env_vars {
         cmd.env(key, val);
     }
