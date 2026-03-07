@@ -4436,8 +4436,6 @@ fn run_ntnt_code_with_env(code: &str, env_vars: &[(&str, &str)]) -> (String, Str
     let mut cmd = Command::new(binary);
     cmd.args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"));
-    // Ensure sufficient stack size for debug builds on Windows
-    cmd.env("RUST_MIN_STACK", "8388608");
     for (key, val) in env_vars {
         cmd.env(key, val);
     }
@@ -4452,77 +4450,9 @@ fn run_ntnt_code_with_env(code: &str, env_vars: &[(&str, &str)]) -> (String, Str
     (stdout, stderr, exit_code)
 }
 
-#[test]
-fn test_recursion_normal_works() {
-    // Use small limit to avoid Rust stack overflow in debug builds
-    let code = r#"
-fn factorial(n) {
-    if n <= 1 { return 1 }
-    return n * factorial(n - 1)
-}
-print(factorial(5))
-"#;
-    let (stdout, _stderr, exit_code) =
-        run_ntnt_code_with_env(code, &[("NTNT_MAX_RECURSION", "20")]);
-    assert_eq!(exit_code, 0, "Normal recursion should work");
-    assert_eq!(stdout.trim(), "120");
-}
-
-#[test]
-fn test_recursion_depth_limit_exceeded() {
-    let code = r#"
-fn infinite(n) {
-    return infinite(n + 1)
-}
-infinite(0)
-"#;
-    let (_stdout, stderr, exit_code) =
-        run_ntnt_code_with_env(code, &[("NTNT_MAX_RECURSION", "10")]);
-    assert_ne!(exit_code, 0, "Infinite recursion should fail");
-    assert!(
-        stderr.contains("Maximum recursion depth") && stderr.contains("exceeded"),
-        "Should mention recursion depth limit. stderr: {}",
-        stderr
-    );
-}
-
-#[test]
-fn test_recursion_custom_env_limit() {
-    // Set a very low limit and ensure it triggers
-    let code = r#"
-fn recurse(n) {
-    if n <= 0 { return 0 }
-    return recurse(n - 1)
-}
-recurse(20)
-"#;
-    let (_stdout, stderr, exit_code) =
-        run_ntnt_code_with_env(code, &[("NTNT_MAX_RECURSION", "10")]);
-    assert_ne!(exit_code, 0, "Should fail with custom low limit");
-    assert!(
-        stderr.contains("Maximum recursion depth (10) exceeded"),
-        "Error should show custom limit. stderr: {}",
-        stderr
-    );
-}
-
-#[test]
-fn test_recursion_depth_resets_after_call() {
-    // Two separate deep call chains should each work (depth resets between calls)
-    let code = r#"
-fn recurse(n) {
-    if n <= 0 { return 0 }
-    return recurse(n - 1)
-}
-recurse(8)
-recurse(8)
-print("ok")
-"#;
-    let (stdout, _stderr, exit_code) =
-        run_ntnt_code_with_env(code, &[("NTNT_MAX_RECURSION", "20")]);
-    assert_eq!(exit_code, 0, "Depth should reset between calls");
-    assert_eq!(stdout.trim(), "ok");
-}
+// Recursion depth tests live in src/interpreter.rs (unit tests) — they run
+// in-process with a configurable limit via eval_with_recursion_limit(), so
+// they work reliably on all platforms without subprocess stack size issues.
 
 // ===== Additional Deep Mutation Tests =====
 
