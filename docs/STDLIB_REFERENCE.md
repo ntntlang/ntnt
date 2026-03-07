@@ -4936,6 +4936,7 @@ import { text, html, json } from "std/http/server"
 | [`html`](#html) | Create an HTML HTTP response. |
 | [`json`](#json) | Create a JSON HTTP response. |
 | [`not_found`](#notfound) | Create an HTTP 404 Not Found response. |
+| [`on_error`](#onerror) | Register a global error handler for HTTP route handlers. |
 | [`parse_form`](#parseform) | Parse a request body (or raw string) as URL-encoded form data. |
 | [`parse_json`](#parsejson) | Parse a request body (or raw string) as JSON. |
 | [`parse_multipart`](#parsemultipart) | Parse a multipart/form-data request body. |
@@ -5174,6 +5175,38 @@ not_found()  // => Response { status: 404, body: "Not Found" }  // 404 response
 **See also:** `error`, `status`, `text`, `html`, `json`, `response`
 
 *Since v0.1.0*
+
+---
+
+#### `on_error`
+
+```ntnt
+on_error(handler: fn(req: Request, error: String) -> Response) -> Unit
+```
+
+Register a global error handler for HTTP route handlers.
+
+When a route handler throws an unhandled error, the registered callback is called with the request and error message instead of returning the default 500 error page. If the callback itself errors, falls back to the default error response.
+
+**Parameters:**
+
+- `handler` — A function that receives (request, error_message) and returns a Response.
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+on_error(fn(req, err) { html("<h1>Error</h1><p>" + err + "</p>") })  // Custom error page
+```
+
+**Gotchas:**
+
+- The handler is called on the interpreter thread; if it errors, the default error page is shown
+
+**See also:** `on_shutdown`
+
+*Since v0.4.0*
 
 ---
 

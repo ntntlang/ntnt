@@ -3528,6 +3528,13 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
                 collect_from_expr(inner, names);
             }
 
+            // TryCatch
+            Expression::TryCatch { body } => {
+                for s in &body.statements {
+                    collect_used_names(s, names);
+                }
+            }
+
             // Literals - no identifiers to collect
             Expression::Integer(_)
             | Expression::Float(_)

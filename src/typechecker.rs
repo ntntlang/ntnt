@@ -1868,6 +1868,17 @@ impl TypeContext {
                 Type::Unit
             }
 
+            Expression::TryCatch { body } => {
+                self.push_scope();
+                let body_type = self.check_block(body);
+                self.pop_scope();
+                // Result<body_type, String>
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![body_type, Type::String],
+                }
+            }
+
             Expression::Await(inner) => self.infer_expression(inner),
             Expression::Try(inner) => {
                 let try_hint = expr_search_hint(inner);

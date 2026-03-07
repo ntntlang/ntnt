@@ -1879,6 +1879,13 @@ impl Parser {
             return self.parse_map_contents();
         }
 
+        // Try-catch expression: try { block } catches runtime errors as Result
+        if self.match_token(&[TokenKind::Try]) {
+            self.consume(&TokenKind::LeftBrace, "Expected '{' after 'try'")?;
+            let body = self.block()?;
+            return Ok(Expression::TryCatch { body });
+        }
+
         // Block expression
         if self.match_token(&[TokenKind::LeftBrace]) {
             let block = self.block()?;

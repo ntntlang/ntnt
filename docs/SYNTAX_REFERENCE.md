@@ -54,7 +54,7 @@ _Control flow statements_
 
 `otherwise`
 
-_Inline error handling on let bindings — unwraps Ok/Some or runs a diverging block for Err/None_
+_Inline error handling on let bindings — unwraps Ok/Some, catches runtime errors, or runs a diverging block for Err/None/errors_
 
 ### Types
 

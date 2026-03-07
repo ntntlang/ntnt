@@ -474,6 +474,7 @@ pub struct ServerState {
     pub hot_reload: bool,                   // Whether hot-reload is enabled
     pub shutdown_handlers: Vec<Value>,      // Functions to call on server shutdown
     pub cors_config: Option<CorsConfig>,    // Optional CORS configuration
+    pub error_handler: Option<Value>,       // Global error handler callback
 }
 
 impl ServerState {
@@ -486,6 +487,7 @@ impl ServerState {
             hot_reload: true, // Enable hot-reload by default in dev
             shutdown_handlers: Vec::new(),
             cors_config: None,
+            error_handler: None,
         }
     }
 
@@ -530,6 +532,14 @@ impl ServerState {
 
     pub fn get_shutdown_handlers(&self) -> &[Value] {
         &self.shutdown_handlers
+    }
+
+    pub fn set_error_handler(&mut self, handler: Value) {
+        self.error_handler = Some(handler);
+    }
+
+    pub fn get_error_handler(&self) -> Option<&Value> {
+        self.error_handler.as_ref()
     }
 
     /// Add a route without source file info (inline routes)
@@ -2385,6 +2395,36 @@ pub fn init() -> HashMap<String, Value> {
                         e
                     )))),
                 }
+            },
+        },
+    );
+
+    // @ntnt on_error
+    // @module std/http/server
+    // @signature on_error(handler: fn(req: Request, error: String) -> Response) -> Unit
+    // Register a global error handler for HTTP route handlers.
+    //
+    // When a route handler throws an unhandled error, the registered callback
+    // is called with the request and error message instead of returning the
+    // default 500 error page. If the callback itself errors, falls back to
+    // the default error response.
+    // @param handler A function that receives (request, error_message) and returns a Response.
+    // @returns Unit
+    // @see_also on_shutdown
+    // @since v0.4.0
+    // @tags #http, #server
+    // @example on_error(fn(req, err) { html("<h1>Error</h1><p>" + err + "</p>") }) ~ "Custom error page"
+    // @gotcha The handler is called on the interpreter thread; if it errors, the default error page is shown
+    module.insert(
+        "on_error".to_string(),
+        Value::NativeFunction {
+            name: "on_error".to_string(),
+            arity: 1,
+            max_arity: 1,
+            func: |_args| {
+                // Actual implementation is in the interpreter's special handling
+                // This placeholder exists for import resolution
+                Ok(Value::Unit)
             },
         },
     );

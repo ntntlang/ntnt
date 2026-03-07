@@ -565,8 +565,8 @@ impl Interpreter {
         match self.execution_mode {
             ExecutionMode::Normal => false,
             ExecutionMode::HotReload => {
-                // In hot-reload, only skip listen() and on_shutdown()
-                matches!(name, "listen" | "on_shutdown")
+                // In hot-reload, only skip listen(), on_shutdown(), and on_error()
+                matches!(name, "listen" | "on_shutdown" | "on_error")
             }
             ExecutionMode::UnitTest => {
                 // In unit test mode, skip all server-related functions
@@ -577,6 +577,7 @@ impl Interpreter {
                         | "routes"
                         | "use_middleware"
                         | "on_shutdown"
+                        | "on_error"
                         | "enable_cors"
                         | "enable_auth"
                 )
@@ -3041,7 +3042,21 @@ impl Interpreter {
                 otherwise,
             } => {
                 let val = if let Some(expr) = value {
-                    self.eval_expression(expr)?
+                    if otherwise.is_some() {
+                        // With otherwise block: catch runtime errors too
+                        match self.eval_expression(expr) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                if !is_production_mode() {
+                                    eprintln!("[WARN] otherwise caught runtime error: {}", e);
+                                }
+                                Value::err(Value::String(format!("{}", e)))
+                            }
+                        }
+                    } else {
+                        // No otherwise block: propagate errors normally
+                        self.eval_expression(expr)?
+                    }
                 } else {
                     Value::Unit
                 };
@@ -3681,6 +3696,16 @@ impl Interpreter {
                         }
                         let handler = self.eval_expression(&arguments[0])?;
                         self.server_state.add_shutdown_handler(handler);
+                        return Ok(Value::Unit);
+                    }
+
+                    // Special handling for on_error(handler_fn)
+                    if name == "on_error" && arguments.len() == 1 {
+                        if self.should_skip_server_call("on_error") {
+                            return Ok(Value::Unit);
+                        }
+                        let handler = self.eval_expression(&arguments[0])?;
+                        self.server_state.set_error_handler(handler);
                         return Ok(Value::Unit);
                     }
 
@@ -4683,6 +4708,20 @@ impl Interpreter {
                 Err(IntentError::RuntimeError(
                     "Async/Await not yet implemented".to_string(),
                 ))
+            }
+
+            Expression::TryCatch { body } => {
+                match self.eval_block(body) {
+                    Ok(value) => {
+                        // If the block returned via explicit `return`, propagate it —
+                        // try {} only catches errors, not control flow.
+                        match value {
+                            Value::Return(_) => Ok(value),
+                            other => Ok(Value::ok(other)),
+                        }
+                    }
+                    Err(e) => Ok(Value::err(Value::String(format!("{}", e)))),
+                }
             }
 
             Expression::Try(inner) => {
@@ -6334,6 +6373,8 @@ impl Interpreter {
                         let final_response = if let Some(resp) = early_response {
                             resp
                         } else {
+                            // Clone req_value for potential on_error handler use
+                            let req_for_error = req_value.clone();
                             // Call the route handler
                             match self.call_function(handler, vec![req_value]) {
                                 Ok(response) => response,
@@ -6360,23 +6401,56 @@ impl Interpreter {
                                         },
                                         e
                                     );
-                                    let method_path = format!("{} {}", method, path);
-                                    // Check for contract violations and return appropriate HTTP status
-                                    if let IntentError::ContractViolation(msg) = &e {
-                                        if msg.contains("Precondition failed") {
-                                            http_server::create_error_response_with_context(
-                                                400,
-                                                &format!("Bad Request: {}", msg),
-                                                &method_path,
-                                                &handler_file,
-                                            )
-                                        } else if msg.contains("Postcondition failed") {
-                                            http_server::create_error_response_with_context(
-                                                500,
-                                                &format!("Internal Error: {}", msg),
-                                                &method_path,
-                                                &handler_file,
-                                            )
+                                    // Try on_error handler if registered
+                                    if let Some(error_handler) =
+                                        self.server_state.get_error_handler().cloned()
+                                    {
+                                        let error_msg = Value::String(e.to_string());
+                                        match self.call_function(
+                                            error_handler,
+                                            vec![req_for_error, error_msg],
+                                        ) {
+                                            Ok(response) => response,
+                                            Err(handler_err) => {
+                                                eprintln!(
+                                                    "[ERROR] on_error handler failed: {}",
+                                                    handler_err
+                                                );
+                                                let method_path = format!("{} {}", method, path);
+                                                http_server::create_error_response_with_context(
+                                                    500,
+                                                    &e.to_string(),
+                                                    &method_path,
+                                                    &handler_file,
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        let method_path = format!("{} {}", method, path);
+                                        // Check for contract violations and return appropriate HTTP status
+                                        if let IntentError::ContractViolation(msg) = &e {
+                                            if msg.contains("Precondition failed") {
+                                                http_server::create_error_response_with_context(
+                                                    400,
+                                                    &format!("Bad Request: {}", msg),
+                                                    &method_path,
+                                                    &handler_file,
+                                                )
+                                            } else if msg.contains("Postcondition failed") {
+                                                http_server::create_error_response_with_context(
+                                                    500,
+                                                    &format!("Internal Error: {}", msg),
+                                                    &method_path,
+                                                    &handler_file,
+                                                )
+                                            } else {
+                                                http_server::create_error_response_with_context(
+                                                    500,
+                                                    &e.to_string(),
+                                                    &method_path,
+                                                    &handler_file,
+                                                )
+                                            }
                                         } else {
                                             http_server::create_error_response_with_context(
                                                 500,
@@ -6385,13 +6459,6 @@ impl Interpreter {
                                                 &handler_file,
                                             )
                                         }
-                                    } else {
-                                        http_server::create_error_response_with_context(
-                                            500,
-                                            &e.to_string(),
-                                            &method_path,
-                                            &handler_file,
-                                        )
                                     }
                                 }
                             }
@@ -6731,6 +6798,8 @@ impl Interpreter {
                         let final_response = if let Some(resp) = early_response {
                             resp
                         } else {
+                            // Clone req for potential on_error handler use
+                            let req_for_error = current_req.clone();
                             match self.call_function(handler, vec![current_req]) {
                                 Ok(response) => response,
                                 Err(e) => {
@@ -6748,12 +6817,37 @@ impl Interpreter {
                                         "[ERROR] {} {} | handler: {}{} | {}",
                                         method, path, handler_file, loc, e
                                     );
-                                    crate::stdlib::http_server::create_error_response_with_context(
-                                        500,
-                                        &e.to_string(),
-                                        &format!("{} {}", method, path),
-                                        &handler_file,
-                                    )
+                                    // Try on_error handler if registered
+                                    if let Some(error_handler) =
+                                        self.server_state.get_error_handler().cloned()
+                                    {
+                                        let error_msg = Value::String(e.to_string());
+                                        match self.call_function(
+                                            error_handler,
+                                            vec![req_for_error, error_msg],
+                                        ) {
+                                            Ok(response) => response,
+                                            Err(handler_err) => {
+                                                eprintln!(
+                                                    "[ERROR] on_error handler failed: {}",
+                                                    handler_err
+                                                );
+                                                crate::stdlib::http_server::create_error_response_with_context(
+                                                    500,
+                                                    &e.to_string(),
+                                                    &format!("{} {}", method, path),
+                                                    &handler_file,
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        crate::stdlib::http_server::create_error_response_with_context(
+                                            500,
+                                            &e.to_string(),
+                                            &format!("{} {}", method, path),
+                                            &handler_file,
+                                        )
+                                    }
                                 }
                             }
                         };
@@ -10925,5 +11019,210 @@ page
             10,
         );
         assert!(result.is_ok(), "Depth should reset between calls");
+    }
+
+    // === Otherwise catches runtime errors ===
+
+    #[test]
+    fn test_otherwise_catches_arithmetic_type_error() {
+        // Arithmetic on incompatible types should be caught by otherwise
+        let result = eval(
+            r#"
+            fn safe() {
+                let map_val = map { "a": 1 }
+                let x = (map_val * 33) otherwise { return 0 }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::Int(0)),
+            "otherwise should catch type error and return 0, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_still_handles_result_err() {
+        // Existing behavior: Result::Err is handled by otherwise
+        let result = eval(
+            r#"
+            fn safe() {
+                let x = Err("something failed") otherwise { return -1 }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::Int(-1)),
+            "otherwise should handle Result::Err, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_still_handles_option_none() {
+        // Existing behavior: Option::None is handled by otherwise
+        let result = eval(
+            r#"
+            fn safe() {
+                let x = None otherwise { return "default" }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::String(ref s) if s == "default"),
+            "otherwise should handle Option::None, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_success_case_not_executed() {
+        // When expression succeeds, otherwise block should NOT execute
+        let result = eval(
+            r#"
+            fn safe() {
+                let x = (1 + 2) otherwise { return -1 }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::Int(3)),
+            "otherwise should not execute on success, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_catches_index_none() {
+        // Out-of-bounds array access returns None, which otherwise catches
+        let result = eval(
+            r#"
+            fn safe() {
+                let arr = [1, 2, 3]
+                let x = arr[99999] otherwise { return 0 }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::Int(0)),
+            "otherwise should catch out-of-bounds None, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_multiple_catches_in_sequence() {
+        // Multiple otherwise blocks independently handle their own errors
+        let result = eval(
+            r#"
+            fn safe() {
+                let a = Err("first") otherwise { return "caught first" }
+                let b = None otherwise { return "caught none" }
+                let c = Ok(42) otherwise { return "should not reach" }
+                return c
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        // First otherwise triggers, so we get "caught first"
+        assert!(
+            matches!(result, Value::String(ref s) if s == "caught first"),
+            "first otherwise should catch Err, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_runtime_error_binds_err_variable() {
+        // The error message should be available as `err` in the otherwise block
+        let result = eval(
+            r#"
+            fn safe() {
+                let map_val = map { "key": "value" }
+                let x = (map_val + 10) otherwise { return err }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        // err should be a string containing the error message
+        match result {
+            Value::String(s) => {
+                assert!(
+                    !s.is_empty(),
+                    "err should contain the runtime error message"
+                );
+            }
+            _ => panic!("Expected err to be a string, got {:?}", result),
+        }
+    }
+
+    // === on_error global error handler ===
+
+    #[test]
+    fn test_on_error_registers_without_error() {
+        // on_error should accept a handler function without errors
+        let result = eval(
+            r#"
+            fn my_handler(req, error) {
+                return map { "status": 500, "body": "custom error" }
+            }
+            on_error(my_handler)
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "on_error should register without error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_on_error_stores_handler_in_server_state() {
+        // Verify the handler is stored (via interpreter's server_state)
+        let lexer = Lexer::new(
+            r#"
+            fn my_handler(req, error) {
+                return map { "status": 500, "body": "custom error" }
+            }
+            on_error(my_handler)
+        "#,
+        );
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.eval(&ast).unwrap();
+        assert!(
+            interpreter.server_state.get_error_handler().is_some(),
+            "on_error should store handler in server_state"
+        );
+    }
+
+    #[test]
+    fn test_default_behavior_no_on_error() {
+        // When no on_error is registered, server_state should have None
+        let interpreter = Interpreter::new();
+        assert!(
+            interpreter.server_state.get_error_handler().is_none(),
+            "No error handler should be registered by default"
+        );
     }
 }
