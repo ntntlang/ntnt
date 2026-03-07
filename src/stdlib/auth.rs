@@ -68,11 +68,7 @@ fn constant_time_compare(a: &str, b: &str) -> bool {
 // ============================================================================
 
 fn make_none() -> Value {
-    Value::EnumValue {
-        enum_name: "Option".to_string(),
-        variant: "None".to_string(),
-        values: vec![],
-    }
+    Value::none()
 }
 
 fn make_some(value: Value) -> Value {

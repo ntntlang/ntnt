@@ -173,11 +173,7 @@ fn row_to_value(row: &Row) -> Value {
 
 /// Construct an Option::None value (represents SQL NULL)
 fn sql_none() -> Value {
-    Value::EnumValue {
-        enum_name: "Option".to_string(),
-        variant: "None".to_string(),
-        values: vec![],
-    }
+    Value::none()
 }
 
 /// Convert a PostgreSQL value to an Intent Value based on type

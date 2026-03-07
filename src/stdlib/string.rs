@@ -1057,11 +1057,7 @@ pub fn init() -> HashMap<String, Value> {
                             variant: "Some".to_string(),
                             values: vec![Value::String(m.as_str().to_string())],
                         }),
-                        None => Ok(Value::EnumValue {
-                            enum_name: "Option".to_string(),
-                            variant: "None".to_string(),
-                            values: vec![],
-                        }),
+                        None => Ok(Value::none()),
                     },
                     Err(e) => Err(IntentError::RuntimeError(format!(
                         "Invalid regex pattern: {}",
@@ -1189,11 +1185,7 @@ pub fn init() -> HashMap<String, Value> {
                                 values: vec![Value::Array(groups)],
                             })
                         }
-                        None => Ok(Value::EnumValue {
-                            enum_name: "Option".to_string(),
-                            variant: "None".to_string(),
-                            values: vec![],
-                        }),
+                        None => Ok(Value::none()),
                     },
                     Err(e) => Err(IntentError::RuntimeError(format!(
                         "Invalid regex pattern: {}",
@@ -1305,11 +1297,7 @@ pub fn init() -> HashMap<String, Value> {
                                 values: vec![Value::Map(map)],
                             })
                         }
-                        None => Ok(Value::EnumValue {
-                            enum_name: "Option".to_string(),
-                            variant: "None".to_string(),
-                            values: vec![],
-                        }),
+                        None => Ok(Value::none()),
                     },
                     Err(e) => Err(IntentError::RuntimeError(format!(
                         "Invalid regex pattern: {}",

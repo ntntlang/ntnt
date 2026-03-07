@@ -1964,18 +1964,10 @@ pub fn init() -> HashMap<String, Value> {
                                 variant: "Some".to_string(),
                                 values: vec![Value::String(value.clone())],
                             }),
-                            None => Ok(Value::EnumValue {
-                                enum_name: "Option".to_string(),
-                                variant: "None".to_string(),
-                                values: vec![],
-                            }),
+                            None => Ok(Value::none()),
                         }
                     }
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    None => Ok(Value::none()),
                 }
             },
         },

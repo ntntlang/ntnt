@@ -113,11 +113,7 @@ pub fn init() -> HashMap<String, Value> {
                         variant: "Some".to_string(),
                         values: vec![Value::String(p.to_string_lossy().to_string())],
                     }),
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    None => Ok(Value::none()),
                 },
                 _ => Err(IntentError::TypeError(
                     "dirname() requires a string path".to_string(),
@@ -148,11 +144,7 @@ pub fn init() -> HashMap<String, Value> {
                         variant: "Some".to_string(),
                         values: vec![Value::String(name.to_string_lossy().to_string())],
                     }),
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    None => Ok(Value::none()),
                 },
                 _ => Err(IntentError::TypeError(
                     "basename() requires a string path".to_string(),
@@ -183,11 +175,7 @@ pub fn init() -> HashMap<String, Value> {
                         variant: "Some".to_string(),
                         values: vec![Value::String(ext.to_string_lossy().to_string())],
                     }),
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    None => Ok(Value::none()),
                 },
                 _ => Err(IntentError::TypeError(
                     "extension() requires a string path".to_string(),
@@ -218,11 +206,7 @@ pub fn init() -> HashMap<String, Value> {
                         variant: "Some".to_string(),
                         values: vec![Value::String(stem.to_string_lossy().to_string())],
                     }),
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    None => Ok(Value::none()),
                 },
                 _ => Err(IntentError::TypeError(
                     "stem() requires a string path".to_string(),

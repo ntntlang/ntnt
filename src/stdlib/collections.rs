@@ -75,11 +75,7 @@ pub fn init() -> HashMap<String, Value> {
                                 variant: "Some".to_string(),
                                 values: vec![v],
                             },
-                            None => Value::EnumValue {
-                                enum_name: "Option".to_string(),
-                                variant: "None".to_string(),
-                                values: vec![],
-                            },
+                            None => Value::none(),
                         };
                         // Return tuple of (new array, popped value)
                         Ok(Value::Array(vec![Value::Array(new_arr), opt_val]))
@@ -143,11 +139,7 @@ pub fn init() -> HashMap<String, Value> {
                         variant: "Some".to_string(),
                         values: vec![v.clone()],
                     }),
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    None => Ok(Value::none()),
                 }
             },
         },
@@ -204,11 +196,7 @@ pub fn init() -> HashMap<String, Value> {
                         variant: "Some".to_string(),
                         values: vec![v.clone()],
                     }),
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    None => Ok(Value::none()),
                 }
             },
         },
@@ -537,11 +525,7 @@ pub fn init() -> HashMap<String, Value> {
                                 Ok(args[2].clone())
                             } else {
                                 // Without default: return None
-                                Ok(Value::EnumValue {
-                                    enum_name: "Option".to_string(),
-                                    variant: "None".to_string(),
-                                    values: vec![],
-                                })
+                                Ok(Value::none())
                             }
                         }
                     }
@@ -628,11 +612,7 @@ pub fn init() -> HashMap<String, Value> {
                     if args.len() == 3 {
                         Ok(args[2].clone())
                     } else {
-                        Ok(Value::EnumValue {
-                            enum_name: "Option".to_string(),
-                            variant: "None".to_string(),
-                            values: vec![],
-                        })
+                        Ok(Value::none())
                     }
                 }
             }

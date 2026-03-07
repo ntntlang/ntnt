@@ -23,32 +23,30 @@ Environment variables that control NTNT runtime behavior
 
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
-| `NTNT_ENV` | `development`, `production`, `prod` | development (when unset) | Controls runtime mode. Production mode disables hot-reload for better performance. |
-| `NTNT_TIMEOUT` | integer (seconds) | 30 | Request timeout for HTTP server in seconds. |
-| `NTNT_STRICT` | `1`, `true` | unset (disabled) | Enable strict type checking. For `ntnt run`, blocks execution if type errors are found. For `ntnt lint`, warns about untyped function signatures. Also configurable via `ntnt lint --strict` or `ntnt.toml` config. |
 | `NTNT_ALLOW_PRIVATE_IPS` | `true` | unset (disabled — private IPs blocked) | Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x). Required for Docker inter-container communication (e.g., calling a sidecar at 172.19.0.1). Disabled by default to prevent SSRF attacks. |
+| `NTNT_ENV` | `development`, `production`, `prod` | development (when unset) | Controls runtime mode. Production mode disables hot-reload for better performance. |
 | `NTNT_MAX_RECURSION` | integer | 256 | Maximum recursion depth for function calls. Prevents stack overflow from runaway recursion. |
+| `NTNT_STRICT` | `1`, `true` | unset (disabled) | Enable strict type checking. For `ntnt run`, blocks execution if type errors are found. For `ntnt lint`, warns about untyped function signatures. Also configurable via `ntnt lint --strict` or `ntnt.toml` config. |
+| `NTNT_TIMEOUT` | integer (seconds) | 30 | Request timeout for HTTP server in seconds. |
 
 ### Examples
 
 ```bash
-# Development (default) - hot-reload enabled
-ntnt run server.tnt
-
-# Production - hot-reload disabled
-NTNT_ENV=production ntnt run server.tnt
-
-# Custom timeout (60 seconds)
-NTNT_TIMEOUT=60 ntnt run server.tnt
-
-# Strict type checking - blocks execution on type errors
-NTNT_STRICT=1 ntnt run server.tnt
-
-# Allow fetch() to connect to Docker internal services
+# Allow `fetch()` to connect to private/internal IP ranges (10
 NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt
 
-# Custom recursion depth limit
+# Controls runtime mode
+NTNT_ENV=production ntnt run server.tnt
+
+# Maximum recursion depth for function calls
 NTNT_MAX_RECURSION=512 ntnt run server.tnt
+
+# Enable strict type checking
+NTNT_STRICT=1 ntnt run server.tnt
+
+# Request timeout for HTTP server in seconds
+NTNT_TIMEOUT=60 ntnt run server.tnt
+
 ```
 
 ---

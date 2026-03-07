@@ -5414,119 +5414,56 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
         md.push_str("| Variable | Values | Default | Description |\n");
         md.push_str("|----------|--------|---------|-------------|\n");
 
-        // NTNT_ENV
-        if let Some(env) = env_vars.get("NTNT_ENV") {
-            let values = env
-                .get("values")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| format!("`{}`", s))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
-            let desc = env
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("-");
-            md.push_str(&format!(
-                "| `NTNT_ENV` | {} | {} | {} |\n",
-                values, default, desc
-            ));
+        // Iterate all env vars from runtime.toml (skip the "description" key)
+        let env_table = env_vars.as_table().cloned().unwrap_or_default();
+        let mut env_var_names: Vec<&str> = env_table
+            .keys()
+            .filter(|k| k.as_str() != "description")
+            .map(|k| k.as_str())
+            .collect();
+        env_var_names.sort();
+        for var_name in &env_var_names {
+            if let Some(env) = env_vars.get(*var_name) {
+                // "values" (array) takes priority over "type" (string) for the Values column
+                let values_col = env
+                    .get("values")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(|s| format!("`{}`", s))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .or_else(|| env.get("type").and_then(|v| v.as_str()).map(String::from))
+                    .unwrap_or_else(|| "-".to_string());
+                let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
+                let desc = env
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-");
+                md.push_str(&format!(
+                    "| `{}` | {} | {} | {} |\n",
+                    var_name, values_col, default, desc
+                ));
+            }
         }
 
-        // NTNT_TIMEOUT
-        if let Some(env) = env_vars.get("NTNT_TIMEOUT") {
-            let typ = env.get("type").and_then(|v| v.as_str()).unwrap_or("-");
-            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
-            let desc = env
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("-");
-            md.push_str(&format!(
-                "| `NTNT_TIMEOUT` | {} | {} | {} |\n",
-                typ, default, desc
-            ));
-        }
-
-        // NTNT_STRICT
-        if let Some(env) = env_vars.get("NTNT_STRICT") {
-            let values = env
-                .get("values")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| format!("`{}`", s))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
-            let desc = env
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("-");
-            md.push_str(&format!(
-                "| `NTNT_STRICT` | {} | {} | {} |\n",
-                values, default, desc
-            ));
-        }
-
-        // NTNT_ALLOW_PRIVATE_IPS
-        if let Some(env) = env_vars.get("NTNT_ALLOW_PRIVATE_IPS") {
-            let values = env
-                .get("values")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|s| format!("`{}`", s))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
-            let desc = env
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("-");
-            md.push_str(&format!(
-                "| `NTNT_ALLOW_PRIVATE_IPS` | {} | {} | {} |\n",
-                values, default, desc
-            ));
-        }
-
-        // NTNT_MAX_RECURSION
-        if let Some(env) = env_vars.get("NTNT_MAX_RECURSION") {
-            let typ = env.get("type").and_then(|v| v.as_str()).unwrap_or("-");
-            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
-            let desc = env
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("-");
-            md.push_str(&format!(
-                "| `NTNT_MAX_RECURSION` | {} | {} | {} |\n",
-                typ, default, desc
-            ));
-        }
-
+        // Examples from runtime.toml
         md.push_str("\n### Examples\n\n```bash\n");
-        md.push_str("# Development (default) - hot-reload enabled\n");
-        md.push_str("ntnt run server.tnt\n\n");
-        md.push_str("# Production - hot-reload disabled\n");
-        md.push_str("NTNT_ENV=production ntnt run server.tnt\n\n");
-        md.push_str("# Custom timeout (60 seconds)\n");
-        md.push_str("NTNT_TIMEOUT=60 ntnt run server.tnt\n\n");
-        md.push_str("# Strict type checking - blocks execution on type errors\n");
-        md.push_str("NTNT_STRICT=1 ntnt run server.tnt\n\n");
-        md.push_str("# Allow fetch() to connect to Docker internal services\n");
-        md.push_str("NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt\n\n");
-        md.push_str("# Custom recursion depth limit\n");
-        md.push_str("NTNT_MAX_RECURSION=512 ntnt run server.tnt\n");
+        for var_name in &env_var_names {
+            if let Some(env) = env_vars.get(*var_name) {
+                if let Some(example) = env.get("example").and_then(|v| v.as_str()) {
+                    let desc = env
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Usage");
+                    // Use first sentence of description as comment
+                    let comment = desc.split('.').next().unwrap_or(desc);
+                    md.push_str(&format!("# {}\n{}\n\n", comment, example));
+                }
+            }
+        }
         md.push_str("```\n\n");
         md.push_str("---\n\n");
     }

@@ -287,16 +287,8 @@ fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
             variant: "Some".to_string(),
             values: vec![serialized.to_value()],
         }),
-        Err(mpsc::RecvTimeoutError::Timeout) => Ok(Value::EnumValue {
-            enum_name: "Option".to_string(),
-            variant: "None".to_string(),
-            values: vec![],
-        }),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Ok(Value::EnumValue {
-            enum_name: "Option".to_string(),
-            variant: "None".to_string(),
-            values: vec![],
-        }),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(Value::none()),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Ok(Value::none()),
     }
 }
 
@@ -327,16 +319,8 @@ fn concurrent_try_recv(ch: &Value) -> Result<Value> {
             variant: "Some".to_string(),
             values: vec![serialized.to_value()],
         }),
-        Err(mpsc::TryRecvError::Empty) => Ok(Value::EnumValue {
-            enum_name: "Option".to_string(),
-            variant: "None".to_string(),
-            values: vec![],
-        }),
-        Err(mpsc::TryRecvError::Disconnected) => Ok(Value::EnumValue {
-            enum_name: "Option".to_string(),
-            variant: "None".to_string(),
-            values: vec![],
-        }),
+        Err(mpsc::TryRecvError::Empty) => Ok(Value::none()),
+        Err(mpsc::TryRecvError::Disconnected) => Ok(Value::none()),
     }
 }
 

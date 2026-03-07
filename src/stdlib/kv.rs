@@ -777,11 +777,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                         variant: "Some".to_string(),
                         values: vec![v],
                     },
-                    None => Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    },
+                    None => Value::none(),
                 };
 
                 Ok(Value::EnumValue {
@@ -1181,11 +1177,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                         variant: "Some".to_string(),
                         values: vec![Value::Int(secs)],
                     },
-                    None => Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    },
+                    None => Value::none(),
                 };
 
                 Ok(Value::EnumValue {

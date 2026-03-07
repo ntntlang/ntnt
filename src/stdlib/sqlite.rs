@@ -46,11 +46,7 @@ fn value_to_sqlite(value: &Value) -> rusqlite::types::Value {
 /// Convert a SQLite ValueRef to an Intent Value
 fn sqlite_to_value(val: ValueRef) -> Value {
     match val {
-        ValueRef::Null => Value::EnumValue {
-            enum_name: "Option".to_string(),
-            variant: "None".to_string(),
-            values: vec![],
-        },
+        ValueRef::Null => Value::none(),
         ValueRef::Integer(i) => Value::Int(i),
         ValueRef::Real(f) => Value::Float(f),
         ValueRef::Text(t) => Value::String(String::from_utf8_lossy(t).to_string()),
@@ -211,11 +207,7 @@ fn sqlite_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> 
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
             variant: "Ok".to_string(),
-            values: vec![Value::EnumValue {
-                enum_name: "Option".to_string(),
-                variant: "None".to_string(),
-                values: vec![],
-            }],
+            values: vec![Value::none()],
         }),
         Err(e) => Ok(Value::EnumValue {
             enum_name: "Result".to_string(),
@@ -942,11 +934,7 @@ mod tests {
         sqlite_execute(
             &conn,
             "INSERT INTO test (name) VALUES (?)",
-            &[Value::EnumValue {
-                enum_name: "Option".to_string(),
-                variant: "None".to_string(),
-                values: vec![],
-            }],
+            &[Value::none()],
         )
         .unwrap();
 
@@ -1019,11 +1007,7 @@ mod tests {
             rusqlite::types::Value::Null => {}
             _ => panic!("Expected Null for Unit"),
         }
-        match value_to_sqlite(&Value::EnumValue {
-            enum_name: "Option".to_string(),
-            variant: "None".to_string(),
-            values: vec![],
-        }) {
+        match value_to_sqlite(&Value::none()) {
             rusqlite::types::Value::Null => {}
             _ => panic!("Expected Null for None"),
         }

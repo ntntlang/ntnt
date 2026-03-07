@@ -7,11 +7,7 @@ use std::collections::HashMap;
 /// Convert JSON value to Intent Value
 pub fn json_to_intent_value(json: &serde_json::Value) -> Value {
     match json {
-        serde_json::Value::Null => Value::EnumValue {
-            enum_name: "Option".to_string(),
-            variant: "None".to_string(),
-            values: vec![],
-        },
+        serde_json::Value::Null => Value::none(),
         serde_json::Value::Bool(b) => Value::Bool(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {

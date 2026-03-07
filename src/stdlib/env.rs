@@ -35,11 +35,7 @@ pub fn init() -> HashMap<String, Value> {
                         variant: "Some".to_string(),
                         values: vec![Value::String(val)],
                     }),
-                    Err(_) => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    Err(_) => Ok(Value::none()),
                 },
                 _ => Err(IntentError::TypeError(
                     "get_env() requires a string".to_string(),

@@ -112,6 +112,15 @@ pub struct FunctionContract {
 }
 
 impl Value {
+    /// Create an Option::None value
+    pub fn none() -> Self {
+        Value::EnumValue {
+            enum_name: "Option".to_string(),
+            variant: "None".to_string(),
+            values: vec![],
+        }
+    }
+
     /// Determine if a value is truthy for conditionals
     ///
     /// Falsy values: false, Unit, None, empty strings, empty arrays, empty maps
@@ -1706,14 +1715,9 @@ impl Interpreter {
             },
         );
 
-        self.environment.borrow_mut().define(
-            "None".to_string(),
-            Value::EnumValue {
-                enum_name: "Option".to_string(),
-                variant: "None".to_string(),
-                values: vec![],
-            },
-        );
+        self.environment
+            .borrow_mut()
+            .define("None".to_string(), Value::none());
 
         // @ntnt Ok
         // @signature Ok(value: Any) -> Result<Any, Any>
@@ -4033,11 +4037,7 @@ impl Interpreter {
                                     });
                                 }
                             }
-                            return Ok(Value::EnumValue {
-                                enum_name: "Option".to_string(),
-                                variant: "None".to_string(),
-                                values: vec![],
-                            });
+                            return Ok(Value::none());
                         } else {
                             return Err(IntentError::TypeError(
                                 "find() requires an array as first argument".to_string(),
@@ -4195,36 +4195,20 @@ impl Interpreter {
                         let index = if i < 0 {
                             match (arr.len() as i64).checked_add(i) {
                                 Some(idx) if idx >= 0 => idx as usize,
-                                _ => {
-                                    return Ok(Value::EnumValue {
-                                        enum_name: "Option".to_string(),
-                                        variant: "None".to_string(),
-                                        values: vec![],
-                                    })
-                                }
+                                _ => return Ok(Value::none()),
                             }
                         } else {
                             i as usize
                         };
                         // Out-of-bounds returns None instead of crashing
-                        Ok(arr.get(index).cloned().unwrap_or_else(|| Value::EnumValue {
-                            enum_name: "Option".to_string(),
-                            variant: "None".to_string(),
-                            values: vec![],
-                        }))
+                        Ok(arr.get(index).cloned().unwrap_or_else(|| Value::none()))
                     }
                     (Value::String(s), Value::Int(i)) => {
                         let index = if i < 0 {
                             let char_count = s.chars().count();
                             match (char_count as i64).checked_add(i) {
                                 Some(idx) if idx >= 0 => idx as usize,
-                                _ => {
-                                    return Ok(Value::EnumValue {
-                                        enum_name: "Option".to_string(),
-                                        variant: "None".to_string(),
-                                        values: vec![],
-                                    })
-                                }
+                                _ => return Ok(Value::none()),
                             }
                         } else {
                             i as usize
@@ -4233,20 +4217,12 @@ impl Interpreter {
                         Ok(s.chars()
                             .nth(index)
                             .map(|c| Value::String(c.to_string()))
-                            .unwrap_or_else(|| Value::EnumValue {
-                                enum_name: "Option".to_string(),
-                                variant: "None".to_string(),
-                                values: vec![],
-                            }))
+                            .unwrap_or_else(|| Value::none()))
                     }
                     // Map access with string key: map["key"]
                     // Returns None for missing keys instead of throwing (DX improvement)
                     (Value::Map(map), Value::String(key)) => {
-                        Ok(map.get(&key).cloned().unwrap_or_else(|| Value::EnumValue {
-                            enum_name: "Option".to_string(),
-                            variant: "None".to_string(),
-                            values: vec![],
-                        }))
+                        Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
                     }
                     // Struct access with string key: struct["field"]
                     (Value::Struct { fields, .. }, Value::String(key)) => {
@@ -4257,11 +4233,7 @@ impl Interpreter {
                     // Type mismatch on index returns None instead of crashing.
                     // This makes ?? the universal safety net: data["key"] ?? "default"
                     // works regardless of whether data is a map, string, int, or None.
-                    _ => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    _ => Ok(Value::none()),
                 }
             }
 
@@ -4271,13 +4243,7 @@ impl Interpreter {
                     Value::Struct { fields, .. } => fields.get(field).cloned().ok_or_else(|| {
                         IntentError::RuntimeError(format!("Unknown field: {}", field))
                     }),
-                    Value::Map(map) => {
-                        Ok(map.get(field).cloned().unwrap_or_else(|| Value::EnumValue {
-                            enum_name: "Option".to_string(),
-                            variant: "None".to_string(),
-                            values: vec![],
-                        }))
-                    }
+                    Value::Map(map) => Ok(map.get(field).cloned().unwrap_or_else(|| Value::none())),
                     _ => Err(IntentError::TypeError(
                         "Field access on non-struct value".to_string(),
                     )),
