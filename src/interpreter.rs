@@ -4214,8 +4214,8 @@ impl Interpreter {
                         }))
                     }
                     (Value::String(s), Value::Int(i)) => {
-                        let char_count = s.chars().count();
                         let index = if i < 0 {
+                            let char_count = s.chars().count();
                             match (char_count as i64).checked_add(i) {
                                 Some(idx) if idx >= 0 => idx as usize,
                                 _ => {
@@ -5088,8 +5088,17 @@ impl Interpreter {
                     let mut value = match self.eval_expression(expr) {
                         Ok(v) => v,
                         Err(e) => {
-                            // If there's a default filter, use Unit so default can provide fallback
                             if has_default {
+                                // Log non-variable errors even with default filter
+                                if !matches!(e, IntentError::UndefinedVariable { .. }) {
+                                    let is_prod = is_production_mode();
+                                    if !is_prod {
+                                        eprintln!(
+                                            "[WARN] Template expression error (using default): {}",
+                                            e
+                                        );
+                                    }
+                                }
                                 Value::Unit
                             } else {
                                 // Error boundary: render gracefully
@@ -5126,6 +5135,16 @@ impl Interpreter {
                         Ok(v) => v,
                         Err(e) => {
                             if has_default {
+                                // Log non-variable errors even with default filter
+                                if !matches!(e, IntentError::UndefinedVariable { .. }) {
+                                    let is_prod = is_production_mode();
+                                    if !is_prod {
+                                        eprintln!(
+                                            "[WARN] Template expression error (using default): {}",
+                                            e
+                                        );
+                                    }
+                                }
                                 Value::Unit
                             } else {
                                 // Error boundary: render gracefully

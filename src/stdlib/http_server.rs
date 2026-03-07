@@ -159,11 +159,6 @@ pub fn get_default_security_headers() -> HashMap<String, Value> {
 /// Apply security headers to a response map
 pub fn apply_security_headers(response: &mut HashMap<String, Value>) {
     let config = get_security_config();
-    if !config.security_headers {
-        return;
-    }
-
-    let security_headers = get_default_security_headers();
 
     // Get existing headers or create new map
     let headers = match response.get_mut("headers") {
@@ -177,16 +172,20 @@ pub fn apply_security_headers(response: &mut HashMap<String, Value>) {
         }
     };
 
-    // Add security headers only if not already set (allow app to override)
-    // Use case-insensitive comparison since HTTP headers are case-insensitive
-    for (key, value) in security_headers {
-        let already_set = headers.keys().any(|k| k.eq_ignore_ascii_case(&key));
-        if !already_set {
-            headers.insert(key, value);
+    if config.security_headers {
+        let security_headers = get_default_security_headers();
+
+        // Add security headers only if not already set (allow app to override)
+        // Use case-insensitive comparison since HTTP headers are case-insensitive
+        for (key, value) in security_headers {
+            let already_set = headers.keys().any(|k| k.eq_ignore_ascii_case(&key));
+            if !already_set {
+                headers.insert(key, value);
+            }
         }
     }
 
-    // Dynamic responses should not be cached by browsers or CDNs.
+    // Cache-Control for dynamic responses (independent of security headers toggle)
     // Static files set their own Cache-Control in serve_static().
     let has_cache_control = headers
         .keys()
@@ -2845,9 +2844,11 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
                 headers.insert(key, value);
             }
         }
+    }
 
-        // Dynamic responses should not be cached by browsers or CDNs.
-        // Static files set their own Cache-Control in serve_static().
+    // Cache-Control for dynamic responses (independent of security headers toggle)
+    // Static files set their own Cache-Control in serve_static().
+    {
         let has_cache_control = headers
             .keys()
             .any(|k| k.eq_ignore_ascii_case("cache-control"));

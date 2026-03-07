@@ -4413,43 +4413,6 @@ print(result)
 
 // ===== Recursion Depth Limit Tests =====
 
-/// Helper to run ntnt with a code string and custom env vars
-fn run_ntnt_code_with_env(code: &str, env_vars: &[(&str, &str)]) -> (String, String, i32) {
-    let test_file = unique_test_file("feature_test_env");
-
-    let mut file = fs::File::create(&test_file).expect("Failed to create test file");
-    writeln!(file, "{}", code).expect("Failed to write test file");
-    drop(file);
-
-    let exe = std::env::consts::EXE_SUFFIX;
-    let debug_path = format!("./target/debug/ntnt{}", exe);
-    let release_path = format!("./target/release/ntnt{}", exe);
-
-    let binary = if std::path::Path::new(&debug_path).exists() {
-        debug_path
-    } else if std::path::Path::new(&release_path).exists() {
-        release_path
-    } else {
-        panic!("No ntnt binary found. Run 'cargo build' first.");
-    };
-
-    let mut cmd = Command::new(binary);
-    cmd.args(&["run", &test_file])
-        .current_dir(env!("CARGO_MANIFEST_DIR"));
-    for (key, val) in env_vars {
-        cmd.env(key, val);
-    }
-    let output = cmd.output().expect("Failed to execute ntnt");
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let exit_code = output.status.code().unwrap_or(-1);
-
-    fs::remove_file(&test_file).ok();
-
-    (stdout, stderr, exit_code)
-}
-
 // Recursion depth tests live in src/interpreter.rs (unit tests) — they run
 // in-process with a configurable limit via eval_with_recursion_limit(), so
 // they work reliably on all platforms without subprocess stack size issues.

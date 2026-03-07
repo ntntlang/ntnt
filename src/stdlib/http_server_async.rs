@@ -52,24 +52,26 @@ fn apply_async_security_headers(response: &mut Response<Body>) {
     let disabled = std::env::var("NTNT_SECURITY_HEADERS")
         .map(|v| v == "0" || v.to_lowercase() == "false")
         .unwrap_or(false);
-    if disabled {
-        return;
-    }
-    let security_headers = get_default_security_headers();
-    let headers = response.headers_mut();
-    for (key, value) in security_headers {
-        if let Ok(name) = header::HeaderName::try_from(key.as_str()) {
-            if !headers.contains_key(&name) {
-                if let Value::String(val) = value {
-                    if let Ok(hv) = header::HeaderValue::from_str(&val) {
-                        headers.insert(name, hv);
+
+    if !disabled {
+        let security_headers = get_default_security_headers();
+        let headers = response.headers_mut();
+        for (key, value) in security_headers {
+            if let Ok(name) = header::HeaderName::try_from(key.as_str()) {
+                if !headers.contains_key(&name) {
+                    if let Value::String(val) = value {
+                        if let Ok(hv) = header::HeaderValue::from_str(&val) {
+                            headers.insert(name, hv);
+                        }
                     }
                 }
             }
         }
     }
-    // Dynamic responses should not be cached by browsers or CDNs.
+
+    // Cache-Control for dynamic responses (independent of security headers toggle)
     // Static files set their own Cache-Control in serve_static_file().
+    let headers = response.headers_mut();
     if !headers.contains_key(header::CACHE_CONTROL) {
         headers.insert(
             header::CACHE_CONTROL,

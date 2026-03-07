@@ -2914,7 +2914,7 @@ See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) and [PERFORMANCE_AUDIT.md](PERFORMANC
 - [x] PostgreSQL connection error sanitization (prevent credential leakage)
 
 ### Security Hardening (Proposed)
-- [x] Interpreter recursion depth limit (default: 1000)
+- [x] Interpreter recursion depth limit (default: 256)
 - [ ] Per-request timeout for sync HTTP server
 - [ ] Optional filesystem sandboxing (`NTNT_FS_ROOT`)
 - [x] Random dev-mode session secret generation

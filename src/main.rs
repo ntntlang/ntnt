@@ -5500,6 +5500,20 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             ));
         }
 
+        // NTNT_MAX_RECURSION
+        if let Some(env) = env_vars.get("NTNT_MAX_RECURSION") {
+            let typ = env.get("type").and_then(|v| v.as_str()).unwrap_or("-");
+            let default = env.get("default").and_then(|v| v.as_str()).unwrap_or("-");
+            let desc = env
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            md.push_str(&format!(
+                "| `NTNT_MAX_RECURSION` | {} | {} | {} |\n",
+                typ, default, desc
+            ));
+        }
+
         md.push_str("\n### Examples\n\n```bash\n");
         md.push_str("# Development (default) - hot-reload enabled\n");
         md.push_str("ntnt run server.tnt\n\n");
@@ -5510,7 +5524,9 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
         md.push_str("# Strict type checking - blocks execution on type errors\n");
         md.push_str("NTNT_STRICT=1 ntnt run server.tnt\n\n");
         md.push_str("# Allow fetch() to connect to Docker internal services\n");
-        md.push_str("NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt\n");
+        md.push_str("NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt\n\n");
+        md.push_str("# Custom recursion depth limit\n");
+        md.push_str("NTNT_MAX_RECURSION=512 ntnt run server.tnt\n");
         md.push_str("```\n\n");
         md.push_str("---\n\n");
     }
