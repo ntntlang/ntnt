@@ -970,7 +970,17 @@ impl TypeContext {
                 let iter_type = self.infer_expression(iterable);
                 let elem_type = match &iter_type {
                     Type::Array(inner) => (**inner).clone(),
-                    Type::String => Type::String,
+                    Type::String => {
+                        // The interpreter yields zero iterations for for..in on strings.
+                        // Warn the user to use chars() instead.
+                        let line = self.find_line_near(&format!("for {} in", variable));
+                        self.warning(
+                            "for..in on String yields zero iterations. Use chars() for character iteration.".to_string(),
+                            line,
+                            Some("Replace with: for c in chars(s)".to_string()),
+                        );
+                        Type::String
+                    }
                     Type::Map { key_type, .. } => (**key_type).clone(),
                     _ => Type::Any,
                 };
@@ -1522,6 +1532,11 @@ impl TypeContext {
                 }
             }
 
+            // TODO: arr[i] and map[k] return Option at runtime (None for out-of-bounds
+            // or missing keys), but the typechecker currently infers the unwrapped element
+            // type. A full fix would return Option<T> here and require ?? or ? at usage
+            // sites, but that's a breaking change requiring broader migration. For now,
+            // the mismatch is documented and the runtime handles it gracefully.
             Expression::Index { object, index } => {
                 let obj_type = self.infer_expression(object);
                 let _idx_type = self.infer_expression(index);
@@ -2669,7 +2684,7 @@ impl TypeContext {
         sig!("typeof", ["value" => Type::Any], Type::String);
 
         // Collections
-        sig!("chars", ["s" => Type::String], Type::Array(Box::new(Type::String)));
+        // chars() is defined in std/string (not a global builtin)
         sig!("len", ["value" => Type::Any], Type::Int);
         sig!("push", ["array" => Type::Array(Box::new(Type::Any)), "item" => Type::Any], Type::Array(Box::new(Type::Any)));
         sig!("pop", ["array" => Type::Array(Box::new(Type::Any))], Type::Any);

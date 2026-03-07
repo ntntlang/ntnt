@@ -431,6 +431,27 @@ pub struct TraitMethodInfo {
     pub has_default: bool,
 }
 
+/// Sanitize a string for safe embedding inside an HTML comment.
+/// Replaces `--` with `&#45;&#45;` to prevent `-->` breakout.
+fn sanitize_html_comment(s: &str) -> String {
+    s.replace("--", "&#45;&#45;")
+}
+
+/// Check if NTNT is running in production mode (NTNT_ENV=production or prod).
+/// Caches the result to avoid repeated env var reads.
+fn is_production_mode() -> bool {
+    use std::sync::OnceLock;
+    static IS_PROD: OnceLock<bool> = OnceLock::new();
+    *IS_PROD.get_or_init(|| {
+        std::env::var("NTNT_ENV")
+            .map(|v| {
+                let v = v.to_lowercase();
+                v == "production" || v == "prod"
+            })
+            .unwrap_or(false)
+    })
+}
+
 impl Interpreter {
     pub fn new() -> Self {
         let env = Rc::new(RefCell::new(Environment::new()));
@@ -1066,38 +1087,6 @@ impl Interpreter {
                 arity: 1,
                 max_arity: 1,
                 func: |args| Ok(Value::String(args[0].to_string())),
-            },
-        );
-
-        // @ntnt chars
-        // @signature chars(s: String) -> Array<String>
-        // Split a string into an array of single-character strings.
-        //
-        // Returns an array where each element is a one-character string.
-        // This is the explicit way to iterate over characters in a string,
-        // since `for..in` on a string no longer auto-iterates characters.
-        // @param s The input string
-        // @returns Array of single-character strings
-        // @tags #pure, #deterministic
-        // @see_also split, len
-        // @since v0.3.17
-        // @example chars("hello") => ["h", "e", "l", "l", "o"] ~ "Split into characters"
-        // @example chars("") => [] ~ "Empty string gives empty array"
-        // @error TypeError ~ "chars() requires a string" fix: "Pass a string argument"
-        self.environment.borrow_mut().define(
-            "chars".to_string(),
-            Value::NativeFunction {
-                name: "chars".to_string(),
-                arity: 1,
-                max_arity: 1,
-                func: |args| match &args[0] {
-                    Value::String(s) => Ok(Value::Array(
-                        s.chars().map(|c| Value::String(c.to_string())).collect(),
-                    )),
-                    _ => Err(IntentError::TypeError(
-                        "chars() requires a string".to_string(),
-                    )),
-                },
             },
         );
 
@@ -3365,11 +3354,7 @@ impl Interpreter {
                     // String and non-collection types: zero iterations with dev-mode warning.
                     // Use chars() builtin for explicit string character iteration.
                     _ => {
-                        if std::env::var("NTNT_ENV").unwrap_or_default().to_lowercase()
-                            != "production"
-                            && std::env::var("NTNT_ENV").unwrap_or_default().to_lowercase()
-                                != "prod"
-                        {
+                        if !is_production_mode() {
                             eprintln!(
                                 "[WARN] for..in on {} — skipping (not a collection). \
                                  Use chars() for string iteration.",
@@ -4206,8 +4191,9 @@ impl Interpreter {
                         }))
                     }
                     (Value::String(s), Value::Int(i)) => {
+                        let char_count = s.chars().count();
                         let index = if i < 0 {
-                            (s.len() as i64 + i) as usize
+                            (char_count as i64 + i) as usize
                         } else {
                             i as usize
                         };
@@ -5031,18 +5017,12 @@ impl Interpreter {
                         // Undefined variables render as empty string (standard Mustache behavior)
                         Err(IntentError::UndefinedVariable { .. }) => {}
                         Err(e) => {
-                            let is_prod = matches!(
-                                std::env::var("NTNT_ENV")
-                                    .unwrap_or_default()
-                                    .to_lowercase()
-                                    .as_str(),
-                                "production" | "prod"
-                            );
+                            let is_prod = is_production_mode();
                             eprintln!("[ERROR] Template expression failed: {}", e);
                             if !is_prod {
                                 result.push_str(&format!(
                                     "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                    e
+                                    sanitize_html_comment(&e.to_string())
                                 ));
                             }
                             // prod: empty string (push nothing)
@@ -5058,18 +5038,12 @@ impl Interpreter {
                         // Undefined variables render as empty string (standard Mustache behavior)
                         Err(IntentError::UndefinedVariable { .. }) => {}
                         Err(e) => {
-                            let is_prod = matches!(
-                                std::env::var("NTNT_ENV")
-                                    .unwrap_or_default()
-                                    .to_lowercase()
-                                    .as_str(),
-                                "production" | "prod"
-                            );
+                            let is_prod = is_production_mode();
                             eprintln!("[ERROR] Template expression failed: {}", e);
                             if !is_prod {
                                 result.push_str(&format!(
                                     "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                    e
+                                    sanitize_html_comment(&e.to_string())
                                 ));
                             }
                         }
@@ -5087,13 +5061,7 @@ impl Interpreter {
                                 Value::Unit
                             } else {
                                 // Error boundary: render gracefully
-                                let is_prod = matches!(
-                                    std::env::var("NTNT_ENV")
-                                        .unwrap_or_default()
-                                        .to_lowercase()
-                                        .as_str(),
-                                    "production" | "prod"
-                                );
+                                let is_prod = is_production_mode();
                                 eprintln!("[ERROR] Template expression failed: {}", e);
                                 if !is_prod {
                                     result.push_str(&format!(
@@ -5129,13 +5097,7 @@ impl Interpreter {
                                 Value::Unit
                             } else {
                                 // Error boundary: render gracefully
-                                let is_prod = matches!(
-                                    std::env::var("NTNT_ENV")
-                                        .unwrap_or_default()
-                                        .to_lowercase()
-                                        .as_str(),
-                                    "production" | "prod"
-                                );
+                                let is_prod = is_production_mode();
                                 eprintln!("[ERROR] Template expression failed: {}", e);
                                 if !is_prod {
                                     result.push_str(&format!(
@@ -5162,18 +5124,12 @@ impl Interpreter {
                         Ok(v) => v,
                         Err(e) => {
                             // Error boundary: treat errored iterable as empty
-                            let is_prod = matches!(
-                                std::env::var("NTNT_ENV")
-                                    .unwrap_or_default()
-                                    .to_lowercase()
-                                    .as_str(),
-                                "production" | "prod"
-                            );
+                            let is_prod = is_production_mode();
                             eprintln!("[ERROR] Template for-loop iterable failed: {}", e);
                             if !is_prod {
                                 result.push_str(&format!(
                                     "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR (for): {} -->",
-                                    e
+                                    sanitize_html_comment(&e.to_string())
                                 ));
                             }
                             // Render empty_body if present, otherwise skip
@@ -5298,13 +5254,7 @@ impl Interpreter {
                         }
                         _ => {
                             // Non-iterable value: skip with warning (consistent with for..in behavior)
-                            let is_prod = matches!(
-                                std::env::var("NTNT_ENV")
-                                    .unwrap_or_default()
-                                    .to_lowercase()
-                                    .as_str(),
-                                "production" | "prod"
-                            );
+                            let is_prod = is_production_mode();
                             eprintln!(
                                 "[WARN] Template for loop on {} — skipping (not a collection)",
                                 iterable_value.type_name()
@@ -5312,7 +5262,7 @@ impl Interpreter {
                             if !is_prod {
                                 result.push_str(&format!(
                                     "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: for loop on {}, expected array or map -->",
-                                    iterable_value.type_name()
+                                    sanitize_html_comment(iterable_value.type_name())
                                 ));
                             }
                             if !empty_body.is_empty() {
@@ -6506,9 +6456,7 @@ impl Interpreter {
             .unwrap_or(port);
 
         // Enable hot-reload unless in production mode
-        let is_production = std::env::var("NTNT_ENV")
-            .map(|v| v == "production" || v == "prod")
-            .unwrap_or(false);
+        let is_production = is_production_mode();
         self.server_state.hot_reload = !is_production;
 
         if is_production {
@@ -10618,7 +10566,13 @@ c")
 
     #[test]
     fn test_chars_builtin() {
-        let result = eval(r#"chars("hi")"#).unwrap();
+        let result = eval(
+            r#"
+            import { chars } from "std/string"
+            chars("hi")
+        "#,
+        )
+        .unwrap();
         match result {
             Value::Array(arr) => {
                 assert_eq!(arr.len(), 2);
@@ -10631,7 +10585,13 @@ c")
 
     #[test]
     fn test_chars_empty_string() {
-        let result = eval(r#"chars("")"#).unwrap();
+        let result = eval(
+            r#"
+            import { chars } from "std/string"
+            chars("")
+        "#,
+        )
+        .unwrap();
         match result {
             Value::Array(arr) => assert_eq!(arr.len(), 0),
             _ => panic!("Expected empty array from chars(\"\")"),
@@ -10643,6 +10603,7 @@ c")
         // chars() provides explicit character iteration
         let result = eval(
             r#"
+            import { chars } from "std/string"
             let count = 0
             for ch in chars("abc") {
                 count = count + 1

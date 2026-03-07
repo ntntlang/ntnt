@@ -178,17 +178,24 @@ pub fn apply_security_headers(response: &mut HashMap<String, Value>) {
     };
 
     // Add security headers only if not already set (allow app to override)
+    // Use case-insensitive comparison since HTTP headers are case-insensitive
     for (key, value) in security_headers {
-        if !headers.contains_key(&key) {
+        let already_set = headers.keys().any(|k| k.eq_ignore_ascii_case(&key));
+        if !already_set {
             headers.insert(key, value);
         }
     }
 
     // Dynamic responses should not be cached by browsers or CDNs.
     // Static files set their own Cache-Control in serve_static().
-    let cc_key = "cache-control".to_string();
-    if !headers.contains_key(&cc_key) {
-        headers.insert(cc_key, Value::String("no-store".to_string()));
+    let has_cache_control = headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("cache-control"));
+    if !has_cache_control {
+        headers.insert(
+            "cache-control".to_string(),
+            Value::String("no-store".to_string()),
+        );
     }
 }
 
@@ -2832,10 +2839,23 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
     if config.security_headers {
         let security_headers = get_default_security_headers();
         for (key, value) in security_headers {
-            // Only add if not already set by the application
-            if !headers.contains_key(&key) {
+            // Case-insensitive check since HTTP headers are case-insensitive
+            let already_set = headers.keys().any(|k| k.eq_ignore_ascii_case(&key));
+            if !already_set {
                 headers.insert(key, value);
             }
+        }
+
+        // Dynamic responses should not be cached by browsers or CDNs.
+        // Static files set their own Cache-Control in serve_static().
+        let has_cache_control = headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("cache-control"));
+        if !has_cache_control {
+            headers.insert(
+                "cache-control".to_string(),
+                Value::String("no-store".to_string()),
+            );
         }
     }
 
@@ -4193,5 +4213,64 @@ mod tests {
         } else {
             panic!("Expected Map response");
         }
+    }
+
+    // ===========================================
+    // Cache-Control Header Tests
+    // ===========================================
+
+    #[test]
+    fn test_apply_security_headers_adds_cache_control() {
+        // Dynamic response with no Cache-Control should get "no-store"
+        let mut response = HashMap::new();
+        response.insert("status".to_string(), Value::Int(200));
+        response.insert("headers".to_string(), Value::Map(HashMap::new()));
+        response.insert("body".to_string(), Value::String("hello".to_string()));
+
+        apply_security_headers(&mut response);
+
+        let headers = match response.get("headers") {
+            Some(Value::Map(h)) => h,
+            _ => panic!("Expected headers map"),
+        };
+        assert_value_string(
+            headers
+                .get("cache-control")
+                .expect("cache-control should be set"),
+            "no-store",
+        );
+    }
+
+    #[test]
+    fn test_apply_security_headers_respects_app_cache_control() {
+        // App explicitly sets Cache-Control — should not be overridden
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Cache-Control".to_string(),
+            Value::String("max-age=3600".to_string()),
+        );
+        let mut response = HashMap::new();
+        response.insert("status".to_string(), Value::Int(200));
+        response.insert("headers".to_string(), Value::Map(headers));
+        response.insert("body".to_string(), Value::String("hello".to_string()));
+
+        apply_security_headers(&mut response);
+
+        let headers = match response.get("headers") {
+            Some(Value::Map(h)) => h,
+            _ => panic!("Expected headers map"),
+        };
+        // The original mixed-case key should still have the app's value
+        assert_value_string(
+            headers
+                .get("Cache-Control")
+                .expect("Cache-Control should still be set"),
+            "max-age=3600",
+        );
+        // And no duplicate lowercase key should be added
+        assert!(
+            headers.get("cache-control").is_none(),
+            "Should not add duplicate lowercase cache-control"
+        );
     }
 }

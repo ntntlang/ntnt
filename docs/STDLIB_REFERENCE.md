@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.3.16
+> Last updated: v0.3.17
 
 ## Table of Contents
 
@@ -42,7 +42,6 @@ These functions are available everywhere without importing.
 | [`abs(x: Int \| Float)`](#abs) | Returns the absolute value of a number. |
 | [`assert(condition: Bool)`](#assert) | Asserts a condition is truthy, throws ContractViolation if not. |
 | [`ceil(x: Int \| Float)`](#ceil) | Rounds up to the nearest integer. |
-| [`chars(s: String)`](#chars) | Split a string into an array of single-character strings. |
 | [`clamp(x: Int \| Float, min_val: Int \| Float, max_val: Int \| Float)`](#clamp) | Constrains a value between a minimum and maximum. |
 | [`delete(pattern: String, handler: Function)`](#delete) | Registers a DELETE route handler. |
 | [`enable_cors(options?: Map)`](#enablecors) | Enable CORS (Cross-Origin Resource Sharing) for the HTTP server. |
@@ -257,39 +256,6 @@ ceil(-2.9)  // => -2  // Ceil rounds toward positive infinity
 **See also:** `floor`, `round`, `trunc`
 
 *Since v0.1.0*
-
----
-
-#### `chars`
-
-```ntnt
-chars(s: String) -> Array<String>
-```
-
-Split a string into an array of single-character strings.
-
-Returns an array where each element is a one-character string. This is the explicit way to iterate over characters in a string, since `for..in` on a string no longer auto-iterates characters.
-
-**Parameters:**
-
-- `s` — The input string
-
-**Returns:** Array of single-character strings
-
-**Examples:**
-
-```ntnt
-chars("hello")  // => ["h", "e", "l", "l", "o"]  // Split into characters
-chars("")  // => []  // Empty string gives empty array
-```
-
-**Errors:**
-
-- **TypeError**: chars() requires a string — *Fix: Pass a string argument*
-
-**See also:** `split`, `len`
-
-*Since v0.3.17*
 
 ---
 

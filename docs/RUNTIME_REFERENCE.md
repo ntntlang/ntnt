@@ -2,7 +2,7 @@
 
 > **Auto-generated from [runtime.toml](runtime.toml)** - Do not edit directly.
 >
-> Last updated: v0.3.16
+> Last updated: v0.3.17
 
 Runtime configuration, environment variables, and CLI commands for NTNT
 
