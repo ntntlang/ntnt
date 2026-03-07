@@ -345,11 +345,7 @@ fn cache_fetch(cache_id: u64, url: &str, opts: Option<&HashMap<String, Value>>) 
         if let Some(cache) = registry.get_mut(&cache_id) {
             if let Some(cached) = cache.get(url) {
                 let resp_value = cached_response_to_value(&cached);
-                return Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![resp_value],
-                });
+                return Ok(Value::ok(resp_value));
             }
         }
     }
@@ -601,11 +597,10 @@ fn read_response_body_limited(
 fn http_get(url: &str) -> Result<Value> {
     // SSRF protection: validate URL before making request
     if let Err(reason) = validate_url_for_ssrf(url) {
-        return Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("SSRF protection: {}", reason))],
-        });
+        return Ok(Value::err(Value::String(format!(
+            "SSRF protection: {}",
+            reason
+        ))));
     }
 
     let client = reqwest::blocking::Client::new();
@@ -613,23 +608,14 @@ fn http_get(url: &str) -> Result<Value> {
         Ok(response) => match read_response_body_limited(response) {
             Ok((body, status, headers, final_url)) => {
                 let resp_value = response_to_value(status, &headers, body, &final_url, url);
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![resp_value],
-                })
+                Ok(Value::ok(resp_value))
             }
-            Err(e) => Ok(Value::EnumValue {
-                enum_name: "Result".to_string(),
-                variant: "Err".to_string(),
-                values: vec![Value::String(e)],
-            }),
+            Err(e) => Ok(Value::err(Value::String(e))),
         },
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("HTTP request failed: {}", e))],
-        }),
+        Err(e) => Ok(Value::err(Value::String(format!(
+            "HTTP request failed: {}",
+            e
+        )))),
     }
 }
 
@@ -646,11 +632,10 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
 
     // SSRF protection: validate URL before making request
     if let Err(reason) = validate_url_for_ssrf(&url) {
-        return Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("SSRF protection: {}", reason))],
-        });
+        return Ok(Value::err(Value::String(format!(
+            "SSRF protection: {}",
+            reason
+        ))));
     }
 
     let method = match opts.get("method") {
@@ -786,27 +771,18 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
                             map.insert("cookies".to_string(), Value::Map(response_cookies));
                         }
                     }
-                    Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![resp_value],
-                    })
+                    Ok(Value::ok(resp_value))
                 }
-                Err(e) => Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Err".to_string(),
-                    values: vec![Value::String(format!(
-                        "Failed to read response body: {}",
-                        e
-                    ))],
-                }),
+                Err(e) => Ok(Value::err(Value::String(format!(
+                    "Failed to read response body: {}",
+                    e
+                )))),
             }
         }
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("HTTP request failed: {}", e))],
-        }),
+        Err(e) => Ok(Value::err(Value::String(format!(
+            "HTTP request failed: {}",
+            e
+        )))),
     }
 }
 
@@ -814,11 +790,10 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
 fn http_download(url: &str, file_path: &str) -> Result<Value> {
     // SSRF protection: validate URL before making request
     if let Err(reason) = validate_url_for_ssrf(url) {
-        return Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("SSRF protection: {}", reason))],
-        });
+        return Ok(Value::err(Value::String(format!(
+            "SSRF protection: {}",
+            reason
+        ))));
     }
 
     let path = Path::new(file_path);
@@ -850,43 +825,34 @@ fn http_download(url: &str, file_path: &str) -> Result<Value> {
                                 result_map
                                     .insert("size".to_string(), Value::Int(bytes.len() as i64));
 
-                                Ok(Value::EnumValue {
-                                    enum_name: "Result".to_string(),
-                                    variant: "Ok".to_string(),
-                                    values: vec![Value::Map(result_map)],
-                                })
+                                Ok(Value::ok(Value::Map(result_map)))
                             }
-                            Err(e) => Ok(Value::EnumValue {
-                                enum_name: "Result".to_string(),
-                                variant: "Err".to_string(),
-                                values: vec![Value::String(format!("Failed to write file: {}", e))],
-                            }),
+                            Err(e) => Ok(Value::err(Value::String(format!(
+                                "Failed to write file: {}",
+                                e
+                            )))),
                         },
-                        Err(e) => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(format!("Failed to create file: {}", e))],
-                        }),
+                        Err(e) => Ok(Value::err(Value::String(format!(
+                            "Failed to create file: {}",
+                            e
+                        )))),
                     },
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(format!("Failed to read response: {}", e))],
-                    }),
+                    Err(e) => Ok(Value::err(Value::String(format!(
+                        "Failed to read response: {}",
+                        e
+                    )))),
                 }
             } else {
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Err".to_string(),
-                    values: vec![Value::String(format!("HTTP error: status {}", status))],
-                })
+                Ok(Value::err(Value::String(format!(
+                    "HTTP error: status {}",
+                    status
+                ))))
             }
         }
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("HTTP request failed: {}", e))],
-        }),
+        Err(e) => Ok(Value::err(Value::String(format!(
+            "HTTP request failed: {}",
+            e
+        )))),
     }
 }
 

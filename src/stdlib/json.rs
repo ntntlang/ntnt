@@ -109,17 +109,9 @@ pub fn init() -> HashMap<String, Value> {
                     match serde_json::from_str::<serde_json::Value>(json_str) {
                         Ok(json_val) => {
                             let intent_val = json_to_intent_value(&json_val);
-                            Ok(Value::EnumValue {
-                                enum_name: "Result".to_string(),
-                                variant: "Ok".to_string(),
-                                values: vec![intent_val],
-                            })
+                            Ok(Value::ok(intent_val))
                         }
-                        Err(e) => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(e.to_string())],
-                        }),
+                        Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                     }
                 }
                 _ => Err(IntentError::TypeError(

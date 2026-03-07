@@ -70,11 +70,7 @@ pub fn init() -> HashMap<String, Value> {
                         let mut new_arr = arr.clone();
                         let popped = new_arr.pop();
                         let opt_val = match popped {
-                            Some(v) => Value::EnumValue {
-                                enum_name: "Option".to_string(),
-                                variant: "Some".to_string(),
-                                values: vec![v],
-                            },
+                            Some(v) => Value::some(v),
                             None => Value::none(),
                         };
                         // Return tuple of (new array, popped value)
@@ -134,11 +130,7 @@ pub fn init() -> HashMap<String, Value> {
 
                 // No default: return Option
                 match arr.first() {
-                    Some(v) => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: vec![v.clone()],
-                    }),
+                    Some(v) => Ok(Value::some(v.clone())),
                     None => Ok(Value::none()),
                 }
             },
@@ -191,11 +183,7 @@ pub fn init() -> HashMap<String, Value> {
 
                 // No default: return Option
                 match arr.last() {
-                    Some(v) => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: vec![v.clone()],
-                    }),
+                    Some(v) => Ok(Value::some(v.clone())),
                     None => Ok(Value::none()),
                 }
             },
@@ -512,11 +500,7 @@ pub fn init() -> HashMap<String, Value> {
                                 Ok(value.clone())
                             } else {
                                 // Without default: return Some(value)
-                                Ok(Value::EnumValue {
-                                    enum_name: "Option".to_string(),
-                                    variant: "Some".to_string(),
-                                    values: vec![value.clone()],
-                                })
+                                Ok(Value::some(value.clone()))
                             }
                         }
                         None => {
@@ -601,11 +585,7 @@ pub fn init() -> HashMap<String, Value> {
                     if args.len() == 3 {
                         Ok(value.clone())
                     } else {
-                        Ok(Value::EnumValue {
-                            enum_name: "Option".to_string(),
-                            variant: "Some".to_string(),
-                            values: vec![value.clone()],
-                        })
+                        Ok(Value::some(value.clone()))
                     }
                 }
                 None => {

@@ -690,11 +690,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     handle.insert("_url".to_string(), Value::String(url));
                     handle.insert("_kv_store_id".to_string(), Value::Int(id as i64));
 
-                    return Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Map(handle)],
-                    });
+                    return Ok(Value::ok(Value::Map(handle)));
                 }
 
                 // SQLite backend (default for file paths)
@@ -710,11 +706,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 handle.insert("_url".to_string(), Value::String(url));
                 handle.insert("_kv_store_id".to_string(), Value::Int(id as i64));
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Map(handle)],
-                })
+                Ok(Value::ok(Value::Map(handle)))
             },
         },
     );
@@ -772,19 +764,11 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 };
 
                 let option_value = match result {
-                    Some(v) => Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: vec![v],
-                    },
+                    Some(v) => Value::some(v),
                     None => Value::none(),
                 };
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![option_value],
-                })
+                Ok(Value::ok(option_value))
             },
         },
     );
@@ -857,11 +841,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     }
                 }
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Unit],
-                })
+                Ok(Value::ok(Value::Unit))
             },
         },
     );
@@ -916,11 +896,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     }
                 };
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Bool(deleted)],
-                })
+                Ok(Value::ok(Value::Bool(deleted)))
             },
         },
     );
@@ -975,11 +951,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     }
                 };
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Bool(exists)],
-                })
+                Ok(Value::ok(Value::Bool(exists)))
             },
         },
     );
@@ -1043,11 +1015,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
 
                 let key_values: Vec<Value> = keys.into_iter().map(Value::String).collect();
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Array(key_values)],
-                })
+                Ok(Value::ok(Value::Array(key_values)))
             },
         },
     );
@@ -1112,11 +1080,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     }
                 };
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Bool(success)],
-                })
+                Ok(Value::ok(Value::Bool(success)))
             },
         },
     );
@@ -1172,19 +1136,11 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 };
 
                 let option_value = match remaining {
-                    Some(secs) => Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: vec![Value::Int(secs)],
-                    },
+                    Some(secs) => Value::some(Value::Int(secs)),
                     None => Value::none(),
                 };
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![option_value],
-                })
+                Ok(Value::ok(option_value))
             },
         },
     );
@@ -1229,11 +1185,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     }
                 }
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Unit],
-                })
+                Ok(Value::ok(Value::Unit))
             },
         },
     );

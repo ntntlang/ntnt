@@ -72,27 +72,15 @@ fn make_none() -> Value {
 }
 
 fn make_some(value: Value) -> Value {
-    Value::EnumValue {
-        enum_name: "Option".to_string(),
-        variant: "Some".to_string(),
-        values: vec![value],
-    }
+    Value::some(value)
 }
 
 fn make_ok(value: Value) -> Value {
-    Value::EnumValue {
-        enum_name: "Result".to_string(),
-        variant: "Ok".to_string(),
-        values: vec![value],
-    }
+    Value::ok(value)
 }
 
 fn make_err(value: Value) -> Value {
-    Value::EnumValue {
-        enum_name: "Result".to_string(),
-        variant: "Err".to_string(),
-        values: vec![value],
-    }
+    Value::err(value)
 }
 
 // ============================================================================
@@ -1410,6 +1398,19 @@ pub fn init_auth(config: AuthConfig) {
             if is_prod {
                 eprintln!("       WARNING: Running in production without persistent storage!");
             }
+            // Start background cleanup task for expired sessions (every 5 minutes)
+            let store = SESSION_STORE.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(300));
+                if let Ok(mut s) = store.lock() {
+                    let now = chrono::Utc::now().timestamp();
+                    let removed = s.cleanup_expired(now);
+                    s.cleanup_expired_oauth_states(now - 600);
+                    if removed > 0 {
+                        eprintln!("[auth] Cleaned up {} expired session(s)", removed);
+                    }
+                }
+            });
         }
         SessionStore::Sqlite(path) => {
             eprintln!("[auth] Using SQLite session storage: {}", path);

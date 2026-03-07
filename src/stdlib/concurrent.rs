@@ -282,11 +282,7 @@ fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
         .map_err(|e| IntentError::RuntimeError(format!("Failed to lock receiver: {}", e)))?;
 
     match rx.recv_timeout(Duration::from_millis(timeout_ms as u64)) {
-        Ok(serialized) => Ok(Value::EnumValue {
-            enum_name: "Option".to_string(),
-            variant: "Some".to_string(),
-            values: vec![serialized.to_value()],
-        }),
+        Ok(serialized) => Ok(Value::some(serialized.to_value())),
         Err(mpsc::RecvTimeoutError::Timeout) => Ok(Value::none()),
         Err(mpsc::RecvTimeoutError::Disconnected) => Ok(Value::none()),
     }
@@ -314,11 +310,7 @@ fn concurrent_try_recv(ch: &Value) -> Result<Value> {
         .map_err(|e| IntentError::RuntimeError(format!("Failed to lock receiver: {}", e)))?;
 
     match rx.try_recv() {
-        Ok(serialized) => Ok(Value::EnumValue {
-            enum_name: "Option".to_string(),
-            variant: "Some".to_string(),
-            values: vec![serialized.to_value()],
-        }),
+        Ok(serialized) => Ok(Value::some(serialized.to_value())),
         Err(mpsc::TryRecvError::Empty) => Ok(Value::none()),
         Err(mpsc::TryRecvError::Disconnected) => Ok(Value::none()),
     }

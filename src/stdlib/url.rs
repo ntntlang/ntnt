@@ -226,11 +226,7 @@ pub fn init() -> HashMap<String, Value> {
 
                         result.insert("href".to_string(), Value::String(url_str.clone()));
 
-                        Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![Value::Map(result)],
-                        })
+                        Ok(Value::ok(Value::Map(result)))
                     }
                     _ => Err(IntentError::TypeError(
                         "parse() requires a URL string".to_string(),
@@ -325,16 +321,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => match url_decode(s) {
-                    Ok(decoded) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::String(decoded)],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e)],
-                    }),
+                    Ok(decoded) => Ok(Value::ok(Value::String(decoded))),
+                    Err(e) => Ok(Value::err(Value::String(e))),
                 },
                 _ => Err(IntentError::TypeError(
                     "decode() requires a string".to_string(),

@@ -276,17 +276,9 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(bytes) => {
                         let values: Vec<Value> =
                             bytes.iter().map(|b| Value::Int(*b as i64)).collect();
-                        Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![Value::Array(values)],
-                        })
+                        Ok(Value::ok(Value::Array(values)))
                     }
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "hex_decode() requires a string".to_string(),
@@ -342,14 +334,9 @@ pub fn init() -> HashMap<String, Value> {
                     match &args[1] {
                         Value::Int(c) => {
                             if *c < 10 || *c > 31 {
-                                return Ok(Value::EnumValue {
-                                    enum_name: "Result".to_string(),
-                                    variant: "Err".to_string(),
-                                    values: vec![Value::String(
-                                        "Cost must be between 10 and 31 (OWASP minimum)"
-                                            .to_string(),
-                                    )],
-                                });
+                                return Ok(Value::err(Value::String(
+                                    "Cost must be between 10 and 31 (OWASP minimum)".to_string(),
+                                )));
                             }
                             *c as u32
                         }
@@ -364,16 +351,8 @@ pub fn init() -> HashMap<String, Value> {
                 };
 
                 match bcrypt::hash(&password, cost) {
-                    Ok(hash) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::String(hash)],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(format!("Hash error: {}", e))],
-                    }),
+                    Ok(hash) => Ok(Value::ok(Value::String(hash))),
+                    Err(e) => Ok(Value::err(Value::String(format!("Hash error: {}", e)))),
                 }
             },
         },
@@ -421,16 +400,8 @@ pub fn init() -> HashMap<String, Value> {
                 };
 
                 match bcrypt::verify(&password, &hash) {
-                    Ok(valid) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Bool(valid)],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(format!("Verify error: {}", e))],
-                    }),
+                    Ok(valid) => Ok(Value::ok(Value::Bool(valid))),
+                    Err(e) => Ok(Value::err(Value::String(format!("Verify error: {}", e)))),
                 }
             },
         },
@@ -524,22 +495,13 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::String(encoded) => match STANDARD.decode(encoded.as_bytes()) {
                     Ok(bytes) => match String::from_utf8(bytes) {
-                        Ok(s) => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![Value::String(s)],
-                        }),
-                        Err(e) => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(format!("UTF-8 error: {}", e))],
-                        }),
+                        Ok(s) => Ok(Value::ok(Value::String(s))),
+                        Err(e) => Ok(Value::err(Value::String(format!("UTF-8 error: {}", e)))),
                     },
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(format!("Base64 decode error: {}", e))],
-                    }),
+                    Err(e) => Ok(Value::err(Value::String(format!(
+                        "Base64 decode error: {}",
+                        e
+                    )))),
                 },
                 _ => Err(IntentError::TypeError(
                     "base64_decode() requires a string".to_string(),
@@ -595,22 +557,13 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::String(encoded) => match URL_SAFE_NO_PAD.decode(encoded.as_bytes()) {
                     Ok(bytes) => match String::from_utf8(bytes) {
-                        Ok(s) => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![Value::String(s)],
-                        }),
-                        Err(e) => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(format!("UTF-8 error: {}", e))],
-                        }),
+                        Ok(s) => Ok(Value::ok(Value::String(s))),
+                        Err(e) => Ok(Value::err(Value::String(format!("UTF-8 error: {}", e)))),
                     },
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(format!("Base64url decode error: {}", e))],
-                    }),
+                    Err(e) => Ok(Value::err(Value::String(format!(
+                        "Base64url decode error: {}",
+                        e
+                    )))),
                 },
                 _ => Err(IntentError::TypeError(
                     "base64url_decode() requires a string".to_string(),
@@ -683,21 +636,13 @@ pub fn init() -> HashMap<String, Value> {
                 let key_bytes = match hex::decode(&key_hex) {
                     Ok(b) if b.len() == 32 => b,
                     Ok(b) => {
-                        return Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(format!(
-                                "Key must be 32 bytes (64 hex chars), got {} bytes",
-                                b.len()
-                            ))],
-                        })
+                        return Ok(Value::err(Value::String(format!(
+                            "Key must be 32 bytes (64 hex chars), got {} bytes",
+                            b.len()
+                        ))))
                     }
                     Err(e) => {
-                        return Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(format!("Invalid hex key: {}", e))],
-                        })
+                        return Ok(Value::err(Value::String(format!("Invalid hex key: {}", e))))
                     }
                 };
 
@@ -710,17 +655,12 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(ciphertext) => {
                         let mut combined = nonce_bytes.to_vec();
                         combined.extend_from_slice(&ciphertext);
-                        Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![Value::String(STANDARD.encode(&combined))],
-                        })
+                        Ok(Value::ok(Value::String(STANDARD.encode(&combined))))
                     }
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(format!("Encryption error: {}", e))],
-                    }),
+                    Err(e) => Ok(Value::err(Value::String(format!(
+                        "Encryption error: {}",
+                        e
+                    )))),
                 }
             },
         },
@@ -766,43 +706,30 @@ pub fn init() -> HashMap<String, Value> {
                 let key_bytes = match hex::decode(&key_hex) {
                     Ok(b) if b.len() == 32 => b,
                     Ok(b) => {
-                        return Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(format!(
-                                "Key must be 32 bytes (64 hex chars), got {} bytes",
-                                b.len()
-                            ))],
-                        })
+                        return Ok(Value::err(Value::String(format!(
+                            "Key must be 32 bytes (64 hex chars), got {} bytes",
+                            b.len()
+                        ))))
                     }
                     Err(e) => {
-                        return Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(format!("Invalid hex key: {}", e))],
-                        })
+                        return Ok(Value::err(Value::String(format!("Invalid hex key: {}", e))))
                     }
                 };
 
                 let combined = match STANDARD.decode(ciphertext_b64.as_bytes()) {
                     Ok(b) => b,
                     Err(e) => {
-                        return Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(format!("Base64 decode error: {}", e))],
-                        })
+                        return Ok(Value::err(Value::String(format!(
+                            "Base64 decode error: {}",
+                            e
+                        ))))
                     }
                 };
 
                 if combined.len() < 12 {
-                    return Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(
-                            "Ciphertext too short (missing nonce)".to_string(),
-                        )],
-                    });
+                    return Ok(Value::err(Value::String(
+                        "Ciphertext too short (missing nonce)".to_string(),
+                    )));
                 }
 
                 let (nonce_bytes, ciphertext) = combined.split_at(12);
@@ -811,22 +738,13 @@ pub fn init() -> HashMap<String, Value> {
 
                 match cipher.decrypt(nonce, ciphertext.as_ref()) {
                     Ok(plaintext) => match String::from_utf8(plaintext) {
-                        Ok(s) => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![Value::String(s)],
-                        }),
-                        Err(e) => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(format!("UTF-8 error: {}", e))],
-                        }),
+                        Ok(s) => Ok(Value::ok(Value::String(s))),
+                        Err(e) => Ok(Value::err(Value::String(format!("UTF-8 error: {}", e)))),
                     },
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(format!("Decryption error: {}", e))],
-                    }),
+                    Err(e) => Ok(Value::err(Value::String(format!(
+                        "Decryption error: {}",
+                        e
+                    )))),
                 }
             },
         },

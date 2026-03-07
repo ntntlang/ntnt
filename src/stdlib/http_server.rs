@@ -509,6 +509,13 @@ impl ServerState {
 
     /// Enable CORS with the given configuration
     pub fn enable_cors(&mut self, config: CorsConfig) {
+        // Warn about wildcard origin in production
+        let is_prod = std::env::var("NTNT_ENV")
+            .map(|v| v == "production" || v == "prod")
+            .unwrap_or(false);
+        if is_prod && config.origins.iter().any(|o| o == "*") {
+            eprintln!("[WARN] CORS wildcard origin ('*') in production — consider restricting to specific origins");
+        }
         self.cors_config = Some(config);
     }
 
@@ -1721,17 +1728,9 @@ pub fn init() -> HashMap<String, Value> {
                 match serde_json::from_str::<serde_json::Value>(&body) {
                     Ok(json_val) => {
                         let intent_val = json_to_intent_value(&json_val);
-                        Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![intent_val],
-                        })
+                        Ok(Value::ok(intent_val))
                     }
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 }
             },
         },
@@ -1959,11 +1958,7 @@ pub fn init() -> HashMap<String, Value> {
                     Some(header) => {
                         let cookies = parse_cookie_header(&header);
                         match cookies.get(&name) {
-                            Some(value) => Ok(Value::EnumValue {
-                                enum_name: "Option".to_string(),
-                                variant: "Some".to_string(),
-                                values: vec![Value::String(value.clone())],
-                            }),
+                            Some(value) => Ok(Value::some(Value::String(value.clone()))),
                             None => Ok(Value::none()),
                         }
                     }
@@ -2245,11 +2240,9 @@ pub fn init() -> HashMap<String, Value> {
                         let body = match map.get("body") {
                             Some(Value::String(b)) => b.clone(),
                             _ => {
-                                return Ok(Value::EnumValue {
-                                    enum_name: "Result".to_string(),
-                                    variant: "Err".to_string(),
-                                    values: vec![Value::String("Request has no body".to_string())],
-                                })
+                                return Ok(Value::err(Value::String(
+                                    "Request has no body".to_string(),
+                                )))
                             }
                         };
 
@@ -2298,28 +2291,16 @@ pub fn init() -> HashMap<String, Value> {
                 let boundary = match boundary {
                     Some(b) => b,
                     None => {
-                        return Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(
-                                "Invalid multipart: no boundary found in Content-Type".to_string(),
-                            )],
-                        })
+                        return Ok(Value::err(Value::String(
+                            "Invalid multipart: no boundary found in Content-Type".to_string(),
+                        )))
                     }
                 };
 
                 // Parse multipart body
                 match parse_multipart_body(&body, &boundary) {
-                    Ok(fields) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Map(fields)],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e)],
-                    }),
+                    Ok(fields) => Ok(Value::ok(Value::Map(fields))),
+                    Err(e) => Ok(Value::err(Value::String(e))),
                 }
             },
         },
@@ -2357,11 +2338,9 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Map(map) => match map.get("data") {
                         Some(Value::String(d)) => d.clone(),
                         _ => {
-                            return Ok(Value::EnumValue {
-                                enum_name: "Result".to_string(),
-                                variant: "Err".to_string(),
-                                values: vec![Value::String("File field has no data".to_string())],
-                            })
+                            return Ok(Value::err(Value::String(
+                                "File field has no data".to_string(),
+                            )))
                         }
                     },
                     _ => {
@@ -2382,11 +2361,7 @@ pub fn init() -> HashMap<String, Value> {
 
                 // Security: Validate path to prevent directory traversal
                 if let Err(e) = validate_upload_path(&path) {
-                    return Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e)],
-                    });
+                    return Ok(Value::err(Value::String(e)));
                 }
 
                 // Create parent directories if they don't exist (convenience)
@@ -2394,30 +2369,21 @@ pub fn init() -> HashMap<String, Value> {
                 if let Some(parent) = path_obj.parent() {
                     if !parent.as_os_str().is_empty() {
                         if let Err(e) = std::fs::create_dir_all(parent) {
-                            return Ok(Value::EnumValue {
-                                enum_name: "Result".to_string(),
-                                variant: "Err".to_string(),
-                                values: vec![Value::String(format!(
-                                    "Failed to create directory: {}",
-                                    e
-                                ))],
-                            });
+                            return Ok(Value::err(Value::String(format!(
+                                "Failed to create directory: {}",
+                                e
+                            ))));
                         }
                     }
                 }
 
                 // Write file to disk
                 match std::fs::write(&path, data.as_bytes()) {
-                    Ok(()) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Int(data.len() as i64)],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(format!("Failed to save file: {}", e))],
-                    }),
+                    Ok(()) => Ok(Value::ok(Value::Int(data.len() as i64))),
+                    Err(e) => Ok(Value::err(Value::String(format!(
+                        "Failed to save file: {}",
+                        e
+                    )))),
                 }
             },
         },

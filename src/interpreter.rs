@@ -121,6 +121,33 @@ impl Value {
         }
     }
 
+    /// Create an Option::Some(value)
+    pub fn some(value: Value) -> Self {
+        Value::EnumValue {
+            enum_name: "Option".to_string(),
+            variant: "Some".to_string(),
+            values: vec![value],
+        }
+    }
+
+    /// Create a Result::Ok(value)
+    pub fn ok(value: Value) -> Self {
+        Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            values: vec![value],
+        }
+    }
+
+    /// Create a Result::Err(value)
+    pub fn err(value: Value) -> Self {
+        Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            values: vec![value],
+        }
+    }
+
     /// Determine if a value is truthy for conditionals
     ///
     /// Falsy values: false, Unit, None, empty strings, empty arrays, empty maps
@@ -1705,13 +1732,7 @@ impl Interpreter {
                 name: "Some".to_string(),
                 arity: 1,
                 max_arity: 1,
-                func: |args| {
-                    Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: args.to_vec(),
-                    })
-                },
+                func: |args| Ok(Value::some(args[0].clone())),
             },
         );
 
@@ -1738,13 +1759,7 @@ impl Interpreter {
                 name: "Ok".to_string(),
                 arity: 1,
                 max_arity: 1,
-                func: |args| {
-                    Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: args.to_vec(),
-                    })
-                },
+                func: |args| Ok(Value::ok(args[0].clone())),
             },
         );
 
@@ -1767,13 +1782,7 @@ impl Interpreter {
                 name: "Err".to_string(),
                 arity: 1,
                 max_arity: 1,
-                func: |args| {
-                    Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: args.to_vec(),
-                    })
-                },
+                func: |args| Ok(Value::err(args[0].clone())),
             },
         );
 
@@ -4030,11 +4039,7 @@ impl Interpreter {
                                 let result =
                                     self.call_function(predicate.clone(), vec![item.clone()])?;
                                 if result.is_truthy() {
-                                    return Ok(Value::EnumValue {
-                                        enum_name: "Option".to_string(),
-                                        variant: "Some".to_string(),
-                                        values: vec![item],
-                                    });
+                                    return Ok(Value::some(item));
                                 }
                             }
                             return Ok(Value::none());

@@ -1052,11 +1052,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => match re.find(s) {
-                        Some(m) => Ok(Value::EnumValue {
-                            enum_name: "Option".to_string(),
-                            variant: "Some".to_string(),
-                            values: vec![Value::String(m.as_str().to_string())],
-                        }),
+                        Some(m) => Ok(Value::some(Value::String(m.as_str().to_string()))),
                         None => Ok(Value::none()),
                     },
                     Err(e) => Err(IntentError::RuntimeError(format!(
@@ -1179,11 +1175,7 @@ pub fn init() -> HashMap<String, Value> {
                                     )
                                 })
                                 .collect();
-                            Ok(Value::EnumValue {
-                                enum_name: "Option".to_string(),
-                                variant: "Some".to_string(),
-                                values: vec![Value::Array(groups)],
-                            })
+                            Ok(Value::some(Value::Array(groups)))
                         }
                         None => Ok(Value::none()),
                     },
@@ -1291,11 +1283,7 @@ pub fn init() -> HashMap<String, Value> {
                                 };
                                 map.insert(key, Value::String(value));
                             }
-                            Ok(Value::EnumValue {
-                                enum_name: "Option".to_string(),
-                                variant: "Some".to_string(),
-                                values: vec![Value::Map(map)],
-                            })
+                            Ok(Value::some(Value::Map(map)))
                         }
                         None => Ok(Value::none()),
                     },

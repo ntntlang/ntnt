@@ -2918,14 +2918,14 @@ See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) and [PERFORMANCE_AUDIT.md](PERFORMANC
 - [ ] Per-request timeout for sync HTTP server
 - [ ] Optional filesystem sandboxing (`NTNT_FS_ROOT`)
 - [x] Random dev-mode session secret generation
-- [ ] Warning on CORS wildcard origin in production
+- [x] Warning on CORS wildcard origin in production
 
 ### Performance Improvements (Proposed)
 - [ ] Template compilation/caching
 - [ ] In-memory static file caching
 - [x] Replace Redis `KEYS` with `SCAN` in KV module
 - [ ] Interpreter thread pool for async server (multi-interpreter)
-- [ ] Automatic session cleanup timer for in-memory sessions
+- [x] Automatic session cleanup timer for in-memory sessions
 - [ ] Copy-on-write Value semantics (major refactor)
 
 ---

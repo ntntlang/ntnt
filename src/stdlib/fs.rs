@@ -33,16 +33,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::read_to_string(path) {
-                    Ok(content) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::String(content)],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Ok(content) => Ok(Value::ok(Value::String(content))),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "read_file() requires a string path".to_string(),
@@ -76,17 +68,9 @@ pub fn init() -> HashMap<String, Value> {
                 Value::String(path) => match fs::read(path) {
                     Ok(bytes) => {
                         let arr: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
-                        Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![Value::Array(arr)],
-                        })
+                        Ok(Value::ok(Value::Array(arr)))
                     }
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "read_bytes() requires a string path".to_string(),
@@ -119,16 +103,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(path), Value::String(content)) => match fs::write(path, content) {
-                    Ok(()) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Unit],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Ok(()) => Ok(Value::ok(Value::Unit)),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "write_file() requires path and content strings".to_string(),
@@ -171,16 +147,8 @@ pub fn init() -> HashMap<String, Value> {
                             .and_then(|mut f| f.write_all(content.as_bytes()));
 
                         match result {
-                            Ok(()) => Ok(Value::EnumValue {
-                                enum_name: "Result".to_string(),
-                                variant: "Ok".to_string(),
-                                values: vec![Value::Unit],
-                            }),
-                            Err(e) => Ok(Value::EnumValue {
-                                enum_name: "Result".to_string(),
-                                variant: "Err".to_string(),
-                                values: vec![Value::String(e.to_string())],
-                            }),
+                            Ok(()) => Ok(Value::ok(Value::Unit)),
+                            Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                         }
                     }
                     _ => Err(IntentError::TypeError(
@@ -300,16 +268,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::create_dir(path) {
-                    Ok(()) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Unit],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Ok(()) => Ok(Value::ok(Value::Unit)),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "mkdir() requires a string path".to_string(),
@@ -340,16 +300,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::create_dir_all(path) {
-                    Ok(()) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Unit],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Ok(()) => Ok(Value::ok(Value::Unit)),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "mkdir_all() requires a string path".to_string(),
@@ -386,17 +338,9 @@ pub fn init() -> HashMap<String, Value> {
                             .flatten()
                             .map(|e| Value::String(e.path().to_string_lossy().to_string()))
                             .collect();
-                        Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![Value::Array(files)],
-                        })
+                        Ok(Value::ok(Value::Array(files)))
                     }
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "readdir() requires a string path".to_string(),
@@ -427,16 +371,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::remove_file(path) {
-                    Ok(()) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Unit],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Ok(()) => Ok(Value::ok(Value::Unit)),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "remove() requires a string path".to_string(),
@@ -468,16 +404,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::remove_dir(path) {
-                    Ok(()) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Unit],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Ok(()) => Ok(Value::ok(Value::Unit)),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "remove_dir() requires a string path".to_string(),
@@ -509,16 +437,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::remove_dir_all(path) {
-                    Ok(()) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Unit],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Ok(()) => Ok(Value::ok(Value::Unit)),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "remove_dir_all() requires a string path".to_string(),
@@ -552,16 +472,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(from), Value::String(to)) => match fs::rename(from, to) {
-                    Ok(()) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Unit],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Ok(()) => Ok(Value::ok(Value::Unit)),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "rename() requires two string paths".to_string(),
@@ -594,16 +506,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(from), Value::String(to)) => match fs::copy(from, to) {
-                    Ok(bytes) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Int(bytes as i64)],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Ok(bytes) => Ok(Value::ok(Value::Int(bytes as i64))),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "copy() requires two string paths".to_string(),
@@ -634,16 +538,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::metadata(path) {
-                    Ok(meta) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Int(meta.len() as i64)],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Ok(meta) => Ok(Value::ok(Value::Int(meta.len() as i64))),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "file_size() requires a string path".to_string(),

@@ -361,11 +361,7 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
             handle.insert("_pg_connection_id".to_string(), Value::Int(id as i64));
             handle.insert("connected".to_string(), Value::Bool(true));
 
-            Ok(Value::EnumValue {
-                enum_name: "Result".to_string(),
-                variant: "Ok".to_string(),
-                values: vec![Value::Map(handle)],
-            })
+            Ok(Value::ok(Value::Map(handle)))
         }
         Err(e) => {
             // Sanitize error message to avoid leaking credentials from connection string
@@ -381,11 +377,7 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
                         .to_string();
                     format!("Connection failed: {}", sanitized)
                 };
-            Ok(Value::EnumValue {
-                enum_name: "Result".to_string(),
-                variant: "Err".to_string(),
-                values: vec![Value::String(sanitized)],
-            })
+            Ok(Value::err(Value::String(sanitized)))
         }
     }
 }
@@ -459,17 +451,12 @@ fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     match client.query(sql, &param_refs) {
         Ok(rows) => {
             let result: Vec<Value> = rows.iter().map(row_to_value).collect();
-            Ok(Value::EnumValue {
-                enum_name: "Result".to_string(),
-                variant: "Ok".to_string(),
-                values: vec![Value::Array(result)],
-            })
+            Ok(Value::ok(Value::Array(result)))
         }
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format_pg_error("Query failed", &e))],
-        }),
+        Err(e) => Ok(Value::err(Value::String(format_pg_error(
+            "Query failed",
+            &e,
+        )))),
     }
 }
 
@@ -487,25 +474,12 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         .collect();
 
     match client.query_opt(sql, &param_refs) {
-        Ok(Some(row)) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Ok".to_string(),
-            values: vec![Value::EnumValue {
-                enum_name: "Option".to_string(),
-                variant: "Some".to_string(),
-                values: vec![row_to_value(&row)],
-            }],
-        }),
-        Ok(None) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Ok".to_string(),
-            values: vec![sql_none()],
-        }),
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format_pg_error("Query failed", &e))],
-        }),
+        Ok(Some(row)) => Ok(Value::ok(Value::some(row_to_value(&row)))),
+        Ok(None) => Ok(Value::ok(sql_none())),
+        Err(e) => Ok(Value::err(Value::String(format_pg_error(
+            "Query failed",
+            &e,
+        )))),
     }
 }
 
@@ -523,16 +497,11 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         .collect();
 
     match client.execute(sql, &param_refs) {
-        Ok(count) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Ok".to_string(),
-            values: vec![Value::Int(count as i64)],
-        }),
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format_pg_error("Execute failed", &e))],
-        }),
+        Ok(count) => Ok(Value::ok(Value::Int(count as i64))),
+        Err(e) => Ok(Value::err(Value::String(format_pg_error(
+            "Execute failed",
+            &e,
+        )))),
     }
 }
 
@@ -564,17 +533,9 @@ fn pg_begin(conn: &Value) -> Result<Value> {
     match client.execute("BEGIN", &[]) {
         Ok(_) => {
             // Return the same connection handle (transaction is implicit)
-            Ok(Value::EnumValue {
-                enum_name: "Result".to_string(),
-                variant: "Ok".to_string(),
-                values: vec![conn.clone()],
-            })
+            Ok(Value::ok(conn.clone()))
         }
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("BEGIN failed: {}", e))],
-        }),
+        Err(e) => Ok(Value::err(Value::String(format!("BEGIN failed: {}", e)))),
     }
 }
 
@@ -587,11 +548,7 @@ fn pg_commit(conn: &Value) -> Result<Value> {
 
     match client.execute("COMMIT", &[]) {
         Ok(_) => Ok(Value::Bool(true)),
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("COMMIT failed: {}", e))],
-        }),
+        Err(e) => Ok(Value::err(Value::String(format!("COMMIT failed: {}", e)))),
     }
 }
 
@@ -604,11 +561,7 @@ fn pg_rollback(conn: &Value) -> Result<Value> {
 
     match client.execute("ROLLBACK", &[]) {
         Ok(_) => Ok(Value::Bool(true)),
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("ROLLBACK failed: {}", e))],
-        }),
+        Err(e) => Ok(Value::err(Value::String(format!("ROLLBACK failed: {}", e)))),
     }
 }
 
