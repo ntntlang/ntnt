@@ -412,6 +412,10 @@ pub struct Interpreter {
     current_line: usize,
     /// Last known source column being executed (for runtime error reporting)
     current_col: usize,
+    /// Current function call depth (for recursion limit)
+    call_depth: usize,
+    /// Maximum allowed recursion depth
+    max_recursion_depth: usize,
 }
 
 /// Information about a trait definition
@@ -436,6 +440,9 @@ pub struct TraitMethodInfo {
 fn sanitize_html_comment(s: &str) -> String {
     s.replace("--", "&#45;&#45;")
 }
+
+/// Default maximum recursion depth. Can be overridden with NTNT_MAX_RECURSION env var.
+const MAX_RECURSION_DEPTH: usize = 1000;
 
 /// Check if NTNT is running in production mode (NTNT_ENV=production or prod).
 /// Caches the result to avoid repeated env var reads.
@@ -483,11 +490,21 @@ impl Interpreter {
             routes_dir_mtimes: HashMap::new(),
             current_line: 0,
             current_col: 0,
+            call_depth: 0,
+            max_recursion_depth: std::env::var("NTNT_MAX_RECURSION")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(MAX_RECURSION_DEPTH),
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
         interpreter.define_stdlib();
         interpreter
+    }
+
+    /// Set the maximum recursion depth for function calls
+    pub fn set_max_recursion_depth(&mut self, depth: usize) {
+        self.max_recursion_depth = depth;
     }
 
     /// Enable test mode - server will handle limited requests then exit
@@ -5861,126 +5878,17 @@ impl Interpreter {
                 contract,
                 type_params: _, // Generic type params - for future type checking
             } => {
-                // Count required params (those without defaults)
-                let required_count = params.iter().filter(|p| p.default.is_none()).count();
-                let total_count = params.len();
-
-                if args.len() < required_count || args.len() > total_count {
-                    let expected = if required_count == total_count {
-                        format!("{}", total_count)
-                    } else {
-                        format!("{} to {}", required_count, total_count)
-                    };
-                    return Err(IntentError::ArityMismatch {
-                        name: name.clone(),
-                        expected,
-                        got: args.len(),
-                    });
+                // Check recursion depth limit
+                if self.call_depth >= self.max_recursion_depth {
+                    return Err(IntentError::RuntimeError(format!(
+                        "Maximum recursion depth ({}) exceeded. Use NTNT_MAX_RECURSION env var to increase.",
+                        self.max_recursion_depth
+                    )));
                 }
-
-                // Create new environment with closure as parent
-                let func_env = Rc::new(RefCell::new(Environment::with_parent(closure)));
-
-                // Bind parameters: provided args first, then evaluate defaults
-                // We need to evaluate defaults in func_env so they can reference earlier params
-                let previous = Rc::clone(&self.environment);
-                self.environment = Rc::clone(&func_env);
-
-                for (i, param) in params.iter().enumerate() {
-                    let value = if i < args.len() {
-                        args[i].clone()
-                    } else if let Some(ref default_expr) = param.default {
-                        self.eval_expression(default_expr)?
-                    } else {
-                        // Should not reach here due to arity check above
-                        Value::Unit
-                    };
-                    func_env.borrow_mut().define(param.name.clone(), value);
-                }
-
-                // Environment is already set to func_env for contract checking and body execution
-
-                // Track deferred statements for this function call
-                let deferred_count_before = self.deferred_statements.len();
-
-                // Check preconditions BEFORE execution
-                if let Some(ref func_contract) = contract {
-                    for req_expr in &func_contract.requires {
-                        let condition_str = Self::format_expression(req_expr);
-                        let result = self.eval_expression(req_expr)?;
-                        if !result.is_truthy() {
-                            self.environment = previous;
-                            return Err(IntentError::ContractViolation(format!(
-                                "Precondition failed in '{}': {}",
-                                name, condition_str
-                            )));
-                        }
-                        self.contracts
-                            .check_precondition(&condition_str, true, None)?;
-                    }
-
-                    // Capture old values for postconditions containing old()
-                    self.current_old_values =
-                        Some(self.capture_old_values(&func_contract.ensures)?);
-                }
-
-                // Execute function body
-                let mut result = Value::Unit;
-                for stmt in &body.statements {
-                    result = self.eval_statement(stmt)?;
-                    if let Value::Return(v) = result {
-                        result = *v;
-                        break;
-                    }
-                }
-
-                // Execute deferred statements in reverse order (LIFO) before returning
-                let deferred_to_run: Vec<Expression> = self
-                    .deferred_statements
-                    .drain(deferred_count_before..)
-                    .collect();
-
-                for deferred_expr in deferred_to_run.into_iter().rev() {
-                    // Deferred expressions execute even if there was a return
-                    let _ = self.eval_expression(&deferred_expr);
-                }
-
-                // Store result for postcondition evaluation
-                self.current_result = Some(result.clone());
-
-                // Bind 'result' in environment for postcondition evaluation
-                self.environment
-                    .borrow_mut()
-                    .define("result".to_string(), result.clone());
-
-                // Check postconditions AFTER execution
-                if let Some(ref func_contract) = contract {
-                    for ens_expr in &func_contract.ensures {
-                        let condition_str = Self::format_expression(ens_expr);
-                        let postcond_result = self.eval_expression(ens_expr)?;
-                        if !postcond_result.is_truthy() {
-                            // Clear state before returning error
-                            self.current_old_values = None;
-                            self.current_result = None;
-                            self.environment = previous;
-                            return Err(IntentError::ContractViolation(format!(
-                                "Postcondition failed in '{}': {}",
-                                name, condition_str
-                            )));
-                        }
-                        self.contracts
-                            .check_postcondition(&condition_str, true, None)?;
-                    }
-                }
-
-                // Clear contract evaluation state
-                self.current_old_values = None;
-                self.current_result = None;
-
-                // Restore environment
-                self.environment = previous;
-
-                Ok(result)
+                self.call_depth += 1;
+                let result = self.call_user_function(name, params, body, closure, contract, args);
+                self.call_depth -= 1;
+                result
             }
 
             Value::NativeFunction {
@@ -6038,6 +5946,138 @@ impl Interpreter {
                 "Can only call functions".to_string(),
             )),
         }
+    }
+
+    /// Execute a user-defined function. Separated from call_function to ensure
+    /// call_depth is always decremented (even on ? early returns).
+    fn call_user_function(
+        &mut self,
+        name: String,
+        params: Vec<Parameter>,
+        body: Block,
+        closure: Rc<RefCell<Environment>>,
+        contract: Option<FunctionContract>,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        // Count required params (those without defaults)
+        let required_count = params.iter().filter(|p| p.default.is_none()).count();
+        let total_count = params.len();
+
+        if args.len() < required_count || args.len() > total_count {
+            let expected = if required_count == total_count {
+                format!("{}", total_count)
+            } else {
+                format!("{} to {}", required_count, total_count)
+            };
+            return Err(IntentError::ArityMismatch {
+                name: name.clone(),
+                expected,
+                got: args.len(),
+            });
+        }
+
+        // Create new environment with closure as parent
+        let func_env = Rc::new(RefCell::new(Environment::with_parent(closure)));
+
+        // Bind parameters: provided args first, then evaluate defaults
+        // We need to evaluate defaults in func_env so they can reference earlier params
+        let previous = Rc::clone(&self.environment);
+        self.environment = Rc::clone(&func_env);
+
+        for (i, param) in params.iter().enumerate() {
+            let value = if i < args.len() {
+                args[i].clone()
+            } else if let Some(ref default_expr) = param.default {
+                self.eval_expression(default_expr)?
+            } else {
+                // Should not reach here due to arity check above
+                Value::Unit
+            };
+            func_env.borrow_mut().define(param.name.clone(), value);
+        }
+
+        // Environment is already set to func_env for contract checking and body execution
+
+        // Track deferred statements for this function call
+        let deferred_count_before = self.deferred_statements.len();
+
+        // Check preconditions BEFORE execution
+        if let Some(ref func_contract) = contract {
+            for req_expr in &func_contract.requires {
+                let condition_str = Self::format_expression(req_expr);
+                let result = self.eval_expression(req_expr)?;
+                if !result.is_truthy() {
+                    self.environment = previous;
+                    return Err(IntentError::ContractViolation(format!(
+                        "Precondition failed in '{}': {}",
+                        name, condition_str
+                    )));
+                }
+                self.contracts
+                    .check_precondition(&condition_str, true, None)?;
+            }
+
+            // Capture old values for postconditions containing old()
+            self.current_old_values = Some(self.capture_old_values(&func_contract.ensures)?);
+        }
+
+        // Execute function body
+        let mut result = Value::Unit;
+        for stmt in &body.statements {
+            result = self.eval_statement(stmt)?;
+            if let Value::Return(v) = result {
+                result = *v;
+                break;
+            }
+        }
+
+        // Execute deferred statements in reverse order (LIFO) before returning
+        let deferred_to_run: Vec<Expression> = self
+            .deferred_statements
+            .drain(deferred_count_before..)
+            .collect();
+
+        for deferred_expr in deferred_to_run.into_iter().rev() {
+            // Deferred expressions execute even if there was a return
+            let _ = self.eval_expression(&deferred_expr);
+        }
+
+        // Store result for postcondition evaluation
+        self.current_result = Some(result.clone());
+
+        // Bind 'result' in environment for postcondition evaluation
+        self.environment
+            .borrow_mut()
+            .define("result".to_string(), result.clone());
+
+        // Check postconditions AFTER execution
+        if let Some(ref func_contract) = contract {
+            for ens_expr in &func_contract.ensures {
+                let condition_str = Self::format_expression(ens_expr);
+                let postcond_result = self.eval_expression(ens_expr)?;
+                if !postcond_result.is_truthy() {
+                    // Clear state before returning error
+                    self.current_old_values = None;
+                    self.current_result = None;
+                    self.environment = previous;
+                    return Err(IntentError::ContractViolation(format!(
+                        "Postcondition failed in '{}': {}",
+                        name, condition_str
+                    )));
+                }
+                self.contracts
+                    .check_postcondition(&condition_str, true, None)?;
+            }
+        }
+
+        // Clear contract evaluation state
+        self.current_old_values = None;
+        self.current_result = None;
+
+        // Restore environment
+        self.environment = previous;
+
+        Ok(result)
     }
 
     /// Run the HTTP server on the specified port
@@ -10830,5 +10870,55 @@ page
         } else {
             panic!("Expected string from template");
         }
+    }
+
+    /// Helper to eval with a custom recursion limit
+    fn eval_with_recursion_limit(source: &str, limit: usize) -> Result<Value> {
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse()?;
+        let mut interpreter = Interpreter::new();
+        interpreter.set_max_recursion_depth(limit);
+        interpreter.eval(&ast)
+    }
+
+    #[test]
+    fn test_recursion_limit_normal() {
+        // Normal recursion within limit should succeed (small depth for debug stack)
+        let result = eval_with_recursion_limit(
+            "fn fact(n) { if n <= 1 { return 1 } return n * fact(n - 1) } fact(5)",
+            20,
+        );
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), Value::Int(120)));
+    }
+
+    #[test]
+    fn test_recursion_limit_exceeded() {
+        // Use a small limit to avoid stack overflow in debug mode
+        let result = eval_with_recursion_limit("fn inf(n) { return inf(n + 1) } inf(0)", 10);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("Maximum recursion depth"),
+            "Error should mention recursion depth: {}",
+            err
+        );
+        assert!(
+            err.contains("10"),
+            "Error should show the limit value: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_recursion_depth_resets() {
+        // After a deep call returns, depth resets so another deep call works
+        let result = eval_with_recursion_limit(
+            "fn deep(n) { if n <= 0 { return 0 } return deep(n - 1) } deep(8); deep(8)",
+            10,
+        );
+        assert!(result.is_ok(), "Depth should reset between calls");
     }
 }

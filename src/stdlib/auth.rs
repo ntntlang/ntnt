@@ -225,14 +225,27 @@ impl Default for AuthConfig {
             session_ttl: 86400 * 7,  // 7 days
             refresh_ttl: 86400 * 30, // 30 days — how long refresh tokens can extend sessions
             store_tokens: false,
-            session_secret: DEFAULT_SESSION_SECRET.to_string(),
+            session_secret: DEFAULT_SESSION_SECRET_SENTINEL.to_string(),
             session_store: SessionStore::Memory,
         }
     }
 }
 
-/// Default session secret (must not be used in production)
-const DEFAULT_SESSION_SECRET: &str = "ntnt-dev-secret-change-in-production";
+/// Sentinel value used to detect when user hasn't set a session secret.
+/// Not used as an actual secret — dev mode generates a random one.
+const DEFAULT_SESSION_SECRET_SENTINEL: &str = "ntnt-dev-secret-change-in-production";
+
+/// Auto-generated random session secret for dev mode.
+/// Generated once at startup; sessions won't persist across restarts.
+fn dev_session_secret() -> &'static str {
+    use rand::RngCore;
+    static SECRET: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        hex::encode(bytes)
+    });
+    &SECRET
+}
 
 /// OIDC Discovery document
 #[derive(Debug, Clone)]
@@ -1368,7 +1381,7 @@ pub fn init_auth(config: AuthConfig) {
         .unwrap_or(false);
 
     // SECURITY: Require secure session_secret in production
-    if is_prod && config.session_secret == DEFAULT_SESSION_SECRET {
+    if is_prod && config.session_secret == DEFAULT_SESSION_SECRET_SENTINEL {
         eprintln!("┌─────────────────────────────────────────────────────────────────┐");
         eprintln!("│ FATAL: Cannot use default session_secret in production!        │");
         eprintln!("│                                                                 │");
@@ -1380,11 +1393,18 @@ pub fn init_auth(config: AuthConfig) {
         std::process::exit(1);
     }
 
-    // Warn if using default secret in development
-    if !is_prod && config.session_secret == DEFAULT_SESSION_SECRET {
-        eprintln!("[auth] WARNING: Using default session_secret (ok for development)");
+    // In dev mode with no explicit secret, use auto-generated random secret
+    let config = if !is_prod && config.session_secret == DEFAULT_SESSION_SECRET_SENTINEL {
+        eprintln!(
+            "[auth] Using auto-generated session secret (sessions won't persist across restarts)"
+        );
         eprintln!("       Set session_secret in enable_auth() for production.");
-    }
+        let mut config = config;
+        config.session_secret = dev_session_secret().to_string();
+        config
+    } else {
+        config
+    };
 
     // Log session storage type
     match &config.session_store {
@@ -5755,7 +5775,7 @@ pub fn init() -> HashMap<String, Value> {
                         Value::String(s) => Some(s.clone()),
                         _ => None,
                     })
-                    .unwrap_or_else(|| DEFAULT_SESSION_SECRET.to_string());
+                    .unwrap_or_else(|| DEFAULT_SESSION_SECRET_SENTINEL.to_string());
 
                 let session_ttl = options
                     .as_ref()

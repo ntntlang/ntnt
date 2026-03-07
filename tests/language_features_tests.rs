@@ -4410,3 +4410,193 @@ print(result)
         stdout
     );
 }
+
+// ===== Recursion Depth Limit Tests =====
+
+/// Helper to run ntnt with a code string and custom env vars
+fn run_ntnt_code_with_env(code: &str, env_vars: &[(&str, &str)]) -> (String, String, i32) {
+    let test_file = unique_test_file("feature_test_env");
+
+    let mut file = fs::File::create(&test_file).expect("Failed to create test file");
+    writeln!(file, "{}", code).expect("Failed to write test file");
+    drop(file);
+
+    let exe = std::env::consts::EXE_SUFFIX;
+    let debug_path = format!("./target/debug/ntnt{}", exe);
+    let release_path = format!("./target/release/ntnt{}", exe);
+
+    let binary = if std::path::Path::new(&debug_path).exists() {
+        debug_path
+    } else if std::path::Path::new(&release_path).exists() {
+        release_path
+    } else {
+        panic!("No ntnt binary found. Run 'cargo build' first.");
+    };
+
+    let mut cmd = Command::new(binary);
+    cmd.args(&["run", &test_file])
+        .current_dir(env!("CARGO_MANIFEST_DIR"));
+    for (key, val) in env_vars {
+        cmd.env(key, val);
+    }
+    let output = cmd.output().expect("Failed to execute ntnt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    fs::remove_file(&test_file).ok();
+
+    (stdout, stderr, exit_code)
+}
+
+#[test]
+fn test_recursion_normal_works() {
+    // Use small limit to avoid Rust stack overflow in debug builds
+    let code = r#"
+fn factorial(n) {
+    if n <= 1 { return 1 }
+    return n * factorial(n - 1)
+}
+print(factorial(5))
+"#;
+    let (stdout, _stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_MAX_RECURSION", "20")]);
+    assert_eq!(exit_code, 0, "Normal recursion should work");
+    assert_eq!(stdout.trim(), "120");
+}
+
+#[test]
+fn test_recursion_depth_limit_exceeded() {
+    let code = r#"
+fn infinite(n) {
+    return infinite(n + 1)
+}
+infinite(0)
+"#;
+    let (_stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_MAX_RECURSION", "10")]);
+    assert_ne!(exit_code, 0, "Infinite recursion should fail");
+    assert!(
+        stderr.contains("Maximum recursion depth") && stderr.contains("exceeded"),
+        "Should mention recursion depth limit. stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_recursion_custom_env_limit() {
+    // Set a very low limit and ensure it triggers
+    let code = r#"
+fn recurse(n) {
+    if n <= 0 { return 0 }
+    return recurse(n - 1)
+}
+recurse(20)
+"#;
+    let (_stdout, stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_MAX_RECURSION", "10")]);
+    assert_ne!(exit_code, 0, "Should fail with custom low limit");
+    assert!(
+        stderr.contains("Maximum recursion depth (10) exceeded"),
+        "Error should show custom limit. stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_recursion_depth_resets_after_call() {
+    // Two separate deep call chains should each work (depth resets between calls)
+    let code = r#"
+fn recurse(n) {
+    if n <= 0 { return 0 }
+    return recurse(n - 1)
+}
+recurse(8)
+recurse(8)
+print("ok")
+"#;
+    let (stdout, _stderr, exit_code) =
+        run_ntnt_code_with_env(code, &[("NTNT_MAX_RECURSION", "20")]);
+    assert_eq!(exit_code, 0, "Depth should reset between calls");
+    assert_eq!(stdout.trim(), "ok");
+}
+
+// ===== Additional Deep Mutation Tests =====
+
+#[test]
+fn test_deep_mutation_four_level_nesting() {
+    let code = r#"
+let mut data = map { "a": map { "b": map { "c": [10, 20, 30] } } }
+data["a"]["b"]["c"][2] = 99
+print(data["a"]["b"]["c"][2])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "99");
+}
+
+#[test]
+fn test_deep_mutation_map_of_map_of_map() {
+    let code = r#"
+let mut cfg = map { "db": map { "primary": map { "host": "old" } } }
+cfg["db"]["primary"]["host"] = "new-host"
+print(cfg["db"]["primary"]["host"])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "new-host");
+}
+
+#[test]
+fn test_deep_mutation_array_of_arrays() {
+    let code = r#"
+let mut grid = [[1, 2], [3, 4]]
+grid[1][0] = 99
+print(grid[1][0])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "99");
+}
+
+// ===== Additional Nested Template If Tests =====
+
+#[test]
+fn test_template_nested_if_inside_for_loop() {
+    let code = r#"
+let items = [map { "name": "A", "active": true }, map { "name": "B", "active": false }]
+let out = """{{#for item in items}}{{#if item.active}}[{{item.name}}]{{/if}}{{/for}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Nested if inside for should work");
+    assert_eq!(stdout.trim(), "[A]");
+}
+
+#[test]
+fn test_template_nested_if_outer_false() {
+    let code = r#"
+let outer = false
+let inner = true
+let out = """{{#if outer}}{{#if inner}}yes{{/if}}{{#else}}no{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Outer false should skip to else");
+    assert_eq!(stdout.trim(), "no");
+}
+
+#[test]
+fn test_template_nested_if_with_elif() {
+    let code = r#"
+let a = false
+let b = true
+let c = true
+let out = """{{#if a}}first{{#elif b}}{{#if c}}second-deep{{/if}}{{#else}}third{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Nested if inside elif should work");
+    assert_eq!(stdout.trim(), "second-deep");
+}

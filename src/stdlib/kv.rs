@@ -468,20 +468,36 @@ impl RedisKV {
         Ok(exists)
     }
 
-    /// List keys with optional prefix
+    /// List keys with optional prefix (uses SCAN instead of KEYS to avoid blocking Redis)
     pub fn list(&mut self, prefix: Option<&str>) -> Result<Vec<String>> {
         let pattern = match prefix {
             Some(p) => format!("{}*", p),
             None => "*".to_string(),
         };
 
-        let keys: Vec<String> = self
-            .conn
-            .keys(&pattern)
-            .map_err(|e| IntentError::RuntimeError(format!("Redis keys error: {}", e)))?;
+        let mut all_keys: Vec<String> = Vec::new();
+        let mut cursor: u64 = 0;
+
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .cursor_arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query(&mut self.conn)
+                .map_err(|e| IntentError::RuntimeError(format!("Redis scan error: {}", e)))?;
+
+            all_keys.extend(batch);
+            cursor = next_cursor;
+
+            if cursor == 0 {
+                break;
+            }
+        }
 
         // Filter out internal type keys
-        let filtered: Vec<String> = keys
+        let filtered: Vec<String> = all_keys
             .into_iter()
             .filter(|k| !k.ends_with(":__type"))
             .collect();
