@@ -1069,6 +1069,38 @@ impl Interpreter {
             },
         );
 
+        // @ntnt chars
+        // @signature chars(s: String) -> Array<String>
+        // Split a string into an array of single-character strings.
+        //
+        // Returns an array where each element is a one-character string.
+        // This is the explicit way to iterate over characters in a string,
+        // since `for..in` on a string no longer auto-iterates characters.
+        // @param s The input string
+        // @returns Array of single-character strings
+        // @tags #pure, #deterministic
+        // @see_also split, len
+        // @since v0.3.17
+        // @example chars("hello") => ["h", "e", "l", "l", "o"] ~ "Split into characters"
+        // @example chars("") => [] ~ "Empty string gives empty array"
+        // @error TypeError ~ "chars() requires a string" fix: "Pass a string argument"
+        self.environment.borrow_mut().define(
+            "chars".to_string(),
+            Value::NativeFunction {
+                name: "chars".to_string(),
+                arity: 1,
+                max_arity: 1,
+                func: |args| match &args[0] {
+                    Value::String(s) => Ok(Value::Array(
+                        s.chars().map(|c| Value::String(c.to_string())).collect(),
+                    )),
+                    _ => Err(IntentError::TypeError(
+                        "chars() requires a string".to_string(),
+                    )),
+                },
+            },
+        );
+
         // @ntnt int
         // @signature int(x: Int | Float | String | Bool) -> Int
         // Converts a value to integer.
@@ -3329,13 +3361,22 @@ impl Interpreter {
                         let end_val = if *inclusive { *end + 1 } else { *end };
                         (*start..end_val).map(Value::Int).collect()
                     }
-                    Value::String(s) => s.chars().map(|c| Value::String(c.to_string())).collect(),
                     Value::Map(map) => map.keys().map(|k| Value::String(k.clone())).collect(),
+                    // String and non-collection types: zero iterations with dev-mode warning.
+                    // Use chars() builtin for explicit string character iteration.
                     _ => {
-                        return Err(IntentError::RuntimeError(format!(
-                            "Cannot iterate over {}",
-                            iterable_value.type_name()
-                        )))
+                        if std::env::var("NTNT_ENV").unwrap_or_default().to_lowercase()
+                            != "production"
+                            && std::env::var("NTNT_ENV").unwrap_or_default().to_lowercase()
+                                != "prod"
+                        {
+                            eprintln!(
+                                "[WARN] for..in on {} — skipping (not a collection). \
+                                 Use chars() for string iteration.",
+                                iterable_value.type_name()
+                            );
+                        }
+                        vec![]
                     }
                 };
 
@@ -4157,13 +4198,12 @@ impl Interpreter {
                         } else {
                             i as usize
                         };
-                        #[allow(clippy::unnecessary_lazy_evaluations)]
-                        arr.get(index)
-                            .cloned()
-                            .ok_or_else(|| IntentError::IndexOutOfBounds {
-                                index: i,
-                                length: arr.len(),
-                            })
+                        // Out-of-bounds returns None instead of crashing
+                        Ok(arr.get(index).cloned().unwrap_or_else(|| Value::EnumValue {
+                            enum_name: "Option".to_string(),
+                            variant: "None".to_string(),
+                            values: vec![],
+                        }))
                     }
                     (Value::String(s), Value::Int(i)) => {
                         let index = if i < 0 {
@@ -4171,14 +4211,15 @@ impl Interpreter {
                         } else {
                             i as usize
                         };
-                        #[allow(clippy::unnecessary_lazy_evaluations)]
-                        s.chars()
+                        // Out-of-bounds returns None instead of crashing
+                        Ok(s.chars()
                             .nth(index)
                             .map(|c| Value::String(c.to_string()))
-                            .ok_or_else(|| IntentError::IndexOutOfBounds {
-                                index: i,
-                                length: s.len(),
-                            })
+                            .unwrap_or_else(|| Value::EnumValue {
+                                enum_name: "Option".to_string(),
+                                variant: "None".to_string(),
+                                values: vec![],
+                            }))
                     }
                     // Map access with string key: map["key"]
                     // Returns None for missing keys instead of throwing (DX improvement)
@@ -4195,9 +4236,14 @@ impl Interpreter {
                             IntentError::RuntimeError(format!("Unknown field: {}", key))
                         })
                     }
-                    _ => Err(IntentError::TypeError(
-                        "Invalid index operation".to_string(),
-                    )),
+                    // Type mismatch on index returns None instead of crashing.
+                    // This makes ?? the universal safety net: data["key"] ?? "default"
+                    // works regardless of whether data is a map, string, int, or None.
+                    _ => Ok(Value::EnumValue {
+                        enum_name: "Option".to_string(),
+                        variant: "None".to_string(),
+                        values: vec![],
+                    }),
                 }
             }
 
@@ -4976,23 +5022,58 @@ impl Interpreter {
             match part {
                 TemplatePart::Literal(s) => result.push_str(s),
                 TemplatePart::Expr(expr) => {
-                    // Undefined variables render as empty string (standard Mustache behavior)
-                    let value = match self.eval_expression(expr) {
-                        Ok(v) => v,
-                        Err(IntentError::UndefinedVariable { .. }) => Value::String(String::new()),
-                        Err(e) => return Err(e),
-                    };
-                    let s = value.to_string();
-                    result.push_str(&html_escape_string(&s));
+                    // Error boundary: catch all errors, render gracefully
+                    match self.eval_expression(expr) {
+                        Ok(v) => {
+                            let s = v.to_string();
+                            result.push_str(&html_escape_string(&s));
+                        }
+                        // Undefined variables render as empty string (standard Mustache behavior)
+                        Err(IntentError::UndefinedVariable { .. }) => {}
+                        Err(e) => {
+                            let is_prod = matches!(
+                                std::env::var("NTNT_ENV")
+                                    .unwrap_or_default()
+                                    .to_lowercase()
+                                    .as_str(),
+                                "production" | "prod"
+                            );
+                            eprintln!("[ERROR] Template expression failed: {}", e);
+                            if !is_prod {
+                                result.push_str(&format!(
+                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                                    e
+                                ));
+                            }
+                            // prod: empty string (push nothing)
+                        }
+                    }
                 }
                 TemplatePart::RawExpr(expr) => {
-                    // Undefined variables render as empty string (standard Mustache behavior)
-                    let value = match self.eval_expression(expr) {
-                        Ok(v) => v,
-                        Err(IntentError::UndefinedVariable { .. }) => Value::String(String::new()),
-                        Err(e) => return Err(e),
-                    };
-                    result.push_str(&value.to_string());
+                    // Error boundary: catch all errors, render gracefully
+                    match self.eval_expression(expr) {
+                        Ok(v) => {
+                            result.push_str(&v.to_string());
+                        }
+                        // Undefined variables render as empty string (standard Mustache behavior)
+                        Err(IntentError::UndefinedVariable { .. }) => {}
+                        Err(e) => {
+                            let is_prod = matches!(
+                                std::env::var("NTNT_ENV")
+                                    .unwrap_or_default()
+                                    .to_lowercase()
+                                    .as_str(),
+                                "production" | "prod"
+                            );
+                            eprintln!("[ERROR] Template expression failed: {}", e);
+                            if !is_prod {
+                                result.push_str(&format!(
+                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                                    e
+                                ));
+                            }
+                        }
+                    }
                 }
                 TemplatePart::FilteredExpr { expr, filters } => {
                     // Check if there's a default filter in the chain
@@ -5001,12 +5082,26 @@ impl Interpreter {
                     let mut value = match self.eval_expression(expr) {
                         Ok(v) => v,
                         Err(e) => {
-                            // If there's a default filter and we got an undefined variable error,
-                            // use Unit as the value so the default filter can provide a fallback
-                            if has_default && matches!(&e, IntentError::UndefinedVariable { .. }) {
+                            // If there's a default filter, use Unit so default can provide fallback
+                            if has_default {
                                 Value::Unit
                             } else {
-                                return Err(e);
+                                // Error boundary: render gracefully
+                                let is_prod = matches!(
+                                    std::env::var("NTNT_ENV")
+                                        .unwrap_or_default()
+                                        .to_lowercase()
+                                        .as_str(),
+                                    "production" | "prod"
+                                );
+                                eprintln!("[ERROR] Template expression failed: {}", e);
+                                if !is_prod {
+                                    result.push_str(&format!(
+                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                                        e
+                                    ));
+                                }
+                                continue;
                             }
                         }
                     };
@@ -5030,10 +5125,25 @@ impl Interpreter {
                     let mut value = match self.eval_expression(expr) {
                         Ok(v) => v,
                         Err(e) => {
-                            if has_default && matches!(&e, IntentError::UndefinedVariable { .. }) {
+                            if has_default {
                                 Value::Unit
                             } else {
-                                return Err(e);
+                                // Error boundary: render gracefully
+                                let is_prod = matches!(
+                                    std::env::var("NTNT_ENV")
+                                        .unwrap_or_default()
+                                        .to_lowercase()
+                                        .as_str(),
+                                    "production" | "prod"
+                                );
+                                eprintln!("[ERROR] Template expression failed: {}", e);
+                                if !is_prod {
+                                    result.push_str(&format!(
+                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                                        e
+                                    ));
+                                }
+                                continue;
                             }
                         }
                     };
@@ -5048,7 +5158,33 @@ impl Interpreter {
                     body,
                     empty_body,
                 } => {
-                    let iterable_value = self.eval_expression(iterable)?;
+                    let iterable_value = match self.eval_expression(iterable) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // Error boundary: treat errored iterable as empty
+                            let is_prod = matches!(
+                                std::env::var("NTNT_ENV")
+                                    .unwrap_or_default()
+                                    .to_lowercase()
+                                    .as_str(),
+                                "production" | "prod"
+                            );
+                            eprintln!("[ERROR] Template for-loop iterable failed: {}", e);
+                            if !is_prod {
+                                result.push_str(&format!(
+                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR (for): {} -->",
+                                    e
+                                ));
+                            }
+                            // Render empty_body if present, otherwise skip
+                            if !empty_body.is_empty() {
+                                if let Ok(Value::String(s)) = self.eval_template_parts(empty_body) {
+                                    result.push_str(&s);
+                                }
+                            }
+                            continue;
+                        }
+                    };
 
                     match iterable_value {
                         Value::Array(ref items) if items.is_empty() => {
@@ -5161,10 +5297,29 @@ impl Interpreter {
                             }
                         }
                         _ => {
-                            return Err(IntentError::RuntimeError(format!(
-                                "Template for loop requires array or map, got {}",
+                            // Non-iterable value: skip with warning (consistent with for..in behavior)
+                            let is_prod = matches!(
+                                std::env::var("NTNT_ENV")
+                                    .unwrap_or_default()
+                                    .to_lowercase()
+                                    .as_str(),
+                                "production" | "prod"
+                            );
+                            eprintln!(
+                                "[WARN] Template for loop on {} — skipping (not a collection)",
                                 iterable_value.type_name()
-                            )));
+                            );
+                            if !is_prod {
+                                result.push_str(&format!(
+                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: for loop on {}, expected array or map -->",
+                                    iterable_value.type_name()
+                                ));
+                            }
+                            if !empty_body.is_empty() {
+                                if let Ok(Value::String(s)) = self.eval_template_parts(empty_body) {
+                                    result.push_str(&s);
+                                }
+                            }
                         }
                     }
                 }
@@ -5174,11 +5329,15 @@ impl Interpreter {
                     elif_chains,
                     else_parts,
                 } => {
-                    // Undefined variables in conditions are falsy (not an error)
+                    // Error boundary: any error in condition is treated as false
                     let condition_value = match self.eval_expression(condition) {
                         Ok(v) => v,
-                        Err(IntentError::UndefinedVariable { .. }) => Value::Bool(false),
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            if !matches!(&e, IntentError::UndefinedVariable { .. }) {
+                                eprintln!("[ERROR] Template if-condition failed: {}", e);
+                            }
+                            Value::Bool(false)
+                        }
                     };
 
                     if condition_value.is_truthy() {
@@ -5192,8 +5351,12 @@ impl Interpreter {
                         for (elif_condition, elif_body) in elif_chains {
                             let elif_value = match self.eval_expression(elif_condition) {
                                 Ok(v) => v,
-                                Err(IntentError::UndefinedVariable { .. }) => Value::Bool(false),
-                                Err(e) => return Err(e),
+                                Err(e) => {
+                                    if !matches!(&e, IntentError::UndefinedVariable { .. }) {
+                                        eprintln!("[ERROR] Template elif-condition failed: {}", e);
+                                    }
+                                    Value::Bool(false)
+                                }
                             };
                             if elif_value.is_truthy() {
                                 let elif_result = self.eval_template_parts(elif_body)?;
@@ -9052,7 +9215,8 @@ c")
     }
 
     #[test]
-    fn test_for_in_string() {
+    fn test_for_in_string_skips() {
+        // for..in on a string now yields zero iterations (use chars() instead)
         let result = eval(
             r#"
             let count = 0
@@ -9063,7 +9227,7 @@ c")
         "#,
         )
         .unwrap();
-        assert!(matches!(result, Value::Int(5)));
+        assert!(matches!(result, Value::Int(0)));
     }
 
     #[test]
@@ -10398,5 +10562,312 @@ c")
     fn test_deep_mutation_new_map_key() {
         let result = eval(r#"let mut m = map { "a": 1 }; m["b"] = 2; m["b"]"#).unwrap();
         assert!(matches!(result, Value::Int(2)));
+    }
+
+    // ============================================
+    // Change 2: for..in skips non-collections + chars()
+    // ============================================
+
+    #[test]
+    fn test_for_in_int_skips() {
+        // for..in on an int should yield zero iterations, not crash
+        let result = eval(
+            r#"
+            let count = 0
+            for k in 42 {
+                count = count + 1
+            }
+            count
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(0)));
+    }
+
+    #[test]
+    fn test_for_in_none_skips() {
+        // for..in on None should yield zero iterations, not crash
+        let result = eval(
+            r#"
+            let count = 0
+            for k in None {
+                count = count + 1
+            }
+            count
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(0)));
+    }
+
+    #[test]
+    fn test_for_in_bool_skips() {
+        // for..in on a bool should yield zero iterations
+        let result = eval(
+            r#"
+            let count = 0
+            for k in true {
+                count = count + 1
+            }
+            count
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(0)));
+    }
+
+    #[test]
+    fn test_chars_builtin() {
+        let result = eval(r#"chars("hi")"#).unwrap();
+        match result {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                assert!(matches!(&arr[0], Value::String(s) if s == "h"));
+                assert!(matches!(&arr[1], Value::String(s) if s == "i"));
+            }
+            _ => panic!("Expected array from chars()"),
+        }
+    }
+
+    #[test]
+    fn test_chars_empty_string() {
+        let result = eval(r#"chars("")"#).unwrap();
+        match result {
+            Value::Array(arr) => assert_eq!(arr.len(), 0),
+            _ => panic!("Expected empty array from chars(\"\")"),
+        }
+    }
+
+    #[test]
+    fn test_for_in_chars_iterates() {
+        // chars() provides explicit character iteration
+        let result = eval(
+            r#"
+            let count = 0
+            for ch in chars("abc") {
+                count = count + 1
+            }
+            count
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(3)));
+    }
+
+    #[test]
+    fn test_for_in_map_regression() {
+        // for..in on a map should still iterate keys
+        let result = eval(
+            r#"
+            let count = 0
+            for k in map { "a": 1, "b": 2 } {
+                count = count + 1
+            }
+            count
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(2)));
+    }
+
+    // ============================================
+    // Change 1: [] returns None on type mismatch
+    // ============================================
+
+    #[test]
+    fn test_index_string_with_string_key_returns_none() {
+        // string["key"] should return None, not TypeError
+        let result = eval(r#"let s = "hello"; s["key"]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_int_with_string_key_returns_none() {
+        // 42["key"] should return None, not TypeError
+        let result = eval(r#"42["key"]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_none_with_string_key_returns_none() {
+        // None["key"] should return None, not TypeError
+        let result = eval(r#"let x = None; x["key"]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_array_out_of_bounds_returns_none() {
+        // [1,2,3][99] should return None, not IndexOutOfBounds
+        let result = eval(r#"[1, 2, 3][99]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_array_negative_out_of_bounds_returns_none() {
+        // [1,2,3][-99] should return None, not IndexOutOfBounds
+        let result = eval(r#"[1, 2, 3][-99]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_string_char_out_of_bounds_returns_none() {
+        // "hi"[99] should return None, not IndexOutOfBounds
+        let result = eval(r#""hi"[99]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_type_mismatch_with_null_coalescing() {
+        // string["key"] ?? "fallback" should return "fallback"
+        let result = eval(r#"let s = "hello"; s["key"] ?? "fallback""#).unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "fallback"));
+    }
+
+    #[test]
+    fn test_index_map_existing_key_regression() {
+        // map["existing"] ?? "default" should still return the existing value
+        let result = eval(r#"let m = map { "name": "Alice" }; m["name"] ?? "default""#).unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "Alice"));
+    }
+
+    #[test]
+    fn test_index_array_valid_index_regression() {
+        // Valid array access should still work
+        let result = eval(r#"[10, 20, 30][1]"#).unwrap();
+        assert!(matches!(result, Value::Int(20)));
+    }
+
+    // ============================================
+    // Change 3: Template error boundaries
+    // ============================================
+
+    #[test]
+    fn test_template_error_boundary_expr_no_crash() {
+        // Template with an expression that would error should not crash
+        // undefined_fn() doesn't exist, but template should render gracefully
+        let code = r#####"
+let page = """before{{undefined_fn()}}after"""
+page
+"#####;
+        let result = eval(code);
+        assert!(
+            result.is_ok(),
+            "Template with bad expression should not crash"
+        );
+        if let Ok(Value::String(s)) = result {
+            assert!(s.contains("before"), "Content before error should render");
+            assert!(s.contains("after"), "Content after error should render");
+        }
+    }
+
+    #[test]
+    fn test_template_error_boundary_if_treats_error_as_false() {
+        // {{#if bad_expr}} should treat error as false, not crash
+        let code = r#####"
+let page = """{{#if undefined_fn()}}shown{{#else}}hidden{{/if}}"""
+page
+"#####;
+        let result = eval(code);
+        assert!(
+            result.is_ok(),
+            "Template with bad if condition should not crash"
+        );
+        if let Ok(Value::String(s)) = result {
+            assert!(
+                s.contains("hidden"),
+                "Bad if condition should fall through to else, got: {}",
+                s
+            );
+            assert!(
+                !s.contains("shown"),
+                "Bad if condition should not render then branch, got: {}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn test_template_error_boundary_for_treats_error_as_empty() {
+        // {{#for x in bad_expr}} should iterate zero times, not crash
+        let code = r#####"
+let page = """before{{#for x in undefined_fn()}}item{{/for}}after"""
+page
+"#####;
+        let result = eval(code);
+        assert!(
+            result.is_ok(),
+            "Template with bad for iterable should not crash"
+        );
+        if let Ok(Value::String(s)) = result {
+            assert!(s.contains("before"), "Content before for should render");
+            assert!(s.contains("after"), "Content after for should render");
+            assert!(
+                !s.contains("item"),
+                "Bad for iterable should yield zero iterations, got: {}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn test_template_valid_expressions_still_work() {
+        // Regression: valid templates should still render correctly
+        let code = r#####"
+let name = "Alice"
+let items = [1, 2, 3]
+let page = """Hello {{name}}! Count: {{len(items)}}"""
+page
+"#####;
+        let result = eval(code).unwrap();
+        if let Value::String(s) = result {
+            assert!(
+                s.contains("Hello Alice!"),
+                "Valid interpolation should work, got: {}",
+                s
+            );
+            assert!(
+                s.contains("Count: 3"),
+                "Valid expression should work, got: {}",
+                s
+            );
+        } else {
+            panic!("Expected string from template");
+        }
     }
 }

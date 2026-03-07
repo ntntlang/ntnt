@@ -2669,6 +2669,7 @@ impl TypeContext {
         sig!("typeof", ["value" => Type::Any], Type::String);
 
         // Collections
+        sig!("chars", ["s" => Type::String], Type::Array(Box::new(Type::String)));
         sig!("len", ["value" => Type::Any], Type::Int);
         sig!("push", ["array" => Type::Array(Box::new(Type::Any)), "item" => Type::Any], Type::Array(Box::new(Type::Any)));
         sig!("pop", ["array" => Type::Array(Box::new(Type::Any))], Type::Any);
