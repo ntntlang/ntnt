@@ -977,7 +977,7 @@ impl TypeContext {
                         self.warning(
                             "for..in on String yields zero iterations. Use chars() for character iteration.".to_string(),
                             line,
-                            Some("Replace with: for c in chars(s)".to_string()),
+                            Some("Replace with: for c in chars(<string>) (and import { chars } from \"std/string\")".to_string()),
                         );
                         Type::String
                     }

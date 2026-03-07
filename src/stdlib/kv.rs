@@ -496,6 +496,10 @@ impl RedisKV {
             }
         }
 
+        // Deduplicate keys (SCAN may return duplicates across iterations)
+        all_keys.sort_unstable();
+        all_keys.dedup();
+
         // Filter out internal type keys
         let filtered: Vec<String> = all_keys
             .into_iter()

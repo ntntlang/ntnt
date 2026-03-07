@@ -442,7 +442,7 @@ fn sanitize_html_comment(s: &str) -> String {
 }
 
 /// Default maximum recursion depth. Can be overridden with NTNT_MAX_RECURSION env var.
-const MAX_RECURSION_DEPTH: usize = 1000;
+const MAX_RECURSION_DEPTH: usize = 256;
 
 /// Check if NTNT is running in production mode (NTNT_ENV=production or prod).
 /// Caches the result to avoid repeated env var reads.
@@ -451,10 +451,7 @@ fn is_production_mode() -> bool {
     static IS_PROD: OnceLock<bool> = OnceLock::new();
     *IS_PROD.get_or_init(|| {
         std::env::var("NTNT_ENV")
-            .map(|v| {
-                let v = v.to_lowercase();
-                v == "production" || v == "prod"
-            })
+            .map(|v| v == "production" || v == "prod")
             .unwrap_or(false)
     })
 }
@@ -4196,7 +4193,16 @@ impl Interpreter {
                 match (obj, idx) {
                     (Value::Array(arr), Value::Int(i)) => {
                         let index = if i < 0 {
-                            (arr.len() as i64 + i) as usize
+                            match (arr.len() as i64).checked_add(i) {
+                                Some(idx) if idx >= 0 => idx as usize,
+                                _ => {
+                                    return Ok(Value::EnumValue {
+                                        enum_name: "Option".to_string(),
+                                        variant: "None".to_string(),
+                                        values: vec![],
+                                    })
+                                }
+                            }
                         } else {
                             i as usize
                         };
@@ -4210,7 +4216,16 @@ impl Interpreter {
                     (Value::String(s), Value::Int(i)) => {
                         let char_count = s.chars().count();
                         let index = if i < 0 {
-                            (char_count as i64 + i) as usize
+                            match (char_count as i64).checked_add(i) {
+                                Some(idx) if idx >= 0 => idx as usize,
+                                _ => {
+                                    return Ok(Value::EnumValue {
+                                        enum_name: "Option".to_string(),
+                                        variant: "None".to_string(),
+                                        values: vec![],
+                                    })
+                                }
+                            }
                         } else {
                             i as usize
                         };
@@ -5083,7 +5098,7 @@ impl Interpreter {
                                 if !is_prod {
                                     result.push_str(&format!(
                                         "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                        e
+                                        sanitize_html_comment(&e.to_string())
                                     ));
                                 }
                                 continue;
@@ -5119,7 +5134,7 @@ impl Interpreter {
                                 if !is_prod {
                                     result.push_str(&format!(
                                         "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                        e
+                                        sanitize_html_comment(&e.to_string())
                                     ));
                                 }
                                 continue;
@@ -5272,11 +5287,11 @@ impl Interpreter {
                         _ => {
                             // Non-iterable value: skip with warning (consistent with for..in behavior)
                             let is_prod = is_production_mode();
-                            eprintln!(
-                                "[WARN] Template for loop on {} — skipping (not a collection)",
-                                iterable_value.type_name()
-                            );
                             if !is_prod {
+                                eprintln!(
+                                    "[WARN] Template for loop on {} — skipping (not a collection)",
+                                    iterable_value.type_name()
+                                );
                                 result.push_str(&format!(
                                     "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: for loop on {}, expected array or map -->",
                                     sanitize_html_comment(iterable_value.type_name())
