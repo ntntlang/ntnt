@@ -669,6 +669,8 @@ impl Interpreter {
     /// This is useful for external callers (like the IAL test runner) that want
     /// to invoke NTNT functions after loading a module.
     pub fn call_function_by_name(&mut self, name: &str, args: Vec<Value>) -> Result<Value> {
+        // Clear warning dedup state for each request/call
+        crate::config::clear_type_warnings();
         // Look up the function in the environment
         let func = self.environment.borrow().get(name).ok_or_else(|| {
             let candidates = self.environment.borrow().keys();
@@ -3056,6 +3058,8 @@ impl Interpreter {
 
     /// Evaluate a program
     pub fn eval(&mut self, program: &Program) -> Result<Value> {
+        // Clear warning dedup state so each eval/request gets fresh warnings
+        crate::config::clear_type_warnings();
         let mut result = Value::Unit;
         for stmt in &program.statements {
             result = self.eval_statement(stmt)?;
@@ -5166,8 +5170,7 @@ impl Interpreter {
     /// - `Warn`: logs to stderr, appends HTML comment to `result`
     /// - `Forgiving`: silently ignores the error
     ///
-    /// Returns `true` if the error was handled (warn/forgiving), `false` is
-    /// never returned — strict mode returns `Err` instead.
+    /// Returns `Ok(())` when the error is handled (warn/forgiving), or `Err(e)` in strict mode.
     fn handle_template_error(e: IntentError, context: &str, result: &mut String) -> Result<()> {
         match get_type_mode() {
             TypeMode::Strict => Err(e),

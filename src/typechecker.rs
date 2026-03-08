@@ -16,10 +16,27 @@ pub enum Severity {
     Warning,
 }
 
+/// Classification of type diagnostics for structured matching.
+///
+/// Used by `check_program_with_lint_mode` to promote annotation warnings
+/// to errors in strict mode without brittle substring matching.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiagnosticKind {
+    /// Missing type annotation on function parameter
+    MissingParamAnnotation,
+    /// Missing return type annotation on function
+    MissingReturnAnnotation,
+    /// Missing type annotation on lambda parameter
+    MissingLambdaParamAnnotation,
+    /// General type error (mismatch, undefined, etc.)
+    General,
+}
+
 /// A diagnostic produced by the type checker
 #[derive(Debug, Clone)]
 pub struct TypeDiagnostic {
     pub severity: Severity,
+    pub kind: DiagnosticKind,
     pub message: String,
     pub line: usize,
     pub column: usize,
@@ -103,13 +120,19 @@ pub fn strict_check(ast: &Program, source: &str) -> Option<Vec<TypeDiagnostic>> 
     strict_check_with_file(ast, source, None)
 }
 
-/// Strict check with file path for cross-file import resolution
+/// Strict check with file path for cross-file import resolution.
+///
+/// Runs when either `NTNT_STRICT=1` (deprecated) or `NTNT_LINT_MODE=strict` is set.
 pub fn strict_check_with_file(
     ast: &Program,
     source: &str,
     file_path: Option<&str>,
 ) -> Option<Vec<TypeDiagnostic>> {
-    if !is_strict_mode() {
+    let lint_strict = matches!(
+        crate::config::get_lint_mode(),
+        crate::config::LintMode::Strict
+    );
+    if !is_strict_mode() && !lint_strict {
         return None;
     }
     let errors: Vec<_> = check_program_with_options(ast, source, false, file_path)
@@ -164,12 +187,16 @@ pub fn check_program_with_lint_mode(
     );
     let mut diagnostics = check_program_with_options(ast, source, strict, file_path);
 
-    // In strict mode, promote annotation warnings to errors
+    // In strict mode, promote annotation warnings to errors using structured kind
     if matches!(lint_mode, crate::config::LintMode::Strict) {
         for d in &mut diagnostics {
             if d.severity == Severity::Warning
-                && (d.message.contains("no type annotation")
-                    || d.message.contains("no return type annotation"))
+                && matches!(
+                    d.kind,
+                    DiagnosticKind::MissingParamAnnotation
+                        | DiagnosticKind::MissingReturnAnnotation
+                        | DiagnosticKind::MissingLambdaParamAnnotation
+                )
             {
                 d.severity = Severity::Error;
             }
@@ -380,14 +407,26 @@ impl TypeContext {
 
     // ── Diagnostics ───────────────────────────────────────────────────
 
-    fn emit(&mut self, severity: Severity, message: String, line: usize, hint: Option<String>) {
+    fn emit_with_kind(
+        &mut self,
+        severity: Severity,
+        kind: DiagnosticKind,
+        message: String,
+        line: usize,
+        hint: Option<String>,
+    ) {
         self.diagnostics.push(TypeDiagnostic {
             severity,
+            kind,
             message,
             line,
             column: 0,
             hint,
         });
+    }
+
+    fn emit(&mut self, severity: Severity, message: String, line: usize, hint: Option<String>) {
+        self.emit_with_kind(severity, DiagnosticKind::General, message, line, hint);
     }
 
     fn error(&mut self, message: String, line: usize, hint: Option<String>) {
@@ -773,7 +812,9 @@ impl TypeContext {
                     let fn_line = self.find_line_near(&format!("fn {}", name));
                     for param in params {
                         if param.type_annotation.is_none() {
-                            self.warning(
+                            self.emit_with_kind(
+                                Severity::Warning,
+                                DiagnosticKind::MissingParamAnnotation,
                                 format!(
                                     "Parameter '{}' in function '{}' has no type annotation",
                                     param.name, name
@@ -784,7 +825,9 @@ impl TypeContext {
                         }
                     }
                     if return_type.is_none() {
-                        self.warning(
+                        self.emit_with_kind(
+                            Severity::Warning,
+                            DiagnosticKind::MissingReturnAnnotation,
                             format!("Function '{}' has no return type annotation", name),
                             fn_line,
                             Some(format!("Add a return type: fn {}(...) -> Type", name)),
@@ -1806,7 +1849,9 @@ impl TypeContext {
                     for param in params {
                         if param.type_annotation.is_none() {
                             let line = self.find_line_near(&param.name);
-                            self.warning(
+                            self.emit_with_kind(
+                                Severity::Warning,
+                                DiagnosticKind::MissingLambdaParamAnnotation,
                                 format!("Lambda parameter '{}' has no type annotation", param.name),
                                 line,
                                 Some(format!("Add a type: {}: Type", param.name)),

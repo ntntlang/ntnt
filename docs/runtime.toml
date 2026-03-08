@@ -265,7 +265,7 @@ description = "Check source file(s) for syntax errors and common mistakes"
 options = [
     { name = "--quiet", short = "-q", type = "flag", description = "Show only errors, not warnings or suggestions" },
     { name = "--fix", short = "", type = "flag", description = "Output auto-fix suggestions as JSON patch" },
-    { name = "--warn-untyped", short = "", type = "flag", description = "Warn about missing type annotations on function parameters and return types (non-fatal, exit code 0). Also: `NTNT_LINT_MODE=warn`." },
+    { name = "--warn-untyped", short = "", type = "flag", description = "Enable strict typechecker warnings without failing the build: warns on missing type annotations and other strict-mode issues (e.g., Float→Int precision-loss, complex interpolation). Exit code remains 0. Also: `NTNT_LINT_MODE=warn`." },
     { name = "--strict", short = "", type = "flag", description = "Require type annotations on all functions — missing annotations are errors (non-zero exit). Also: `NTNT_LINT_MODE=strict`. Replaces deprecated `NTNT_STRICT`." }
 ]
 example = "ntnt lint server.tnt"

@@ -196,11 +196,11 @@ enum Commands {
         fix: bool,
 
         /// Enable strict type checking (require type annotations on all functions)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "warn_untyped")]
         strict: bool,
 
         /// Warn about untyped function signatures (non-fatal)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "strict")]
         warn_untyped: bool,
     },
     /// Intent-Driven Development commands

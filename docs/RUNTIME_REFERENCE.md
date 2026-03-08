@@ -282,7 +282,7 @@ Check source file(s) for syntax errors and common mistakes
 |--------|------|---------|-------------|
 | `--quiet`, `-q` | flag | - | Show only errors, not warnings or suggestions |
 | `--fix` | flag | - | Output auto-fix suggestions as JSON patch |
-| `--warn-untyped` | flag | - | Warn about missing type annotations on function parameters and return types (non-fatal, exit code 0). Also: `NTNT_LINT_MODE=warn`. |
+| `--warn-untyped` | flag | - | Enable strict typechecker warnings without failing the build: warns on missing type annotations and other strict-mode issues (e.g., Float→Int precision-loss, complex interpolation). Exit code remains 0. Also: `NTNT_LINT_MODE=warn`. |
 | `--strict` | flag | - | Require type annotations on all functions — missing annotations are errors (non-zero exit). Also: `NTNT_LINT_MODE=strict`. Replaces deprecated `NTNT_STRICT`. |
 
 **Example:**

@@ -424,14 +424,14 @@ print(result)
 
 #[test]
 fn test_strict_lint_warns_untyped_params() {
-    let code = r#"fn greet(name) {
+    let source = r#"fn greet(name) {
     return "hello " + name
 }
 
 print(greet("world"))
 "#;
 
-    let (stdout, _stderr, code) = lint_strict_code(code);
+    let (stdout, _stderr, exit_code) = lint_strict_code(source);
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("lint --strict should output valid JSON");
@@ -470,22 +470,22 @@ print(greet("world"))
 
     // Strict lint with errors should exit non-zero
     assert!(
-        code != 0,
+        exit_code != 0,
         "ntnt lint --strict should exit non-zero when annotation errors exist, got exit code {}",
-        code
+        exit_code
     );
 }
 
 #[test]
 fn test_strict_lint_warns_missing_return_type() {
-    let code = r#"fn add(a: Int, b: Int) {
+    let source = r#"fn add(a: Int, b: Int) {
     return a + b
 }
 
 print(add(1, 2))
 "#;
 
-    let (stdout, _stderr, code) = lint_strict_code(code);
+    let (stdout, _stderr, exit_code) = lint_strict_code(source);
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("lint --strict should output valid JSON");
@@ -512,9 +512,9 @@ print(add(1, 2))
 
     // Strict lint with errors should exit non-zero
     assert!(
-        code != 0,
+        exit_code != 0,
         "ntnt lint --strict should exit non-zero when annotation errors exist, got exit code {}",
-        code
+        exit_code
     );
 }
 
@@ -607,14 +607,14 @@ fn lint_warn_untyped_code(code: &str) -> (String, String, i32) {
 
 #[test]
 fn test_warn_untyped_produces_warnings_not_errors() {
-    let code = r#"fn greet(name) {
+    let source = r#"fn greet(name) {
     return "hello " + name
 }
 
 print(greet("world"))
 "#;
 
-    let (stdout, _stderr, code) = lint_warn_untyped_code(code);
+    let (stdout, _stderr, exit_code) = lint_warn_untyped_code(source);
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("lint --warn-untyped should output valid JSON");
@@ -634,9 +634,9 @@ print(greet("world"))
 
     // Exit code should be 0 (warnings are non-fatal)
     assert_eq!(
-        code, 0,
+        exit_code, 0,
         "--warn-untyped should exit 0 (warnings are non-fatal), got exit code {}",
-        code
+        exit_code
     );
 }
 
