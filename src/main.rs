@@ -2483,22 +2483,27 @@ fn run_intent_check_command(
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to start app server: {}", e))?;
 
-    // Wait for the server to be ready (poll /health or root, up to 30 seconds)
+    // Wait for the server to be ready (TCP connect poll, up to 30 seconds)
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(30);
     let mut server_ready = false;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     while start.elapsed() < timeout {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        if let Ok(resp) = reqwest::blocking::get(format!("http://127.0.0.1:{}/health", port)) {
-            if resp.status().is_success() || resp.status().is_redirection() {
-                server_ready = true;
-                break;
-            }
-        } else if let Ok(resp) = reqwest::blocking::get(format!("http://127.0.0.1:{}/", port)) {
-            if resp.status().is_success() || resp.status().is_redirection() {
-                server_ready = true;
-                break;
-            }
+        // Check if subprocess died
+        if let Some(status) = app_process.try_wait().ok().flatten() {
+            let _ = app_process.kill();
+            anyhow::bail!(
+                "Server process exited with status {} before becoming ready",
+                status
+            );
+        }
+        // Try TCP connect with a short timeout
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
+            .is_ok()
+        {
+            server_ready = true;
+            break;
         }
     }
     if !server_ready {

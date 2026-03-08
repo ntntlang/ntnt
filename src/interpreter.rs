@@ -11,6 +11,7 @@
 //! - `result` to reference the return value in postconditions
 
 use crate::ast::*;
+use crate::config::{get_type_mode, TypeMode};
 use crate::contracts::{ContractChecker, OldValues, StoredValue};
 use crate::error::{IntentError, Result};
 use std::cell::RefCell;
@@ -3382,30 +3383,41 @@ impl Interpreter {
                 let iterable_value = self.eval_expression(iterable)?;
 
                 // Convert iterable to something we can iterate over
-                let items: Vec<Value> = match &iterable_value {
-                    Value::Array(arr) => arr.clone(),
+                // Resolve the iterable into items.  Non-collection values are handled
+                // according to the current NTNT_TYPE_MODE:
+                //   strict    → RuntimeError (halts)
+                //   warn      → [WARN] to stderr, then empty iteration (default)
+                //   forgiving → empty iteration, silently
+                let items_result: Result<Vec<Value>> = match &iterable_value {
+                    Value::Array(arr) => Ok(arr.clone()),
                     Value::Range {
                         start,
                         end,
                         inclusive,
                     } => {
                         let end_val = if *inclusive { *end + 1 } else { *end };
-                        (*start..end_val).map(Value::Int).collect()
+                        Ok((*start..end_val).map(Value::Int).collect())
                     }
-                    Value::Map(map) => map.keys().map(|k| Value::String(k.clone())).collect(),
-                    // String and non-collection types: zero iterations with dev-mode warning.
+                    Value::Map(map) => Ok(map.keys().map(|k| Value::String(k.clone())).collect()),
+                    // String and non-collection types: behaviour depends on TypeMode.
                     // Use chars() builtin for explicit string character iteration.
-                    _ => {
-                        if !is_production_mode() {
+                    _ => match get_type_mode() {
+                        TypeMode::Strict => Err(IntentError::RuntimeError(format!(
+                            "for..in requires a collection (Array, Map, or Range), got {}",
+                            iterable_value.type_name()
+                        ))),
+                        TypeMode::Warn => {
                             eprintln!(
                                 "[WARN] for..in on {} — skipping (not a collection). \
                                  Use chars() for string iteration.",
                                 iterable_value.type_name()
                             );
+                            Ok(vec![])
                         }
-                        vec![]
-                    }
+                        TypeMode::Forgiving => Ok(vec![]),
+                    },
                 };
+                let items = items_result?;
 
                 let mut result = Value::Unit;
                 for item in items {
@@ -4266,10 +4278,28 @@ impl Interpreter {
                             IntentError::RuntimeError(format!("Unknown field: {}", key))
                         })
                     }
-                    // Type mismatch on index returns None instead of crashing.
-                    // This makes ?? the universal safety net: data["key"] ?? "default"
-                    // works regardless of whether data is a map, string, int, or None.
-                    _ => Ok(Value::none()),
+                    // Type mismatch on index: behaviour depends on NTNT_TYPE_MODE.
+                    //   strict    → RuntimeError
+                    //   warn      → [WARN] to stderr, return None  (default)
+                    //   forgiving → return None silently
+                    // ?? remains the universal safety net in warn/forgiving modes.
+                    (obj, idx) => match get_type_mode() {
+                        TypeMode::Strict => Err(IntentError::RuntimeError(format!(
+                            "Type mismatch: cannot index {} with {}",
+                            obj.type_name(),
+                            idx.type_name()
+                        ))),
+                        TypeMode::Warn => {
+                            eprintln!(
+                                "[WARN] Type mismatch: indexing {} with {} — returning None. \
+                                 Use ?? for a safe default.",
+                                obj.type_name(),
+                                idx.type_name()
+                            );
+                            Ok(Value::none())
+                        }
+                        TypeMode::Forgiving => Ok(Value::none()),
+                    },
                 }
             }
 
@@ -5056,7 +5086,10 @@ impl Interpreter {
             match part {
                 TemplatePart::Literal(s) => result.push_str(s),
                 TemplatePart::Expr(expr) => {
-                    // Error boundary: catch all errors, render gracefully
+                    // Error boundary: behaviour depends on NTNT_TYPE_MODE.
+                    //   strict    → propagate error (HTTP 500)
+                    //   warn      → [WARN] to stderr + HTML comment  (default)
+                    //   forgiving → render empty string silently
                     match self.eval_expression(expr) {
                         Ok(v) => {
                             let s = v.to_string();
@@ -5064,37 +5097,38 @@ impl Interpreter {
                         }
                         // Undefined variables render as empty string (standard Mustache behavior)
                         Err(IntentError::UndefinedVariable { .. }) => {}
-                        Err(e) => {
-                            let is_prod = is_production_mode();
-                            eprintln!("[ERROR] Template expression failed: {}", e);
-                            if !is_prod {
+                        Err(e) => match get_type_mode() {
+                            TypeMode::Strict => return Err(e),
+                            TypeMode::Warn => {
+                                eprintln!("[WARN] Template expression failed: {}", e);
                                 result.push_str(&format!(
                                     "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
                                     sanitize_html_comment(&e.to_string())
                                 ));
                             }
-                            // prod: empty string (push nothing)
-                        }
+                            TypeMode::Forgiving => {}
+                        },
                     }
                 }
                 TemplatePart::RawExpr(expr) => {
-                    // Error boundary: catch all errors, render gracefully
+                    // Error boundary: behaviour depends on NTNT_TYPE_MODE.
                     match self.eval_expression(expr) {
                         Ok(v) => {
                             result.push_str(&v.to_string());
                         }
                         // Undefined variables render as empty string (standard Mustache behavior)
                         Err(IntentError::UndefinedVariable { .. }) => {}
-                        Err(e) => {
-                            let is_prod = is_production_mode();
-                            eprintln!("[ERROR] Template expression failed: {}", e);
-                            if !is_prod {
+                        Err(e) => match get_type_mode() {
+                            TypeMode::Strict => return Err(e),
+                            TypeMode::Warn => {
+                                eprintln!("[WARN] Template expression failed: {}", e);
                                 result.push_str(&format!(
                                     "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
                                     sanitize_html_comment(&e.to_string())
                                 ));
                             }
-                        }
+                            TypeMode::Forgiving => {}
+                        },
                     }
                 }
                 TemplatePart::FilteredExpr { expr, filters } => {
@@ -5106,25 +5140,27 @@ impl Interpreter {
                         Err(e) => {
                             if has_default {
                                 // Log non-variable errors even with default filter
-                                if !matches!(e, IntentError::UndefinedVariable { .. }) {
-                                    let is_prod = is_production_mode();
-                                    if !is_prod {
-                                        eprintln!(
-                                            "[WARN] Template expression error (using default): {}",
-                                            e
-                                        );
-                                    }
+                                if !matches!(e, IntentError::UndefinedVariable { .. })
+                                    && get_type_mode() == TypeMode::Warn
+                                {
+                                    eprintln!(
+                                        "[WARN] Template expression error (using default): {}",
+                                        e
+                                    );
                                 }
                                 Value::Unit
                             } else {
-                                // Error boundary: render gracefully
-                                let is_prod = is_production_mode();
-                                eprintln!("[ERROR] Template expression failed: {}", e);
-                                if !is_prod {
-                                    result.push_str(&format!(
-                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                        sanitize_html_comment(&e.to_string())
-                                    ));
+                                // Error boundary: behaviour depends on NTNT_TYPE_MODE
+                                match get_type_mode() {
+                                    TypeMode::Strict => return Err(e),
+                                    TypeMode::Warn => {
+                                        eprintln!("[WARN] Template expression failed: {}", e);
+                                        result.push_str(&format!(
+                                            "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                                            sanitize_html_comment(&e.to_string())
+                                        ));
+                                    }
+                                    TypeMode::Forgiving => {}
                                 }
                                 continue;
                             }
@@ -5152,25 +5188,27 @@ impl Interpreter {
                         Err(e) => {
                             if has_default {
                                 // Log non-variable errors even with default filter
-                                if !matches!(e, IntentError::UndefinedVariable { .. }) {
-                                    let is_prod = is_production_mode();
-                                    if !is_prod {
-                                        eprintln!(
-                                            "[WARN] Template expression error (using default): {}",
-                                            e
-                                        );
-                                    }
+                                if !matches!(e, IntentError::UndefinedVariable { .. })
+                                    && get_type_mode() == TypeMode::Warn
+                                {
+                                    eprintln!(
+                                        "[WARN] Template expression error (using default): {}",
+                                        e
+                                    );
                                 }
                                 Value::Unit
                             } else {
-                                // Error boundary: render gracefully
-                                let is_prod = is_production_mode();
-                                eprintln!("[ERROR] Template expression failed: {}", e);
-                                if !is_prod {
-                                    result.push_str(&format!(
-                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                        sanitize_html_comment(&e.to_string())
-                                    ));
+                                // Error boundary: behaviour depends on NTNT_TYPE_MODE
+                                match get_type_mode() {
+                                    TypeMode::Strict => return Err(e),
+                                    TypeMode::Warn => {
+                                        eprintln!("[WARN] Template expression failed: {}", e);
+                                        result.push_str(&format!(
+                                            "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                                            sanitize_html_comment(&e.to_string())
+                                        ));
+                                    }
+                                    TypeMode::Forgiving => {}
                                 }
                                 continue;
                             }
@@ -5190,14 +5228,17 @@ impl Interpreter {
                     let iterable_value = match self.eval_expression(iterable) {
                         Ok(v) => v,
                         Err(e) => {
-                            // Error boundary: treat errored iterable as empty
-                            let is_prod = is_production_mode();
-                            eprintln!("[ERROR] Template for-loop iterable failed: {}", e);
-                            if !is_prod {
-                                result.push_str(&format!(
-                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR (for): {} -->",
-                                    sanitize_html_comment(&e.to_string())
-                                ));
+                            // Error boundary: behaviour depends on NTNT_TYPE_MODE
+                            match get_type_mode() {
+                                TypeMode::Strict => return Err(e),
+                                TypeMode::Warn => {
+                                    eprintln!("[WARN] Template for-loop iterable failed: {}", e);
+                                    result.push_str(&format!(
+                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR (for): {} -->",
+                                        sanitize_html_comment(&e.to_string())
+                                    ));
+                                }
+                                TypeMode::Forgiving => {}
                             }
                             // Render empty_body if present, otherwise skip
                             if !empty_body.is_empty() {
@@ -5320,17 +5361,28 @@ impl Interpreter {
                             }
                         }
                         _ => {
-                            // Non-iterable value: skip with warning (consistent with for..in behavior)
-                            let is_prod = is_production_mode();
-                            if !is_prod {
-                                eprintln!(
-                                    "[WARN] Template for loop on {} — skipping (not a collection)",
-                                    iterable_value.type_name()
-                                );
-                                result.push_str(&format!(
-                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: for loop on {}, expected array or map -->",
-                                    sanitize_html_comment(iterable_value.type_name())
-                                ));
+                            // Non-iterable value: behaviour depends on NTNT_TYPE_MODE
+                            match get_type_mode() {
+                                TypeMode::Strict => {
+                                    return Err(IntentError::RuntimeError(format!(
+                                        "Template for loop requires a collection \
+                                         (Array or Map), got {}",
+                                        iterable_value.type_name()
+                                    )));
+                                }
+                                TypeMode::Warn => {
+                                    eprintln!(
+                                        "[WARN] Template for loop on {} — skipping \
+                                         (not a collection)",
+                                        iterable_value.type_name()
+                                    );
+                                    result.push_str(&format!(
+                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: for loop on \
+                                         {}, expected array or map -->",
+                                        sanitize_html_comment(iterable_value.type_name())
+                                    ));
+                                }
+                                TypeMode::Forgiving => {}
                             }
                             if !empty_body.is_empty() {
                                 if let Ok(Value::String(s)) = self.eval_template_parts(empty_body) {
@@ -10663,6 +10715,8 @@ c")
 
     #[test]
     fn test_for_in_int_skips() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on an int should yield zero iterations, not crash
         let result = eval(
             r#"
@@ -10679,6 +10733,8 @@ c")
 
     #[test]
     fn test_for_in_none_skips() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on None should yield zero iterations, not crash
         let result = eval(
             r#"
@@ -10695,6 +10751,8 @@ c")
 
     #[test]
     fn test_for_in_bool_skips() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on a bool should yield zero iterations
         let result = eval(
             r#"
@@ -10779,9 +10837,13 @@ c")
     // ============================================
     // Change 1: [] returns None on type mismatch
     // ============================================
+    // These tests assume forgiving/warn mode (pre-DD-009 behavior).
+    // Lock the mutex and set forgiving to prevent strict mode from leaking in.
 
     #[test]
     fn test_index_string_with_string_key_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // string["key"] should return None, not TypeError
         let result = eval(r#"let s = "hello"; s["key"]"#).unwrap();
         assert!(matches!(
@@ -10795,6 +10857,8 @@ c")
 
     #[test]
     fn test_index_int_with_string_key_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // 42["key"] should return None, not TypeError
         let result = eval(r#"42["key"]"#).unwrap();
         assert!(matches!(
@@ -10808,6 +10872,8 @@ c")
 
     #[test]
     fn test_index_none_with_string_key_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // None["key"] should return None, not TypeError
         let result = eval(r#"let x = None; x["key"]"#).unwrap();
         assert!(matches!(
@@ -10821,6 +10887,8 @@ c")
 
     #[test]
     fn test_index_array_out_of_bounds_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // [1,2,3][99] should return None, not IndexOutOfBounds
         let result = eval(r#"[1, 2, 3][99]"#).unwrap();
         assert!(matches!(
@@ -10834,6 +10902,8 @@ c")
 
     #[test]
     fn test_index_array_negative_out_of_bounds_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // [1,2,3][-99] should return None, not IndexOutOfBounds
         let result = eval(r#"[1, 2, 3][-99]"#).unwrap();
         assert!(matches!(
@@ -10847,6 +10917,8 @@ c")
 
     #[test]
     fn test_index_string_char_out_of_bounds_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // "hi"[99] should return None, not IndexOutOfBounds
         let result = eval(r#""hi"[99]"#).unwrap();
         assert!(matches!(
@@ -10860,6 +10932,8 @@ c")
 
     #[test]
     fn test_index_type_mismatch_with_null_coalescing() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // string["key"] ?? "fallback" should return "fallback"
         let result = eval(r#"let s = "hello"; s["key"] ?? "fallback""#).unwrap();
         assert!(matches!(result, Value::String(ref s) if s == "fallback"));
@@ -11229,6 +11303,143 @@ page
         assert!(
             interpreter.server_state.get_error_handler().is_none(),
             "No error handler should be registered by default"
+        );
+    }
+
+    // ── TypeMode tests (DD-009) ──────────────────────────────────────────────
+    //
+    // These tests manipulate NTNT_TYPE_MODE. Because get_type_mode() bypasses
+    // caching in test builds, each test reads fresh from the environment.
+    // A process-wide mutex serialises env var access to avoid races when
+    // tests run in parallel (cargo test default).
+
+    use std::sync::Mutex;
+    static TYPE_MODE_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_strict_mode_crashes_on_type_mismatch() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        // Indexing an Int with a String key — strict mode should return RuntimeError
+        let result = eval(r#"let x = 42; x["key"]"#);
+        assert!(
+            result.is_err(),
+            "strict mode: indexing Int with String should return Err, got {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Type mismatch") || msg.contains("cannot index"),
+            "error should mention type mismatch, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_warn_mode_logs_and_continues() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
+        // Indexing an Int with a String key — warn mode returns None, no crash
+        let result = eval(r#"let x = 42; x["key"]"#);
+        assert!(
+            result.is_ok(),
+            "warn mode: indexing Int with String should return Ok(None), got {:?}",
+            result
+        );
+        // The result should be None (represented as EnumValue { Option, None })
+        match result.unwrap() {
+            Value::EnumValue {
+                enum_name, variant, ..
+            } if enum_name == "Option" && variant == "None" => {}
+            other => panic!("expected Option::None, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_forgiving_mode_silent() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        // Forgiving mode: same None result, no warnings (we can't capture stderr here
+        // but we verify no panic and correct return value)
+        let result = eval(r#"let x = 42; x["key"]"#);
+        assert!(
+            result.is_ok(),
+            "forgiving mode: indexing Int with String should return Ok(None), got {:?}",
+            result
+        );
+        match result.unwrap() {
+            Value::EnumValue {
+                enum_name, variant, ..
+            } if enum_name == "Option" && variant == "None" => {}
+            other => panic!("expected Option::None, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_for_in_strict_crashes() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        // for..in on an Int — strict mode should return RuntimeError
+        let result = eval(
+            r#"
+            let count = 0
+            for i in 42 {
+                count = count + 1
+            }
+            count
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "strict mode: for..in on Int should return Err, got {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("collection") || msg.contains("for..in"),
+            "error should mention collection requirement, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_for_in_warn_skips() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
+        // for..in on an Int — warn mode skips the loop body and returns Unit
+        let result = eval(
+            r#"
+            let count = 0
+            for i in 42 {
+                count = count + 1
+            }
+            count
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "warn mode: for..in on Int should return Ok, got {:?}",
+            result
         );
     }
 }

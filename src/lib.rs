@@ -4,6 +4,7 @@
 //! first-class contracts, a static type system, and human-in-the-loop governance.
 
 pub mod ast;
+pub mod config;
 pub mod contracts;
 pub mod error;
 pub mod ial;
