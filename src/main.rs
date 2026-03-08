@@ -2478,13 +2478,33 @@ fn run_intent_check_command(
         .arg("run")
         .arg(&ntnt_path)
         .env("NTNT_LISTEN_PORT", port.to_string())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to start app server: {}", e))?;
 
-    // Give the server time to start (Axum async server needs more time)
-    std::thread::sleep(std::time::Duration::from_millis(3000));
+    // Wait for the server to be ready (poll /health or root, up to 30 seconds)
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(30);
+    let mut server_ready = false;
+    while start.elapsed() < timeout {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if let Ok(resp) = reqwest::blocking::get(format!("http://127.0.0.1:{}/health", port)) {
+            if resp.status().is_success() || resp.status().is_redirection() {
+                server_ready = true;
+                break;
+            }
+        } else if let Ok(resp) = reqwest::blocking::get(format!("http://127.0.0.1:{}/", port)) {
+            if resp.status().is_success() || resp.status().is_redirection() {
+                server_ready = true;
+                break;
+            }
+        }
+    }
+    if !server_ready {
+        let _ = app_process.kill();
+        anyhow::bail!("Server failed to start within 30 seconds on port {}", port);
+    }
 
     // Run tests using the new IAL engine
     let results = intent::run_tests_against_server(&intent_file, port, &source_files);
@@ -3123,6 +3143,28 @@ fn collect_tnt_files(path: &PathBuf) -> anyhow::Result<Vec<PathBuf>> {
                 if path.is_file() && path.extension() == Some(std::ffi::OsStr::new("tnt")) {
                     files.push(path);
                 } else if path.is_dir() {
+                    // Skip common non-source directories
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if matches!(
+                            name,
+                            "node_modules"
+                                | ".git"
+                                | "target"
+                                | "dist"
+                                | "build"
+                                | "__pycache__"
+                                | ".venv"
+                                | "venv"
+                                | "vendor"
+                                | "repos"
+                                | "static-archive"
+                                | ".next"
+                                | "coverage"
+                                | ".cache"
+                        ) {
+                            continue;
+                        }
+                    }
                     collect_recursive(&path, files)?;
                 }
             }

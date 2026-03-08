@@ -3604,11 +3604,17 @@ impl Interpreter {
                         }
                         let port = self.eval_expression(&arguments[0])?;
                         if let Value::Int(port_num) = port {
+                            // Allow NTNT_LISTEN_PORT env var to override the port
+                            // (used by `ntnt intent check` to run on a test port)
+                            let effective_port = std::env::var("NTNT_LISTEN_PORT")
+                                .ok()
+                                .and_then(|s| s.parse::<u16>().ok())
+                                .unwrap_or(port_num as u16);
                             // Use sync server for test mode (intent check), async for production
                             if self.test_mode.is_some() {
-                                return self.run_http_server(port_num as u16);
+                                return self.run_http_server(effective_port);
                             } else {
-                                return self.run_async_http_server(port_num as u16);
+                                return self.run_async_http_server(effective_port);
                             }
                         } else {
                             return Err(IntentError::TypeError(
