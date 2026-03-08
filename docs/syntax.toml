@@ -31,7 +31,7 @@ description = "Control flow statements"
 
 [keywords.error_handling]
 words = ["otherwise"]
-description = "Inline error handling on let bindings — unwraps Ok/Some or runs a diverging block for Err/None"
+description = "Inline error handling on let bindings — unwraps Ok/Some, catches runtime errors, or runs a diverging block for Err/None/errors"
 
 [keywords.types]
 words = ["type", "struct", "enum", "impl", "trait", "pub", "self"]

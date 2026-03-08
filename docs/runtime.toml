@@ -34,6 +34,13 @@ description = "Allow `fetch()` to connect to private/internal IP ranges (10.x, 1
 example = "NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt"
 affects = ["http-client", "security"]
 
+[env_vars.NTNT_MAX_RECURSION]
+type = "integer"
+default = "256"
+description = "Maximum recursion depth for function calls. Prevents stack overflow from runaway recursion."
+example = "NTNT_MAX_RECURSION=512 ntnt run server.tnt"
+affects = ["runtime"]
+
 [env_vars.NTNT_STRICT]
 values = ["1", "true"]
 default = "unset (disabled)"

@@ -1,6 +1,6 @@
 <!-- NTNT coding guide sections are sourced from docs/AI_AGENT_GUIDE.md -->
 <!-- To update NTNT coding instructions, edit AI_AGENT_GUIDE.md and copy to all agent files -->
-<!-- Last synced: 2026-02-28 -->
+<!-- Last synced: 2026-03-08 -->
 
 # NTNT Language - Claude Code Instructions
 
@@ -890,7 +890,7 @@ fn get_user(id) {
 
 ### The `otherwise` Keyword (Inline Error Handling)
 
-`otherwise` unwraps `Ok`/`Some` or runs a diverging block for `Err`/`None`. Unlike `?`, it handles errors at the call site with custom recovery logic:
+`otherwise` unwraps `Ok`/`Some` or runs a diverging block for `Err`/`None`. It also catches runtime errors (type mismatches, arithmetic errors, etc.) from the expression, converting them to `Err` values so the otherwise block can handle them. Unlike `?`, it handles errors at the call site with custom recovery logic:
 
 ```ntnt
 // Block form — err is automatically bound to the error value
@@ -912,6 +912,14 @@ fn get_user(req) {
     return json(user)
 }
 
+// Catches runtime errors too — no more unhandled crashes
+fn safe_compute(req) {
+    let result = (some_value * 33) otherwise {
+        return json(map { "error": "Computation failed: {err}" }, 400)
+    }
+    return json(map { "result": result })
+}
+
 // In loops — use continue to skip, break to stop
 for line in lines {
     let value = parse_line(line) otherwise {
@@ -925,8 +933,10 @@ for line in lines {
 **Behavior:**
 - `Ok(v)` / `Some(v)` → binds `v` to the variable
 - `Err(e)` / `None` → runs the otherwise block with `err` bound to `e` (or `Unit` for None)
+- Runtime errors (type mismatches, etc.) → caught and converted to `Err`, then handled by the otherwise block with `err` bound to the error message
 - The otherwise block **must diverge**: `return`, `break`, `continue`, or call a function that doesn't return
 - Non-Result/Option values bind as-is (gradual typing)
+- In dev mode, caught runtime errors emit a `[WARN]` to stderr for visibility
 
 ### When to Use Each
 

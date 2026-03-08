@@ -52,21 +52,31 @@ fn apply_async_security_headers(response: &mut Response<Body>) {
     let disabled = std::env::var("NTNT_SECURITY_HEADERS")
         .map(|v| v == "0" || v.to_lowercase() == "false")
         .unwrap_or(false);
-    if disabled {
-        return;
-    }
-    let security_headers = get_default_security_headers();
-    let headers = response.headers_mut();
-    for (key, value) in security_headers {
-        if let Ok(name) = header::HeaderName::try_from(key.as_str()) {
-            if !headers.contains_key(&name) {
-                if let Value::String(val) = value {
-                    if let Ok(hv) = header::HeaderValue::from_str(&val) {
-                        headers.insert(name, hv);
+
+    if !disabled {
+        let security_headers = get_default_security_headers();
+        let headers = response.headers_mut();
+        for (key, value) in security_headers {
+            if let Ok(name) = header::HeaderName::try_from(key.as_str()) {
+                if !headers.contains_key(&name) {
+                    if let Value::String(val) = value {
+                        if let Ok(hv) = header::HeaderValue::from_str(&val) {
+                            headers.insert(name, hv);
+                        }
                     }
                 }
             }
         }
+    }
+
+    // Cache-Control for dynamic responses (independent of security headers toggle)
+    // Static files set their own Cache-Control in serve_static_file().
+    let headers = response.headers_mut();
+    if !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        );
     }
 }
 
@@ -408,11 +418,11 @@ fn bridge_to_axum_response(resp: BridgeResponse) -> Response<Body> {
 }
 
 /// Serve a static file with proper headers
-fn serve_static_file(file_path: &str, if_none_match: Option<&str>) -> Response<Body> {
-    use std::fs;
+async fn serve_static_file(file_path: &str, if_none_match: Option<&str>) -> Response<Body> {
+    use tokio_util::io::ReaderStream;
 
     let path = std::path::Path::new(file_path);
-    let metadata = match fs::metadata(path) {
+    let metadata = match tokio::fs::metadata(path).await {
         Ok(m) => m,
         Err(_) => {
             return Response::builder()
@@ -453,19 +463,23 @@ fn serve_static_file(file_path: &str, if_none_match: Option<&str>) -> Response<B
         }
     }
 
-    let mut resp = match fs::read(file_path) {
-        Ok(contents) => {
+    // Stream file contents instead of loading entirely into memory.
+    // A 5MB image now uses ~8KB buffer instead of 5MB heap allocation.
+    let mut resp = match tokio::fs::File::open(file_path).await {
+        Ok(file) => {
             let mime_type = guess_mime_type(file_path);
-            let len = contents.len();
+            let file_size = metadata.len();
+            let stream = ReaderStream::new(file);
+            let body = Body::from_stream(stream);
 
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", mime_type)
-                .header("content-length", len)
+                .header("content-length", file_size)
                 .header("etag", &etag)
                 .header("cache-control", cache_control_for(file_path))
                 .header("server", "ntnt-async")
-                .body(Body::from(contents))
+                .body(body)
                 .unwrap_or_else(|_| {
                     Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -579,7 +593,7 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
             // No dynamic route - check static files (GET only)
             if method == axum::http::Method::GET {
                 if let Some((file_path, _prefix)) = state.routes.find_static_file(&path).await {
-                    return serve_static_file(&file_path, if_none_match.as_deref());
+                    return serve_static_file(&file_path, if_none_match.as_deref()).await;
                 }
             }
 

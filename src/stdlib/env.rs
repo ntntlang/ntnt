@@ -30,16 +30,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(name) => match std::env::var(name) {
-                    Ok(val) => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: vec![Value::String(val)],
-                    }),
-                    Err(_) => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    Ok(val) => Ok(Value::some(Value::String(val))),
+                    Err(_) => Ok(Value::none()),
                 },
                 _ => Err(IntentError::TypeError(
                     "get_env() requires a string".to_string(),
@@ -132,17 +124,12 @@ pub fn init() -> HashMap<String, Value> {
                                         std::env::set_var(key.trim(), value.trim());
                                     }
                                 }
-                                Ok(Value::EnumValue {
-                                    enum_name: "Result".to_string(),
-                                    variant: "Ok".to_string(),
-                                    values: vec![Value::Unit],
-                                })
+                                Ok(Value::ok(Value::Unit))
                             }
-                            Err(e) => Ok(Value::EnumValue {
-                                enum_name: "Result".to_string(),
-                                variant: "Err".to_string(),
-                                values: vec![Value::String(format!("Failed to load .env: {}", e))],
-                            }),
+                            Err(e) => Ok(Value::err(Value::String(format!(
+                                "Failed to load .env: {}",
+                                e
+                            )))),
                         }
                     }
                     _ => Err(IntentError::TypeError(

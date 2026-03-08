@@ -468,20 +468,40 @@ impl RedisKV {
         Ok(exists)
     }
 
-    /// List keys with optional prefix
+    /// List keys with optional prefix (uses SCAN instead of KEYS to avoid blocking Redis)
     pub fn list(&mut self, prefix: Option<&str>) -> Result<Vec<String>> {
         let pattern = match prefix {
             Some(p) => format!("{}*", p),
             None => "*".to_string(),
         };
 
-        let keys: Vec<String> = self
-            .conn
-            .keys(&pattern)
-            .map_err(|e| IntentError::RuntimeError(format!("Redis keys error: {}", e)))?;
+        let mut all_keys: Vec<String> = Vec::new();
+        let mut cursor: u64 = 0;
+
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .cursor_arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query(&mut self.conn)
+                .map_err(|e| IntentError::RuntimeError(format!("Redis scan error: {}", e)))?;
+
+            all_keys.extend(batch);
+            cursor = next_cursor;
+
+            if cursor == 0 {
+                break;
+            }
+        }
+
+        // Deduplicate keys (SCAN may return duplicates across iterations)
+        all_keys.sort_unstable();
+        all_keys.dedup();
 
         // Filter out internal type keys
-        let filtered: Vec<String> = keys
+        let filtered: Vec<String> = all_keys
             .into_iter()
             .filter(|k| !k.ends_with(":__type"))
             .collect();
@@ -670,11 +690,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     handle.insert("_url".to_string(), Value::String(url));
                     handle.insert("_kv_store_id".to_string(), Value::Int(id as i64));
 
-                    return Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Map(handle)],
-                    });
+                    return Ok(Value::ok(Value::Map(handle)));
                 }
 
                 // SQLite backend (default for file paths)
@@ -690,11 +706,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 handle.insert("_url".to_string(), Value::String(url));
                 handle.insert("_kv_store_id".to_string(), Value::Int(id as i64));
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Map(handle)],
-                })
+                Ok(Value::ok(Value::Map(handle)))
             },
         },
     );
@@ -752,23 +764,11 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 };
 
                 let option_value = match result {
-                    Some(v) => Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: vec![v],
-                    },
-                    None => Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    },
+                    Some(v) => Value::some(v),
+                    None => Value::none(),
                 };
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![option_value],
-                })
+                Ok(Value::ok(option_value))
             },
         },
     );
@@ -841,11 +841,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     }
                 }
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Unit],
-                })
+                Ok(Value::ok(Value::Unit))
             },
         },
     );
@@ -900,11 +896,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     }
                 };
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Bool(deleted)],
-                })
+                Ok(Value::ok(Value::Bool(deleted)))
             },
         },
     );
@@ -959,11 +951,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     }
                 };
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Bool(exists)],
-                })
+                Ok(Value::ok(Value::Bool(exists)))
             },
         },
     );
@@ -1027,11 +1015,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
 
                 let key_values: Vec<Value> = keys.into_iter().map(Value::String).collect();
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Array(key_values)],
-                })
+                Ok(Value::ok(Value::Array(key_values)))
             },
         },
     );
@@ -1096,11 +1080,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     }
                 };
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Bool(success)],
-                })
+                Ok(Value::ok(Value::Bool(success)))
             },
         },
     );
@@ -1156,23 +1136,11 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 };
 
                 let option_value = match remaining {
-                    Some(secs) => Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: vec![Value::Int(secs)],
-                    },
-                    None => Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    },
+                    Some(secs) => Value::some(Value::Int(secs)),
+                    None => Value::none(),
                 };
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![option_value],
-                })
+                Ok(Value::ok(option_value))
             },
         },
     );
@@ -1217,11 +1185,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     }
                 }
 
-                Ok(Value::EnumValue {
-                    enum_name: "Result".to_string(),
-                    variant: "Ok".to_string(),
-                    values: vec![Value::Unit],
-                })
+                Ok(Value::ok(Value::Unit))
             },
         },
     );

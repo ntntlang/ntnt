@@ -2,7 +2,7 @@
 
 > **Auto-generated from [syntax.toml](syntax.toml)** - Do not edit directly.
 >
-> Last updated: v0.3.16
+> Last updated: v0.3.17
 
 ## Table of Contents
 
@@ -54,7 +54,7 @@ _Control flow statements_
 
 `otherwise`
 
-_Inline error handling on let bindings — unwraps Ok/Some or runs a diverging block for Err/None_
+_Inline error handling on let bindings — unwraps Ok/Some, catches runtime errors, or runs a diverging block for Err/None/errors_
 
 ### Types
 

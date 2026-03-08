@@ -340,17 +340,9 @@ pub fn init() -> HashMap<String, Value> {
                     match NaiveDateTime::parse_from_str(date_str, fmt) {
                         Ok(naive) => {
                             let dt = naive.and_utc();
-                            Ok(Value::EnumValue {
-                                enum_name: "Result".to_string(),
-                                variant: "Ok".to_string(),
-                                values: vec![Value::Int(dt.timestamp())],
-                            })
+                            Ok(Value::ok(Value::Int(dt.timestamp())))
                         }
-                        Err(e) => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(format!("Parse error: {}", e))],
-                        }),
+                        Err(e) => Ok(Value::err(Value::String(format!("Parse error: {}", e)))),
                     }
                 }
                 _ => Err(IntentError::TypeError(
@@ -382,16 +374,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => match DateTime::parse_from_rfc3339(s) {
-                    Ok(dt) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Int(dt.timestamp())],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(format!("Parse error: {}", e))],
-                    }),
+                    Ok(dt) => Ok(Value::ok(Value::Int(dt.timestamp()))),
+                    Err(e) => Ok(Value::err(Value::String(format!("Parse error: {}", e)))),
                 },
                 _ => Err(IntentError::TypeError(
                     "parse_iso() requires a string".to_string(),
@@ -444,16 +428,12 @@ pub fn init() -> HashMap<String, Value> {
                         *minute as u32,
                         *second as u32,
                     ) {
-                        chrono::LocalResult::Single(dt) => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![Value::Int(dt.timestamp())],
-                        }),
-                        _ => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String("Invalid date/time components".to_string())],
-                        }),
+                        chrono::LocalResult::Single(dt) => {
+                            Ok(Value::ok(Value::Int(dt.timestamp())))
+                        }
+                        _ => Ok(Value::err(Value::String(
+                            "Invalid date/time components".to_string(),
+                        ))),
                     }
                 }
                 _ => Err(IntentError::TypeError(
@@ -489,16 +469,12 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::Int(year), Value::Int(month), Value::Int(day)) => {
                     match Utc.with_ymd_and_hms(*year as i32, *month as u32, *day as u32, 0, 0, 0) {
-                        chrono::LocalResult::Single(dt) => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![Value::Int(dt.timestamp())],
-                        }),
-                        _ => Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String("Invalid date components".to_string())],
-                        }),
+                        chrono::LocalResult::Single(dt) => {
+                            Ok(Value::ok(Value::Int(dt.timestamp())))
+                        }
+                        _ => Ok(Value::err(Value::String(
+                            "Invalid date components".to_string(),
+                        ))),
                     }
                 }
                 _ => Err(IntentError::TypeError(

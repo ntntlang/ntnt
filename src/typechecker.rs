@@ -970,7 +970,17 @@ impl TypeContext {
                 let iter_type = self.infer_expression(iterable);
                 let elem_type = match &iter_type {
                     Type::Array(inner) => (**inner).clone(),
-                    Type::String => Type::String,
+                    Type::String => {
+                        // The interpreter yields zero iterations for for..in on strings.
+                        // Warn the user to use chars() instead.
+                        let line = self.find_line_near(&format!("for {} in", variable));
+                        self.warning(
+                            "for..in on String yields zero iterations. Use chars() for character iteration.".to_string(),
+                            line,
+                            Some("Replace with: for c in chars(<string>) (and import { chars } from \"std/string\")".to_string()),
+                        );
+                        Type::String
+                    }
                     Type::Map { key_type, .. } => (**key_type).clone(),
                     _ => Type::Any,
                 };
@@ -1522,6 +1532,11 @@ impl TypeContext {
                 }
             }
 
+            // TODO: arr[i] and map[k] return Option at runtime (None for out-of-bounds
+            // or missing keys), but the typechecker currently infers the unwrapped element
+            // type. A full fix would return Option<T> here and require ?? or ? at usage
+            // sites, but that's a breaking change requiring broader migration. For now,
+            // the mismatch is documented and the runtime handles it gracefully.
             Expression::Index { object, index } => {
                 let obj_type = self.infer_expression(object);
                 let _idx_type = self.infer_expression(index);
@@ -1851,6 +1866,17 @@ impl TypeContext {
                     self.rebind(name, value_type);
                 }
                 Type::Unit
+            }
+
+            Expression::TryCatch { body } => {
+                self.push_scope();
+                let body_type = self.check_block(body);
+                self.pop_scope();
+                // Result<body_type, String>
+                Type::Generic {
+                    name: "Result".to_string(),
+                    args: vec![body_type, Type::String],
+                }
             }
 
             Expression::Await(inner) => self.infer_expression(inner),
@@ -2669,6 +2695,7 @@ impl TypeContext {
         sig!("typeof", ["value" => Type::Any], Type::String);
 
         // Collections
+        // chars() is defined in std/string (not a global builtin)
         sig!("len", ["value" => Type::Any], Type::Int);
         sig!("push", ["array" => Type::Array(Box::new(Type::Any)), "item" => Type::Any], Type::Array(Box::new(Type::Any)));
         sig!("pop", ["array" => Type::Array(Box::new(Type::Any))], Type::Any);

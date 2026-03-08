@@ -112,6 +112,42 @@ pub struct FunctionContract {
 }
 
 impl Value {
+    /// Create an Option::None value
+    pub fn none() -> Self {
+        Value::EnumValue {
+            enum_name: "Option".to_string(),
+            variant: "None".to_string(),
+            values: vec![],
+        }
+    }
+
+    /// Create an Option::Some(value)
+    pub fn some(value: Value) -> Self {
+        Value::EnumValue {
+            enum_name: "Option".to_string(),
+            variant: "Some".to_string(),
+            values: vec![value],
+        }
+    }
+
+    /// Create a Result::Ok(value)
+    pub fn ok(value: Value) -> Self {
+        Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            values: vec![value],
+        }
+    }
+
+    /// Create a Result::Err(value)
+    pub fn err(value: Value) -> Self {
+        Value::EnumValue {
+            enum_name: "Result".to_string(),
+            variant: "Err".to_string(),
+            values: vec![value],
+        }
+    }
+
     /// Determine if a value is truthy for conditionals
     ///
     /// Falsy values: false, Unit, None, empty strings, empty arrays, empty maps
@@ -412,6 +448,10 @@ pub struct Interpreter {
     current_line: usize,
     /// Last known source column being executed (for runtime error reporting)
     current_col: usize,
+    /// Current function call depth (for recursion limit)
+    call_depth: usize,
+    /// Maximum allowed recursion depth
+    max_recursion_depth: usize,
 }
 
 /// Information about a trait definition
@@ -429,6 +469,27 @@ pub struct TraitMethodInfo {
     pub params: Vec<Parameter>,
     pub return_type: Option<TypeExpr>,
     pub has_default: bool,
+}
+
+/// Sanitize a string for safe embedding inside an HTML comment.
+/// Replaces `--` with `&#45;&#45;` to prevent `-->` breakout.
+fn sanitize_html_comment(s: &str) -> String {
+    s.replace("--", "&#45;&#45;")
+}
+
+/// Default maximum recursion depth. Can be overridden with NTNT_MAX_RECURSION env var.
+const MAX_RECURSION_DEPTH: usize = 256;
+
+/// Check if NTNT is running in production mode (NTNT_ENV=production or prod).
+/// Caches the result to avoid repeated env var reads.
+fn is_production_mode() -> bool {
+    use std::sync::OnceLock;
+    static IS_PROD: OnceLock<bool> = OnceLock::new();
+    *IS_PROD.get_or_init(|| {
+        std::env::var("NTNT_ENV")
+            .map(|v| v == "production" || v == "prod")
+            .unwrap_or(false)
+    })
 }
 
 impl Interpreter {
@@ -462,11 +523,21 @@ impl Interpreter {
             routes_dir_mtimes: HashMap::new(),
             current_line: 0,
             current_col: 0,
+            call_depth: 0,
+            max_recursion_depth: std::env::var("NTNT_MAX_RECURSION")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(MAX_RECURSION_DEPTH),
         };
         interpreter.define_builtins();
         interpreter.define_builtin_types();
         interpreter.define_stdlib();
         interpreter
+    }
+
+    /// Set the maximum recursion depth for function calls
+    pub fn set_max_recursion_depth(&mut self, depth: usize) {
+        self.max_recursion_depth = depth;
     }
 
     /// Enable test mode - server will handle limited requests then exit
@@ -494,8 +565,8 @@ impl Interpreter {
         match self.execution_mode {
             ExecutionMode::Normal => false,
             ExecutionMode::HotReload => {
-                // In hot-reload, only skip listen() and on_shutdown()
-                matches!(name, "listen" | "on_shutdown")
+                // In hot-reload, only skip listen(), on_shutdown(), and on_error()
+                matches!(name, "listen" | "on_shutdown" | "on_error")
             }
             ExecutionMode::UnitTest => {
                 // In unit test mode, skip all server-related functions
@@ -506,6 +577,7 @@ impl Interpreter {
                         | "routes"
                         | "use_middleware"
                         | "on_shutdown"
+                        | "on_error"
                         | "enable_cors"
                         | "enable_auth"
                 )
@@ -1661,24 +1733,13 @@ impl Interpreter {
                 name: "Some".to_string(),
                 arity: 1,
                 max_arity: 1,
-                func: |args| {
-                    Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: args.to_vec(),
-                    })
-                },
+                func: |args| Ok(Value::some(args[0].clone())),
             },
         );
 
-        self.environment.borrow_mut().define(
-            "None".to_string(),
-            Value::EnumValue {
-                enum_name: "Option".to_string(),
-                variant: "None".to_string(),
-                values: vec![],
-            },
-        );
+        self.environment
+            .borrow_mut()
+            .define("None".to_string(), Value::none());
 
         // @ntnt Ok
         // @signature Ok(value: Any) -> Result<Any, Any>
@@ -1699,13 +1760,7 @@ impl Interpreter {
                 name: "Ok".to_string(),
                 arity: 1,
                 max_arity: 1,
-                func: |args| {
-                    Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: args.to_vec(),
-                    })
-                },
+                func: |args| Ok(Value::ok(args[0].clone())),
             },
         );
 
@@ -1728,13 +1783,7 @@ impl Interpreter {
                 name: "Err".to_string(),
                 arity: 1,
                 max_arity: 1,
-                func: |args| {
-                    Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: args.to_vec(),
-                    })
-                },
+                func: |args| Ok(Value::err(args[0].clone())),
             },
         );
 
@@ -2993,7 +3042,21 @@ impl Interpreter {
                 otherwise,
             } => {
                 let val = if let Some(expr) = value {
-                    self.eval_expression(expr)?
+                    if otherwise.is_some() {
+                        // With otherwise block: catch runtime errors too
+                        match self.eval_expression(expr) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                if !is_production_mode() {
+                                    eprintln!("[WARN] otherwise caught runtime error: {}", e);
+                                }
+                                Value::err(Value::String(format!("{}", e)))
+                            }
+                        }
+                    } else {
+                        // No otherwise block: propagate errors normally
+                        self.eval_expression(expr)?
+                    }
                 } else {
                     Value::Unit
                 };
@@ -3329,13 +3392,18 @@ impl Interpreter {
                         let end_val = if *inclusive { *end + 1 } else { *end };
                         (*start..end_val).map(Value::Int).collect()
                     }
-                    Value::String(s) => s.chars().map(|c| Value::String(c.to_string())).collect(),
                     Value::Map(map) => map.keys().map(|k| Value::String(k.clone())).collect(),
+                    // String and non-collection types: zero iterations with dev-mode warning.
+                    // Use chars() builtin for explicit string character iteration.
                     _ => {
-                        return Err(IntentError::RuntimeError(format!(
-                            "Cannot iterate over {}",
-                            iterable_value.type_name()
-                        )))
+                        if !is_production_mode() {
+                            eprintln!(
+                                "[WARN] for..in on {} — skipping (not a collection). \
+                                 Use chars() for string iteration.",
+                                iterable_value.type_name()
+                            );
+                        }
+                        vec![]
                     }
                 };
 
@@ -3536,11 +3604,17 @@ impl Interpreter {
                         }
                         let port = self.eval_expression(&arguments[0])?;
                         if let Value::Int(port_num) = port {
+                            // Allow NTNT_LISTEN_PORT env var to override the port
+                            // (used by `ntnt intent check` to run on a test port)
+                            let effective_port = std::env::var("NTNT_LISTEN_PORT")
+                                .ok()
+                                .and_then(|s| s.parse::<u16>().ok())
+                                .unwrap_or(port_num as u16);
                             // Use sync server for test mode (intent check), async for production
                             if self.test_mode.is_some() {
-                                return self.run_http_server(port_num as u16);
+                                return self.run_http_server(effective_port);
                             } else {
-                                return self.run_async_http_server(port_num as u16);
+                                return self.run_async_http_server(effective_port);
                             }
                         } else {
                             return Err(IntentError::TypeError(
@@ -3628,6 +3702,16 @@ impl Interpreter {
                         }
                         let handler = self.eval_expression(&arguments[0])?;
                         self.server_state.add_shutdown_handler(handler);
+                        return Ok(Value::Unit);
+                    }
+
+                    // Special handling for on_error(handler_fn)
+                    if name == "on_error" && arguments.len() == 1 {
+                        if self.should_skip_server_call("on_error") {
+                            return Ok(Value::Unit);
+                        }
+                        let handler = self.eval_expression(&arguments[0])?;
+                        self.server_state.set_error_handler(handler);
                         return Ok(Value::Unit);
                     }
 
@@ -3986,18 +4070,10 @@ impl Interpreter {
                                 let result =
                                     self.call_function(predicate.clone(), vec![item.clone()])?;
                                 if result.is_truthy() {
-                                    return Ok(Value::EnumValue {
-                                        enum_name: "Option".to_string(),
-                                        variant: "Some".to_string(),
-                                        values: vec![item],
-                                    });
+                                    return Ok(Value::some(item));
                                 }
                             }
-                            return Ok(Value::EnumValue {
-                                enum_name: "Option".to_string(),
-                                variant: "None".to_string(),
-                                values: vec![],
-                            });
+                            return Ok(Value::none());
                         } else {
                             return Err(IntentError::TypeError(
                                 "find() requires an array as first argument".to_string(),
@@ -4153,41 +4229,36 @@ impl Interpreter {
                 match (obj, idx) {
                     (Value::Array(arr), Value::Int(i)) => {
                         let index = if i < 0 {
-                            (arr.len() as i64 + i) as usize
+                            match (arr.len() as i64).checked_add(i) {
+                                Some(idx) if idx >= 0 => idx as usize,
+                                _ => return Ok(Value::none()),
+                            }
                         } else {
                             i as usize
                         };
-                        #[allow(clippy::unnecessary_lazy_evaluations)]
-                        arr.get(index)
-                            .cloned()
-                            .ok_or_else(|| IntentError::IndexOutOfBounds {
-                                index: i,
-                                length: arr.len(),
-                            })
+                        // Out-of-bounds returns None instead of crashing
+                        Ok(arr.get(index).cloned().unwrap_or_else(|| Value::none()))
                     }
                     (Value::String(s), Value::Int(i)) => {
                         let index = if i < 0 {
-                            (s.len() as i64 + i) as usize
+                            let char_count = s.chars().count();
+                            match (char_count as i64).checked_add(i) {
+                                Some(idx) if idx >= 0 => idx as usize,
+                                _ => return Ok(Value::none()),
+                            }
                         } else {
                             i as usize
                         };
-                        #[allow(clippy::unnecessary_lazy_evaluations)]
-                        s.chars()
+                        // Out-of-bounds returns None instead of crashing
+                        Ok(s.chars()
                             .nth(index)
                             .map(|c| Value::String(c.to_string()))
-                            .ok_or_else(|| IntentError::IndexOutOfBounds {
-                                index: i,
-                                length: s.len(),
-                            })
+                            .unwrap_or_else(|| Value::none()))
                     }
                     // Map access with string key: map["key"]
                     // Returns None for missing keys instead of throwing (DX improvement)
                     (Value::Map(map), Value::String(key)) => {
-                        Ok(map.get(&key).cloned().unwrap_or_else(|| Value::EnumValue {
-                            enum_name: "Option".to_string(),
-                            variant: "None".to_string(),
-                            values: vec![],
-                        }))
+                        Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
                     }
                     // Struct access with string key: struct["field"]
                     (Value::Struct { fields, .. }, Value::String(key)) => {
@@ -4195,9 +4266,10 @@ impl Interpreter {
                             IntentError::RuntimeError(format!("Unknown field: {}", key))
                         })
                     }
-                    _ => Err(IntentError::TypeError(
-                        "Invalid index operation".to_string(),
-                    )),
+                    // Type mismatch on index returns None instead of crashing.
+                    // This makes ?? the universal safety net: data["key"] ?? "default"
+                    // works regardless of whether data is a map, string, int, or None.
+                    _ => Ok(Value::none()),
                 }
             }
 
@@ -4207,13 +4279,7 @@ impl Interpreter {
                     Value::Struct { fields, .. } => fields.get(field).cloned().ok_or_else(|| {
                         IntentError::RuntimeError(format!("Unknown field: {}", field))
                     }),
-                    Value::Map(map) => {
-                        Ok(map.get(field).cloned().unwrap_or_else(|| Value::EnumValue {
-                            enum_name: "Option".to_string(),
-                            variant: "None".to_string(),
-                            values: vec![],
-                        }))
-                    }
+                    Value::Map(map) => Ok(map.get(field).cloned().unwrap_or_else(|| Value::none())),
                     _ => Err(IntentError::TypeError(
                         "Field access on non-struct value".to_string(),
                     )),
@@ -4650,6 +4716,20 @@ impl Interpreter {
                 ))
             }
 
+            Expression::TryCatch { body } => {
+                match self.eval_block(body) {
+                    Ok(value) => {
+                        // If the block returned via explicit `return`, propagate it —
+                        // try {} only catches errors, not control flow.
+                        match value {
+                            Value::Return(_) => Ok(value),
+                            other => Ok(Value::ok(other)),
+                        }
+                    }
+                    Err(e) => Ok(Value::err(Value::String(format!("{}", e)))),
+                }
+            }
+
             Expression::Try(inner) => {
                 let value = self.eval_expression(inner)?;
                 match &value {
@@ -4976,23 +5056,46 @@ impl Interpreter {
             match part {
                 TemplatePart::Literal(s) => result.push_str(s),
                 TemplatePart::Expr(expr) => {
-                    // Undefined variables render as empty string (standard Mustache behavior)
-                    let value = match self.eval_expression(expr) {
-                        Ok(v) => v,
-                        Err(IntentError::UndefinedVariable { .. }) => Value::String(String::new()),
-                        Err(e) => return Err(e),
-                    };
-                    let s = value.to_string();
-                    result.push_str(&html_escape_string(&s));
+                    // Error boundary: catch all errors, render gracefully
+                    match self.eval_expression(expr) {
+                        Ok(v) => {
+                            let s = v.to_string();
+                            result.push_str(&html_escape_string(&s));
+                        }
+                        // Undefined variables render as empty string (standard Mustache behavior)
+                        Err(IntentError::UndefinedVariable { .. }) => {}
+                        Err(e) => {
+                            let is_prod = is_production_mode();
+                            eprintln!("[ERROR] Template expression failed: {}", e);
+                            if !is_prod {
+                                result.push_str(&format!(
+                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                                    sanitize_html_comment(&e.to_string())
+                                ));
+                            }
+                            // prod: empty string (push nothing)
+                        }
+                    }
                 }
                 TemplatePart::RawExpr(expr) => {
-                    // Undefined variables render as empty string (standard Mustache behavior)
-                    let value = match self.eval_expression(expr) {
-                        Ok(v) => v,
-                        Err(IntentError::UndefinedVariable { .. }) => Value::String(String::new()),
-                        Err(e) => return Err(e),
-                    };
-                    result.push_str(&value.to_string());
+                    // Error boundary: catch all errors, render gracefully
+                    match self.eval_expression(expr) {
+                        Ok(v) => {
+                            result.push_str(&v.to_string());
+                        }
+                        // Undefined variables render as empty string (standard Mustache behavior)
+                        Err(IntentError::UndefinedVariable { .. }) => {}
+                        Err(e) => {
+                            let is_prod = is_production_mode();
+                            eprintln!("[ERROR] Template expression failed: {}", e);
+                            if !is_prod {
+                                result.push_str(&format!(
+                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                                    sanitize_html_comment(&e.to_string())
+                                ));
+                            }
+                        }
+                    }
                 }
                 TemplatePart::FilteredExpr { expr, filters } => {
                     // Check if there's a default filter in the chain
@@ -5001,12 +5104,29 @@ impl Interpreter {
                     let mut value = match self.eval_expression(expr) {
                         Ok(v) => v,
                         Err(e) => {
-                            // If there's a default filter and we got an undefined variable error,
-                            // use Unit as the value so the default filter can provide a fallback
-                            if has_default && matches!(&e, IntentError::UndefinedVariable { .. }) {
+                            if has_default {
+                                // Log non-variable errors even with default filter
+                                if !matches!(e, IntentError::UndefinedVariable { .. }) {
+                                    let is_prod = is_production_mode();
+                                    if !is_prod {
+                                        eprintln!(
+                                            "[WARN] Template expression error (using default): {}",
+                                            e
+                                        );
+                                    }
+                                }
                                 Value::Unit
                             } else {
-                                return Err(e);
+                                // Error boundary: render gracefully
+                                let is_prod = is_production_mode();
+                                eprintln!("[ERROR] Template expression failed: {}", e);
+                                if !is_prod {
+                                    result.push_str(&format!(
+                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                                        sanitize_html_comment(&e.to_string())
+                                    ));
+                                }
+                                continue;
                             }
                         }
                     };
@@ -5030,10 +5150,29 @@ impl Interpreter {
                     let mut value = match self.eval_expression(expr) {
                         Ok(v) => v,
                         Err(e) => {
-                            if has_default && matches!(&e, IntentError::UndefinedVariable { .. }) {
+                            if has_default {
+                                // Log non-variable errors even with default filter
+                                if !matches!(e, IntentError::UndefinedVariable { .. }) {
+                                    let is_prod = is_production_mode();
+                                    if !is_prod {
+                                        eprintln!(
+                                            "[WARN] Template expression error (using default): {}",
+                                            e
+                                        );
+                                    }
+                                }
                                 Value::Unit
                             } else {
-                                return Err(e);
+                                // Error boundary: render gracefully
+                                let is_prod = is_production_mode();
+                                eprintln!("[ERROR] Template expression failed: {}", e);
+                                if !is_prod {
+                                    result.push_str(&format!(
+                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                                        sanitize_html_comment(&e.to_string())
+                                    ));
+                                }
+                                continue;
                             }
                         }
                     };
@@ -5048,7 +5187,27 @@ impl Interpreter {
                     body,
                     empty_body,
                 } => {
-                    let iterable_value = self.eval_expression(iterable)?;
+                    let iterable_value = match self.eval_expression(iterable) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // Error boundary: treat errored iterable as empty
+                            let is_prod = is_production_mode();
+                            eprintln!("[ERROR] Template for-loop iterable failed: {}", e);
+                            if !is_prod {
+                                result.push_str(&format!(
+                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR (for): {} -->",
+                                    sanitize_html_comment(&e.to_string())
+                                ));
+                            }
+                            // Render empty_body if present, otherwise skip
+                            if !empty_body.is_empty() {
+                                if let Ok(Value::String(s)) = self.eval_template_parts(empty_body) {
+                                    result.push_str(&s);
+                                }
+                            }
+                            continue;
+                        }
+                    };
 
                     match iterable_value {
                         Value::Array(ref items) if items.is_empty() => {
@@ -5161,10 +5320,23 @@ impl Interpreter {
                             }
                         }
                         _ => {
-                            return Err(IntentError::RuntimeError(format!(
-                                "Template for loop requires array or map, got {}",
-                                iterable_value.type_name()
-                            )));
+                            // Non-iterable value: skip with warning (consistent with for..in behavior)
+                            let is_prod = is_production_mode();
+                            if !is_prod {
+                                eprintln!(
+                                    "[WARN] Template for loop on {} — skipping (not a collection)",
+                                    iterable_value.type_name()
+                                );
+                                result.push_str(&format!(
+                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: for loop on {}, expected array or map -->",
+                                    sanitize_html_comment(iterable_value.type_name())
+                                ));
+                            }
+                            if !empty_body.is_empty() {
+                                if let Ok(Value::String(s)) = self.eval_template_parts(empty_body) {
+                                    result.push_str(&s);
+                                }
+                            }
                         }
                     }
                 }
@@ -5174,11 +5346,15 @@ impl Interpreter {
                     elif_chains,
                     else_parts,
                 } => {
-                    // Undefined variables in conditions are falsy (not an error)
+                    // Error boundary: any error in condition is treated as false
                     let condition_value = match self.eval_expression(condition) {
                         Ok(v) => v,
-                        Err(IntentError::UndefinedVariable { .. }) => Value::Bool(false),
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            if !matches!(&e, IntentError::UndefinedVariable { .. }) {
+                                eprintln!("[ERROR] Template if-condition failed: {}", e);
+                            }
+                            Value::Bool(false)
+                        }
                     };
 
                     if condition_value.is_truthy() {
@@ -5192,8 +5368,12 @@ impl Interpreter {
                         for (elif_condition, elif_body) in elif_chains {
                             let elif_value = match self.eval_expression(elif_condition) {
                                 Ok(v) => v,
-                                Err(IntentError::UndefinedVariable { .. }) => Value::Bool(false),
-                                Err(e) => return Err(e),
+                                Err(e) => {
+                                    if !matches!(&e, IntentError::UndefinedVariable { .. }) {
+                                        eprintln!("[ERROR] Template elif-condition failed: {}", e);
+                                    }
+                                    Value::Bool(false)
+                                }
                             };
                             if elif_value.is_truthy() {
                                 let elif_result = self.eval_template_parts(elif_body)?;
@@ -5748,126 +5928,17 @@ impl Interpreter {
                 contract,
                 type_params: _, // Generic type params - for future type checking
             } => {
-                // Count required params (those without defaults)
-                let required_count = params.iter().filter(|p| p.default.is_none()).count();
-                let total_count = params.len();
-
-                if args.len() < required_count || args.len() > total_count {
-                    let expected = if required_count == total_count {
-                        format!("{}", total_count)
-                    } else {
-                        format!("{} to {}", required_count, total_count)
-                    };
-                    return Err(IntentError::ArityMismatch {
-                        name: name.clone(),
-                        expected,
-                        got: args.len(),
-                    });
+                // Check recursion depth limit
+                if self.call_depth >= self.max_recursion_depth {
+                    return Err(IntentError::RuntimeError(format!(
+                        "Maximum recursion depth ({}) exceeded. Use NTNT_MAX_RECURSION env var to increase.",
+                        self.max_recursion_depth
+                    )));
                 }
-
-                // Create new environment with closure as parent
-                let func_env = Rc::new(RefCell::new(Environment::with_parent(closure)));
-
-                // Bind parameters: provided args first, then evaluate defaults
-                // We need to evaluate defaults in func_env so they can reference earlier params
-                let previous = Rc::clone(&self.environment);
-                self.environment = Rc::clone(&func_env);
-
-                for (i, param) in params.iter().enumerate() {
-                    let value = if i < args.len() {
-                        args[i].clone()
-                    } else if let Some(ref default_expr) = param.default {
-                        self.eval_expression(default_expr)?
-                    } else {
-                        // Should not reach here due to arity check above
-                        Value::Unit
-                    };
-                    func_env.borrow_mut().define(param.name.clone(), value);
-                }
-
-                // Environment is already set to func_env for contract checking and body execution
-
-                // Track deferred statements for this function call
-                let deferred_count_before = self.deferred_statements.len();
-
-                // Check preconditions BEFORE execution
-                if let Some(ref func_contract) = contract {
-                    for req_expr in &func_contract.requires {
-                        let condition_str = Self::format_expression(req_expr);
-                        let result = self.eval_expression(req_expr)?;
-                        if !result.is_truthy() {
-                            self.environment = previous;
-                            return Err(IntentError::ContractViolation(format!(
-                                "Precondition failed in '{}': {}",
-                                name, condition_str
-                            )));
-                        }
-                        self.contracts
-                            .check_precondition(&condition_str, true, None)?;
-                    }
-
-                    // Capture old values for postconditions containing old()
-                    self.current_old_values =
-                        Some(self.capture_old_values(&func_contract.ensures)?);
-                }
-
-                // Execute function body
-                let mut result = Value::Unit;
-                for stmt in &body.statements {
-                    result = self.eval_statement(stmt)?;
-                    if let Value::Return(v) = result {
-                        result = *v;
-                        break;
-                    }
-                }
-
-                // Execute deferred statements in reverse order (LIFO) before returning
-                let deferred_to_run: Vec<Expression> = self
-                    .deferred_statements
-                    .drain(deferred_count_before..)
-                    .collect();
-
-                for deferred_expr in deferred_to_run.into_iter().rev() {
-                    // Deferred expressions execute even if there was a return
-                    let _ = self.eval_expression(&deferred_expr);
-                }
-
-                // Store result for postcondition evaluation
-                self.current_result = Some(result.clone());
-
-                // Bind 'result' in environment for postcondition evaluation
-                self.environment
-                    .borrow_mut()
-                    .define("result".to_string(), result.clone());
-
-                // Check postconditions AFTER execution
-                if let Some(ref func_contract) = contract {
-                    for ens_expr in &func_contract.ensures {
-                        let condition_str = Self::format_expression(ens_expr);
-                        let postcond_result = self.eval_expression(ens_expr)?;
-                        if !postcond_result.is_truthy() {
-                            // Clear state before returning error
-                            self.current_old_values = None;
-                            self.current_result = None;
-                            self.environment = previous;
-                            return Err(IntentError::ContractViolation(format!(
-                                "Postcondition failed in '{}': {}",
-                                name, condition_str
-                            )));
-                        }
-                        self.contracts
-                            .check_postcondition(&condition_str, true, None)?;
-                    }
-                }
-
-                // Clear contract evaluation state
-                self.current_old_values = None;
-                self.current_result = None;
-
-                // Restore environment
-                self.environment = previous;
-
-                Ok(result)
+                self.call_depth += 1;
+                let result = self.call_user_function(name, params, body, closure, contract, args);
+                self.call_depth -= 1;
+                result
             }
 
             Value::NativeFunction {
@@ -5925,6 +5996,138 @@ impl Interpreter {
                 "Can only call functions".to_string(),
             )),
         }
+    }
+
+    /// Execute a user-defined function. Separated from call_function to ensure
+    /// call_depth is always decremented (even on ? early returns).
+    fn call_user_function(
+        &mut self,
+        name: String,
+        params: Vec<Parameter>,
+        body: Block,
+        closure: Rc<RefCell<Environment>>,
+        contract: Option<FunctionContract>,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        // Count required params (those without defaults)
+        let required_count = params.iter().filter(|p| p.default.is_none()).count();
+        let total_count = params.len();
+
+        if args.len() < required_count || args.len() > total_count {
+            let expected = if required_count == total_count {
+                format!("{}", total_count)
+            } else {
+                format!("{} to {}", required_count, total_count)
+            };
+            return Err(IntentError::ArityMismatch {
+                name: name.clone(),
+                expected,
+                got: args.len(),
+            });
+        }
+
+        // Create new environment with closure as parent
+        let func_env = Rc::new(RefCell::new(Environment::with_parent(closure)));
+
+        // Bind parameters: provided args first, then evaluate defaults
+        // We need to evaluate defaults in func_env so they can reference earlier params
+        let previous = Rc::clone(&self.environment);
+        self.environment = Rc::clone(&func_env);
+
+        for (i, param) in params.iter().enumerate() {
+            let value = if i < args.len() {
+                args[i].clone()
+            } else if let Some(ref default_expr) = param.default {
+                self.eval_expression(default_expr)?
+            } else {
+                // Should not reach here due to arity check above
+                Value::Unit
+            };
+            func_env.borrow_mut().define(param.name.clone(), value);
+        }
+
+        // Environment is already set to func_env for contract checking and body execution
+
+        // Track deferred statements for this function call
+        let deferred_count_before = self.deferred_statements.len();
+
+        // Check preconditions BEFORE execution
+        if let Some(ref func_contract) = contract {
+            for req_expr in &func_contract.requires {
+                let condition_str = Self::format_expression(req_expr);
+                let result = self.eval_expression(req_expr)?;
+                if !result.is_truthy() {
+                    self.environment = previous;
+                    return Err(IntentError::ContractViolation(format!(
+                        "Precondition failed in '{}': {}",
+                        name, condition_str
+                    )));
+                }
+                self.contracts
+                    .check_precondition(&condition_str, true, None)?;
+            }
+
+            // Capture old values for postconditions containing old()
+            self.current_old_values = Some(self.capture_old_values(&func_contract.ensures)?);
+        }
+
+        // Execute function body
+        let mut result = Value::Unit;
+        for stmt in &body.statements {
+            result = self.eval_statement(stmt)?;
+            if let Value::Return(v) = result {
+                result = *v;
+                break;
+            }
+        }
+
+        // Execute deferred statements in reverse order (LIFO) before returning
+        let deferred_to_run: Vec<Expression> = self
+            .deferred_statements
+            .drain(deferred_count_before..)
+            .collect();
+
+        for deferred_expr in deferred_to_run.into_iter().rev() {
+            // Deferred expressions execute even if there was a return
+            let _ = self.eval_expression(&deferred_expr);
+        }
+
+        // Store result for postcondition evaluation
+        self.current_result = Some(result.clone());
+
+        // Bind 'result' in environment for postcondition evaluation
+        self.environment
+            .borrow_mut()
+            .define("result".to_string(), result.clone());
+
+        // Check postconditions AFTER execution
+        if let Some(ref func_contract) = contract {
+            for ens_expr in &func_contract.ensures {
+                let condition_str = Self::format_expression(ens_expr);
+                let postcond_result = self.eval_expression(ens_expr)?;
+                if !postcond_result.is_truthy() {
+                    // Clear state before returning error
+                    self.current_old_values = None;
+                    self.current_result = None;
+                    self.environment = previous;
+                    return Err(IntentError::ContractViolation(format!(
+                        "Postcondition failed in '{}': {}",
+                        name, condition_str
+                    )));
+                }
+                self.contracts
+                    .check_postcondition(&condition_str, true, None)?;
+            }
+        }
+
+        // Clear contract evaluation state
+        self.current_old_values = None;
+        self.current_result = None;
+
+        // Restore environment
+        self.environment = previous;
+
+        Ok(result)
     }
 
     /// Run the HTTP server on the specified port
@@ -6176,6 +6379,8 @@ impl Interpreter {
                         let final_response = if let Some(resp) = early_response {
                             resp
                         } else {
+                            // Clone req_value for potential on_error handler use
+                            let req_for_error = req_value.clone();
                             // Call the route handler
                             match self.call_function(handler, vec![req_value]) {
                                 Ok(response) => response,
@@ -6202,23 +6407,56 @@ impl Interpreter {
                                         },
                                         e
                                     );
-                                    let method_path = format!("{} {}", method, path);
-                                    // Check for contract violations and return appropriate HTTP status
-                                    if let IntentError::ContractViolation(msg) = &e {
-                                        if msg.contains("Precondition failed") {
-                                            http_server::create_error_response_with_context(
-                                                400,
-                                                &format!("Bad Request: {}", msg),
-                                                &method_path,
-                                                &handler_file,
-                                            )
-                                        } else if msg.contains("Postcondition failed") {
-                                            http_server::create_error_response_with_context(
-                                                500,
-                                                &format!("Internal Error: {}", msg),
-                                                &method_path,
-                                                &handler_file,
-                                            )
+                                    // Try on_error handler if registered
+                                    if let Some(error_handler) =
+                                        self.server_state.get_error_handler().cloned()
+                                    {
+                                        let error_msg = Value::String(e.to_string());
+                                        match self.call_function(
+                                            error_handler,
+                                            vec![req_for_error, error_msg],
+                                        ) {
+                                            Ok(response) => response,
+                                            Err(handler_err) => {
+                                                eprintln!(
+                                                    "[ERROR] on_error handler failed: {}",
+                                                    handler_err
+                                                );
+                                                let method_path = format!("{} {}", method, path);
+                                                http_server::create_error_response_with_context(
+                                                    500,
+                                                    &e.to_string(),
+                                                    &method_path,
+                                                    &handler_file,
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        let method_path = format!("{} {}", method, path);
+                                        // Check for contract violations and return appropriate HTTP status
+                                        if let IntentError::ContractViolation(msg) = &e {
+                                            if msg.contains("Precondition failed") {
+                                                http_server::create_error_response_with_context(
+                                                    400,
+                                                    &format!("Bad Request: {}", msg),
+                                                    &method_path,
+                                                    &handler_file,
+                                                )
+                                            } else if msg.contains("Postcondition failed") {
+                                                http_server::create_error_response_with_context(
+                                                    500,
+                                                    &format!("Internal Error: {}", msg),
+                                                    &method_path,
+                                                    &handler_file,
+                                                )
+                                            } else {
+                                                http_server::create_error_response_with_context(
+                                                    500,
+                                                    &e.to_string(),
+                                                    &method_path,
+                                                    &handler_file,
+                                                )
+                                            }
                                         } else {
                                             http_server::create_error_response_with_context(
                                                 500,
@@ -6227,13 +6465,6 @@ impl Interpreter {
                                                 &handler_file,
                                             )
                                         }
-                                    } else {
-                                        http_server::create_error_response_with_context(
-                                            500,
-                                            &e.to_string(),
-                                            &method_path,
-                                            &handler_file,
-                                        )
                                     }
                                 }
                             }
@@ -6343,9 +6574,7 @@ impl Interpreter {
             .unwrap_or(port);
 
         // Enable hot-reload unless in production mode
-        let is_production = std::env::var("NTNT_ENV")
-            .map(|v| v == "production" || v == "prod")
-            .unwrap_or(false);
+        let is_production = is_production_mode();
         self.server_state.hot_reload = !is_production;
 
         if is_production {
@@ -6575,6 +6804,8 @@ impl Interpreter {
                         let final_response = if let Some(resp) = early_response {
                             resp
                         } else {
+                            // Clone req for potential on_error handler use
+                            let req_for_error = current_req.clone();
                             match self.call_function(handler, vec![current_req]) {
                                 Ok(response) => response,
                                 Err(e) => {
@@ -6592,12 +6823,37 @@ impl Interpreter {
                                         "[ERROR] {} {} | handler: {}{} | {}",
                                         method, path, handler_file, loc, e
                                     );
-                                    crate::stdlib::http_server::create_error_response_with_context(
-                                        500,
-                                        &e.to_string(),
-                                        &format!("{} {}", method, path),
-                                        &handler_file,
-                                    )
+                                    // Try on_error handler if registered
+                                    if let Some(error_handler) =
+                                        self.server_state.get_error_handler().cloned()
+                                    {
+                                        let error_msg = Value::String(e.to_string());
+                                        match self.call_function(
+                                            error_handler,
+                                            vec![req_for_error, error_msg],
+                                        ) {
+                                            Ok(response) => response,
+                                            Err(handler_err) => {
+                                                eprintln!(
+                                                    "[ERROR] on_error handler failed: {}",
+                                                    handler_err
+                                                );
+                                                crate::stdlib::http_server::create_error_response_with_context(
+                                                    500,
+                                                    &e.to_string(),
+                                                    &format!("{} {}", method, path),
+                                                    &handler_file,
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        crate::stdlib::http_server::create_error_response_with_context(
+                                            500,
+                                            &e.to_string(),
+                                            &format!("{} {}", method, path),
+                                            &handler_file,
+                                        )
+                                    }
                                 }
                             }
                         };
@@ -9052,7 +9308,8 @@ c")
     }
 
     #[test]
-    fn test_for_in_string() {
+    fn test_for_in_string_skips() {
+        // for..in on a string now yields zero iterations (use chars() instead)
         let result = eval(
             r#"
             let count = 0
@@ -9063,7 +9320,7 @@ c")
         "#,
         )
         .unwrap();
-        assert!(matches!(result, Value::Int(5)));
+        assert!(matches!(result, Value::Int(0)));
     }
 
     #[test]
@@ -10398,5 +10655,580 @@ c")
     fn test_deep_mutation_new_map_key() {
         let result = eval(r#"let mut m = map { "a": 1 }; m["b"] = 2; m["b"]"#).unwrap();
         assert!(matches!(result, Value::Int(2)));
+    }
+
+    // ============================================
+    // Change 2: for..in skips non-collections + chars()
+    // ============================================
+
+    #[test]
+    fn test_for_in_int_skips() {
+        // for..in on an int should yield zero iterations, not crash
+        let result = eval(
+            r#"
+            let count = 0
+            for k in 42 {
+                count = count + 1
+            }
+            count
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(0)));
+    }
+
+    #[test]
+    fn test_for_in_none_skips() {
+        // for..in on None should yield zero iterations, not crash
+        let result = eval(
+            r#"
+            let count = 0
+            for k in None {
+                count = count + 1
+            }
+            count
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(0)));
+    }
+
+    #[test]
+    fn test_for_in_bool_skips() {
+        // for..in on a bool should yield zero iterations
+        let result = eval(
+            r#"
+            let count = 0
+            for k in true {
+                count = count + 1
+            }
+            count
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(0)));
+    }
+
+    #[test]
+    fn test_chars_builtin() {
+        let result = eval(
+            r#"
+            import { chars } from "std/string"
+            chars("hi")
+        "#,
+        )
+        .unwrap();
+        match result {
+            Value::Array(arr) => {
+                assert_eq!(arr.len(), 2);
+                assert!(matches!(&arr[0], Value::String(s) if s == "h"));
+                assert!(matches!(&arr[1], Value::String(s) if s == "i"));
+            }
+            _ => panic!("Expected array from chars()"),
+        }
+    }
+
+    #[test]
+    fn test_chars_empty_string() {
+        let result = eval(
+            r#"
+            import { chars } from "std/string"
+            chars("")
+        "#,
+        )
+        .unwrap();
+        match result {
+            Value::Array(arr) => assert_eq!(arr.len(), 0),
+            _ => panic!("Expected empty array from chars(\"\")"),
+        }
+    }
+
+    #[test]
+    fn test_for_in_chars_iterates() {
+        // chars() provides explicit character iteration
+        let result = eval(
+            r#"
+            import { chars } from "std/string"
+            let count = 0
+            for ch in chars("abc") {
+                count = count + 1
+            }
+            count
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(3)));
+    }
+
+    #[test]
+    fn test_for_in_map_regression() {
+        // for..in on a map should still iterate keys
+        let result = eval(
+            r#"
+            let count = 0
+            for k in map { "a": 1, "b": 2 } {
+                count = count + 1
+            }
+            count
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(2)));
+    }
+
+    // ============================================
+    // Change 1: [] returns None on type mismatch
+    // ============================================
+
+    #[test]
+    fn test_index_string_with_string_key_returns_none() {
+        // string["key"] should return None, not TypeError
+        let result = eval(r#"let s = "hello"; s["key"]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_int_with_string_key_returns_none() {
+        // 42["key"] should return None, not TypeError
+        let result = eval(r#"42["key"]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_none_with_string_key_returns_none() {
+        // None["key"] should return None, not TypeError
+        let result = eval(r#"let x = None; x["key"]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_array_out_of_bounds_returns_none() {
+        // [1,2,3][99] should return None, not IndexOutOfBounds
+        let result = eval(r#"[1, 2, 3][99]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_array_negative_out_of_bounds_returns_none() {
+        // [1,2,3][-99] should return None, not IndexOutOfBounds
+        let result = eval(r#"[1, 2, 3][-99]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_string_char_out_of_bounds_returns_none() {
+        // "hi"[99] should return None, not IndexOutOfBounds
+        let result = eval(r#""hi"[99]"#).unwrap();
+        assert!(matches!(
+            result,
+            Value::EnumValue {
+                ref variant,
+                ..
+            } if variant == "None"
+        ));
+    }
+
+    #[test]
+    fn test_index_type_mismatch_with_null_coalescing() {
+        // string["key"] ?? "fallback" should return "fallback"
+        let result = eval(r#"let s = "hello"; s["key"] ?? "fallback""#).unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "fallback"));
+    }
+
+    #[test]
+    fn test_index_map_existing_key_regression() {
+        // map["existing"] ?? "default" should still return the existing value
+        let result = eval(r#"let m = map { "name": "Alice" }; m["name"] ?? "default""#).unwrap();
+        assert!(matches!(result, Value::String(ref s) if s == "Alice"));
+    }
+
+    #[test]
+    fn test_index_array_valid_index_regression() {
+        // Valid array access should still work
+        let result = eval(r#"[10, 20, 30][1]"#).unwrap();
+        assert!(matches!(result, Value::Int(20)));
+    }
+
+    // ============================================
+    // Change 3: Template error boundaries
+    // ============================================
+
+    #[test]
+    fn test_template_error_boundary_expr_no_crash() {
+        // Template with an expression that would error should not crash
+        // undefined_fn() doesn't exist, but template should render gracefully
+        let code = r#####"
+let page = """before{{undefined_fn()}}after"""
+page
+"#####;
+        let result = eval(code);
+        assert!(
+            result.is_ok(),
+            "Template with bad expression should not crash"
+        );
+        if let Ok(Value::String(s)) = result {
+            assert!(s.contains("before"), "Content before error should render");
+            assert!(s.contains("after"), "Content after error should render");
+        }
+    }
+
+    #[test]
+    fn test_template_error_boundary_if_treats_error_as_false() {
+        // {{#if bad_expr}} should treat error as false, not crash
+        let code = r#####"
+let page = """{{#if undefined_fn()}}shown{{#else}}hidden{{/if}}"""
+page
+"#####;
+        let result = eval(code);
+        assert!(
+            result.is_ok(),
+            "Template with bad if condition should not crash"
+        );
+        if let Ok(Value::String(s)) = result {
+            assert!(
+                s.contains("hidden"),
+                "Bad if condition should fall through to else, got: {}",
+                s
+            );
+            assert!(
+                !s.contains("shown"),
+                "Bad if condition should not render then branch, got: {}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn test_template_error_boundary_for_treats_error_as_empty() {
+        // {{#for x in bad_expr}} should iterate zero times, not crash
+        let code = r#####"
+let page = """before{{#for x in undefined_fn()}}item{{/for}}after"""
+page
+"#####;
+        let result = eval(code);
+        assert!(
+            result.is_ok(),
+            "Template with bad for iterable should not crash"
+        );
+        if let Ok(Value::String(s)) = result {
+            assert!(s.contains("before"), "Content before for should render");
+            assert!(s.contains("after"), "Content after for should render");
+            assert!(
+                !s.contains("item"),
+                "Bad for iterable should yield zero iterations, got: {}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn test_template_valid_expressions_still_work() {
+        // Regression: valid templates should still render correctly
+        let code = r#####"
+let name = "Alice"
+let items = [1, 2, 3]
+let page = """Hello {{name}}! Count: {{len(items)}}"""
+page
+"#####;
+        let result = eval(code).unwrap();
+        if let Value::String(s) = result {
+            assert!(
+                s.contains("Hello Alice!"),
+                "Valid interpolation should work, got: {}",
+                s
+            );
+            assert!(
+                s.contains("Count: 3"),
+                "Valid expression should work, got: {}",
+                s
+            );
+        } else {
+            panic!("Expected string from template");
+        }
+    }
+
+    /// Helper to eval with a custom recursion limit
+    fn eval_with_recursion_limit(source: &str, limit: usize) -> Result<Value> {
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse()?;
+        let mut interpreter = Interpreter::new();
+        interpreter.set_max_recursion_depth(limit);
+        interpreter.eval(&ast)
+    }
+
+    #[test]
+    fn test_recursion_limit_normal() {
+        // Normal recursion within limit should succeed (small depth for debug stack)
+        let result = eval_with_recursion_limit(
+            "fn fact(n) { if n <= 1 { return 1 } return n * fact(n - 1) } fact(5)",
+            20,
+        );
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), Value::Int(120)));
+    }
+
+    #[test]
+    fn test_recursion_limit_exceeded() {
+        // Use a small limit to avoid stack overflow in debug mode
+        let result = eval_with_recursion_limit("fn inf(n) { return inf(n + 1) } inf(0)", 10);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("Maximum recursion depth"),
+            "Error should mention recursion depth: {}",
+            err
+        );
+        assert!(
+            err.contains("10"),
+            "Error should show the limit value: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_recursion_depth_resets() {
+        // After a deep call returns, depth resets so another deep call works
+        let result = eval_with_recursion_limit(
+            "fn deep(n) { if n <= 0 { return 0 } return deep(n - 1) } deep(8); deep(8)",
+            10,
+        );
+        assert!(result.is_ok(), "Depth should reset between calls");
+    }
+
+    // === Otherwise catches runtime errors ===
+
+    #[test]
+    fn test_otherwise_catches_arithmetic_type_error() {
+        // Arithmetic on incompatible types should be caught by otherwise
+        let result = eval(
+            r#"
+            fn safe() {
+                let map_val = map { "a": 1 }
+                let x = (map_val * 33) otherwise { return 0 }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::Int(0)),
+            "otherwise should catch type error and return 0, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_still_handles_result_err() {
+        // Existing behavior: Result::Err is handled by otherwise
+        let result = eval(
+            r#"
+            fn safe() {
+                let x = Err("something failed") otherwise { return -1 }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::Int(-1)),
+            "otherwise should handle Result::Err, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_still_handles_option_none() {
+        // Existing behavior: Option::None is handled by otherwise
+        let result = eval(
+            r#"
+            fn safe() {
+                let x = None otherwise { return "default" }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::String(ref s) if s == "default"),
+            "otherwise should handle Option::None, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_success_case_not_executed() {
+        // When expression succeeds, otherwise block should NOT execute
+        let result = eval(
+            r#"
+            fn safe() {
+                let x = (1 + 2) otherwise { return -1 }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::Int(3)),
+            "otherwise should not execute on success, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_catches_index_none() {
+        // Out-of-bounds array access returns None, which otherwise catches
+        let result = eval(
+            r#"
+            fn safe() {
+                let arr = [1, 2, 3]
+                let x = arr[99999] otherwise { return 0 }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, Value::Int(0)),
+            "otherwise should catch out-of-bounds None, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_multiple_catches_in_sequence() {
+        // Multiple otherwise blocks independently handle their own errors
+        let result = eval(
+            r#"
+            fn safe() {
+                let a = Err("first") otherwise { return "caught first" }
+                let b = None otherwise { return "caught none" }
+                let c = Ok(42) otherwise { return "should not reach" }
+                return c
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        // First otherwise triggers, so we get "caught first"
+        assert!(
+            matches!(result, Value::String(ref s) if s == "caught first"),
+            "first otherwise should catch Err, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_otherwise_runtime_error_binds_err_variable() {
+        // The error message should be available as `err` in the otherwise block
+        let result = eval(
+            r#"
+            fn safe() {
+                let map_val = map { "key": "value" }
+                let x = (map_val + 10) otherwise { return err }
+                return x
+            }
+            safe()
+        "#,
+        )
+        .unwrap();
+        // err should be a string containing the error message
+        match result {
+            Value::String(s) => {
+                assert!(
+                    !s.is_empty(),
+                    "err should contain the runtime error message"
+                );
+            }
+            _ => panic!("Expected err to be a string, got {:?}", result),
+        }
+    }
+
+    // === on_error global error handler ===
+
+    #[test]
+    fn test_on_error_registers_without_error() {
+        // on_error should accept a handler function without errors
+        let result = eval(
+            r#"
+            fn my_handler(req, error) {
+                return map { "status": 500, "body": "custom error" }
+            }
+            on_error(my_handler)
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "on_error should register without error, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_on_error_stores_handler_in_server_state() {
+        // Verify the handler is stored (via interpreter's server_state)
+        let lexer = Lexer::new(
+            r#"
+            fn my_handler(req, error) {
+                return map { "status": 500, "body": "custom error" }
+            }
+            on_error(my_handler)
+        "#,
+        );
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+        let mut interpreter = Interpreter::new();
+        interpreter.eval(&ast).unwrap();
+        assert!(
+            interpreter.server_state.get_error_handler().is_some(),
+            "on_error should store handler in server_state"
+        );
+    }
+
+    #[test]
+    fn test_default_behavior_no_on_error() {
+        // When no on_error is registered, server_state should have None
+        let interpreter = Interpreter::new();
+        assert!(
+            interpreter.server_state.get_error_handler().is_none(),
+            "No error handler should be registered by default"
+        );
     }
 }

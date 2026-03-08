@@ -332,6 +332,9 @@ pub enum Expression {
 
     /// Try expression (for error propagation)
     Try(Box<Expression>),
+
+    /// Try-catch expression: try { block } catches runtime errors as Result
+    TryCatch { body: Block },
 }
 
 /// Binary operators

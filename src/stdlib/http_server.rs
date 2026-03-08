@@ -159,11 +159,6 @@ pub fn get_default_security_headers() -> HashMap<String, Value> {
 /// Apply security headers to a response map
 pub fn apply_security_headers(response: &mut HashMap<String, Value>) {
     let config = get_security_config();
-    if !config.security_headers {
-        return;
-    }
-
-    let security_headers = get_default_security_headers();
 
     // Get existing headers or create new map
     let headers = match response.get_mut("headers") {
@@ -177,11 +172,29 @@ pub fn apply_security_headers(response: &mut HashMap<String, Value>) {
         }
     };
 
-    // Add security headers only if not already set (allow app to override)
-    for (key, value) in security_headers {
-        if !headers.contains_key(&key) {
-            headers.insert(key, value);
+    if config.security_headers {
+        let security_headers = get_default_security_headers();
+
+        // Add security headers only if not already set (allow app to override)
+        // Use case-insensitive comparison since HTTP headers are case-insensitive
+        for (key, value) in security_headers {
+            let already_set = headers.keys().any(|k| k.eq_ignore_ascii_case(&key));
+            if !already_set {
+                headers.insert(key, value);
+            }
         }
+    }
+
+    // Cache-Control for dynamic responses (independent of security headers toggle)
+    // Static files set their own Cache-Control in serve_static().
+    let has_cache_control = headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("cache-control"));
+    if !has_cache_control {
+        headers.insert(
+            "cache-control".to_string(),
+            Value::String("no-store".to_string()),
+        );
     }
 }
 
@@ -461,6 +474,7 @@ pub struct ServerState {
     pub hot_reload: bool,                   // Whether hot-reload is enabled
     pub shutdown_handlers: Vec<Value>,      // Functions to call on server shutdown
     pub cors_config: Option<CorsConfig>,    // Optional CORS configuration
+    pub error_handler: Option<Value>,       // Global error handler callback
 }
 
 impl ServerState {
@@ -473,6 +487,7 @@ impl ServerState {
             hot_reload: true, // Enable hot-reload by default in dev
             shutdown_handlers: Vec::new(),
             cors_config: None,
+            error_handler: None,
         }
     }
 
@@ -496,6 +511,13 @@ impl ServerState {
 
     /// Enable CORS with the given configuration
     pub fn enable_cors(&mut self, config: CorsConfig) {
+        // Warn about wildcard origin in production
+        let is_prod = std::env::var("NTNT_ENV")
+            .map(|v| v == "production" || v == "prod")
+            .unwrap_or(false);
+        if is_prod && config.origins.iter().any(|o| o == "*") {
+            eprintln!("[WARN] CORS wildcard origin ('*') in production — consider restricting to specific origins");
+        }
         self.cors_config = Some(config);
     }
 
@@ -510,6 +532,14 @@ impl ServerState {
 
     pub fn get_shutdown_handlers(&self) -> &[Value] {
         &self.shutdown_handlers
+    }
+
+    pub fn set_error_handler(&mut self, handler: Value) {
+        self.error_handler = Some(handler);
+    }
+
+    pub fn get_error_handler(&self) -> Option<&Value> {
+        self.error_handler.as_ref()
     }
 
     /// Add a route without source file info (inline routes)
@@ -1708,17 +1738,9 @@ pub fn init() -> HashMap<String, Value> {
                 match serde_json::from_str::<serde_json::Value>(&body) {
                     Ok(json_val) => {
                         let intent_val = json_to_intent_value(&json_val);
-                        Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Ok".to_string(),
-                            values: vec![intent_val],
-                        })
+                        Ok(Value::ok(intent_val))
                     }
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 }
             },
         },
@@ -1946,23 +1968,11 @@ pub fn init() -> HashMap<String, Value> {
                     Some(header) => {
                         let cookies = parse_cookie_header(&header);
                         match cookies.get(&name) {
-                            Some(value) => Ok(Value::EnumValue {
-                                enum_name: "Option".to_string(),
-                                variant: "Some".to_string(),
-                                values: vec![Value::String(value.clone())],
-                            }),
-                            None => Ok(Value::EnumValue {
-                                enum_name: "Option".to_string(),
-                                variant: "None".to_string(),
-                                values: vec![],
-                            }),
+                            Some(value) => Ok(Value::some(Value::String(value.clone()))),
+                            None => Ok(Value::none()),
                         }
                     }
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    None => Ok(Value::none()),
                 }
             },
         },
@@ -2240,11 +2250,9 @@ pub fn init() -> HashMap<String, Value> {
                         let body = match map.get("body") {
                             Some(Value::String(b)) => b.clone(),
                             _ => {
-                                return Ok(Value::EnumValue {
-                                    enum_name: "Result".to_string(),
-                                    variant: "Err".to_string(),
-                                    values: vec![Value::String("Request has no body".to_string())],
-                                })
+                                return Ok(Value::err(Value::String(
+                                    "Request has no body".to_string(),
+                                )))
                             }
                         };
 
@@ -2293,28 +2301,16 @@ pub fn init() -> HashMap<String, Value> {
                 let boundary = match boundary {
                     Some(b) => b,
                     None => {
-                        return Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(
-                                "Invalid multipart: no boundary found in Content-Type".to_string(),
-                            )],
-                        })
+                        return Ok(Value::err(Value::String(
+                            "Invalid multipart: no boundary found in Content-Type".to_string(),
+                        )))
                     }
                 };
 
                 // Parse multipart body
                 match parse_multipart_body(&body, &boundary) {
-                    Ok(fields) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Map(fields)],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e)],
-                    }),
+                    Ok(fields) => Ok(Value::ok(Value::Map(fields))),
+                    Err(e) => Ok(Value::err(Value::String(e))),
                 }
             },
         },
@@ -2352,11 +2348,9 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Map(map) => match map.get("data") {
                         Some(Value::String(d)) => d.clone(),
                         _ => {
-                            return Ok(Value::EnumValue {
-                                enum_name: "Result".to_string(),
-                                variant: "Err".to_string(),
-                                values: vec![Value::String("File field has no data".to_string())],
-                            })
+                            return Ok(Value::err(Value::String(
+                                "File field has no data".to_string(),
+                            )))
                         }
                     },
                     _ => {
@@ -2377,11 +2371,7 @@ pub fn init() -> HashMap<String, Value> {
 
                 // Security: Validate path to prevent directory traversal
                 if let Err(e) = validate_upload_path(&path) {
-                    return Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e)],
-                    });
+                    return Ok(Value::err(Value::String(e)));
                 }
 
                 // Create parent directories if they don't exist (convenience)
@@ -2389,31 +2379,52 @@ pub fn init() -> HashMap<String, Value> {
                 if let Some(parent) = path_obj.parent() {
                     if !parent.as_os_str().is_empty() {
                         if let Err(e) = std::fs::create_dir_all(parent) {
-                            return Ok(Value::EnumValue {
-                                enum_name: "Result".to_string(),
-                                variant: "Err".to_string(),
-                                values: vec![Value::String(format!(
-                                    "Failed to create directory: {}",
-                                    e
-                                ))],
-                            });
+                            return Ok(Value::err(Value::String(format!(
+                                "Failed to create directory: {}",
+                                e
+                            ))));
                         }
                     }
                 }
 
                 // Write file to disk
                 match std::fs::write(&path, data.as_bytes()) {
-                    Ok(()) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::Int(data.len() as i64)],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(format!("Failed to save file: {}", e))],
-                    }),
+                    Ok(()) => Ok(Value::ok(Value::Int(data.len() as i64))),
+                    Err(e) => Ok(Value::err(Value::String(format!(
+                        "Failed to save file: {}",
+                        e
+                    )))),
                 }
+            },
+        },
+    );
+
+    // @ntnt on_error
+    // @module std/http/server
+    // @signature on_error(handler: fn(req: Request, error: String) -> Response) -> Unit
+    // Register a global error handler for HTTP route handlers.
+    //
+    // When a route handler throws an unhandled error, the registered callback
+    // is called with the request and error message instead of returning the
+    // default 500 error page. If the callback itself errors, falls back to
+    // the default error response.
+    // @param handler A function that receives (request, error_message) and returns a Response.
+    // @returns Unit
+    // @see_also on_shutdown
+    // @since v0.4.0
+    // @tags #http, #server
+    // @example on_error(fn(req, err) { html(template("views/error.html", map { "message": "Something went wrong" })) }) ~ "Custom error page (use templates to avoid XSS)"
+    // @gotcha The handler is called on the interpreter thread; if it errors, the default error page is shown
+    module.insert(
+        "on_error".to_string(),
+        Value::NativeFunction {
+            name: "on_error".to_string(),
+            arity: 1,
+            max_arity: 1,
+            func: |_args| {
+                // Actual implementation is in the interpreter's special handling
+                // This placeholder exists for import resolution
+                Ok(Value::Unit)
             },
         },
     );
@@ -2825,10 +2836,25 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
     if config.security_headers {
         let security_headers = get_default_security_headers();
         for (key, value) in security_headers {
-            // Only add if not already set by the application
-            if !headers.contains_key(&key) {
+            // Case-insensitive check since HTTP headers are case-insensitive
+            let already_set = headers.keys().any(|k| k.eq_ignore_ascii_case(&key));
+            if !already_set {
                 headers.insert(key, value);
             }
+        }
+    }
+
+    // Cache-Control for dynamic responses (independent of security headers toggle)
+    // Static files set their own Cache-Control in serve_static().
+    {
+        let has_cache_control = headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("cache-control"));
+        if !has_cache_control {
+            headers.insert(
+                "cache-control".to_string(),
+                Value::String("no-store".to_string()),
+            );
         }
     }
 
@@ -4186,5 +4212,64 @@ mod tests {
         } else {
             panic!("Expected Map response");
         }
+    }
+
+    // ===========================================
+    // Cache-Control Header Tests
+    // ===========================================
+
+    #[test]
+    fn test_apply_security_headers_adds_cache_control() {
+        // Dynamic response with no Cache-Control should get "no-store"
+        let mut response = HashMap::new();
+        response.insert("status".to_string(), Value::Int(200));
+        response.insert("headers".to_string(), Value::Map(HashMap::new()));
+        response.insert("body".to_string(), Value::String("hello".to_string()));
+
+        apply_security_headers(&mut response);
+
+        let headers = match response.get("headers") {
+            Some(Value::Map(h)) => h,
+            _ => panic!("Expected headers map"),
+        };
+        assert_value_string(
+            headers
+                .get("cache-control")
+                .expect("cache-control should be set"),
+            "no-store",
+        );
+    }
+
+    #[test]
+    fn test_apply_security_headers_respects_app_cache_control() {
+        // App explicitly sets Cache-Control — should not be overridden
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Cache-Control".to_string(),
+            Value::String("max-age=3600".to_string()),
+        );
+        let mut response = HashMap::new();
+        response.insert("status".to_string(), Value::Int(200));
+        response.insert("headers".to_string(), Value::Map(headers));
+        response.insert("body".to_string(), Value::String("hello".to_string()));
+
+        apply_security_headers(&mut response);
+
+        let headers = match response.get("headers") {
+            Some(Value::Map(h)) => h,
+            _ => panic!("Expected headers map"),
+        };
+        // The original mixed-case key should still have the app's value
+        assert_value_string(
+            headers
+                .get("Cache-Control")
+                .expect("Cache-Control should still be set"),
+            "max-age=3600",
+        );
+        // And no duplicate lowercase key should be added
+        assert!(
+            headers.get("cache-control").is_none(),
+            "Should not add duplicate lowercase cache-control"
+        );
     }
 }

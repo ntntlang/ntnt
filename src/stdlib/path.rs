@@ -108,16 +108,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).parent() {
-                    Some(p) => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: vec![Value::String(p.to_string_lossy().to_string())],
-                    }),
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    Some(p) => Ok(Value::some(Value::String(p.to_string_lossy().to_string()))),
+                    None => Ok(Value::none()),
                 },
                 _ => Err(IntentError::TypeError(
                     "dirname() requires a string path".to_string(),
@@ -143,16 +135,10 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).file_name() {
-                    Some(name) => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: vec![Value::String(name.to_string_lossy().to_string())],
-                    }),
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    Some(name) => Ok(Value::some(Value::String(
+                        name.to_string_lossy().to_string(),
+                    ))),
+                    None => Ok(Value::none()),
                 },
                 _ => Err(IntentError::TypeError(
                     "basename() requires a string path".to_string(),
@@ -178,16 +164,10 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).extension() {
-                    Some(ext) => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: vec![Value::String(ext.to_string_lossy().to_string())],
-                    }),
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    Some(ext) => Ok(Value::some(Value::String(
+                        ext.to_string_lossy().to_string(),
+                    ))),
+                    None => Ok(Value::none()),
                 },
                 _ => Err(IntentError::TypeError(
                     "extension() requires a string path".to_string(),
@@ -213,16 +193,10 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).file_stem() {
-                    Some(stem) => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "Some".to_string(),
-                        values: vec![Value::String(stem.to_string_lossy().to_string())],
-                    }),
-                    None => Ok(Value::EnumValue {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        values: vec![],
-                    }),
+                    Some(stem) => Ok(Value::some(Value::String(
+                        stem.to_string_lossy().to_string(),
+                    ))),
+                    None => Ok(Value::none()),
                 },
                 _ => Err(IntentError::TypeError(
                     "stem() requires a string path".to_string(),
@@ -249,16 +223,8 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => match std::fs::canonicalize(path) {
-                    Ok(abs) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Ok".to_string(),
-                        values: vec![Value::String(abs.to_string_lossy().to_string())],
-                    }),
-                    Err(e) => Ok(Value::EnumValue {
-                        enum_name: "Result".to_string(),
-                        variant: "Err".to_string(),
-                        values: vec![Value::String(e.to_string())],
-                    }),
+                    Ok(abs) => Ok(Value::ok(Value::String(abs.to_string_lossy().to_string()))),
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
                 _ => Err(IntentError::TypeError(
                     "resolve() requires a string path".to_string(),

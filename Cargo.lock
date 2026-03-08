@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "ntnt"
-version = "0.3.16"
+version = "0.3.17"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1644,6 +1644,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tiny_http",
  "tokio",
+ "tokio-util",
  "toml",
  "totp-rs",
  "tower 0.4.13",

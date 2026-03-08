@@ -2803,7 +2803,9 @@ pub fn main() {
 }
 ```
 
-### 7.20 Nested Assignment (Deep Mutation)
+### 7.20 Nested Assignment (Deep Mutation) ✅
+
+> **Status: Implemented.** Nested assignment works for arbitrary depth including `array[i]["key"]`, `map["a"]["b"]["c"]`, and mixed nesting. Comprehensive tests cover single-level through four-level nesting, error cases (immutable, out-of-bounds), and new key creation.
 
 **Goal:** Support assigning to nested structures like `array[i]["key"] = value` and `map["a"]["b"] = value`, which currently fails with "Invalid assignment target".
 
@@ -2847,7 +2849,9 @@ task["tags"][2] = "updated"          // ✅ Map → array nesting
 
 **Priority:** High — this is the most common "papercut" when building real NTNT web apps with data persistence.
 
-### 7.21 Nested `{{#if}}` Blocks in Templates
+### 7.21 Nested `{{#if}}` Blocks in Templates ✅
+
+> **Status: Implemented.** Nested `{{#if}}` blocks work to arbitrary depth, including with `{{#else}}`, `{{#elif}}`, and inside `{{#for}}` loops. Comprehensive tests cover two/three-level nesting, mixed content, and various condition combinations.
 
 **Goal:** Support nested `{{#if}}` conditionals inside template strings and external template files.
 
@@ -2910,18 +2914,18 @@ See [SECURITY_AUDIT.md](SECURITY_AUDIT.md) and [PERFORMANCE_AUDIT.md](PERFORMANC
 - [x] PostgreSQL connection error sanitization (prevent credential leakage)
 
 ### Security Hardening (Proposed)
-- [ ] Interpreter recursion depth limit (default: 1000)
+- [x] Interpreter recursion depth limit (default: 256)
 - [ ] Per-request timeout for sync HTTP server
 - [ ] Optional filesystem sandboxing (`NTNT_FS_ROOT`)
-- [ ] Random dev-mode session secret generation
-- [ ] Warning on CORS wildcard origin in production
+- [x] Random dev-mode session secret generation
+- [x] Warning on CORS wildcard origin in production
 
 ### Performance Improvements (Proposed)
 - [ ] Template compilation/caching
 - [ ] In-memory static file caching
-- [ ] Replace Redis `KEYS` with `SCAN` in KV module
+- [x] Replace Redis `KEYS` with `SCAN` in KV module
 - [ ] Interpreter thread pool for async server (multi-interpreter)
-- [ ] Automatic session cleanup timer for in-memory sessions
+- [x] Automatic session cleanup timer for in-memory sessions
 - [ ] Copy-on-write Value semantics (major refactor)
 
 ---

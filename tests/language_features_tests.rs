@@ -4410,3 +4410,88 @@ print(result)
         stdout
     );
 }
+
+// ===== Recursion Depth Limit Tests =====
+
+// Recursion depth tests live in src/interpreter.rs (unit tests) — they run
+// in-process with a configurable limit via eval_with_recursion_limit(), so
+// they work reliably on all platforms without subprocess stack size issues.
+
+// ===== Additional Deep Mutation Tests =====
+
+#[test]
+fn test_deep_mutation_four_level_nesting() {
+    let code = r#"
+let mut data = map { "a": map { "b": map { "c": [10, 20, 30] } } }
+data["a"]["b"]["c"][2] = 99
+print(data["a"]["b"]["c"][2])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "99");
+}
+
+#[test]
+fn test_deep_mutation_map_of_map_of_map() {
+    let code = r#"
+let mut cfg = map { "db": map { "primary": map { "host": "old" } } }
+cfg["db"]["primary"]["host"] = "new-host"
+print(cfg["db"]["primary"]["host"])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "new-host");
+}
+
+#[test]
+fn test_deep_mutation_array_of_arrays() {
+    let code = r#"
+let mut grid = [[1, 2], [3, 4]]
+grid[1][0] = 99
+print(grid[1][0])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "99");
+}
+
+// ===== Additional Nested Template If Tests =====
+
+#[test]
+fn test_template_nested_if_inside_for_loop() {
+    let code = r#"
+let items = [map { "name": "A", "active": true }, map { "name": "B", "active": false }]
+let out = """{{#for item in items}}{{#if item.active}}[{{item.name}}]{{/if}}{{/for}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Nested if inside for should work");
+    assert_eq!(stdout.trim(), "[A]");
+}
+
+#[test]
+fn test_template_nested_if_outer_false() {
+    let code = r#"
+let outer = false
+let inner = true
+let out = """{{#if outer}}{{#if inner}}yes{{/if}}{{#else}}no{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Outer false should skip to else");
+    assert_eq!(stdout.trim(), "no");
+}
+
+#[test]
+fn test_template_nested_if_with_elif() {
+    let code = r#"
+let a = false
+let b = true
+let c = true
+let out = """{{#if a}}first{{#elif b}}{{#if c}}second-deep{{/if}}{{#else}}third{{/if}}"""
+print(out)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Nested if inside elif should work");
+    assert_eq!(stdout.trim(), "second-deep");
+}

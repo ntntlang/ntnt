@@ -46,11 +46,7 @@ fn value_to_sqlite(value: &Value) -> rusqlite::types::Value {
 /// Convert a SQLite ValueRef to an Intent Value
 fn sqlite_to_value(val: ValueRef) -> Value {
     match val {
-        ValueRef::Null => Value::EnumValue {
-            enum_name: "Option".to_string(),
-            variant: "None".to_string(),
-            values: vec![],
-        },
+        ValueRef::Null => Value::none(),
         ValueRef::Integer(i) => Value::Int(i),
         ValueRef::Real(f) => Value::Float(f),
         ValueRef::Text(t) => Value::String(String::from_utf8_lossy(t).to_string()),
@@ -84,17 +80,12 @@ fn sqlite_connect(path: &str) -> Result<Value> {
             handle.insert("_sqlite_connection_id".to_string(), Value::Int(id as i64));
             handle.insert("connected".to_string(), Value::Bool(true));
 
-            Ok(Value::EnumValue {
-                enum_name: "Result".to_string(),
-                variant: "Ok".to_string(),
-                values: vec![Value::Map(handle)],
-            })
+            Ok(Value::ok(Value::Map(handle)))
         }
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("Connection failed: {}", e))],
-        }),
+        Err(e) => Ok(Value::err(Value::String(format!(
+            "Connection failed: {}",
+            e
+        )))),
     }
 }
 
@@ -155,26 +146,12 @@ fn sqlite_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
             for row in rows {
                 match row {
                     Ok(v) => result.push(v),
-                    Err(e) => {
-                        return Ok(Value::EnumValue {
-                            enum_name: "Result".to_string(),
-                            variant: "Err".to_string(),
-                            values: vec![Value::String(format!("Row error: {}", e))],
-                        })
-                    }
+                    Err(e) => return Ok(Value::err(Value::String(format!("Row error: {}", e)))),
                 }
             }
-            Ok(Value::EnumValue {
-                enum_name: "Result".to_string(),
-                variant: "Ok".to_string(),
-                values: vec![Value::Array(result)],
-            })
+            Ok(Value::ok(Value::Array(result)))
         }
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("Query failed: {}", e))],
-        }),
+        Err(e) => Ok(Value::err(Value::String(format!("Query failed: {}", e)))),
     }
 }
 
@@ -203,25 +180,9 @@ fn sqlite_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> 
         }
         Ok(Value::Map(map))
     }) {
-        Ok(row) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Ok".to_string(),
-            values: vec![row],
-        }),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Ok".to_string(),
-            values: vec![Value::EnumValue {
-                enum_name: "Option".to_string(),
-                variant: "None".to_string(),
-                values: vec![],
-            }],
-        }),
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("Query failed: {}", e))],
-        }),
+        Ok(row) => Ok(Value::ok(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Value::ok(Value::none())),
+        Err(e) => Ok(Value::err(Value::String(format!("Query failed: {}", e)))),
     }
 }
 
@@ -235,16 +196,8 @@ fn sqlite_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     let sqlite_params: Vec<rusqlite::types::Value> = params.iter().map(value_to_sqlite).collect();
 
     match conn_guard.execute(sql, rusqlite::params_from_iter(sqlite_params.iter())) {
-        Ok(count) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Ok".to_string(),
-            values: vec![Value::Int(count as i64)],
-        }),
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("Execute failed: {}", e))],
-        }),
+        Ok(count) => Ok(Value::ok(Value::Int(count as i64))),
+        Err(e) => Ok(Value::err(Value::String(format!("Execute failed: {}", e)))),
     }
 }
 
@@ -274,16 +227,8 @@ fn sqlite_begin(conn: &Value) -> Result<Value> {
         .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
 
     match conn_guard.execute_batch("BEGIN") {
-        Ok(_) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Ok".to_string(),
-            values: vec![conn.clone()],
-        }),
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("BEGIN failed: {}", e))],
-        }),
+        Ok(_) => Ok(Value::ok(conn.clone())),
+        Err(e) => Ok(Value::err(Value::String(format!("BEGIN failed: {}", e)))),
     }
 }
 
@@ -296,11 +241,7 @@ fn sqlite_commit(conn: &Value) -> Result<Value> {
 
     match conn_guard.execute_batch("COMMIT") {
         Ok(_) => Ok(Value::Bool(true)),
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("COMMIT failed: {}", e))],
-        }),
+        Err(e) => Ok(Value::err(Value::String(format!("COMMIT failed: {}", e)))),
     }
 }
 
@@ -313,11 +254,7 @@ fn sqlite_rollback(conn: &Value) -> Result<Value> {
 
     match conn_guard.execute_batch("ROLLBACK") {
         Ok(_) => Ok(Value::Bool(true)),
-        Err(e) => Ok(Value::EnumValue {
-            enum_name: "Result".to_string(),
-            variant: "Err".to_string(),
-            values: vec![Value::String(format!("ROLLBACK failed: {}", e))],
-        }),
+        Err(e) => Ok(Value::err(Value::String(format!("ROLLBACK failed: {}", e)))),
     }
 }
 
@@ -942,11 +879,7 @@ mod tests {
         sqlite_execute(
             &conn,
             "INSERT INTO test (name) VALUES (?)",
-            &[Value::EnumValue {
-                enum_name: "Option".to_string(),
-                variant: "None".to_string(),
-                values: vec![],
-            }],
+            &[Value::none()],
         )
         .unwrap();
 
@@ -1019,11 +952,7 @@ mod tests {
             rusqlite::types::Value::Null => {}
             _ => panic!("Expected Null for Unit"),
         }
-        match value_to_sqlite(&Value::EnumValue {
-            enum_name: "Option".to_string(),
-            variant: "None".to_string(),
-            values: vec![],
-        }) {
+        match value_to_sqlite(&Value::none()) {
             rusqlite::types::Value::Null => {}
             _ => panic!("Expected Null for None"),
         }

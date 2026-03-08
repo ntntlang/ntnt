@@ -68,35 +68,19 @@ fn constant_time_compare(a: &str, b: &str) -> bool {
 // ============================================================================
 
 fn make_none() -> Value {
-    Value::EnumValue {
-        enum_name: "Option".to_string(),
-        variant: "None".to_string(),
-        values: vec![],
-    }
+    Value::none()
 }
 
 fn make_some(value: Value) -> Value {
-    Value::EnumValue {
-        enum_name: "Option".to_string(),
-        variant: "Some".to_string(),
-        values: vec![value],
-    }
+    Value::some(value)
 }
 
 fn make_ok(value: Value) -> Value {
-    Value::EnumValue {
-        enum_name: "Result".to_string(),
-        variant: "Ok".to_string(),
-        values: vec![value],
-    }
+    Value::ok(value)
 }
 
 fn make_err(value: Value) -> Value {
-    Value::EnumValue {
-        enum_name: "Result".to_string(),
-        variant: "Err".to_string(),
-        values: vec![value],
-    }
+    Value::err(value)
 }
 
 // ============================================================================
@@ -225,14 +209,27 @@ impl Default for AuthConfig {
             session_ttl: 86400 * 7,  // 7 days
             refresh_ttl: 86400 * 30, // 30 days — how long refresh tokens can extend sessions
             store_tokens: false,
-            session_secret: DEFAULT_SESSION_SECRET.to_string(),
+            session_secret: DEFAULT_SESSION_SECRET_SENTINEL.to_string(),
             session_store: SessionStore::Memory,
         }
     }
 }
 
-/// Default session secret (must not be used in production)
-const DEFAULT_SESSION_SECRET: &str = "ntnt-dev-secret-change-in-production";
+/// Sentinel value used to detect when user hasn't set a session secret.
+/// Not used as an actual secret — dev mode generates a random one.
+const DEFAULT_SESSION_SECRET_SENTINEL: &str = "ntnt-dev-secret-change-in-production";
+
+/// Auto-generated random session secret for dev mode.
+/// Generated once at startup; sessions won't persist across restarts.
+fn dev_session_secret() -> &'static str {
+    use rand::RngCore;
+    static SECRET: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        hex::encode(bytes)
+    });
+    &SECRET
+}
 
 /// OIDC Discovery document
 #[derive(Debug, Clone)]
@@ -1368,7 +1365,7 @@ pub fn init_auth(config: AuthConfig) {
         .unwrap_or(false);
 
     // SECURITY: Require secure session_secret in production
-    if is_prod && config.session_secret == DEFAULT_SESSION_SECRET {
+    if is_prod && config.session_secret == DEFAULT_SESSION_SECRET_SENTINEL {
         eprintln!("┌─────────────────────────────────────────────────────────────────┐");
         eprintln!("│ FATAL: Cannot use default session_secret in production!        │");
         eprintln!("│                                                                 │");
@@ -1380,11 +1377,18 @@ pub fn init_auth(config: AuthConfig) {
         std::process::exit(1);
     }
 
-    // Warn if using default secret in development
-    if !is_prod && config.session_secret == DEFAULT_SESSION_SECRET {
-        eprintln!("[auth] WARNING: Using default session_secret (ok for development)");
+    // In dev mode with no explicit secret, use auto-generated random secret
+    let config = if !is_prod && config.session_secret == DEFAULT_SESSION_SECRET_SENTINEL {
+        eprintln!(
+            "[auth] Using auto-generated session secret (sessions won't persist across restarts)"
+        );
         eprintln!("       Set session_secret in enable_auth() for production.");
-    }
+        let mut config = config;
+        config.session_secret = dev_session_secret().to_string();
+        config
+    } else {
+        config
+    };
 
     // Log session storage type
     match &config.session_store {
@@ -1394,6 +1398,19 @@ pub fn init_auth(config: AuthConfig) {
             if is_prod {
                 eprintln!("       WARNING: Running in production without persistent storage!");
             }
+            // Start background cleanup task for expired sessions (every 5 minutes)
+            let store = SESSION_STORE.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(300));
+                if let Ok(mut s) = store.lock() {
+                    let now = chrono::Utc::now().timestamp();
+                    let removed = s.cleanup_expired(now);
+                    s.cleanup_expired_oauth_states(now - 600);
+                    if removed > 0 {
+                        eprintln!("[auth] Cleaned up {} expired session(s)", removed);
+                    }
+                }
+            });
         }
         SessionStore::Sqlite(path) => {
             eprintln!("[auth] Using SQLite session storage: {}", path);
@@ -5755,7 +5772,7 @@ pub fn init() -> HashMap<String, Value> {
                         Value::String(s) => Some(s.clone()),
                         _ => None,
                     })
-                    .unwrap_or_else(|| DEFAULT_SESSION_SECRET.to_string());
+                    .unwrap_or_else(|| DEFAULT_SESSION_SECRET_SENTINEL.to_string());
 
                 let session_ttl = options
                     .as_ref()
