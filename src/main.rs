@@ -195,9 +195,13 @@ enum Commands {
         #[arg(long)]
         fix: bool,
 
-        /// Enable strict type checking (warn on untyped function signatures)
+        /// Enable strict type checking (require type annotations on all functions)
         #[arg(long)]
         strict: bool,
+
+        /// Warn about untyped function signatures (non-fatal)
+        #[arg(long)]
+        warn_untyped: bool,
     },
     /// Intent-Driven Development commands
     ///
@@ -493,7 +497,8 @@ fn main() {
             quiet,
             fix,
             strict,
-        }) => lint_project(&path, quiet, fix, strict),
+            warn_untyped,
+        }) => lint_project(&path, quiet, fix, strict, warn_untyped),
         Some(Commands::Intent(intent_cmd)) => run_intent_command(intent_cmd),
         Some(Commands::Docs {
             query,
@@ -1763,13 +1768,28 @@ fn lint_project(
     quiet: bool,
     show_fixes: bool,
     strict_flag: bool,
+    warn_untyped_flag: bool,
 ) -> anyhow::Result<()> {
     use serde_json::{json, Value as JsonValue};
 
-    // Strict lint mode: CLI flag OR env var OR project config
-    let strict =
-        strict_flag || ntnt::typechecker::is_strict_mode() || read_project_config_strict(path);
-
+    // Resolve lint mode: CLI flag > NTNT_LINT_MODE env > NTNT_STRICT env > project config > default
+    let lint_mode = if strict_flag {
+        ntnt::config::LintMode::Strict
+    } else if warn_untyped_flag {
+        ntnt::config::LintMode::Warn
+    } else {
+        let env_mode = ntnt::config::get_lint_mode();
+        if matches!(env_mode, ntnt::config::LintMode::Default) {
+            // Fall back to legacy NTNT_STRICT and project config
+            if ntnt::typechecker::is_strict_mode() || read_project_config_strict(path) {
+                ntnt::config::LintMode::Strict
+            } else {
+                ntnt::config::LintMode::Default
+            }
+        } else {
+            env_mode
+        }
+    };
     let files = collect_tnt_files(path)?;
 
     let mut results: Vec<JsonValue> = Vec::new();
@@ -1805,17 +1825,14 @@ fn lint_project(
                 // Run comprehensive lint checks
                 let mut issues = lint_ast(&ast, &source, &relative_path);
 
-                // Run type checker (strict mode adds warnings for untyped signatures)
+                // Run type checker with lint mode
                 let lint_file_path_str = file_path.to_string_lossy();
-                let type_diagnostics = if strict {
-                    ntnt::typechecker::check_program_strict_with_file(
-                        &ast,
-                        &source,
-                        &lint_file_path_str,
-                    )
-                } else {
-                    ntnt::typechecker::check_program_with_file(&ast, &source, &lint_file_path_str)
-                };
+                let type_diagnostics = ntnt::typechecker::check_program_with_lint_mode(
+                    &ast,
+                    &source,
+                    lint_mode,
+                    Some(&lint_file_path_str),
+                );
                 for diag in type_diagnostics {
                     let severity = match diag.severity {
                         ntnt::typechecker::Severity::Error => "error",

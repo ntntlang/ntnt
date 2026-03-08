@@ -4310,9 +4310,25 @@ impl Interpreter {
                         IntentError::RuntimeError(format!("Unknown field: {}", field))
                     }),
                     Value::Map(map) => Ok(map.get(field).cloned().unwrap_or_else(|| Value::none())),
-                    _ => Err(IntentError::TypeError(
-                        "Field access on non-struct value".to_string(),
-                    )),
+                    // Field access on non-struct/map: behaviour depends on TypeMode.
+                    // Real-world scenario: JSON from DB decoded as wrong type.
+                    _ => match get_type_mode() {
+                        TypeMode::Strict => Err(IntentError::TypeError(format!(
+                            "Field access on {}: expected Struct or Map, got {}",
+                            field,
+                            obj.type_name()
+                        ))),
+                        TypeMode::Warn => {
+                            eprintln!(
+                                "[WARN] Field access .{} on {} — returning None. \
+                                 Expected Struct or Map.",
+                                field,
+                                obj.type_name()
+                            );
+                            Ok(Value::none())
+                        }
+                        TypeMode::Forgiving => Ok(Value::none()),
+                    },
                 }
             }
 
@@ -5078,6 +5094,20 @@ impl Interpreter {
         result
     }
 
+    /// Format a template error for HTML output in warn mode.
+    /// In development, renders detailed error as HTML comment.
+    /// In production, renders a generic marker to avoid leaking internals.
+    fn template_warn_comment(error: &IntentError) -> String {
+        if is_production_mode() {
+            "<!-- template error -->".to_string()
+        } else {
+            format!(
+                "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                sanitize_html_comment(&error.to_string())
+            )
+        }
+    }
+
     /// Evaluate template string parts
     fn eval_template_parts(&mut self, parts: &[TemplatePart]) -> Result<Value> {
         let mut result = String::new();
@@ -5101,10 +5131,7 @@ impl Interpreter {
                             TypeMode::Strict => return Err(e),
                             TypeMode::Warn => {
                                 eprintln!("[WARN] Template expression failed: {}", e);
-                                result.push_str(&format!(
-                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                    sanitize_html_comment(&e.to_string())
-                                ));
+                                result.push_str(&Self::template_warn_comment(&e));
                             }
                             TypeMode::Forgiving => {}
                         },
@@ -5122,10 +5149,7 @@ impl Interpreter {
                             TypeMode::Strict => return Err(e),
                             TypeMode::Warn => {
                                 eprintln!("[WARN] Template expression failed: {}", e);
-                                result.push_str(&format!(
-                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                    sanitize_html_comment(&e.to_string())
-                                ));
+                                result.push_str(&Self::template_warn_comment(&e));
                             }
                             TypeMode::Forgiving => {}
                         },
@@ -5155,10 +5179,7 @@ impl Interpreter {
                                     TypeMode::Strict => return Err(e),
                                     TypeMode::Warn => {
                                         eprintln!("[WARN] Template expression failed: {}", e);
-                                        result.push_str(&format!(
-                                            "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                            sanitize_html_comment(&e.to_string())
-                                        ));
+                                        result.push_str(&Self::template_warn_comment(&e));
                                     }
                                     TypeMode::Forgiving => {}
                                 }
@@ -5203,10 +5224,7 @@ impl Interpreter {
                                     TypeMode::Strict => return Err(e),
                                     TypeMode::Warn => {
                                         eprintln!("[WARN] Template expression failed: {}", e);
-                                        result.push_str(&format!(
-                                            "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                            sanitize_html_comment(&e.to_string())
-                                        ));
+                                        result.push_str(&Self::template_warn_comment(&e));
                                     }
                                     TypeMode::Forgiving => {}
                                 }
@@ -5233,10 +5251,7 @@ impl Interpreter {
                                 TypeMode::Strict => return Err(e),
                                 TypeMode::Warn => {
                                     eprintln!("[WARN] Template for-loop iterable failed: {}", e);
-                                    result.push_str(&format!(
-                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR (for): {} -->",
-                                        sanitize_html_comment(&e.to_string())
-                                    ));
+                                    result.push_str(&Self::template_warn_comment(&e));
                                 }
                                 TypeMode::Forgiving => {}
                             }
@@ -5376,11 +5391,14 @@ impl Interpreter {
                                          (not a collection)",
                                         iterable_value.type_name()
                                     );
-                                    result.push_str(&format!(
-                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: for loop on \
-                                         {}, expected array or map -->",
-                                        sanitize_html_comment(iterable_value.type_name())
-                                    ));
+                                    if is_production_mode() {
+                                        result.push_str("<!-- template error -->");
+                                    } else {
+                                        result.push_str(&format!(
+                                            "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: for loop on {}, expected array or map -->",
+                                            sanitize_html_comment(iterable_value.type_name())
+                                        ));
+                                    }
                                 }
                                 TypeMode::Forgiving => {}
                             }
@@ -9361,6 +9379,8 @@ c")
 
     #[test]
     fn test_for_in_string_skips() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on a string now yields zero iterations (use chars() instead)
         let result = eval(
             r#"
@@ -11075,8 +11095,9 @@ page
 
     #[test]
     fn test_recursion_limit_exceeded() {
-        // Use a small limit to avoid stack overflow in debug mode
-        let result = eval_with_recursion_limit("fn inf(n) { return inf(n + 1) } inf(0)", 10);
+        // Use a very small limit (3) to avoid stack overflow on platforms
+        // with small default thread stacks (macOS CI).
+        let result = eval_with_recursion_limit("fn inf(n) { return inf(n + 1) } inf(0)", 3);
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(
@@ -11085,7 +11106,7 @@ page
             err
         );
         assert!(
-            err.contains("10"),
+            err.contains("3"),
             "Error should show the limit value: {}",
             err
         );

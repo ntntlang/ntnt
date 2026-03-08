@@ -138,6 +138,34 @@ pub fn check_program_strict_with_file(
     check_program_with_options(ast, source, true, Some(file_path))
 }
 
+/// Entry point using `LintMode` enum (from `NTNT_LINT_MODE` env or CLI flags).
+pub fn check_program_with_lint_mode(
+    ast: &Program,
+    source: &str,
+    lint_mode: crate::config::LintMode,
+    file_path: Option<&str>,
+) -> Vec<TypeDiagnostic> {
+    let strict = matches!(
+        lint_mode,
+        crate::config::LintMode::Warn | crate::config::LintMode::Strict
+    );
+    let mut diagnostics = check_program_with_options(ast, source, strict, file_path);
+
+    // In strict mode, promote annotation warnings to errors
+    if matches!(lint_mode, crate::config::LintMode::Strict) {
+        for d in &mut diagnostics {
+            if d.severity == Severity::Warning
+                && (d.message.contains("no type annotation")
+                    || d.message.contains("no return type annotation"))
+            {
+                d.severity = Severity::Error;
+            }
+        }
+    }
+
+    diagnostics
+}
+
 fn check_program_with_options(
     ast: &Program,
     source: &str,
@@ -1759,6 +1787,21 @@ impl TypeContext {
 
             Expression::Lambda { params, body } => {
                 self.push_scope();
+
+                // Strict lint: warn about untyped lambda parameters
+                if self.strict_lint {
+                    for param in params {
+                        if param.type_annotation.is_none() {
+                            let line = self.find_line_near(&param.name);
+                            self.warning(
+                                format!("Lambda parameter '{}' has no type annotation", param.name),
+                                line,
+                                Some(format!("Add a type: {}: Type", param.name)),
+                            );
+                        }
+                    }
+                }
+
                 // Save and reset collected_returns for lambda scope
                 let prev_return = self.current_return_type.take();
                 let prev_collected = std::mem::take(&mut self.collected_returns);

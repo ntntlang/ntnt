@@ -436,36 +436,36 @@ print(greet("world"))
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("lint --strict should output valid JSON");
 
-    let warnings = json["summary"]["warnings"].as_i64().unwrap_or(0);
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
     assert!(
-        warnings > 0,
-        "Strict lint should produce warnings for untyped params, got 0 warnings"
+        errors > 0,
+        "Strict lint should produce errors for untyped params, got 0 errors"
     );
 
-    // Verify the warnings mention the untyped parameter
+    // In strict mode, missing annotations are promoted to errors (not warnings)
     let files = json["files"].as_array().unwrap();
     let issues = files[0]["issues"].as_array().unwrap();
-    let type_warnings: Vec<&serde_json::Value> = issues
+    let type_errors: Vec<&serde_json::Value> = issues
         .iter()
         .filter(|issue| {
             issue["rule"].as_str() == Some("type_check")
-                && issue["severity"].as_str() == Some("warning")
+                && issue["severity"].as_str() == Some("error")
         })
         .collect();
 
     assert!(
-        !type_warnings.is_empty(),
-        "Should have type_check warnings for untyped parameters"
+        !type_errors.is_empty(),
+        "Should have type_check errors for untyped parameters in strict mode"
     );
 
-    let has_param_warning = type_warnings.iter().any(|w| {
+    let has_param_error = type_errors.iter().any(|w| {
         let msg = w["message"].as_str().unwrap_or("");
         msg.contains("no type annotation") && msg.contains("name")
     });
     assert!(
-        has_param_warning,
-        "Should warn about untyped parameter 'name'. Warnings: {:?}",
-        type_warnings
+        has_param_error,
+        "Should error about untyped parameter 'name' in strict mode. Errors: {:?}",
+        type_errors
     );
 }
 
@@ -485,11 +485,12 @@ print(add(1, 2))
 
     let files = json["files"].as_array().unwrap();
     let issues = files[0]["issues"].as_array().unwrap();
-    let return_warnings: Vec<&serde_json::Value> = issues
+    // In strict mode, missing return type annotations are promoted to errors
+    let return_errors: Vec<&serde_json::Value> = issues
         .iter()
         .filter(|issue| {
             issue["rule"].as_str() == Some("type_check")
-                && issue["severity"].as_str() == Some("warning")
+                && issue["severity"].as_str() == Some("error")
                 && issue["message"]
                     .as_str()
                     .unwrap_or("")
@@ -498,8 +499,8 @@ print(add(1, 2))
         .collect();
 
     assert!(
-        !return_warnings.is_empty(),
-        "Strict lint should warn about missing return type on 'add'"
+        !return_errors.is_empty(),
+        "Strict lint should error about missing return type on 'add'"
     );
 }
 

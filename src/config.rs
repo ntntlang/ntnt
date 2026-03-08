@@ -2,8 +2,9 @@
 //!
 //! Provides [`TypeMode`] (runtime behavior for type mismatches) and [`LintMode`]
 //! (lint-time behavior for missing annotations), read from environment variables.
-//! Values are cached via `OnceLock` in production builds; re-read on every call
-//! in test builds so that tests can manipulate env vars with isolation.
+//! Values are cached via `OnceLock` in non-test builds (`#[cfg(not(test))]`);
+//! re-read on every call in test builds so that tests can manipulate env vars
+//! with isolation.
 
 /// Runtime type safety mode, controlled by the `NTNT_TYPE_MODE` env var.
 ///
