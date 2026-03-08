@@ -4313,8 +4313,8 @@ impl Interpreter {
                     // Field access on non-struct/map: behaviour depends on TypeMode.
                     // Real-world scenario: JSON from DB decoded as wrong type.
                     _ => match get_type_mode() {
-                        TypeMode::Strict => Err(IntentError::TypeError(format!(
-                            "Field access on {}: expected Struct or Map, got {}",
+                        TypeMode::Strict => Err(IntentError::RuntimeError(format!(
+                            "Type mismatch: field access .{} on {}, expected Struct or Map",
                             field,
                             obj.type_name()
                         ))),
@@ -11447,7 +11447,7 @@ page
     fn test_for_in_warn_skips() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap();
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
-        // for..in on an Int — warn mode skips the loop body and returns Unit
+        // for..in on an Int — warn mode skips the loop body, count stays 0
         let result = eval(
             r#"
             let count = 0
@@ -11461,6 +11461,10 @@ page
             result.is_ok(),
             "warn mode: for..in on Int should return Ok, got {:?}",
             result
+        );
+        assert!(
+            matches!(result.unwrap(), Value::Int(0)),
+            "warn mode: for..in on Int should skip loop body (count should be 0)"
         );
     }
 }

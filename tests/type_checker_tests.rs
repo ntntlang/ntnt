@@ -431,7 +431,7 @@ fn test_strict_lint_warns_untyped_params() {
 print(greet("world"))
 "#;
 
-    let (stdout, _stderr, _code) = lint_strict_code(code);
+    let (stdout, _stderr, code) = lint_strict_code(code);
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("lint --strict should output valid JSON");
@@ -467,6 +467,13 @@ print(greet("world"))
         "Should error about untyped parameter 'name' in strict mode. Errors: {:?}",
         type_errors
     );
+
+    // Strict lint with errors should exit non-zero
+    assert!(
+        code != 0,
+        "ntnt lint --strict should exit non-zero when annotation errors exist, got exit code {}",
+        code
+    );
 }
 
 #[test]
@@ -478,7 +485,7 @@ fn test_strict_lint_warns_missing_return_type() {
 print(add(1, 2))
 "#;
 
-    let (stdout, _stderr, _code) = lint_strict_code(code);
+    let (stdout, _stderr, code) = lint_strict_code(code);
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("lint --strict should output valid JSON");
@@ -501,6 +508,13 @@ print(add(1, 2))
     assert!(
         !return_errors.is_empty(),
         "Strict lint should error about missing return type on 'add'"
+    );
+
+    // Strict lint with errors should exit non-zero
+    assert!(
+        code != 0,
+        "ntnt lint --strict should exit non-zero when annotation errors exist, got exit code {}",
+        code
     );
 }
 

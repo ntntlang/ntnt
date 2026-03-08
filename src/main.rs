@@ -1777,17 +1777,15 @@ fn lint_project(
         ntnt::config::LintMode::Strict
     } else if warn_untyped_flag {
         ntnt::config::LintMode::Warn
+    } else if std::env::var("NTNT_LINT_MODE").is_ok() {
+        // NTNT_LINT_MODE was explicitly set — respect it, even if "default"
+        ntnt::config::get_lint_mode()
     } else {
-        let env_mode = ntnt::config::get_lint_mode();
-        if matches!(env_mode, ntnt::config::LintMode::Default) {
-            // Fall back to legacy NTNT_STRICT and project config
-            if ntnt::typechecker::is_strict_mode() || read_project_config_strict(path) {
-                ntnt::config::LintMode::Strict
-            } else {
-                ntnt::config::LintMode::Default
-            }
+        // No NTNT_LINT_MODE set — fall back to legacy NTNT_STRICT and project config
+        if ntnt::typechecker::is_strict_mode() || read_project_config_strict(path) {
+            ntnt::config::LintMode::Strict
         } else {
-            env_mode
+            ntnt::config::LintMode::Default
         }
     };
     let files = collect_tnt_files(path)?;
