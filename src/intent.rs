@@ -2772,8 +2772,9 @@ pub struct FeatureCoverage {
 impl IntentFile {
     /// Parse an intent file from a path
     pub fn parse(path: &Path) -> Result<Self, IntentError> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to read intent file: {}", e)))?;
+        let content = fs::read_to_string(path).map_err(|e| {
+            IntentError::runtime_error(format!("Failed to read intent file: {}", e))
+        })?;
 
         Self::parse_content(&content, path.to_string_lossy().to_string())
     }
@@ -3733,13 +3734,13 @@ pub fn run_intent_check(
 
     // Read NTNT source
     let source = fs::read_to_string(ntnt_path)
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to read NTNT file: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to read NTNT file: {}", e)))?;
 
     // Count total tests
     let total_tests: usize = intent.features.iter().map(|f| f.tests.len()).sum();
 
     if total_tests == 0 {
-        return Err(IntentError::RuntimeError(
+        return Err(IntentError::runtime_error(
             "No tests found in intent file".to_string(),
         ));
     }

@@ -36,7 +36,7 @@ pub fn init() -> HashMap<String, Value> {
                     new_arr.push(args[1].clone());
                     Ok(Value::Array(new_arr))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "push() requires an array".to_string(),
                 )),
             },
@@ -76,7 +76,7 @@ pub fn init() -> HashMap<String, Value> {
                         // Return tuple of (new array, popped value)
                         Ok(Value::Array(vec![Value::Array(new_arr), opt_val]))
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "pop() requires an array".to_string(),
                     )),
                 }
@@ -109,7 +109,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "first() requires 1 or 2 arguments".to_string(),
                     ));
                 }
@@ -117,7 +117,7 @@ pub fn init() -> HashMap<String, Value> {
                 let arr = match &args[0] {
                     Value::Array(arr) => arr,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "first() requires an array as first argument".to_string(),
                         ))
                     }
@@ -162,7 +162,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "last() requires 1 or 2 arguments".to_string(),
                     ));
                 }
@@ -170,7 +170,7 @@ pub fn init() -> HashMap<String, Value> {
                 let arr = match &args[0] {
                     Value::Array(arr) => arr,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "last() requires an array as first argument".to_string(),
                         ))
                     }
@@ -215,7 +215,7 @@ pub fn init() -> HashMap<String, Value> {
                     new_arr.reverse();
                     Ok(Value::Array(new_arr))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "reverse() requires an array".to_string(),
                 )),
             },
@@ -250,11 +250,13 @@ pub fn init() -> HashMap<String, Value> {
                     let start = *start as usize;
                     let end = (*end as usize).min(arr.len());
                     if start > arr.len() || start > end {
-                        return Err(IntentError::RuntimeError("Invalid slice range".to_string()));
+                        return Err(IntentError::runtime_error(
+                            "Invalid slice range".to_string(),
+                        ));
                     }
                     Ok(Value::Array(arr[start..end].to_vec()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "slice() requires array, int, int".to_string(),
                 )),
             },
@@ -288,7 +290,7 @@ pub fn init() -> HashMap<String, Value> {
                     new_arr.extend(arr2.clone());
                     Ok(Value::Array(new_arr))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "concat() requires two arrays".to_string(),
                 )),
             },
@@ -319,7 +321,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Array(arr) => Ok(Value::Bool(arr.is_empty())),
                 Value::String(s) => Ok(Value::Bool(s.is_empty())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_empty() requires array or string".to_string(),
                 )),
             },
@@ -352,7 +354,7 @@ pub fn init() -> HashMap<String, Value> {
                     let keys: Vec<Value> = map.keys().map(|k| Value::String(k.clone())).collect();
                     Ok(Value::Array(keys))
                 }
-                _ => Err(IntentError::TypeError("keys() requires a map".to_string())),
+                _ => Err(IntentError::type_error("keys() requires a map".to_string())),
             },
         },
     );
@@ -382,7 +384,7 @@ pub fn init() -> HashMap<String, Value> {
                     let values: Vec<Value> = map.values().cloned().collect();
                     Ok(Value::Array(values))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "values() requires a map".to_string(),
                 )),
             },
@@ -423,7 +425,7 @@ pub fn init() -> HashMap<String, Value> {
                         .collect();
                     Ok(Value::Array(entries))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "entries() requires a map".to_string(),
                 )),
             },
@@ -454,7 +456,7 @@ pub fn init() -> HashMap<String, Value> {
                 // Non-map first argument: return false instead of crashing.
                 // has_key() is a check — it should be safe to call on anything.
                 (_, Value::String(_)) => Ok(Value::Bool(false)),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "has_key() requires a map and string key".to_string(),
                 )),
             },
@@ -486,7 +488,7 @@ pub fn init() -> HashMap<String, Value> {
         func: |args| {
             eprintln!("[DEPRECATED] get_key() is deprecated. Use get_or() instead.");
             if args.len() < 2 || args.len() > 3 {
-                return Err(IntentError::TypeError(
+                return Err(IntentError::type_error(
                     "get_key() requires 2 or 3 arguments: get_key(map, key) or get_key(map, key, default)".to_string()
                 ));
             }
@@ -514,7 +516,7 @@ pub fn init() -> HashMap<String, Value> {
                         }
                     }
                 }
-                _ => Err(IntentError::TypeError("get_key() requires a map and string key".to_string())),
+                _ => Err(IntentError::type_error("get_key() requires a map and string key".to_string())),
             }
         },
     });
@@ -547,7 +549,7 @@ pub fn init() -> HashMap<String, Value> {
         max_arity: 0,
         func: |args| {
             if args.len() < 2 || args.len() > 3 {
-                return Err(IntentError::TypeError(
+                return Err(IntentError::type_error(
                     "get_index() requires 2 or 3 arguments: get_index(arr, index) or get_index(arr, index, default)".to_string()
                 ));
             }
@@ -555,7 +557,7 @@ pub fn init() -> HashMap<String, Value> {
             let arr = match &args[0] {
                 Value::Array(arr) => arr,
                 _ => {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "get_index() requires an array as first argument".to_string(),
                     ))
                 }
@@ -564,7 +566,7 @@ pub fn init() -> HashMap<String, Value> {
             let index = match &args[1] {
                 Value::Int(i) => *i,
                 _ => {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "get_index() requires an integer as second argument".to_string(),
                     ))
                 }
@@ -628,7 +630,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     Ok(Value::Map(result))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "merge() requires two maps".to_string(),
                 )),
             },
@@ -665,7 +667,7 @@ pub fn init() -> HashMap<String, Value> {
                 // Non-map first argument: return the default value instead of crashing.
                 // get_or() exists for defensive access — it should never be the thing that crashes.
                 (_, Value::String(_)) => Ok(args[2].clone()),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "get_or() requires a map (or any value), string key, and default value"
                         .to_string(),
                 )),
@@ -703,7 +705,7 @@ pub fn init() -> HashMap<String, Value> {
                     let found = arr.iter().any(|item| values_equal(item, needle));
                     Ok(Value::Bool(found))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "includes() requires an array as first argument".to_string(),
                 )),
             },
@@ -735,7 +737,7 @@ pub fn init() -> HashMap<String, Value> {
                         let found = arr.iter().any(|item| values_equal(item, needle));
                         Ok(Value::Bool(found))
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "has_value() requires an array as first argument".to_string(),
                     )),
                 }

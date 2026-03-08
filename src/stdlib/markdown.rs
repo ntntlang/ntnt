@@ -33,7 +33,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(md) => Ok(markdown_to_html(md, false)),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "to_html() requires a String argument".to_string(),
                 )),
             },
@@ -53,7 +53,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(md) => Ok(markdown_to_html(md, true)),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "to_html_safe() requires a String argument".to_string(),
                 )),
             },

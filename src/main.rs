@@ -438,6 +438,15 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
             }
         }
 
+        // Rich type context (expected/got)
+        if let Some(ctx) = intent_err.type_context() {
+            eprintln!("  {} {}", "expected:".cyan().bold(), ctx.expected.green());
+            eprintln!("     {} {}", "found:".cyan().bold(), ctx.got.red());
+            if let Some(hint) = &ctx.hint {
+                eprintln!("      {} {}", "hint:".cyan().bold(), hint);
+            }
+        }
+
         // Suggestion ("Did you mean?")
         if let Some(suggestion) = intent_err.suggestion() {
             eprintln!(

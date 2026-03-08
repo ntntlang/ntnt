@@ -392,16 +392,16 @@ fn get_client(conn: &Value) -> Result<Arc<Mutex<Client>>> {
                         return Ok(Arc::clone(client));
                     }
                 }
-                Err(IntentError::RuntimeError(
+                Err(IntentError::runtime_error(
                     "Invalid or closed database connection".to_string(),
                 ))
             } else {
-                Err(IntentError::TypeError(
+                Err(IntentError::type_error(
                     "Expected a database connection handle".to_string(),
                 ))
             }
         }
-        _ => Err(IntentError::TypeError(
+        _ => Err(IntentError::type_error(
             "Expected a database connection handle".to_string(),
         )),
     }
@@ -437,7 +437,7 @@ fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     let client_arc = get_client(conn)?;
     let mut client = client_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     // Convert params to SqlParam
     let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
@@ -465,7 +465,7 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     let client_arc = get_client(conn)?;
     let mut client = client_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
     let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
@@ -488,7 +488,7 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     let client_arc = get_client(conn)?;
     let mut client = client_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
     let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
@@ -517,7 +517,7 @@ fn pg_close(conn: &Value) -> Result<Value> {
             }
             Ok(Value::Bool(false))
         }
-        _ => Err(IntentError::TypeError(
+        _ => Err(IntentError::type_error(
             "Expected a database connection handle".to_string(),
         )),
     }
@@ -528,7 +528,7 @@ fn pg_begin(conn: &Value) -> Result<Value> {
     let client_arc = get_client(conn)?;
     let mut client = client_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     match client.execute("BEGIN", &[]) {
         Ok(_) => {
@@ -544,7 +544,7 @@ fn pg_commit(conn: &Value) -> Result<Value> {
     let client_arc = get_client(conn)?;
     let mut client = client_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     match client.execute("COMMIT", &[]) {
         Ok(_) => Ok(Value::Bool(true)),
@@ -557,7 +557,7 @@ fn pg_rollback(conn: &Value) -> Result<Value> {
     let client_arc = get_client(conn)?;
     let mut client = client_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     match client.execute("ROLLBACK", &[]) {
         Ok(_) => Ok(Value::Bool(true)),
@@ -594,7 +594,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(conn_str) => pg_connect(conn_str),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "connect() requires a connection string".to_string(),
                 )),
             },
@@ -629,7 +629,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => pg_query(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => pg_query(conn, sql, &[]),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "query() requires (connection, sql_string, params_array)".to_string(),
                 )),
             },
@@ -664,7 +664,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => pg_query_one(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => pg_query_one(conn, sql, &[]),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "query_one() requires (connection, sql_string, params_array)".to_string(),
                 )),
             },
@@ -697,7 +697,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => pg_execute(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => pg_execute(conn, sql, &[]),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "execute() requires (connection, sql_string, params_array)".to_string(),
                 )),
             },

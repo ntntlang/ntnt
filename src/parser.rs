@@ -2609,6 +2609,51 @@ impl Parser {
     }
 
     fn parse_single_type(&mut self) -> Result<TypeExpr> {
+        // Check for function type: (T1, T2) -> ReturnType
+        if self.match_token(&[TokenKind::LeftParen]) {
+            let mut params = Vec::new();
+            if !self.check(&TokenKind::RightParen) {
+                loop {
+                    params.push(self.parse_type()?);
+                    if !self.match_token(&[TokenKind::Comma]) {
+                        break;
+                    }
+                }
+            }
+            self.consume(
+                &TokenKind::RightParen,
+                "Expected ')' after function type parameters",
+            )?;
+            self.consume(
+                &TokenKind::Arrow,
+                "Expected '->' after function type parameters",
+            )?;
+            let return_type = self.parse_type()?;
+            let fn_type = TypeExpr::Function {
+                params,
+                return_type: Box::new(return_type),
+            };
+            // Check for optional function type
+            if self.match_token(&[TokenKind::Question]) {
+                return Ok(TypeExpr::Optional(Box::new(fn_type)));
+            }
+            return Ok(fn_type);
+        }
+
+        // Check for array type literal: [T]
+        if self.match_token(&[TokenKind::LeftBracket]) {
+            let element_type = self.parse_type()?;
+            self.consume(
+                &TokenKind::RightBracket,
+                "Expected ']' after array element type",
+            )?;
+            let arr_type = TypeExpr::Array(Box::new(element_type));
+            if self.match_token(&[TokenKind::Question]) {
+                return Ok(TypeExpr::Optional(Box::new(arr_type)));
+            }
+            return Ok(arr_type);
+        }
+
         let name = self.consume_identifier("Expected type name")?;
 
         // Check for generic parameters

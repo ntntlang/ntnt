@@ -54,7 +54,7 @@ pub fn load_template_file(path: &str, base_path: Option<&str>) -> Result<String>
     };
 
     fs::read_to_string(&full_path).map_err(|e| {
-        IntentError::RuntimeError(format!(
+        IntentError::runtime_error(format!(
             "Failed to load template '{}': {}",
             full_path.display(),
             e

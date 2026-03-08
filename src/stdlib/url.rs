@@ -228,7 +228,7 @@ pub fn init() -> HashMap<String, Value> {
 
                         Ok(Value::ok(Value::Map(result)))
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "parse() requires a URL string".to_string(),
                     )),
                 }
@@ -261,7 +261,7 @@ pub fn init() -> HashMap<String, Value> {
                     let encoded = url_encode(s);
                     Ok(Value::String(encoded))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "encode() requires a string".to_string(),
                 )),
             },
@@ -293,7 +293,7 @@ pub fn init() -> HashMap<String, Value> {
                     let encoded = url_encode_component(s);
                     Ok(Value::String(encoded))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "encode_component() requires a string".to_string(),
                 )),
             },
@@ -324,7 +324,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(decoded) => Ok(Value::ok(Value::String(decoded))),
                     Err(e) => Ok(Value::err(Value::String(e))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "decode() requires a string".to_string(),
                 )),
             },
@@ -362,7 +362,7 @@ pub fn init() -> HashMap<String, Value> {
                         .collect();
                     Ok(Value::String(pairs.join("&")))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "build_query() requires a map".to_string(),
                 )),
             },
@@ -413,7 +413,7 @@ pub fn init() -> HashMap<String, Value> {
 
                         Ok(Value::Map(result))
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "parse_query() requires a string".to_string(),
                     )),
                 }
@@ -447,7 +447,7 @@ pub fn init() -> HashMap<String, Value> {
                     let path = path.trim_start_matches('/');
                     Ok(Value::String(format!("{}/{}", base, path)))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "join_url() requires two strings".to_string(),
                 )),
             },
@@ -478,7 +478,7 @@ pub fn init() -> HashMap<String, Value> {
                         let path = path.trim_start_matches('/');
                         Ok(Value::String(format!("{}/{}", base, path)))
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "join() requires two strings".to_string(),
                     )),
                 }

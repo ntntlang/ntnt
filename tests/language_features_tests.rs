@@ -4495,3 +4495,83 @@ print(out)
     assert_eq!(exit_code, 0, "Nested if inside elif should work");
     assert_eq!(stdout.trim(), "second-deep");
 }
+
+// ============================================================================
+// Type System Feature Tests (DD-009, Phase 7.2)
+// ============================================================================
+
+#[test]
+fn test_type_alias_basic() {
+    let code = r#"
+type UserId = Int
+
+fn get_user(id: UserId) -> String {
+    return "user_" + str(id)
+}
+print(get_user(42))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Type alias should work");
+    assert_eq!(stdout.trim(), "user_42");
+}
+
+#[test]
+fn test_type_alias_function_type() {
+    let code = r#"
+type Mapper = (Int) -> Int
+
+fn apply(f: Mapper, x: Int) -> Int {
+    return f(x)
+}
+
+let double = fn(x: Int) -> Int { return x * 2 }
+print(apply(double, 21))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Function type alias should work");
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn test_optional_type_annotation() {
+    let code = r#"
+fn greet(name: String?) -> String {
+    return name ?? "world"
+}
+print(greet("test"))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Optional type annotation should work");
+    assert_eq!(stdout.trim(), "test");
+}
+
+#[test]
+fn test_array_type_literal_syntax() {
+    let code = r#"
+fn sum(nums: [Int]) -> Int {
+    let total = 0
+    for n in nums {
+        total = total + n
+    }
+    return total
+}
+print(sum([1, 2, 3, 4, 5]))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "[Int] array type syntax should work");
+    assert_eq!(stdout.trim(), "15");
+}
+
+#[test]
+fn test_rich_error_binary_op_mismatch() {
+    let code = r#"
+let result = "hello" - 42
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "String - Int should error");
+    assert!(
+        stderr.contains("Cannot apply") || stderr.contains("String") || stderr.contains("Int"),
+        "Error should mention types involved, got: {}",
+        stderr
+    );
+}

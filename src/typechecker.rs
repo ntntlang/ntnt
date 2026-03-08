@@ -51,6 +51,9 @@ pub struct FunctionSig {
     pub variadic: bool,
     /// Number of required parameters (those without defaults). Defaults to params.len().
     pub required_params: usize,
+    /// Generic type parameter names (e.g., ["T", "U"] for `fn foo<T, U>`).
+    /// Empty for non-generic functions.
+    pub type_params: Vec<String>,
 }
 
 /// Exported type definitions from a parsed file (functions, structs, enums, aliases)
@@ -493,7 +496,15 @@ impl TypeContext {
                     if self.structs.contains_key(name) || self.enums.contains_key(name) {
                         return Type::Named(name.clone());
                     }
-                    // Treat unresolved type names as Any (likely type parameters like T, U)
+                    // Single uppercase letter or common type param names: keep as Named
+                    // so generic unification can resolve them (e.g., T, U, V, K, V2, etc.)
+                    // Multi-char all-uppercase names also treated as type params.
+                    let looks_like_type_param = name.len() == 1
+                        || name.chars().all(|c| c.is_uppercase() || c.is_ascii_digit());
+                    if looks_like_type_param {
+                        return Type::Named(name.clone());
+                    }
+                    // Treat other unresolved names as Any
                     Type::Any
                 }
             },
@@ -615,9 +626,11 @@ impl TypeContext {
                 name,
                 params,
                 return_type,
-                type_params: _,
+                type_params,
                 ..
             } => {
+                let tp_names: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+
                 let param_types: Vec<(String, Type)> = params
                     .iter()
                     .map(|p| {
@@ -647,6 +660,7 @@ impl TypeContext {
                         return_type: ret,
                         variadic: false,
                         required_params,
+                        type_params: tp_names,
                     },
                 );
             }
@@ -2444,6 +2458,12 @@ impl TypeContext {
                         .zip(sig.params.iter())
                         .enumerate()
                     {
+                        // Skip type-checking for generic type params — they accept any type.
+                        let is_type_param =
+                            matches!(param_type, Type::Named(n) if sig.type_params.contains(n));
+                        if is_type_param {
+                            continue;
+                        }
                         if !self.compatible(arg_type, param_type)
                             && !matches!(arg_type, Type::Any)
                             && !matches!(param_type, Type::Any)
@@ -2465,12 +2485,123 @@ impl TypeContext {
                     }
                 }
 
+                // Generic type unification: if the function has type params,
+                // infer T from the concrete argument types and substitute into return type.
+                if !sig.type_params.is_empty() {
+                    let bindings =
+                        Self::unify_type_params(&sig.type_params, &sig.params, &arg_types);
+                    if !bindings.is_empty() {
+                        return Self::substitute_type_params(&sig.return_type, &bindings);
+                    }
+                }
+
                 return sig.return_type;
             }
         }
 
         // Unknown function or dynamic call
         Type::Any
+    }
+
+    /// Unify generic type parameters with concrete argument types.
+    /// Returns a map from type param name → concrete type.
+    ///
+    /// Example: `fn identity<T>(x: T) -> T` called with `Int` arg → `{"T": Int}`
+    fn unify_type_params(
+        type_params: &[String],
+        param_sigs: &[(String, Type)],
+        arg_types: &[Type],
+    ) -> HashMap<String, Type> {
+        let mut bindings: HashMap<String, Type> = HashMap::new();
+        for ((_param_name, param_type), arg_type) in param_sigs.iter().zip(arg_types.iter()) {
+            Self::unify_one(param_type, arg_type, type_params, &mut bindings);
+        }
+        bindings
+    }
+
+    /// Recursively unify a single param type pattern with a concrete type.
+    fn unify_one(
+        pattern: &Type,
+        concrete: &Type,
+        type_params: &[String],
+        bindings: &mut HashMap<String, Type>,
+    ) {
+        match pattern {
+            // If the pattern is a named type that's a type parameter → bind it
+            Type::Any => {} // Any is already maximally general
+            Type::Named(name) if type_params.contains(name) => {
+                bindings
+                    .entry(name.clone())
+                    .or_insert_with(|| concrete.clone());
+            }
+            // Recurse into compound types
+            Type::Array(inner_pattern) => {
+                if let Type::Array(inner_concrete) = concrete {
+                    Self::unify_one(inner_pattern, inner_concrete, type_params, bindings);
+                }
+            }
+            Type::Optional(inner_pattern) => {
+                let inner_concrete = match concrete {
+                    Type::Optional(c) => c.as_ref(),
+                    other => other, // T? unified with T also binds T
+                };
+                Self::unify_one(inner_pattern, inner_concrete, type_params, bindings);
+            }
+            Type::Function {
+                params: fn_params,
+                return_type: fn_ret,
+            } => {
+                if let Type::Function {
+                    params: concrete_params,
+                    return_type: concrete_ret,
+                } = concrete
+                {
+                    for (fp, cp) in fn_params.iter().zip(concrete_params.iter()) {
+                        Self::unify_one(fp, cp, type_params, bindings);
+                    }
+                    Self::unify_one(fn_ret, concrete_ret, type_params, bindings);
+                }
+            }
+            _ => {} // Concrete types don't produce bindings
+        }
+    }
+
+    /// Substitute resolved type parameter bindings into a type.
+    ///
+    /// Example: return type `T` with bindings `{"T": Int}` → `Int`
+    fn substitute_type_params(ty: &Type, bindings: &HashMap<String, Type>) -> Type {
+        match ty {
+            Type::Named(name) => {
+                if let Some(resolved) = bindings.get(name) {
+                    resolved.clone()
+                } else {
+                    ty.clone()
+                }
+            }
+            Type::Array(inner) => {
+                Type::Array(Box::new(Self::substitute_type_params(inner, bindings)))
+            }
+            Type::Optional(inner) => {
+                Type::Optional(Box::new(Self::substitute_type_params(inner, bindings)))
+            }
+            Type::Function {
+                params,
+                return_type,
+            } => Type::Function {
+                params: params
+                    .iter()
+                    .map(|p| Self::substitute_type_params(p, bindings))
+                    .collect(),
+                return_type: Box::new(Self::substitute_type_params(return_type, bindings)),
+            },
+            Type::Tuple(types) => Type::Tuple(
+                types
+                    .iter()
+                    .map(|t| Self::substitute_type_params(t, bindings))
+                    .collect(),
+            ),
+            _ => ty.clone(),
+        }
     }
 
     /// Bind pattern variables with their inferred types
@@ -2766,6 +2897,7 @@ impl TypeContext {
                         return_type: $ret,
                         variadic: false,
                         required_params,
+                        type_params: vec![],
                     });
                 }
             };
@@ -2778,6 +2910,7 @@ impl TypeContext {
                         return_type: $ret,
                         variadic: true,
                         required_params,
+                        type_params: vec![],
                     });
                 }
             };
@@ -2904,6 +3037,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     return_type: $ret,
                     variadic: false,
                     required_params,
+                    type_params: vec![],
                 });
             }
         };
@@ -2916,6 +3050,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     return_type: $ret,
                     variadic: true,
                     required_params,
+                    type_params: vec![],
                 });
             }
         };
@@ -5795,6 +5930,7 @@ let n: Int = double(5)"#;
                 return_type: Type::String,
                 variadic: false,
                 required_params: 2,
+                type_params: vec![],
             },
         );
 
@@ -6037,6 +6173,7 @@ let n: Int = double(5)"#;
                 return_type: Type::String,
                 variadic: false,
                 required_params: 1,
+                type_params: vec![],
             },
         );
 

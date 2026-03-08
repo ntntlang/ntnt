@@ -603,14 +603,14 @@ pub fn fetch_oidc_discovery(issuer: &str) -> Result<OidcDiscovery> {
         .get(&discovery_url)
         .header("Accept", "application/json")
         .send()
-        .map_err(|e| IntentError::RuntimeError(format!("[auth] OIDC discovery failed: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("[auth] OIDC discovery failed: {}", e)))?;
 
     let body = response.text().map_err(|e| {
-        IntentError::RuntimeError(format!("[auth] Failed to read discovery response: {}", e))
+        IntentError::runtime_error(format!("[auth] Failed to read discovery response: {}", e))
     })?;
 
     let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-        IntentError::RuntimeError(format!("[auth] Failed to parse discovery document: {}", e))
+        IntentError::runtime_error(format!("[auth] Failed to parse discovery document: {}", e))
     })?;
 
     let get_str = |key: &str| -> Option<String> {
@@ -632,17 +632,19 @@ pub fn fetch_oidc_discovery(issuer: &str) -> Result<OidcDiscovery> {
 
     Ok(OidcDiscovery {
         issuer: get_str("issuer").ok_or_else(|| {
-            IntentError::RuntimeError("[auth] Discovery missing issuer".to_string())
+            IntentError::runtime_error("[auth] Discovery missing issuer".to_string())
         })?,
         authorization_endpoint: get_str("authorization_endpoint").ok_or_else(|| {
-            IntentError::RuntimeError("[auth] Discovery missing authorization_endpoint".to_string())
+            IntentError::runtime_error(
+                "[auth] Discovery missing authorization_endpoint".to_string(),
+            )
         })?,
         token_endpoint: get_str("token_endpoint").ok_or_else(|| {
-            IntentError::RuntimeError("[auth] Discovery missing token_endpoint".to_string())
+            IntentError::runtime_error("[auth] Discovery missing token_endpoint".to_string())
         })?,
         userinfo_endpoint: get_str("userinfo_endpoint"),
         jwks_uri: get_str("jwks_uri").ok_or_else(|| {
-            IntentError::RuntimeError("[auth] Discovery missing jwks_uri".to_string())
+            IntentError::runtime_error("[auth] Discovery missing jwks_uri".to_string())
         })?,
         scopes_supported: get_arr("scopes_supported"),
         response_types_supported: get_arr("response_types_supported"),
@@ -731,14 +733,14 @@ pub fn exchange_code_for_tokens(
         .header("User-Agent", "NTNT/0.3.13") // Required by GitHub
         .form(&params)
         .send()
-        .map_err(|e| IntentError::RuntimeError(format!("[auth] Token exchange failed: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("[auth] Token exchange failed: {}", e)))?;
 
     let body = response.text().map_err(|e| {
-        IntentError::RuntimeError(format!("[auth] Failed to read token response: {}", e))
+        IntentError::runtime_error(format!("[auth] Failed to read token response: {}", e))
     })?;
 
     let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-        IntentError::RuntimeError(format!(
+        IntentError::runtime_error(format!(
             "[auth] Failed to parse token response: {} - Body: {}",
             e, body
         ))
@@ -750,7 +752,7 @@ pub fn exchange_code_for_tokens(
             .get("error_description")
             .and_then(|v| v.as_str())
             .unwrap_or("Unknown error");
-        return Err(IntentError::RuntimeError(format!(
+        return Err(IntentError::runtime_error(format!(
             "[auth] OAuth error: {} - {}",
             error.as_str().unwrap_or("unknown"),
             error_desc
@@ -762,7 +764,7 @@ pub fn exchange_code_for_tokens(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            IntentError::RuntimeError(format!("[auth] No access_token in response: {}", body))
+            IntentError::runtime_error(format!("[auth] No access_token in response: {}", body))
         })?;
 
     // Default expires_in to 1 hour if not provided (security: don't allow infinite-lived tokens)
@@ -813,14 +815,14 @@ pub fn refresh_access_token(
         .header("Accept", "application/json")
         .form(&params)
         .send()
-        .map_err(|e| IntentError::RuntimeError(format!("[auth] Token refresh failed: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("[auth] Token refresh failed: {}", e)))?;
 
     let body = response.text().map_err(|e| {
-        IntentError::RuntimeError(format!("[auth] Failed to read refresh response: {}", e))
+        IntentError::runtime_error(format!("[auth] Failed to read refresh response: {}", e))
     })?;
 
     let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-        IntentError::RuntimeError(format!("[auth] Failed to parse refresh response: {}", e))
+        IntentError::runtime_error(format!("[auth] Failed to parse refresh response: {}", e))
     })?;
 
     if let Some(error) = json.get("error") {
@@ -828,7 +830,7 @@ pub fn refresh_access_token(
             .get("error_description")
             .and_then(|v| v.as_str())
             .unwrap_or("Unknown error");
-        return Err(IntentError::RuntimeError(format!(
+        return Err(IntentError::runtime_error(format!(
             "[auth] Refresh error: {} - {}",
             error.as_str().unwrap_or("unknown"),
             error_desc
@@ -840,7 +842,7 @@ pub fn refresh_access_token(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            IntentError::RuntimeError("[auth] No access_token in refresh response".to_string())
+            IntentError::runtime_error("[auth] No access_token in refresh response".to_string())
         })?;
 
     // Default expires_in to 1 hour if not provided
@@ -896,15 +898,15 @@ pub fn client_credentials_grant(
         .form(&params)
         .send()
         .map_err(|e| {
-            IntentError::RuntimeError(format!("[auth] Client credentials grant failed: {}", e))
+            IntentError::runtime_error(format!("[auth] Client credentials grant failed: {}", e))
         })?;
 
     let body = response.text().map_err(|e| {
-        IntentError::RuntimeError(format!("[auth] Failed to read token response: {}", e))
+        IntentError::runtime_error(format!("[auth] Failed to read token response: {}", e))
     })?;
 
     let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-        IntentError::RuntimeError(format!("[auth] Failed to parse token response: {}", e))
+        IntentError::runtime_error(format!("[auth] Failed to parse token response: {}", e))
     })?;
 
     if let Some(error) = json.get("error") {
@@ -912,7 +914,7 @@ pub fn client_credentials_grant(
             .get("error_description")
             .and_then(|v| v.as_str())
             .unwrap_or("Unknown error");
-        return Err(IntentError::RuntimeError(format!(
+        return Err(IntentError::runtime_error(format!(
             "[auth] Client credentials error: {} - {}",
             error.as_str().unwrap_or("unknown"),
             error_desc
@@ -924,7 +926,7 @@ pub fn client_credentials_grant(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            IntentError::RuntimeError("[auth] No access_token in response".to_string())
+            IntentError::runtime_error("[auth] No access_token in response".to_string())
         })?;
 
     // Default expires_in to 1 hour if not provided
@@ -954,17 +956,17 @@ pub fn client_credentials_grant(
 pub fn decode_id_token(id_token: &str) -> Result<HashMap<String, Value>> {
     let parts: Vec<&str> = id_token.split('.').collect();
     if parts.len() != 3 {
-        return Err(IntentError::RuntimeError(
+        return Err(IntentError::runtime_error(
             "[auth] Invalid ID token format".to_string(),
         ));
     }
 
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(parts[1])
-        .map_err(|e| IntentError::RuntimeError(format!("[auth] ID token decode error: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("[auth] ID token decode error: {}", e)))?;
 
     let json: serde_json::Value = serde_json::from_slice(&payload)
-        .map_err(|e| IntentError::RuntimeError(format!("[auth] ID token parse error: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("[auth] ID token parse error: {}", e)))?;
 
     json_to_value_map(&json)
 }
@@ -988,11 +990,11 @@ pub fn validate_id_token_claims(
                 }
             })
             .ok_or_else(|| {
-                IntentError::RuntimeError("[auth] ID token missing issuer".to_string())
+                IntentError::runtime_error("[auth] ID token missing issuer".to_string())
             })?;
 
         if iss != expected_iss {
-            return Err(IntentError::RuntimeError(format!(
+            return Err(IntentError::runtime_error(format!(
                 "[auth] ID token issuer mismatch: expected {}, got {}",
                 expected_iss, iss
             )));
@@ -1013,7 +1015,7 @@ pub fn validate_id_token_claims(
         _ => false,
     };
     if !aud_valid {
-        return Err(IntentError::RuntimeError(
+        return Err(IntentError::runtime_error(
             "[auth] ID token audience mismatch".to_string(),
         ));
     }
@@ -1030,11 +1032,11 @@ pub fn validate_id_token_claims(
                 }
             })
             .ok_or_else(|| {
-                IntentError::RuntimeError("[auth] ID token missing nonce".to_string())
+                IntentError::runtime_error("[auth] ID token missing nonce".to_string())
             })?;
 
         if !constant_time_compare(nonce, expected_n) {
-            return Err(IntentError::RuntimeError(
+            return Err(IntentError::runtime_error(
                 "[auth] ID token nonce mismatch (possible replay attack)".to_string(),
             ));
         }
@@ -1050,11 +1052,11 @@ pub fn validate_id_token_claims(
                 None
             }
         })
-        .ok_or_else(|| IntentError::RuntimeError("[auth] ID token missing expiry".to_string()))?;
+        .ok_or_else(|| IntentError::runtime_error("[auth] ID token missing expiry".to_string()))?;
 
     let now = chrono::Utc::now().timestamp();
     if now > exp {
-        return Err(IntentError::RuntimeError(
+        return Err(IntentError::runtime_error(
             "[auth] ID token expired".to_string(),
         ));
     }
@@ -1080,14 +1082,16 @@ pub fn fetch_userinfo(
         .header("Accept", "application/json")
         .header("User-Agent", "NTNT/0.3.13") // Required by GitHub
         .send()
-        .map_err(|e| IntentError::RuntimeError(format!("[auth] Userinfo request failed: {}", e)))?;
+        .map_err(|e| {
+            IntentError::runtime_error(format!("[auth] Userinfo request failed: {}", e))
+        })?;
 
     let body = response.text().map_err(|e| {
-        IntentError::RuntimeError(format!("[auth] Failed to read userinfo response: {}", e))
+        IntentError::runtime_error(format!("[auth] Failed to read userinfo response: {}", e))
     })?;
 
     let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-        IntentError::RuntimeError(format!(
+        IntentError::runtime_error(format!(
             "[auth] Failed to parse userinfo: {} - Body: {}",
             e, body
         ))
@@ -1117,18 +1121,18 @@ pub fn introspect_token(
         .form(&params)
         .send()
         .map_err(|e| {
-            IntentError::RuntimeError(format!("[auth] Token introspection failed: {}", e))
+            IntentError::runtime_error(format!("[auth] Token introspection failed: {}", e))
         })?;
 
     let body = response.text().map_err(|e| {
-        IntentError::RuntimeError(format!(
+        IntentError::runtime_error(format!(
             "[auth] Failed to read introspection response: {}",
             e
         ))
     })?;
 
     let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
-        IntentError::RuntimeError(format!(
+        IntentError::runtime_error(format!(
             "[auth] Failed to parse introspection response: {}",
             e
         ))
@@ -1146,7 +1150,7 @@ fn json_to_value_map(json: &serde_json::Value) -> Result<HashMap<String, Value>>
             }
             Ok(map)
         }
-        _ => Err(IntentError::TypeError("Expected JSON object".to_string())),
+        _ => Err(IntentError::type_error("Expected JSON object".to_string())),
     }
 }
 
@@ -3631,12 +3635,12 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
     };
 
     let provider_name = provider_name.ok_or_else(|| {
-        IntentError::RuntimeError("[auth] No provider specified in /auth/{provider}".to_string())
+        IntentError::runtime_error("[auth] No provider specified in /auth/{provider}".to_string())
     })?;
 
     // Get auth config
     let config = get_auth_config().ok_or_else(|| {
-        IntentError::RuntimeError(
+        IntentError::runtime_error(
             "[auth] Auth not configured - call enable_auth() first".to_string(),
         )
     })?;
@@ -3658,7 +3662,7 @@ pub fn handle_auth_start(args: &[Value]) -> Result<Value> {
                     provider_name, available_providers()
                 )
             };
-            IntentError::RuntimeError(msg)
+            IntentError::runtime_error(msg)
         })?;
 
     // Generate state for CSRF protection
@@ -3728,7 +3732,7 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
     let req = &args[0];
 
     let config = get_auth_config()
-        .ok_or_else(|| IntentError::RuntimeError("[auth] Auth not configured".to_string()))?;
+        .ok_or_else(|| IntentError::runtime_error("[auth] Auth not configured".to_string()))?;
 
     // Extract code and state from query params
     let (code, state, error) = if let Value::Map(req_map) = req {
@@ -3858,7 +3862,7 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
         },
         config.session_ttl,
     )
-    .map_err(|e| IntentError::RuntimeError(format!("[auth] Failed to create session: {}", e)))?;
+    .map_err(|e| IntentError::runtime_error(format!("[auth] Failed to create session: {}", e)))?;
     let session_id = session.id.clone();
     store_session(session);
 
@@ -3969,7 +3973,7 @@ pub fn value_to_provider(value: &Value) -> Result<ProviderConfig> {
             let get_str = |key: &str| -> Result<String> {
                 match map.get(key) {
                     Some(Value::String(s)) => Ok(s.clone()),
-                    _ => Err(IntentError::TypeError(format!(
+                    _ => Err(IntentError::type_error(format!(
                         "Provider {} must be a string",
                         key
                     ))),
@@ -4052,7 +4056,9 @@ pub fn value_to_provider(value: &Value) -> Result<ProviderConfig> {
                 supports_oidc: get_bool("supports_oidc", false),
             })
         }
-        _ => Err(IntentError::TypeError("Provider must be a map".to_string())),
+        _ => Err(IntentError::type_error(
+            "Provider must be a map".to_string(),
+        )),
     }
 }
 
@@ -4091,14 +4097,14 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] oauth() requires at least a provider name".to_string()
                     ));
                 }
 
                 let provider_name = match &args[0] {
                     Value::String(s) => s.clone(),
-                    _ => return Err(IntentError::TypeError(
+                    _ => return Err(IntentError::type_error(
                         "[auth] oauth() first argument must be a provider name string".to_string()
                     )),
                 };
@@ -4109,7 +4115,7 @@ pub fn init() -> HashMap<String, Value> {
                         // Signature: oauth(provider, client_id, client_secret, options?)
                         let client_secret = match args.get(2) {
                             Some(Value::String(s)) => s.clone(),
-                            Some(_) => return Err(IntentError::TypeError(
+                            Some(_) => return Err(IntentError::type_error(
                                 "[auth] oauth() client_secret must be a string".to_string()
                             )),
                             None => String::new(), // Allow empty for PKCE public clients
@@ -4117,7 +4123,7 @@ pub fn init() -> HashMap<String, Value> {
 
                         let options = match args.get(3) {
                             Some(Value::Map(m)) => Some(m.clone()),
-                            Some(_) => return Err(IntentError::TypeError(
+                            Some(_) => return Err(IntentError::type_error(
                                 "[auth] oauth() options must be a map".to_string()
                             )),
                             None => None,
@@ -4150,7 +4156,7 @@ pub fn init() -> HashMap<String, Value> {
                                         provider_name, available_providers(), provider_name
                                     )
                                 };
-                                return Err(IntentError::RuntimeError(msg));
+                                return Err(IntentError::runtime_error(msg));
                             };
 
                         // Check if PKCE is explicitly requested or required
@@ -4161,7 +4167,7 @@ pub fn init() -> HashMap<String, Value> {
                             .unwrap_or(provider_name == "twitter"); // Twitter requires PKCE
 
                         if use_pkce && !supports_pkce {
-                            return Err(IntentError::RuntimeError(format!(
+                            return Err(IntentError::runtime_error(format!(
                                 "[auth] Provider \"{}\" does not support PKCE",
                                 provider_name
                             )));
@@ -4228,7 +4234,7 @@ pub fn init() -> HashMap<String, Value> {
                         };
 
                         let client_id = get_str("client_id").ok_or_else(|| {
-                            IntentError::TypeError(format!(
+                            IntentError::type_error(format!(
                                 "[auth] Custom provider \"{}\" missing required field \"client_id\"",
                                 provider_name
                             ))
@@ -4237,14 +4243,14 @@ pub fn init() -> HashMap<String, Value> {
                         let client_secret = get_str("client_secret").unwrap_or_default();
 
                         let authorize_url = get_str("authorize_url").ok_or_else(|| {
-                            IntentError::TypeError(format!(
+                            IntentError::type_error(format!(
                                 "[auth] Custom provider \"{}\" missing required field \"authorize_url\"",
                                 provider_name
                             ))
                         })?;
 
                         let token_url = get_str("token_url").ok_or_else(|| {
-                            IntentError::TypeError(format!(
+                            IntentError::type_error(format!(
                                 "[auth] Custom provider \"{}\" missing required field \"token_url\"",
                                 provider_name
                             ))
@@ -4287,10 +4293,10 @@ pub fn init() -> HashMap<String, Value> {
 
                         Ok(provider_to_value(&config))
                     }
-                    Some(_) => Err(IntentError::TypeError(
+                    Some(_) => Err(IntentError::type_error(
                         "[auth] oauth() second argument must be client_id (string) or config (map)".to_string()
                     )),
-                    None => Err(IntentError::TypeError(
+                    None => Err(IntentError::type_error(
                         "[auth] oauth() requires credentials or configuration".to_string()
                     )),
                 }
@@ -4322,7 +4328,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] oauth_discover() requires issuer and client_id".to_string(),
                     ));
                 }
@@ -4330,7 +4336,7 @@ pub fn init() -> HashMap<String, Value> {
                 let issuer = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] oauth_discover() issuer must be a string".to_string(),
                         ))
                     }
@@ -4339,7 +4345,7 @@ pub fn init() -> HashMap<String, Value> {
                 let client_id = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] oauth_discover() client_id must be a string".to_string(),
                         ))
                     }
@@ -4458,7 +4464,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 4,
             func: |args| {
                 if args.len() < 4 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] oauth_m2m() requires token_url, client_id, client_secret, scopes"
                             .to_string(),
                     ));
@@ -4467,7 +4473,7 @@ pub fn init() -> HashMap<String, Value> {
                 let token_url = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] token_url must be a string".to_string(),
                         ))
                     }
@@ -4475,7 +4481,7 @@ pub fn init() -> HashMap<String, Value> {
                 let client_id = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] client_id must be a string".to_string(),
                         ))
                     }
@@ -4483,7 +4489,7 @@ pub fn init() -> HashMap<String, Value> {
                 let client_secret = match &args[2] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] client_secret must be a string".to_string(),
                         ))
                     }
@@ -4500,7 +4506,7 @@ pub fn init() -> HashMap<String, Value> {
                         })
                         .collect(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] scopes must be an array".to_string(),
                         ))
                     }
@@ -4549,25 +4555,25 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] oauth_refresh() requires a request".to_string(),
                     ));
                 }
 
                 let config = get_auth_config().ok_or_else(|| {
-                    IntentError::RuntimeError("[auth] Auth not configured".to_string())
+                    IntentError::runtime_error("[auth] Auth not configured".to_string())
                 })?;
 
                 let session_id = get_session_id_from_request(&args[0]).ok_or_else(|| {
-                    IntentError::RuntimeError("[auth] No session found".to_string())
+                    IntentError::runtime_error("[auth] No session found".to_string())
                 })?;
 
                 let session = get_session_by_id(&session_id).ok_or_else(|| {
-                    IntentError::RuntimeError("[auth] Session expired".to_string())
+                    IntentError::runtime_error("[auth] Session expired".to_string())
                 })?;
 
                 let refresh_token = session.refresh_token.as_ref().ok_or_else(|| {
-                    IntentError::RuntimeError(
+                    IntentError::runtime_error(
                         "[auth] No refresh token stored (enable store_tokens in auth config)"
                             .to_string(),
                     )
@@ -4578,7 +4584,7 @@ pub fn init() -> HashMap<String, Value> {
                     .iter()
                     .find(|p| p.name == session.provider)
                     .ok_or_else(|| {
-                        IntentError::RuntimeError(format!(
+                        IntentError::runtime_error(format!(
                             "[auth] Provider {} not found",
                             session.provider
                         ))
@@ -4628,7 +4634,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] oauth_validate() requires token and options".to_string(),
                     ));
                 }
@@ -4643,7 +4649,7 @@ pub fn init() -> HashMap<String, Value> {
                         }
                     }
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] token must be a string".to_string(),
                         ))
                     }
@@ -4652,7 +4658,7 @@ pub fn init() -> HashMap<String, Value> {
                 let options = match &args[1] {
                     Value::Map(m) => m.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] options must be a map".to_string(),
                         ))
                     }
@@ -4716,26 +4722,26 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 4,
             func: |args| {
                 if args.len() < 4 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] oauth_introspect() requires introspection_url, token, client_id, client_secret".to_string()
                     ));
                 }
 
                 let introspection_url = match &args[0] {
                     Value::String(s) => s.clone(),
-                    _ => return Err(IntentError::TypeError("[auth] introspection_url must be a string".to_string())),
+                    _ => return Err(IntentError::type_error("[auth] introspection_url must be a string".to_string())),
                 };
                 let token = match &args[1] {
                     Value::String(s) => s.clone(),
-                    _ => return Err(IntentError::TypeError("[auth] token must be a string".to_string())),
+                    _ => return Err(IntentError::type_error("[auth] token must be a string".to_string())),
                 };
                 let client_id = match &args[2] {
                     Value::String(s) => s.clone(),
-                    _ => return Err(IntentError::TypeError("[auth] client_id must be a string".to_string())),
+                    _ => return Err(IntentError::type_error("[auth] client_id must be a string".to_string())),
                 };
                 let client_secret = match &args[3] {
                     Value::String(s) => s.clone(),
-                    _ => return Err(IntentError::TypeError("[auth] client_secret must be a string".to_string())),
+                    _ => return Err(IntentError::type_error("[auth] client_secret must be a string".to_string())),
                 };
 
                 match introspect_token(&introspection_url, &token, &client_id, &client_secret) {
@@ -4767,7 +4773,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] get_user() requires a request".to_string(),
                     ));
                 }
@@ -4804,7 +4810,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] get_session() requires a request".to_string(),
                     ));
                 }
@@ -4843,7 +4849,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] session_data() requires a request".to_string(),
                     ));
                 }
@@ -4903,7 +4909,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] validate_csrf() requires a request".to_string(),
                     ));
                 }
@@ -5040,7 +5046,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] set_session() requires request and data".to_string(),
                     ));
                 }
@@ -5048,7 +5054,7 @@ pub fn init() -> HashMap<String, Value> {
                 let data_map = match &args[1] {
                     Value::Map(m) => m.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] set_session() data must be a map".to_string(),
                         ))
                     }
@@ -5139,7 +5145,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] user_sessions() requires a request".to_string(),
                     ));
                 }
@@ -5203,7 +5209,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] logout_all() requires request and keep_current".to_string(),
                     ));
                 }
@@ -5211,7 +5217,7 @@ pub fn init() -> HashMap<String, Value> {
                 let keep_current = match &args[1] {
                     Value::Bool(b) => *b,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] keep_current must be a boolean".to_string(),
                         ))
                     }
@@ -5258,7 +5264,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] csrf_token() requires a request".to_string(),
                     ));
                 }
@@ -5296,7 +5302,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] csrf_field() requires a request".to_string(),
                     ));
                 }
@@ -5340,7 +5346,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] verify_csrf() requires request and token".to_string(),
                     ));
                 }
@@ -5348,7 +5354,7 @@ pub fn init() -> HashMap<String, Value> {
                 let submitted_token = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] token must be a string".to_string(),
                         ))
                     }
@@ -5393,7 +5399,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] jwt_sign() requires claims and secret".to_string(),
                     ));
                 }
@@ -5401,7 +5407,7 @@ pub fn init() -> HashMap<String, Value> {
                 let claims = match &args[0] {
                     Value::Map(m) => m.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] claims must be a map".to_string(),
                         ))
                     }
@@ -5410,7 +5416,7 @@ pub fn init() -> HashMap<String, Value> {
                 let secret = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] secret must be a string".to_string(),
                         ))
                     }
@@ -5491,7 +5497,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] jwt_verify() requires token and secret".to_string(),
                     ));
                 }
@@ -5499,7 +5505,7 @@ pub fn init() -> HashMap<String, Value> {
                 let token = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] token must be a string".to_string(),
                         ))
                     }
@@ -5508,7 +5514,7 @@ pub fn init() -> HashMap<String, Value> {
                 let secret = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] secret must be a string".to_string(),
                         ))
                     }
@@ -5556,7 +5562,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] jwt_decode() requires a token".to_string(),
                     ));
                 }
@@ -5564,7 +5570,7 @@ pub fn init() -> HashMap<String, Value> {
                 let token = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] token must be a string".to_string(),
                         ))
                     }
@@ -5663,7 +5669,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] logout_user() requires a request".to_string(),
                     ));
                 }
@@ -5715,7 +5721,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             func: |args| {
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] enable_auth() requires a providers array".to_string(),
                     ));
                 }
@@ -5724,7 +5730,7 @@ pub fn init() -> HashMap<String, Value> {
                 let providers_arr = match &args[0] {
                     Value::Array(arr) => arr.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] enable_auth() first argument must be an array of providers"
                                 .to_string(),
                         ))
@@ -5734,7 +5740,7 @@ pub fn init() -> HashMap<String, Value> {
                 let options = match args.get(1) {
                     Some(Value::Map(m)) => Some(m.clone()),
                     Some(_) => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] enable_auth() second argument must be an options map"
                                 .to_string(),
                         ))
@@ -5748,7 +5754,7 @@ pub fn init() -> HashMap<String, Value> {
                     match pval {
                         Value::Map(pmap) => {
                             let provider = value_map_to_provider(pmap).map_err(|e| {
-                                IntentError::TypeError(format!(
+                                IntentError::type_error(format!(
                                     "[auth] Invalid provider at index {}: {}",
                                     idx, e
                                 ))
@@ -5756,7 +5762,7 @@ pub fn init() -> HashMap<String, Value> {
                             providers.push(provider);
                         }
                         _ => {
-                            return Err(IntentError::TypeError(format!(
+                            return Err(IntentError::type_error(format!(
                                 "[auth] Provider at index {} must be a map (use oauth() to create)",
                                 idx
                             )));
@@ -5856,7 +5862,7 @@ pub fn init() -> HashMap<String, Value> {
                     SessionStore::Sqlite(path) => {
                         if let Err(e) = init_sqlite_sessions(path) {
                             eprintln!("[auth] Failed to initialize SQLite sessions: {}", e);
-                            return Err(IntentError::RuntimeError(format!(
+                            return Err(IntentError::runtime_error(format!(
                                 "Failed to initialize SQLite session store: {}",
                                 e
                             )));
@@ -5865,7 +5871,7 @@ pub fn init() -> HashMap<String, Value> {
                     SessionStore::Postgres(url) => {
                         if let Err(e) = init_postgres_sessions(url) {
                             eprintln!("[auth] Failed to initialize PostgreSQL sessions: {}", e);
-                            return Err(IntentError::RuntimeError(format!(
+                            return Err(IntentError::runtime_error(format!(
                                 "Failed to initialize PostgreSQL session store: {}",
                                 e
                             )));
@@ -5874,7 +5880,7 @@ pub fn init() -> HashMap<String, Value> {
                     SessionStore::Redis(url) => {
                         if let Err(e) = init_redis_sessions(url) {
                             eprintln!("[auth] Failed to initialize Redis sessions: {}", e);
-                            return Err(IntentError::RuntimeError(format!(
+                            return Err(IntentError::runtime_error(format!(
                                 "Failed to initialize Redis session store: {}",
                                 e
                             )));
@@ -5948,7 +5954,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] oauth_start() requires (provider, redirect_uri)".to_string(),
                     ));
                 }
@@ -5964,7 +5970,7 @@ pub fn init() -> HashMap<String, Value> {
                 let redirect_uri = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] redirect_uri must be a string".to_string(),
                         ))
                     }
@@ -6036,7 +6042,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 4,
             func: |args| {
                 if args.len() < 4 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] oauth_exchange() requires (provider, code, state, redirect_uri)"
                             .to_string(),
                     ));
@@ -6053,7 +6059,7 @@ pub fn init() -> HashMap<String, Value> {
                 let code = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] code must be a string".to_string(),
                         ))
                     }
@@ -6062,7 +6068,7 @@ pub fn init() -> HashMap<String, Value> {
                 let state = match &args[2] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] state must be a string".to_string(),
                         ))
                     }
@@ -6071,7 +6077,7 @@ pub fn init() -> HashMap<String, Value> {
                 let redirect_uri = match &args[3] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] redirect_uri must be a string".to_string(),
                         ))
                     }
@@ -6159,7 +6165,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             func: |args| {
                 if args.len() < 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] create_session_from_oauth() requires (provider_name, user_info, tokens?)".to_string()
                     ));
                 }
@@ -6171,12 +6177,12 @@ pub fn init() -> HashMap<String, Value> {
 
                 let provider_name = match &args[0] {
                     Value::String(s) => s.clone(),
-                    _ => return Err(IntentError::TypeError("[auth] provider_name must be a string".to_string())),
+                    _ => return Err(IntentError::type_error("[auth] provider_name must be a string".to_string())),
                 };
 
                 let user_info = match &args[1] {
                     Value::Map(m) => m.clone(),
-                    _ => return Err(IntentError::TypeError("[auth] user_info must be a map".to_string())),
+                    _ => return Err(IntentError::type_error("[auth] user_info must be a map".to_string())),
                 };
 
                 // Parse optional tokens
@@ -6380,7 +6386,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| {
                 eprintln!("[DEPRECATED] hash_password() in std/auth is deprecated. Use hash_password() from std/crypto instead.");
                 if args.is_empty() {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] hash_password() requires a password".to_string(),
                     ));
                 }
@@ -6388,7 +6394,7 @@ pub fn init() -> HashMap<String, Value> {
                 let password = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] password must be a string".to_string(),
                         ))
                     }
@@ -6424,7 +6430,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| {
                 eprintln!("[DEPRECATED] verify_password() in std/auth is deprecated. Use verify_password() from std/crypto instead.");
                 if args.len() < 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] verify_password() requires (password, hash)".to_string(),
                     ));
                 }
@@ -6432,7 +6438,7 @@ pub fn init() -> HashMap<String, Value> {
                 let password = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] password must be a string".to_string(),
                         ))
                     }
@@ -6441,7 +6447,7 @@ pub fn init() -> HashMap<String, Value> {
                 let hash = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] hash must be a string".to_string(),
                         ))
                     }
@@ -6501,7 +6507,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 3,
             func: |args| {
                 if args.len() < 3 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] totp_uri() requires (secret, email, issuer)".to_string(),
                     ));
                 }
@@ -6509,7 +6515,7 @@ pub fn init() -> HashMap<String, Value> {
                 let secret = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] secret must be a string".to_string(),
                         ))
                     }
@@ -6518,7 +6524,7 @@ pub fn init() -> HashMap<String, Value> {
                 let email = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] email must be a string".to_string(),
                         ))
                     }
@@ -6527,7 +6533,7 @@ pub fn init() -> HashMap<String, Value> {
                 let issuer = match &args[2] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] issuer must be a string".to_string(),
                         ))
                     }
@@ -6563,7 +6569,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() < 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "[auth] verify_totp() requires (secret, code)".to_string(),
                     ));
                 }
@@ -6571,7 +6577,7 @@ pub fn init() -> HashMap<String, Value> {
                 let secret = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] secret must be a string".to_string(),
                         ))
                     }
@@ -6580,7 +6586,7 @@ pub fn init() -> HashMap<String, Value> {
                 let code = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "[auth] code must be a string".to_string(),
                         ))
                     }

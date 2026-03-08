@@ -1160,7 +1160,7 @@ pub fn init() -> HashMap<String, Value> {
                         );
                         Ok(create_response_value(200, headers, body.clone()))
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "text() requires a string".to_string(),
                     )),
                 }
@@ -1198,7 +1198,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 3,
             func: |args| {
                 if args.is_empty() || args.len() > 3 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "html() requires 1 to 3 arguments (body, optional status_code, optional headers)".to_string(),
                     ));
                 }
@@ -1206,7 +1206,7 @@ pub fn init() -> HashMap<String, Value> {
                 let body = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "html() body must be a string".to_string(),
                         ))
                     }
@@ -1216,7 +1216,7 @@ pub fn init() -> HashMap<String, Value> {
                     match &args[1] {
                         Value::Int(code) => *code,
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "html() status code must be an integer".to_string(),
                             ))
                         }
@@ -1251,7 +1251,7 @@ pub fn init() -> HashMap<String, Value> {
                             }
                         }
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "html() headers must be a map".to_string(),
                             ))
                         }
@@ -1290,7 +1290,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 3,
             func: |args| {
                 if args.is_empty() || args.len() > 3 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "json() requires 1 to 3 arguments (data, optional status_code, optional headers)".to_string(),
                     ));
                 }
@@ -1299,7 +1299,7 @@ pub fn init() -> HashMap<String, Value> {
                     match &args[1] {
                         Value::Int(code) => *code,
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "json() status code must be an integer".to_string(),
                             ))
                         }
@@ -1345,7 +1345,7 @@ pub fn init() -> HashMap<String, Value> {
                             }
                         }
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "json() headers must be a map".to_string(),
                             ))
                         }
@@ -1387,7 +1387,7 @@ pub fn init() -> HashMap<String, Value> {
                     );
                     Ok(create_response_value(*code, headers, body.clone()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "status() requires int and string".to_string(),
                 )),
             },
@@ -1425,7 +1425,7 @@ pub fn init() -> HashMap<String, Value> {
                     headers.insert("location".to_string(), Value::String(url.clone()));
                     Ok(create_response_value(302, headers, String::new()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "redirect() requires a URL string".to_string(),
                 )),
             },
@@ -1462,7 +1462,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "redirect_safe() requires 1 or 2 arguments (url, optional fallback)"
                             .to_string(),
                     ));
@@ -1471,7 +1471,7 @@ pub fn init() -> HashMap<String, Value> {
                 let url = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "redirect_safe() requires a URL string".to_string(),
                         ))
                     }
@@ -1558,7 +1558,7 @@ pub fn init() -> HashMap<String, Value> {
                     );
                     Ok(create_response_value(500, headers, msg.clone()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "error() requires a string".to_string(),
                 )),
             },
@@ -1593,25 +1593,25 @@ pub fn init() -> HashMap<String, Value> {
         max_arity: 3,
         func: |args| {
             if args.len() < 2 || args.len() > 3 {
-                return Err(IntentError::TypeError(
+                return Err(IntentError::type_error(
                     "static_file() requires 2-3 arguments (content, content_type, optional max_age)".to_string()
                 ));
             }
 
             let content = match &args[0] {
                 Value::String(s) => s.clone(),
-                _ => return Err(IntentError::TypeError("static_file() content must be a string".to_string())),
+                _ => return Err(IntentError::type_error("static_file() content must be a string".to_string())),
             };
 
             let content_type = match &args[1] {
                 Value::String(s) => s.clone(),
-                _ => return Err(IntentError::TypeError("static_file() content_type must be a string".to_string())),
+                _ => return Err(IntentError::type_error("static_file() content_type must be a string".to_string())),
             };
 
             let max_age = if args.len() == 3 {
                 match &args[2] {
                     Value::Int(n) => *n,
-                    _ => return Err(IntentError::TypeError("static_file() max_age must be an integer".to_string())),
+                    _ => return Err(IntentError::type_error("static_file() max_age must be an integer".to_string())),
                 }
             } else {
                 3600 // Default 1 hour
@@ -1659,7 +1659,7 @@ pub fn init() -> HashMap<String, Value> {
                 let status = match &args[0] {
                     Value::Int(code) => *code,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "response() status must be an integer".to_string(),
                         ))
                     }
@@ -1668,7 +1668,7 @@ pub fn init() -> HashMap<String, Value> {
                 let custom_headers = match &args[1] {
                     Value::Map(map) => map.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "response() headers must be a map".to_string(),
                         ))
                     }
@@ -1677,7 +1677,7 @@ pub fn init() -> HashMap<String, Value> {
                 let body = match &args[2] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "response() body must be a string".to_string(),
                         ))
                     }
@@ -1722,14 +1722,14 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Map(map) => match map.get("body") {
                         Some(Value::String(b)) => b.clone(),
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "parse_json() requires a request with body".to_string(),
                             ))
                         }
                     },
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "parse_json() requires a request map or body string".to_string(),
                         ))
                     }
@@ -1775,14 +1775,14 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Map(map) => match map.get("body") {
                         Some(Value::String(b)) => b.clone(),
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "parse_form() requires a request with body".to_string(),
                             ))
                         }
                     },
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "parse_form() requires a request map or body string".to_string(),
                         ))
                     }
@@ -1858,7 +1858,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 3,
             func: |args| {
                 if args.len() < 2 || args.len() > 3 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "set_cookie() requires 2 or 3 arguments (name, value, optional options)"
                             .to_string(),
                     ));
@@ -1867,7 +1867,7 @@ pub fn init() -> HashMap<String, Value> {
                 let name = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "set_cookie() name must be a string".to_string(),
                         ))
                     }
@@ -1875,7 +1875,7 @@ pub fn init() -> HashMap<String, Value> {
 
                 // Validate cookie name (RFC 6265)
                 if !is_valid_cookie_name(&name) {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "set_cookie() name contains invalid characters (must be alphanumeric, -, _, or .)".to_string(),
                     ));
                 }
@@ -1883,7 +1883,7 @@ pub fn init() -> HashMap<String, Value> {
                 let value = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "set_cookie() value must be a string".to_string(),
                         ))
                     }
@@ -1893,7 +1893,7 @@ pub fn init() -> HashMap<String, Value> {
                     match &args[2] {
                         Value::Map(m) => m.clone(),
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "set_cookie() options must be a map".to_string(),
                             ))
                         }
@@ -1937,7 +1937,7 @@ pub fn init() -> HashMap<String, Value> {
                         _ => HashMap::new(),
                     },
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "get_cookie() requires a request map".to_string(),
                         ))
                     }
@@ -1946,7 +1946,7 @@ pub fn init() -> HashMap<String, Value> {
                 let name = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "get_cookie() name must be a string".to_string(),
                         ))
                     }
@@ -2005,7 +2005,7 @@ pub fn init() -> HashMap<String, Value> {
                         _ => HashMap::new(),
                     },
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "get_cookies() requires a request map".to_string(),
                         ))
                     }
@@ -2060,7 +2060,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "delete_cookie() requires 1 or 2 arguments (name, optional options)"
                             .to_string(),
                     ));
@@ -2069,7 +2069,7 @@ pub fn init() -> HashMap<String, Value> {
                 let name = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "delete_cookie() name must be a string".to_string(),
                         ))
                     }
@@ -2079,7 +2079,7 @@ pub fn init() -> HashMap<String, Value> {
                     match &args[1] {
                         Value::Map(m) => m.clone(),
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "delete_cookie() options must be a map".to_string(),
                             ))
                         }
@@ -2125,7 +2125,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 4,
             func: |args| {
                 if args.len() < 3 || args.len() > 4 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "with_cookie() requires 3 or 4 arguments (response, name, value, optional options)"
                             .to_string(),
                     ));
@@ -2134,7 +2134,7 @@ pub fn init() -> HashMap<String, Value> {
                 let mut response = match &args[0] {
                     Value::Map(m) => m.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "with_cookie() response must be a map".to_string(),
                         ))
                     }
@@ -2143,7 +2143,7 @@ pub fn init() -> HashMap<String, Value> {
                 let name = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "with_cookie() name must be a string".to_string(),
                         ))
                     }
@@ -2152,7 +2152,7 @@ pub fn init() -> HashMap<String, Value> {
                 let value = match &args[2] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "with_cookie() value must be a string".to_string(),
                         ))
                     }
@@ -2162,7 +2162,7 @@ pub fn init() -> HashMap<String, Value> {
                     match &args[3] {
                         Value::Map(m) => m.clone(),
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "with_cookie() options must be a map".to_string(),
                             ))
                         }
@@ -2277,7 +2277,7 @@ pub fn init() -> HashMap<String, Value> {
                         (content_type, body)
                     }
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "parse_multipart() requires a request map".to_string(),
                         ))
                     }
@@ -2354,7 +2354,7 @@ pub fn init() -> HashMap<String, Value> {
                         }
                     },
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "save_upload() first argument must be a file map".to_string(),
                         ))
                     }
@@ -2363,7 +2363,7 @@ pub fn init() -> HashMap<String, Value> {
                 let path = match &args[1] {
                     Value::String(p) => p.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "save_upload() second argument must be a path string".to_string(),
                         ))
                     }
@@ -2737,7 +2737,7 @@ fn parse_cookie_header(header: &str) -> HashMap<String, String> {
 pub fn start_server(port: u16) -> Result<tiny_http::Server> {
     let addr = format!("0.0.0.0:{}", port);
     tiny_http::Server::http(&addr)
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to start server: {}", e)))
+        .map_err(|e| IntentError::runtime_error(format!("Failed to start server: {}", e)))
 }
 
 /// Start the HTTP server with timeout support (for test mode)
@@ -2748,7 +2748,7 @@ pub fn start_server_with_timeout(
 ) -> Result<tiny_http::Server> {
     let addr = format!("127.0.0.1:{}", port);
     tiny_http::Server::http(&addr)
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to start test server: {}", e)))
+        .map_err(|e| IntentError::runtime_error(format!("Failed to start test server: {}", e)))
 }
 
 /// Read request body and create request Value
@@ -2768,7 +2768,7 @@ pub fn process_request(
         .and_then(|h| h.value.as_str().parse::<usize>().ok())
     {
         if content_length > max_size {
-            return Err(IntentError::RuntimeError(format!(
+            return Err(IntentError::runtime_error(format!(
                 "Request body too large: {} bytes exceeds limit of {} bytes. \
                  Configure with NTNT_MAX_BODY_SIZE environment variable.",
                 content_length, max_size
@@ -2784,7 +2784,7 @@ pub fn process_request(
     match limited_reader.read_to_string(&mut body_string) {
         Ok(n) => {
             if n > max_size {
-                return Err(IntentError::RuntimeError(format!(
+                return Err(IntentError::runtime_error(format!(
                     "Request body too large: {} bytes exceeds limit of {} bytes. \
                      Configure with NTNT_MAX_BODY_SIZE environment variable.",
                     n, max_size
@@ -2792,7 +2792,7 @@ pub fn process_request(
             }
         }
         Err(e) => {
-            return Err(IntentError::RuntimeError(format!(
+            return Err(IntentError::runtime_error(format!(
                 "Failed to read request body: {}",
                 e
             )));
@@ -2829,7 +2829,11 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
 
             (status, headers, body)
         }
-        _ => return Err(IntentError::TypeError("Response must be a map".to_string())),
+        _ => {
+            return Err(IntentError::type_error(
+                "Response must be a map".to_string(),
+            ))
+        }
     };
 
     // Add security headers if enabled (apps can override by setting headers explicitly)
@@ -2901,7 +2905,7 @@ pub fn send_response(request: tiny_http::Request, response: &Value) -> Result<()
 
     request
         .respond(response_builder)
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to send response: {}", e)))
+        .map_err(|e| IntentError::runtime_error(format!("Failed to send response: {}", e)))
 }
 
 /// Create an error response
@@ -3139,16 +3143,16 @@ pub fn serve_static_file(file_path: &str) -> Result<Value> {
     {
         // Text files - read as string
         fs::read_to_string(path)
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to read file: {}", e)))?
+            .map_err(|e| IntentError::runtime_error(format!("Failed to read file: {}", e)))?
     } else {
         // Binary files - read as bytes and encode as base64 or raw
         // For now, we'll read as lossy UTF-8 (works for most text, not ideal for binary)
         // A proper solution would need binary response support
         let mut file = fs::File::open(path)
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to open file: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Failed to open file: {}", e)))?;
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer)
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to read file: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Failed to read file: {}", e)))?;
 
         // For binary files, we need to handle them differently
         // For now, return raw bytes (this works with tiny_http's response)
@@ -3185,7 +3189,7 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
 
     // Generate ETag from file metadata (size + mtime)
     let metadata = fs::metadata(path)
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to stat file: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to stat file: {}", e)))?;
     let etag = if let Ok(mtime) = metadata.modified() {
         let duration = mtime
             .duration_since(std::time::UNIX_EPOCH)
@@ -3210,19 +3214,19 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
     if let Some(ref client_etag) = if_none_match {
         if client_etag == &etag || client_etag == "*" {
             let etag_header = tiny_http::Header::from_bytes(b"ETag", etag.as_bytes())
-                .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+                .map_err(|_| IntentError::runtime_error("Invalid header".to_string()))?;
             let cache_header = tiny_http::Header::from_bytes(
                 b"Cache-Control",
                 sync_cache_control_for(file_path).as_bytes(),
             )
-            .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+            .map_err(|_| IntentError::runtime_error("Invalid header".to_string()))?;
             let response = tiny_http::Response::from_data(Vec::<u8>::new())
                 .with_status_code(304)
                 .with_header(etag_header)
                 .with_header(cache_header);
-            return request
-                .respond(response)
-                .map_err(|e| IntentError::RuntimeError(format!("Failed to send response: {}", e)));
+            return request.respond(response).map_err(|e| {
+                IntentError::runtime_error(format!("Failed to send response: {}", e))
+            });
         }
     }
 
@@ -3231,25 +3235,25 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
 
     // Open and read the file
     let mut file = File::open(path)
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to open file: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to open file: {}", e)))?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to read file: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to read file: {}", e)))?;
 
     // Build response with proper headers
     let content_type = tiny_http::Header::from_bytes(b"Content-Type", mime_type.as_bytes())
-        .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+        .map_err(|_| IntentError::runtime_error("Invalid header".to_string()))?;
     let cache_control = tiny_http::Header::from_bytes(
         b"Cache-Control",
         sync_cache_control_for(file_path).as_bytes(),
     )
-    .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+    .map_err(|_| IntentError::runtime_error("Invalid header".to_string()))?;
     let etag_header = tiny_http::Header::from_bytes(b"ETag", etag.as_bytes())
-        .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+        .map_err(|_| IntentError::runtime_error("Invalid header".to_string()))?;
     let connection_close = tiny_http::Header::from_bytes(b"Connection", b"close")
-        .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+        .map_err(|_| IntentError::runtime_error("Invalid header".to_string()))?;
     let server_header = tiny_http::Header::from_bytes(b"Server", b"ntnt-http")
-        .map_err(|_| IntentError::RuntimeError("Invalid header".to_string()))?;
+        .map_err(|_| IntentError::runtime_error("Invalid header".to_string()))?;
 
     let response = tiny_http::Response::from_data(buffer)
         .with_status_code(200)
@@ -3261,7 +3265,7 @@ pub fn send_static_response(request: tiny_http::Request, file_path: &str) -> Res
 
     request
         .respond(response)
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to send response: {}", e)))
+        .map_err(|e| IntentError::runtime_error(format!("Failed to send response: {}", e)))
 }
 
 /// Returns appropriate Cache-Control value based on file type (sync server).

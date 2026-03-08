@@ -36,7 +36,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(content) => Ok(Value::ok(Value::String(content))),
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "read_file() requires a string path".to_string(),
                 )),
             },
@@ -72,7 +72,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "read_bytes() requires a string path".to_string(),
                 )),
             },
@@ -106,7 +106,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "write_file() requires path and content strings".to_string(),
                 )),
             },
@@ -151,7 +151,7 @@ pub fn init() -> HashMap<String, Value> {
                             Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                         }
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "append_file() requires path and content strings".to_string(),
                     )),
                 }
@@ -181,7 +181,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).exists())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "exists() requires a string path".to_string(),
                 )),
             },
@@ -210,7 +210,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).is_file())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_file() requires a string path".to_string(),
                 )),
             },
@@ -238,7 +238,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).is_dir())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_dir() requires a string path".to_string(),
                 )),
             },
@@ -271,7 +271,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "mkdir() requires a string path".to_string(),
                 )),
             },
@@ -303,7 +303,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "mkdir_all() requires a string path".to_string(),
                 )),
             },
@@ -342,7 +342,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "readdir() requires a string path".to_string(),
                 )),
             },
@@ -374,7 +374,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "remove() requires a string path".to_string(),
                 )),
             },
@@ -407,7 +407,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "remove_dir() requires a string path".to_string(),
                 )),
             },
@@ -440,7 +440,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "remove_dir_all() requires a string path".to_string(),
                 )),
             },
@@ -475,7 +475,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "rename() requires two string paths".to_string(),
                 )),
             },
@@ -509,7 +509,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(bytes) => Ok(Value::ok(Value::Int(bytes as i64))),
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "copy() requires two string paths".to_string(),
                 )),
             },
@@ -541,7 +541,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(meta) => Ok(Value::ok(Value::Int(meta.len() as i64))),
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "file_size() requires a string path".to_string(),
                 )),
             },

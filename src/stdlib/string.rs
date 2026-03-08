@@ -43,7 +43,7 @@ pub fn init() -> HashMap<String, Value> {
                         .collect();
                     Ok(Value::Array(parts))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "split() requires two strings".to_string(),
                 )),
             },
@@ -79,7 +79,7 @@ pub fn init() -> HashMap<String, Value> {
                         .collect();
                     Ok(Value::String(parts.join(delim)))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "join() requires array and string".to_string(),
                 )),
             },
@@ -118,11 +118,11 @@ pub fn init() -> HashMap<String, Value> {
                 }
                 Value::String(s1) => match &args[1] {
                     Value::String(s2) => Ok(Value::String(format!("{}{}", s1, s2))),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "concat() requires strings".to_string(),
                     )),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "concat() requires strings or array of strings".to_string(),
                 )),
             },
@@ -149,13 +149,13 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::Int(n)) => {
                     if *n < 0 {
-                        return Err(IntentError::RuntimeError(
+                        return Err(IntentError::runtime_error(
                             "repeat count must be non-negative".to_string(),
                         ));
                     }
                     Ok(Value::String(s.repeat(*n as usize)))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "repeat() requires string and int".to_string(),
                 )),
             },
@@ -178,7 +178,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "reverse() requires a string".to_string(),
                 )),
             },
@@ -204,7 +204,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim().to_string())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "trim() requires a string".to_string(),
                 )),
             },
@@ -230,7 +230,7 @@ pub fn init() -> HashMap<String, Value> {
                 eprintln!("[DEPRECATED] trim_left() is deprecated. Use trim_start() instead.");
                 match &args[0] {
                     Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "trim_left() requires a string".to_string(),
                     )),
                 }
@@ -257,7 +257,7 @@ pub fn init() -> HashMap<String, Value> {
                 eprintln!("[DEPRECATED] trim_right() is deprecated. Use trim_end() instead.");
                 match &args[0] {
                     Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "trim_right() requires a string".to_string(),
                     )),
                 }
@@ -288,7 +288,7 @@ pub fn init() -> HashMap<String, Value> {
                         s.trim_matches(|c| char_set.contains(&c)).to_string(),
                     ))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "trim_chars() requires two strings".to_string(),
                 )),
             },
@@ -316,7 +316,7 @@ pub fn init() -> HashMap<String, Value> {
                 eprintln!("[DEPRECATED] to_upper() is deprecated. Use upper() instead.");
                 match &args[0] {
                     Value::String(s) => Ok(Value::String(s.to_uppercase())),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "to_upper() requires a string".to_string(),
                     )),
                 }
@@ -343,7 +343,7 @@ pub fn init() -> HashMap<String, Value> {
                 eprintln!("[DEPRECATED] to_lower() is deprecated. Use lower() instead.");
                 match &args[0] {
                     Value::String(s) => Ok(Value::String(s.to_lowercase())),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "to_lower() requires a string".to_string(),
                     )),
                 }
@@ -380,7 +380,7 @@ pub fn init() -> HashMap<String, Value> {
                         }
                     }
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "capitalize() requires a string".to_string(),
                 )),
             },
@@ -420,7 +420,7 @@ pub fn init() -> HashMap<String, Value> {
                         .join(" ");
                     Ok(Value::String(result))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "title() requires a string".to_string(),
                 )),
             },
@@ -459,7 +459,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     Ok(Value::String(result))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "to_snake_case() requires a string".to_string(),
                 )),
             },
@@ -497,7 +497,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     Ok(Value::String(result))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "to_camel_case() requires a string".to_string(),
                 )),
             },
@@ -535,7 +535,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     Ok(Value::String(result))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "to_pascal_case() requires a string".to_string(),
                 )),
             },
@@ -574,7 +574,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     Ok(Value::String(result))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "to_kebab_case() requires a string".to_string(),
                 )),
             },
@@ -634,7 +634,7 @@ pub fn init() -> HashMap<String, Value> {
                             .collect();
                         Ok(Value::String(result.trim_matches('-').to_string()))
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "slugify() requires a string".to_string(),
                     )),
                 }
@@ -664,7 +664,7 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::String(s), Value::String(substr)) => {
                     Ok(Value::Bool(s.contains(substr.as_str())))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "contains() requires two strings".to_string(),
                 )),
             },
@@ -691,7 +691,7 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::String(s), Value::String(prefix)) => {
                     Ok(Value::Bool(s.starts_with(prefix.as_str())))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "starts_with() requires two strings".to_string(),
                 )),
             },
@@ -718,7 +718,7 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::String(s), Value::String(suffix)) => {
                     Ok(Value::Bool(s.ends_with(suffix.as_str())))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "ends_with() requires two strings".to_string(),
                 )),
             },
@@ -746,7 +746,7 @@ pub fn init() -> HashMap<String, Value> {
                     Some(idx) => Ok(Value::Int(idx as i64)),
                     None => Ok(Value::Int(-1)),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "index_of() requires two strings".to_string(),
                 )),
             },
@@ -774,7 +774,7 @@ pub fn init() -> HashMap<String, Value> {
                     Some(idx) => Ok(Value::Int(idx as i64)),
                     None => Ok(Value::Int(-1)),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "last_index_of() requires two strings".to_string(),
                 )),
             },
@@ -801,7 +801,7 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::String(s), Value::String(substr)) => {
                     Ok(Value::Int(s.matches(substr.as_str()).count() as i64))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "count() requires two strings".to_string(),
                 )),
             },
@@ -829,7 +829,7 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::String(s), Value::String(from), Value::String(to)) => {
                     Ok(Value::String(s.replace(from.as_str(), to.as_str())))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "replace() requires three strings".to_string(),
                 )),
             },
@@ -857,7 +857,7 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::String(s), Value::String(from), Value::String(to)) => {
                     Ok(Value::String(s.replacen(from.as_str(), to.as_str(), 1)))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "replace_first() requires three strings".to_string(),
                 )),
             },
@@ -896,7 +896,7 @@ pub fn init() -> HashMap<String, Value> {
                         .collect();
                     Ok(Value::String(result))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "replace_chars() requires three strings".to_string(),
                 )),
             },
@@ -925,7 +925,7 @@ pub fn init() -> HashMap<String, Value> {
                     let result: String = s.chars().filter(|c| !char_set.contains(c)).collect();
                     Ok(Value::String(result))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "remove_chars() requires two strings".to_string(),
                 )),
             },
@@ -954,7 +954,7 @@ pub fn init() -> HashMap<String, Value> {
                     let result: String = s.chars().filter(|c| char_set.contains(c)).collect();
                     Ok(Value::String(result))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "keep_chars() requires two strings".to_string(),
                 )),
             },
@@ -987,13 +987,13 @@ pub fn init() -> HashMap<String, Value> {
                         Ok(re) => Ok(Value::String(
                             re.replace_all(s, replacement.as_str()).to_string(),
                         )),
-                        Err(e) => Err(IntentError::RuntimeError(format!(
+                        Err(e) => Err(IntentError::runtime_error(format!(
                             "Invalid regex pattern: {}",
                             e
                         ))),
                     }
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "replace_pattern() requires three strings".to_string(),
                 )),
             },
@@ -1020,12 +1020,12 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => Ok(Value::Bool(re.is_match(s))),
-                    Err(e) => Err(IntentError::RuntimeError(format!(
+                    Err(e) => Err(IntentError::runtime_error(format!(
                         "Invalid regex pattern: {}",
                         e
                     ))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "matches_pattern() requires two strings".to_string(),
                 )),
             },
@@ -1055,12 +1055,12 @@ pub fn init() -> HashMap<String, Value> {
                         Some(m) => Ok(Value::some(Value::String(m.as_str().to_string()))),
                         None => Ok(Value::none()),
                     },
-                    Err(e) => Err(IntentError::RuntimeError(format!(
+                    Err(e) => Err(IntentError::runtime_error(format!(
                         "Invalid regex pattern: {}",
                         e
                     ))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "find_pattern() requires two strings".to_string(),
                 )),
             },
@@ -1093,12 +1093,12 @@ pub fn init() -> HashMap<String, Value> {
                             .collect();
                         Ok(Value::Array(matches))
                     }
-                    Err(e) => Err(IntentError::RuntimeError(format!(
+                    Err(e) => Err(IntentError::runtime_error(format!(
                         "Invalid regex pattern: {}",
                         e
                     ))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "find_all_pattern() requires two strings".to_string(),
                 )),
             },
@@ -1129,12 +1129,12 @@ pub fn init() -> HashMap<String, Value> {
                             re.split(s).map(|p| Value::String(p.to_string())).collect();
                         Ok(Value::Array(parts))
                     }
-                    Err(e) => Err(IntentError::RuntimeError(format!(
+                    Err(e) => Err(IntentError::runtime_error(format!(
                         "Invalid regex pattern: {}",
                         e
                     ))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "split_pattern() requires two strings".to_string(),
                 )),
             },
@@ -1179,12 +1179,12 @@ pub fn init() -> HashMap<String, Value> {
                         }
                         None => Ok(Value::none()),
                     },
-                    Err(e) => Err(IntentError::RuntimeError(format!(
+                    Err(e) => Err(IntentError::runtime_error(format!(
                         "Invalid regex pattern: {}",
                         e
                     ))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "capture_pattern() requires two strings".to_string(),
                 )),
             },
@@ -1232,12 +1232,12 @@ pub fn init() -> HashMap<String, Value> {
                             .collect();
                         Ok(Value::Array(all_matches))
                     }
-                    Err(e) => Err(IntentError::RuntimeError(format!(
+                    Err(e) => Err(IntentError::runtime_error(format!(
                         "Invalid regex pattern: {}",
                         e
                     ))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "capture_all_pattern() requires two strings".to_string(),
                 )),
             },
@@ -1287,12 +1287,12 @@ pub fn init() -> HashMap<String, Value> {
                         }
                         None => Ok(Value::none()),
                     },
-                    Err(e) => Err(IntentError::RuntimeError(format!(
+                    Err(e) => Err(IntentError::runtime_error(format!(
                         "Invalid regex pattern: {}",
                         e
                     ))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "capture_named_pattern() requires two strings".to_string(),
                 )),
             },
@@ -1325,10 +1325,10 @@ pub fn init() -> HashMap<String, Value> {
                         .nth(idx)
                         .map(|c| Value::String(c.to_string()))
                         .ok_or_else(|| {
-                            IntentError::RuntimeError(format!("Index {} out of bounds", idx))
+                            IntentError::runtime_error(format!("Index {} out of bounds", idx))
                         })
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "char_at() requires string and int".to_string(),
                 )),
             },
@@ -1359,13 +1359,13 @@ pub fn init() -> HashMap<String, Value> {
                     let end = *end as usize;
                     let chars: Vec<char> = s.chars().collect();
                     if start > chars.len() || end > chars.len() || start > end {
-                        return Err(IntentError::RuntimeError(
+                        return Err(IntentError::runtime_error(
                             "Invalid substring range".to_string(),
                         ));
                     }
                     Ok(Value::String(chars[start..end].iter().collect()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "substring() requires string, int, int".to_string(),
                 )),
             },
@@ -1393,7 +1393,7 @@ pub fn init() -> HashMap<String, Value> {
                         s.chars().map(|c| Value::String(c.to_string())).collect();
                     Ok(Value::Array(chars))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "chars() requires a string".to_string(),
                 )),
             },
@@ -1421,7 +1421,7 @@ pub fn init() -> HashMap<String, Value> {
                         s.lines().map(|l| Value::String(l.to_string())).collect();
                     Ok(Value::Array(lines))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "lines() requires a string".to_string(),
                 )),
             },
@@ -1451,7 +1451,7 @@ pub fn init() -> HashMap<String, Value> {
                         .collect();
                     Ok(Value::Array(words))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "words() requires a string".to_string(),
                 )),
             },
@@ -1489,7 +1489,7 @@ pub fn init() -> HashMap<String, Value> {
                         Ok(Value::String(format!("{}{}", truncated, suffix)))
                     }
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "truncate() requires string, int, string".to_string(),
                 )),
             },
@@ -1527,7 +1527,7 @@ pub fn init() -> HashMap<String, Value> {
                         Ok(Value::String(format!("{}{}", padding, s)))
                     }
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "pad_left() requires string, int, string".to_string(),
                 )),
             },
@@ -1563,7 +1563,7 @@ pub fn init() -> HashMap<String, Value> {
                         Ok(Value::String(format!("{}{}", s, padding)))
                     }
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "pad_right() requires string, int, string".to_string(),
                 )),
             },
@@ -1602,7 +1602,7 @@ pub fn init() -> HashMap<String, Value> {
                         Ok(Value::String(format!("{}{}{}", left, s, right)))
                     }
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "center() requires string, int, string".to_string(),
                 )),
             },
@@ -1628,7 +1628,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(s.is_empty())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_empty() requires a string".to_string(),
                 )),
             },
@@ -1652,7 +1652,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(s.trim().is_empty())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_blank() requires a string".to_string(),
                 )),
             },
@@ -1678,7 +1678,7 @@ pub fn init() -> HashMap<String, Value> {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
                 )),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_numeric() requires a string".to_string(),
                 )),
             },
@@ -1704,7 +1704,7 @@ pub fn init() -> HashMap<String, Value> {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
                 )),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_alpha() requires a string".to_string(),
                 )),
             },
@@ -1730,7 +1730,7 @@ pub fn init() -> HashMap<String, Value> {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
                 )),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_alphanumeric() requires a string".to_string(),
                 )),
             },
@@ -1756,7 +1756,7 @@ pub fn init() -> HashMap<String, Value> {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| !c.is_alphabetic() || c.is_lowercase()),
                 )),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_lowercase() requires a string".to_string(),
                 )),
             },
@@ -1782,7 +1782,7 @@ pub fn init() -> HashMap<String, Value> {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| !c.is_alphabetic() || c.is_uppercase()),
                 )),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_uppercase() requires a string".to_string(),
                 )),
             },
@@ -1808,7 +1808,7 @@ pub fn init() -> HashMap<String, Value> {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_whitespace()),
                 )),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_whitespace() requires a string".to_string(),
                 )),
             },
@@ -1838,7 +1838,7 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::String(s), Value::String(pattern)) => {
                     Ok(Value::Bool(simple_glob_match(s, pattern)))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "matches() requires two strings".to_string(),
                 )),
             },
@@ -1868,7 +1868,7 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::String(s), Value::String(from), Value::String(to)) => {
                     Ok(Value::String(s.replace(from.as_str(), to.as_str())))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "replace_all() requires three strings".to_string(),
                 )),
             },
@@ -1892,7 +1892,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.to_uppercase())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "upper() requires a string".to_string(),
                 )),
             },
@@ -1916,7 +1916,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.to_lowercase())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "lower() requires a string".to_string(),
                 )),
             },
@@ -1940,7 +1940,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "trim_start() requires a string".to_string(),
                 )),
             },
@@ -1964,7 +1964,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "trim_end() requires a string".to_string(),
                 )),
             },
@@ -2002,7 +2002,7 @@ pub fn init() -> HashMap<String, Value> {
                         .replace('\'', "&#x27;");
                     Ok(Value::String(escaped))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "html_escape() requires a string argument".to_string(),
                 )),
             },

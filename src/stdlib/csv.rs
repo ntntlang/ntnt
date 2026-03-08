@@ -33,7 +33,7 @@ pub fn init() -> HashMap<String, Value> {
                 let csv_string = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "parse_csv() requires a string".to_string(),
                         ))
                     }
@@ -84,7 +84,7 @@ pub fn init() -> HashMap<String, Value> {
                 let csv_string = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "csv.parse_with_headers() requires a string".to_string(),
                         ))
                     }
@@ -149,7 +149,7 @@ pub fn init() -> HashMap<String, Value> {
                 let rows = match &args[0] {
                     Value::Array(arr) => arr,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "csv.stringify() requires an array".to_string(),
                         ))
                     }
@@ -174,7 +174,7 @@ pub fn init() -> HashMap<String, Value> {
                     let row = match row_value {
                         Value::Array(arr) => arr,
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "csv.stringify: each row must be an array".to_string(),
                             ))
                         }
@@ -219,7 +219,7 @@ pub fn init() -> HashMap<String, Value> {
                 let rows = match &args[0] {
                     Value::Array(arr) => arr,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "csv.stringify_with_headers() first arg must be array".to_string(),
                         ))
                     }
@@ -230,13 +230,13 @@ pub fn init() -> HashMap<String, Value> {
                         .iter()
                         .map(|v| match v {
                             Value::String(s) => Ok(s.clone()),
-                            _ => Err(IntentError::TypeError(
+                            _ => Err(IntentError::type_error(
                                 "Headers must be strings".to_string(),
                             )),
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "csv.stringify_with_headers() second arg must be headers array"
                                 .to_string(),
                         ))
@@ -269,7 +269,7 @@ pub fn init() -> HashMap<String, Value> {
                     let row = match row_value {
                         Value::Map(m) => m,
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "csv.stringify_with_headers: each row must be a map".to_string(),
                             ))
                         }

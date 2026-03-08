@@ -124,7 +124,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "log_debug() requires 1 or 2 arguments (message, optional data)"
                             .to_string(),
                     ));
@@ -133,7 +133,7 @@ pub fn init() -> HashMap<String, Value> {
                 let message = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "log_debug() message must be a string".to_string(),
                         ))
                     }
@@ -175,7 +175,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "log_info() requires 1 or 2 arguments (message, optional data)".to_string(),
                     ));
                 }
@@ -183,7 +183,7 @@ pub fn init() -> HashMap<String, Value> {
                 let message = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "log_info() message must be a string".to_string(),
                         ))
                     }
@@ -225,7 +225,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "log_warn() requires 1 or 2 arguments (message, optional data)".to_string(),
                     ));
                 }
@@ -233,7 +233,7 @@ pub fn init() -> HashMap<String, Value> {
                 let message = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "log_warn() message must be a string".to_string(),
                         ))
                     }
@@ -275,7 +275,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "log_error() requires 1 or 2 arguments (message, optional data)"
                             .to_string(),
                     ));
@@ -284,7 +284,7 @@ pub fn init() -> HashMap<String, Value> {
                 let message = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "log_error() message must be a string".to_string(),
                         ))
                     }
@@ -328,7 +328,7 @@ pub fn init() -> HashMap<String, Value> {
                 let level_str = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "set_log_level() requires a string".to_string(),
                         ))
                     }
@@ -339,7 +339,7 @@ pub fn init() -> HashMap<String, Value> {
                         LOG_LEVEL.store(level, Ordering::Relaxed);
                         Ok(Value::Unit)
                     }
-                    None => Err(IntentError::TypeError(format!(
+                    None => Err(IntentError::type_error(format!(
                         "Invalid log level '{}'. Use 'debug', 'info', 'warn', or 'error'",
                         level_str
                     ))),
