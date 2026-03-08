@@ -2413,7 +2413,7 @@ pub fn init() -> HashMap<String, Value> {
     // @see_also on_shutdown
     // @since v0.4.0
     // @tags #http, #server
-    // @example on_error(fn(req, err) { html("<h1>Error</h1><p>" + err + "</p>") }) ~ "Custom error page"
+    // @example on_error(fn(req, err) { html(template("views/error.html", map { "message": "Something went wrong" })) }) ~ "Custom error page (use templates to avoid XSS)"
     // @gotcha The handler is called on the interpreter thread; if it errors, the default error page is shown
     module.insert(
         "on_error".to_string(),

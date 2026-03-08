@@ -5466,7 +5466,7 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("Usage");
                     // Use first sentence of description as comment
-                    let comment = desc.split('.').next().unwrap_or(desc);
+                    let comment = desc.split(". ").next().unwrap_or(desc);
                     md.push_str(&format!("# {}\n{}\n\n", comment, example));
                 }
             }

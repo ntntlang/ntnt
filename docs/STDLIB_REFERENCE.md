@@ -5197,7 +5197,7 @@ When a route handler throws an unhandled error, the registered callback is calle
 **Examples:**
 
 ```ntnt
-on_error(fn(req, err) { html("<h1>Error</h1><p>" + err + "</p>") })  // Custom error page
+on_error(fn(req, err) { html(template("views/error.html", map { "message": "Something went wrong" })) })  // Custom error page (use templates to avoid XSS)
 ```
 
 **Gotchas:**

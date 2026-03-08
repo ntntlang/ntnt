@@ -98,6 +98,12 @@ fn discover_source_files() -> Vec<String> {
 }
 
 fn main() {
+    // Windows debug builds have large unoptimized stack frames.
+    // Increase the default stack size from 1MB to 8MB to prevent
+    // overflow in the tree-walking interpreter's deep call chains.
+    #[cfg(target_os = "windows")]
+    println!("cargo:rustc-link-arg=/STACK:8388608");
+
     let source_files = discover_source_files();
 
     // Re-run when scanned source files change or new files are added

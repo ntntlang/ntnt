@@ -32,7 +32,7 @@ Environment variables that control NTNT runtime behavior
 ### Examples
 
 ```bash
-# Allow `fetch()` to connect to private/internal IP ranges (10
+# Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x)
 NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt
 
 # Controls runtime mode
@@ -44,7 +44,7 @@ NTNT_MAX_RECURSION=512 ntnt run server.tnt
 # Enable strict type checking
 NTNT_STRICT=1 ntnt run server.tnt
 
-# Request timeout for HTTP server in seconds
+# Request timeout for HTTP server in seconds.
 NTNT_TIMEOUT=60 ntnt run server.tnt
 
 ```
