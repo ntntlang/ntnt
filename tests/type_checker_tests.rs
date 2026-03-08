@@ -591,6 +591,90 @@ print(greet("world"))
 }
 
 // ============================================================================
+// --warn-untyped integration tests (DD-009)
+// ============================================================================
+
+/// Helper to run `ntnt lint --warn-untyped` on code
+fn lint_warn_untyped_code(code: &str) -> (String, String, i32) {
+    let test_file = unique_test_file("lint_warn_untyped");
+    let mut file = fs::File::create(&test_file).expect("Failed to create test file");
+    write!(file, "{}", code).expect("Failed to write test file");
+    drop(file);
+    let result = run_ntnt(&["lint", "--warn-untyped", &test_file]);
+    fs::remove_file(&test_file).ok();
+    result
+}
+
+#[test]
+fn test_warn_untyped_produces_warnings_not_errors() {
+    let code = r#"fn greet(name) {
+    return "hello " + name
+}
+
+print(greet("world"))
+"#;
+
+    let (stdout, _stderr, code) = lint_warn_untyped_code(code);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint --warn-untyped should output valid JSON");
+
+    let warnings = json["summary"]["warnings"].as_i64().unwrap_or(0);
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+
+    assert!(
+        warnings > 0,
+        "--warn-untyped should produce warnings for untyped params, got 0"
+    );
+    assert_eq!(
+        errors, 0,
+        "--warn-untyped should NOT produce errors (warnings are non-fatal), got {} errors",
+        errors
+    );
+
+    // Exit code should be 0 (warnings are non-fatal)
+    assert_eq!(
+        code, 0,
+        "--warn-untyped should exit 0 (warnings are non-fatal), got exit code {}",
+        code
+    );
+}
+
+#[test]
+fn test_warn_untyped_no_warnings_on_fully_typed() {
+    let code = r#"fn add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+print(add(1, 2))
+"#;
+
+    let (stdout, _stderr, _code) = lint_warn_untyped_code(code);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint --warn-untyped should output valid JSON");
+
+    let files = json["files"].as_array().unwrap();
+    if !files.is_empty() {
+        let issues = files[0]["issues"].as_array().unwrap();
+        let type_warnings: Vec<&serde_json::Value> = issues
+            .iter()
+            .filter(|issue| {
+                issue["rule"].as_str() == Some("type_check")
+                    && (issue["severity"].as_str() == Some("warning")
+                        || issue["severity"].as_str() == Some("error"))
+            })
+            .collect();
+
+        assert!(
+            type_warnings.is_empty(),
+            "Fully typed code with --warn-untyped should have zero type warnings, found: {:?}",
+            type_warnings
+        );
+    }
+}
+
+// ============================================================================
 // Contract type-checking integration tests
 // ============================================================================
 

@@ -493,6 +493,46 @@ fn is_production_mode() -> bool {
     })
 }
 
+/// # Type Error Categories (DD-009)
+///
+/// The interpreter has ~130 `IntentError::TypeError` / `RuntimeError` / `InvalidOperation`
+/// throw sites. Only a subset are gated behind `get_type_mode()` (the TypeMode-aware
+/// boundaries). The rest are intentional hard errors. Here's the categorization:
+///
+/// ## TypeMode-Aware (gated behind `get_type_mode()`)
+/// These are **data boundary** errors — the mismatch comes from external data
+/// (database, API, user input) rather than a code bug:
+/// - Index type mismatch (`obj[key]` where types don't match)
+/// - `for..in` on non-collection values
+/// - Field access on non-struct/map
+/// - Template expression/filter/for-loop errors
+///
+/// ## Hard Errors — Code Bugs (always crash, TypeMode does NOT apply)
+/// These indicate a bug in the source code, not a data mismatch:
+/// - **Arity**: wrong number of arguments to a function
+/// - **Binary op mismatch**: `5 + [1,2]`, `"a" - 3`
+/// - **Unary op mismatch**: `-"hello"`, `!42` (when bool expected)
+/// - **Missing field on known struct**: struct schema is static, field absence is a typo
+/// - **push/pop on non-array**: calling collection methods on wrong types
+/// - **Assignment to immutable**: `const` or `let` reassignment where disallowed
+///
+/// ## Hard Errors — Explicit Conversion Failures (always crash)
+/// User explicitly requested a type conversion that failed:
+/// - `int("not_a_number")`, `float("abc")` — parse failures
+/// - `round()`, `floor()`, `ceil()` on non-numeric — wrong type passed to math
+/// - `abs()`, `sqrt()`, `pow()` on non-numeric
+///
+/// ## Hard Errors — Arithmetic Invariants (always crash)
+/// Mathematical invariants that can't produce a meaningful result:
+/// - Division by zero
+/// - `sqrt()` of negative number
+/// - `clamp()` with min > max
+///
+/// ## Hard Errors — Control Flow / Internal (always crash)
+/// Interpreter-internal errors that shouldn't reach user code:
+/// - Calling a non-function value
+/// - Pattern match exhaustiveness failures
+/// - `break`/`continue` outside a loop
 impl Interpreter {
     pub fn new() -> Self {
         let env = Rc::new(RefCell::new(Environment::new()));
@@ -3407,10 +3447,14 @@ impl Interpreter {
                             iterable_value.type_name()
                         ))),
                         TypeMode::Warn => {
-                            eprintln!(
-                                "[WARN] for..in on {} — skipping (not a collection). \
+                            let msg = format!(
+                                "for..in on {} — skipping (not a collection). \
                                  Use chars() for string iteration.",
                                 iterable_value.type_name()
+                            );
+                            crate::config::type_warn_dedup(
+                                &format!("for_in:{}", iterable_value.type_name()),
+                                &msg,
                             );
                             Ok(vec![])
                         }
@@ -4290,11 +4334,15 @@ impl Interpreter {
                             idx.type_name()
                         ))),
                         TypeMode::Warn => {
-                            eprintln!(
-                                "[WARN] Type mismatch: indexing {} with {} — returning None. \
+                            let msg = format!(
+                                "Type mismatch: indexing {} with {} — returning None. \
                                  Use ?? for a safe default.",
                                 obj.type_name(),
                                 idx.type_name()
+                            );
+                            crate::config::type_warn_dedup(
+                                &format!("index:{}:{}", obj.type_name(), idx.type_name()),
+                                &msg,
                             );
                             Ok(Value::none())
                         }
@@ -4319,11 +4367,15 @@ impl Interpreter {
                             obj.type_name()
                         ))),
                         TypeMode::Warn => {
-                            eprintln!(
-                                "[WARN] Field access .{} on {} — returning None. \
+                            let msg = format!(
+                                "Field access .{} on {} — returning None. \
                                  Expected Struct or Map.",
                                 field,
                                 obj.type_name()
+                            );
+                            crate::config::type_warn_dedup(
+                                &format!("field:{}:{}", field, obj.type_name()),
+                                &msg,
                             );
                             Ok(Value::none())
                         }
@@ -5108,6 +5160,31 @@ impl Interpreter {
         }
     }
 
+    /// Handle a template error according to `NTNT_TYPE_MODE`.
+    ///
+    /// - `Strict`: returns `Err(e)` (caller should propagate)
+    /// - `Warn`: logs to stderr, appends HTML comment to `result`
+    /// - `Forgiving`: silently ignores the error
+    ///
+    /// Returns `true` if the error was handled (warn/forgiving), `false` is
+    /// never returned — strict mode returns `Err` instead.
+    fn handle_template_error(e: IntentError, context: &str, result: &mut String) -> Result<()> {
+        match get_type_mode() {
+            TypeMode::Strict => Err(e),
+            TypeMode::Warn => {
+                let key = format!("template:{}:{}", context, e);
+                if crate::config::type_warn_dedup(
+                    &key,
+                    &format!("Template {} failed: {}", context, e),
+                ) {
+                    result.push_str(&Self::template_warn_comment(&e));
+                }
+                Ok(())
+            }
+            TypeMode::Forgiving => Ok(()),
+        }
+    }
+
     /// Evaluate template string parts
     fn eval_template_parts(&mut self, parts: &[TemplatePart]) -> Result<Value> {
         let mut result = String::new();
@@ -5127,14 +5204,7 @@ impl Interpreter {
                         }
                         // Undefined variables render as empty string (standard Mustache behavior)
                         Err(IntentError::UndefinedVariable { .. }) => {}
-                        Err(e) => match get_type_mode() {
-                            TypeMode::Strict => return Err(e),
-                            TypeMode::Warn => {
-                                eprintln!("[WARN] Template expression failed: {}", e);
-                                result.push_str(&Self::template_warn_comment(&e));
-                            }
-                            TypeMode::Forgiving => {}
-                        },
+                        Err(e) => Self::handle_template_error(e, "expression", &mut result)?,
                     }
                 }
                 TemplatePart::RawExpr(expr) => {
@@ -5145,14 +5215,7 @@ impl Interpreter {
                         }
                         // Undefined variables render as empty string (standard Mustache behavior)
                         Err(IntentError::UndefinedVariable { .. }) => {}
-                        Err(e) => match get_type_mode() {
-                            TypeMode::Strict => return Err(e),
-                            TypeMode::Warn => {
-                                eprintln!("[WARN] Template expression failed: {}", e);
-                                result.push_str(&Self::template_warn_comment(&e));
-                            }
-                            TypeMode::Forgiving => {}
-                        },
+                        Err(e) => Self::handle_template_error(e, "raw expression", &mut result)?,
                     }
                 }
                 TemplatePart::FilteredExpr { expr, filters } => {
@@ -5174,15 +5237,7 @@ impl Interpreter {
                                 }
                                 Value::Unit
                             } else {
-                                // Error boundary: behaviour depends on NTNT_TYPE_MODE
-                                match get_type_mode() {
-                                    TypeMode::Strict => return Err(e),
-                                    TypeMode::Warn => {
-                                        eprintln!("[WARN] Template expression failed: {}", e);
-                                        result.push_str(&Self::template_warn_comment(&e));
-                                    }
-                                    TypeMode::Forgiving => {}
-                                }
+                                Self::handle_template_error(e, "filtered expression", &mut result)?;
                                 continue;
                             }
                         }
@@ -5219,15 +5274,7 @@ impl Interpreter {
                                 }
                                 Value::Unit
                             } else {
-                                // Error boundary: behaviour depends on NTNT_TYPE_MODE
-                                match get_type_mode() {
-                                    TypeMode::Strict => return Err(e),
-                                    TypeMode::Warn => {
-                                        eprintln!("[WARN] Template expression failed: {}", e);
-                                        result.push_str(&Self::template_warn_comment(&e));
-                                    }
-                                    TypeMode::Forgiving => {}
-                                }
+                                Self::handle_template_error(e, "filtered expression", &mut result)?;
                                 continue;
                             }
                         }
@@ -5246,15 +5293,7 @@ impl Interpreter {
                     let iterable_value = match self.eval_expression(iterable) {
                         Ok(v) => v,
                         Err(e) => {
-                            // Error boundary: behaviour depends on NTNT_TYPE_MODE
-                            match get_type_mode() {
-                                TypeMode::Strict => return Err(e),
-                                TypeMode::Warn => {
-                                    eprintln!("[WARN] Template for-loop iterable failed: {}", e);
-                                    result.push_str(&Self::template_warn_comment(&e));
-                                }
-                                TypeMode::Forgiving => {}
-                            }
+                            Self::handle_template_error(e, "for-loop iterable", &mut result)?;
                             // Render empty_body if present, otherwise skip
                             if !empty_body.is_empty() {
                                 if let Ok(Value::String(s)) = self.eval_template_parts(empty_body) {
@@ -5377,31 +5416,11 @@ impl Interpreter {
                         }
                         _ => {
                             // Non-iterable value: behaviour depends on NTNT_TYPE_MODE
-                            match get_type_mode() {
-                                TypeMode::Strict => {
-                                    return Err(IntentError::RuntimeError(format!(
-                                        "Template for loop requires a collection \
-                                         (Array or Map), got {}",
-                                        iterable_value.type_name()
-                                    )));
-                                }
-                                TypeMode::Warn => {
-                                    eprintln!(
-                                        "[WARN] Template for loop on {} — skipping \
-                                         (not a collection)",
-                                        iterable_value.type_name()
-                                    );
-                                    if is_production_mode() {
-                                        result.push_str("<!-- template error -->");
-                                    } else {
-                                        result.push_str(&format!(
-                                            "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: for loop on {}, expected array or map -->",
-                                            sanitize_html_comment(iterable_value.type_name())
-                                        ));
-                                    }
-                                }
-                                TypeMode::Forgiving => {}
-                            }
+                            let err = IntentError::RuntimeError(format!(
+                                "Template for loop requires a collection (Array or Map), got {}",
+                                iterable_value.type_name()
+                            ));
+                            Self::handle_template_error(err, "for-loop non-iterable", &mut result)?;
                             if !empty_body.is_empty() {
                                 if let Ok(Value::String(s)) = self.eval_template_parts(empty_body) {
                                     result.push_str(&s);

@@ -29,6 +29,32 @@ ntnt test server.tnt --get /health --post /users --body 'name=Alice'
 
 ---
 
+## Type Safety Modes (v0.4.0+)
+
+Two independent axes for type control:
+
+**Runtime (`NTNT_TYPE_MODE`):** Controls behavior on type mismatches at runtime.
+- `strict` — crash on mismatch (use for auth/payment apps)
+- `warn` — log `[WARN]` and continue **(default)**
+- `forgiving` — silent degradation
+
+**Lint (`NTNT_LINT_MODE`):** Controls annotation requirements.
+- `default` — only check annotated code **(default)**
+- `warn` — also warn about missing annotations (`--warn-untyped`)
+- `strict` — missing annotations are errors (`--strict`)
+
+```bash
+# Recommended for production apps with auth:
+NTNT_TYPE_MODE=strict NTNT_LINT_MODE=strict ntnt run server.tnt
+
+# Development:
+NTNT_TYPE_MODE=warn ntnt run server.tnt
+```
+
+`NTNT_STRICT` is deprecated — use `NTNT_LINT_MODE=strict`.
+
+---
+
 ## Intent-Driven Development (IDD)
 
 IDD is **the core workflow** for NTNT development. You capture user requirements as executable specifications, then implement code that satisfies them.

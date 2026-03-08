@@ -41,12 +41,103 @@ description = "Maximum recursion depth for function calls. Prevents stack overfl
 example = "NTNT_MAX_RECURSION=512 ntnt run server.tnt"
 affects = ["runtime"]
 
+[env_vars.NTNT_TYPE_MODE]
+values = ["strict", "warn", "forgiving"]
+default = "warn"
+description = "Controls runtime behavior for type mismatches. `strict`: type mismatches crash (fail-closed, recommended for auth/payments). `warn`: log `[WARN]` and continue (default). `forgiving`: silent degradation (pre-v0.4 behavior). See [Type Safety Modes](#type-safety-modes)."
+example = "NTNT_TYPE_MODE=strict ntnt run server.tnt"
+affects = ["type-checking", "runtime"]
+
+[env_vars.NTNT_LINT_MODE]
+values = ["default", "warn", "strict"]
+default = "default"
+description = "Controls lint strictness for type annotations. `default`: only check annotated code. `warn`: also warn about missing annotations (non-fatal). `strict`: missing annotations are errors. CLI flags (`--strict`, `--warn-untyped`) override this."
+example = "NTNT_LINT_MODE=strict ntnt lint server.tnt"
+affects = ["lint", "type-checking"]
+
 [env_vars.NTNT_STRICT]
 values = ["1", "true"]
 default = "unset (disabled)"
-description = "Enable strict type checking. For `ntnt run`, blocks execution if type errors are found. For `ntnt lint`, warns about untyped function signatures. Also configurable via `ntnt lint --strict` or `ntnt.toml` config."
+description = "**Deprecated — use `NTNT_LINT_MODE=strict` instead.** Enable strict type checking. Still works but emits a deprecation warning."
 example = "NTNT_STRICT=1 ntnt run server.tnt"
 affects = ["type-checking", "lint"]
+
+# =============================================================================
+# TYPE SAFETY MODES (DD-009)
+# =============================================================================
+
+[type_safety_modes]
+content = """ntnt provides two independent axes for type control, configured via environment variables.
+
+### Axis 1: Runtime Type Mode (`NTNT_TYPE_MODE`)
+
+Controls what happens when types mismatch at runtime (e.g., bad data from a database, wrong API response type).
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `strict` | Type mismatches crash the request (fail-closed) | Apps with auth, payments, safety-critical logic |
+| `warn` | Log `[WARN]` to stderr and continue **(default)** | Production apps with log monitoring |
+| `forgiving` | Silent degradation, no warnings | Content sites where uptime > correctness |
+
+```bash
+# Crash on type mismatches (safest)
+NTNT_TYPE_MODE=strict ntnt run server.tnt
+
+# Log warnings and continue (default)
+NTNT_TYPE_MODE=warn ntnt run server.tnt
+
+# Silent degradation (pre-v0.4 behavior)
+NTNT_TYPE_MODE=forgiving ntnt run server.tnt
+```
+
+**Affected operations:** index (`[]`) type mismatch, `for..in` on non-collections, field access on wrong types, template expression errors. Warnings are deduplicated per evaluation context — the same mismatch won't spam 50 times in a loop.
+
+**Security note:** Apps with authentication, authorization, or financial logic should use `strict`. Forgiving mode is fail-open — a type mismatch on a permission check can silently bypass it.
+
+### Axis 2: Lint Mode (`NTNT_LINT_MODE`)
+
+Controls how the linter treats missing type annotations.
+
+| Mode | Behavior | CI Exit Code |
+|------|----------|--------------|
+| `default` | Only report errors in annotated code | 0 (if no type conflicts) |
+| `warn` | Also warn about missing annotations | 0 (warnings are non-fatal) |
+| `strict` | Missing annotations are errors | Non-zero on missing annotations |
+
+```bash
+# Default: only check annotated code
+ntnt lint app.tnt
+
+# Warn about missing annotations (non-fatal)
+ntnt lint --warn-untyped app.tnt
+NTNT_LINT_MODE=warn ntnt lint app.tnt
+
+# Require all annotations (CI-safe)
+ntnt lint --strict app.tnt
+NTNT_LINT_MODE=strict ntnt lint app.tnt
+```
+
+### Precedence
+
+```
+CLI flag > Environment variable > ntnt.toml > built-in default
+```
+
+### Docker Configuration
+
+```yaml
+# SaaS app with auth + payments
+environment:
+  - NTNT_TYPE_MODE=strict
+  - NTNT_LINT_MODE=strict
+  - NTNT_ENV=production
+
+# Content site / blog
+environment:
+  - NTNT_TYPE_MODE=warn
+  - NTNT_LINT_MODE=default
+  - NTNT_ENV=production
+```"""
 
 # =============================================================================
 # HOT-RELOAD
@@ -174,7 +265,8 @@ description = "Check source file(s) for syntax errors and common mistakes"
 options = [
     { name = "--quiet", short = "-q", type = "flag", description = "Show only errors, not warnings or suggestions" },
     { name = "--fix", short = "", type = "flag", description = "Output auto-fix suggestions as JSON patch" },
-    { name = "--strict", short = "", type = "flag", description = "Warn about untyped function parameters and missing return types (also: NTNT_STRICT=1 or ntnt.toml)" }
+    { name = "--warn-untyped", short = "", type = "flag", description = "Warn about missing type annotations on function parameters and return types (non-fatal, exit code 0). Also: `NTNT_LINT_MODE=warn`." },
+    { name = "--strict", short = "", type = "flag", description = "Require type annotations on all functions — missing annotations are errors (non-zero exit). Also: `NTNT_LINT_MODE=strict`. Replaces deprecated `NTNT_STRICT`." }
 ]
 example = "ntnt lint server.tnt"
 

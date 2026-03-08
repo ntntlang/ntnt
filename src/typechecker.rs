@@ -79,9 +79,22 @@ pub struct TypeContext {
     resolving_files: Vec<String>,
 }
 
-/// Returns true if NTNT_STRICT mode is enabled
+/// Returns true if NTNT_STRICT mode is enabled.
+///
+/// **Deprecated:** Use `NTNT_LINT_MODE=strict` instead.
+/// This function emits a one-time deprecation warning to stderr when
+/// `NTNT_STRICT` is detected.
 pub fn is_strict_mode() -> bool {
-    std::env::var("NTNT_STRICT").map_or(false, |v| v == "1" || v == "true")
+    use std::sync::Once;
+    static DEPRECATION_WARNED: Once = Once::new();
+
+    let is_set = std::env::var("NTNT_STRICT").map_or(false, |v| v == "1" || v == "true");
+    if is_set {
+        DEPRECATION_WARNED.call_once(|| {
+            eprintln!("[DEPRECATED] NTNT_STRICT is deprecated. Use NTNT_LINT_MODE=strict instead.");
+        });
+    }
+    is_set
 }
 
 /// Run the type checker in strict mode. Returns `Some(errors)` if strict mode is

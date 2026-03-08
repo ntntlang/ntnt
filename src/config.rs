@@ -99,3 +99,34 @@ pub fn get_lint_mode() -> LintMode {
 pub fn get_lint_mode() -> LintMode {
     read_lint_mode_from_env()
 }
+
+use std::cell::RefCell;
+use std::collections::HashSet;
+
+thread_local! {
+    /// Tracks already-warned type mismatch locations to prevent duplicate warnings
+    /// in the same evaluation context (e.g., a template for-loop iterating 50 bad rows).
+    static WARNED_LOCATIONS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Log a type-mode warning to stderr, deduplicating by message key.
+/// Returns `true` if the warning was emitted, `false` if it was suppressed
+/// as a duplicate.
+pub fn type_warn_dedup(key: &str, message: &str) -> bool {
+    WARNED_LOCATIONS.with(|warned| {
+        let mut set = warned.borrow_mut();
+        if set.contains(key) {
+            false
+        } else {
+            set.insert(key.to_string());
+            eprintln!("[WARN] {}", message);
+            true
+        }
+    })
+}
+
+/// Clear the warning dedup set. Call at the start of each request
+/// or evaluation to allow warnings to fire again for the next request.
+pub fn clear_type_warnings() {
+    WARNED_LOCATIONS.with(|warned| warned.borrow_mut().clear());
+}

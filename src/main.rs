@@ -5537,6 +5537,16 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
         md.push_str("---\n\n");
     }
 
+    // Type Safety Modes section (DD-009)
+    if let Some(tsm) = runtime.get("type_safety_modes") {
+        md.push_str("## Type Safety Modes\n\n");
+        if let Some(content) = tsm.get("content").and_then(|v| v.as_str()) {
+            md.push_str(content);
+            md.push_str("\n\n");
+        }
+        md.push_str("---\n\n");
+    }
+
     // Hot-Reload
     if let Some(hot_reload) = runtime.get("hot_reload") {
         md.push_str("## Hot-Reload\n\n");
