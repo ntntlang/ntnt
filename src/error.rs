@@ -65,6 +65,8 @@ pub enum IntentError {
     TypeError {
         message: String,
         context: Option<TypeContext>,
+        /// Source line (set by interpreter from current_line, 0 = unknown)
+        line: usize,
     },
 
     #[error("Contract violation: {0}")]
@@ -74,18 +76,24 @@ pub enum IntentError {
     RuntimeError {
         message: String,
         context: Option<TypeContext>,
+        /// Source line (set by interpreter from current_line, 0 = unknown)
+        line: usize,
     },
 
     #[error("Undefined variable: {name}")]
     UndefinedVariable {
         name: String,
         suggestion: Option<String>,
+        #[allow(dead_code)]
+        line: usize,
     },
 
     #[error("Undefined function: {name}")]
     UndefinedFunction {
         name: String,
         suggestion: Option<String>,
+        #[allow(dead_code)]
+        line: usize,
     },
 
     #[error("Arity mismatch: function '{name}' expected {expected} arguments, got {got}")]
@@ -93,6 +101,8 @@ pub enum IntentError {
         name: String,
         expected: String,
         got: usize,
+        #[allow(dead_code)]
+        line: usize,
     },
 
     #[error("Division by zero")]
@@ -114,6 +124,7 @@ impl IntentError {
         IntentError::TypeError {
             message: message.into(),
             context: None,
+            line: 0,
         }
     }
 
@@ -122,6 +133,7 @@ impl IntentError {
         IntentError::TypeError {
             message: message.into(),
             context: Some(context),
+            line: 0,
         }
     }
 
@@ -130,6 +142,7 @@ impl IntentError {
         IntentError::RuntimeError {
             message: message.into(),
             context: None,
+            line: 0,
         }
     }
 
@@ -138,7 +151,22 @@ impl IntentError {
         IntentError::RuntimeError {
             message: message.into(),
             context: Some(context),
+            line: 0,
         }
+    }
+
+    /// Set the line number on a TypeError or RuntimeError (builder pattern).
+    /// Usage: `IntentError::type_error("msg").at_line(42)`
+    pub fn at_line(mut self, line: usize) -> Self {
+        match &mut self {
+            IntentError::TypeError { line: l, .. } => *l = line,
+            IntentError::RuntimeError { line: l, .. } => *l = line,
+            IntentError::UndefinedVariable { line: l, .. } => *l = line,
+            IntentError::UndefinedFunction { line: l, .. } => *l = line,
+            IntentError::ArityMismatch { line: l, .. } => *l = line,
+            _ => {}
+        }
+        self
     }
 
     /// Get the TypeContext if this error has one
@@ -197,6 +225,11 @@ impl IntentError {
         match self {
             IntentError::LexerError { line, .. } => Some(*line),
             IntentError::ParserError { line, .. } => Some(*line),
+            IntentError::TypeError { line, .. } if *line > 0 => Some(*line),
+            IntentError::RuntimeError { line, .. } if *line > 0 => Some(*line),
+            IntentError::UndefinedVariable { line, .. } if *line > 0 => Some(*line),
+            IntentError::UndefinedFunction { line, .. } if *line > 0 => Some(*line),
+            IntentError::ArityMismatch { line, .. } if *line > 0 => Some(*line),
             _ => None,
         }
     }
@@ -391,15 +424,18 @@ mod tests {
             IntentError::UndefinedVariable {
                 name: String::new(),
                 suggestion: None,
+                line: 0,
             },
             IntentError::UndefinedFunction {
                 name: String::new(),
                 suggestion: None,
+                line: 0,
             },
             IntentError::ArityMismatch {
                 name: String::new(),
                 expected: "0".to_string(),
                 got: 0,
+                line: 0,
             },
             IntentError::DivisionByZero,
             IntentError::IndexOutOfBounds {
@@ -437,12 +473,14 @@ mod tests {
         let e = IntentError::UndefinedVariable {
             name: "usres".into(),
             suggestion: Some("users".into()),
+            line: 0,
         };
         assert_eq!(e.suggestion(), Some("users"));
 
         let e = IntentError::UndefinedVariable {
             name: "xyz".into(),
             suggestion: None,
+            line: 0,
         };
         assert_eq!(e.suggestion(), None);
     }

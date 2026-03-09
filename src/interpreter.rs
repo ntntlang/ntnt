@@ -678,6 +678,7 @@ impl Interpreter {
             IntentError::UndefinedVariable {
                 name: name.to_string(),
                 suggestion,
+                line: 0,
             }
         })?;
 
@@ -3084,7 +3085,14 @@ impl Interpreter {
             Statement::Located { line, col, stmt } => {
                 self.current_line = *line;
                 self.current_col = *col;
-                return self.eval_statement(stmt);
+                return self.eval_statement(stmt).map_err(|e| {
+                    // Annotate errors with line info if they don't already have it
+                    if e.line().is_none() {
+                        e.at_line(*line)
+                    } else {
+                        e
+                    }
+                });
             }
             Statement::Let {
                 name,
@@ -3593,6 +3601,7 @@ impl Interpreter {
                 IntentError::UndefinedVariable {
                     name: name.clone(),
                     suggestion,
+                    line: 0,
                 }
             }),
 
@@ -4470,6 +4479,7 @@ impl Interpreter {
                             Err(IntentError::UndefinedVariable {
                                 name: name.clone(),
                                 suggestion,
+                                line: 0,
                             })
                         }
                     }
@@ -4485,6 +4495,7 @@ impl Interpreter {
                                     IntentError::UndefinedVariable {
                                         name: var_name.clone(),
                                         suggestion,
+                                        line: 0,
                                     }
                                 })?;
 
@@ -4570,6 +4581,7 @@ impl Interpreter {
                                 IntentError::UndefinedVariable {
                                     name: root_name.clone(),
                                     suggestion,
+                                    line: 0,
                                 }
                             })?;
 
@@ -4772,6 +4784,7 @@ impl Interpreter {
                     Err(IntentError::UndefinedFunction {
                         name: method.clone(),
                         suggestion: None,
+                        line: 0,
                     })
                 }
             }
@@ -6073,6 +6086,7 @@ impl Interpreter {
                             name: fn_name.clone(),
                             expected: format!("{}", arity),
                             got: args.len(),
+                            line: 0,
                         });
                     }
                 } else {
@@ -6086,6 +6100,7 @@ impl Interpreter {
                                 format!("{}-{}", arity, max_arity)
                             },
                             got: args.len(),
+                            line: 0,
                         });
                     }
                 }
@@ -6102,6 +6117,7 @@ impl Interpreter {
                         name: format!("{}::{}", enum_name, variant),
                         expected: format!("{}", arity),
                         got: args.len(),
+                        line: 0,
                     });
                 }
                 Ok(Value::EnumValue {
@@ -6142,6 +6158,7 @@ impl Interpreter {
                 name: name.clone(),
                 expected,
                 got: args.len(),
+                line: 0,
             });
         }
 

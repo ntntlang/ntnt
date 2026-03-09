@@ -383,7 +383,12 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
             code.red().bold(),
             "]".dimmed(),
         );
-        eprintln!("  {} {}", "-->".blue().bold(), intent_err);
+        // Show file:line location if available
+        if let (Some(line), Some(path)) = (line_info, file_path) {
+            let display_path = path.display();
+            eprintln!("  {} {}:{}", "-->".blue().bold(), display_path, line);
+        }
+        eprintln!("  {} {}", "=".blue().bold(), intent_err);
 
         // Source code snippet (for errors with line numbers and a known file)
         if let (Some(line), Some(path)) = (line_info, file_path) {

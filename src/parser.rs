@@ -91,31 +91,38 @@ impl Parser {
         if self.check(kind) {
             Ok(self.advance().unwrap().clone())
         } else {
-            let line = self.peek().map(|t| t.line).unwrap_or(0);
-            let column = self.peek().map(|t| t.column).unwrap_or(0);
             Err(IntentError::ParserError {
-                line,
-                column,
+                line: self.current_line(),
+                column: self.current_column(),
                 message: message.to_string(),
             })
         }
     }
 
     fn current_line(&self) -> usize {
-        self.peek().map(|t| t.line).unwrap_or(0)
+        self.peek()
+            .map(|t| t.line)
+            .or_else(|| self.previous().map(|t| t.line))
+            .unwrap_or(0)
     }
 
     fn current_column(&self) -> usize {
-        self.peek().map(|t| t.column).unwrap_or(0)
+        self.peek()
+            .map(|t| t.column)
+            .or_else(|| self.previous().map(|t| t.column))
+            .unwrap_or(0)
     }
 
     // Parsing methods
 
     fn declaration(&mut self) -> Result<Statement> {
+        let decl_line = self.current_line();
+        let decl_col = self.current_column();
+
         // Check for attributes
         let attributes = self.parse_attributes()?;
 
-        if self.match_token(&[TokenKind::Let]) {
+        let inner = if self.match_token(&[TokenKind::Let]) {
             self.let_declaration()
         } else if self.match_token(&[TokenKind::Fn]) {
             self.function_declaration(attributes)
@@ -142,8 +149,20 @@ impl Parser {
         } else if self.match_token(&[TokenKind::Server]) {
             self.server_declaration()
         } else {
-            self.statement()
-        }
+            // statement() already wraps with Located, so return directly
+            return self.statement();
+        }?;
+
+        // Wrap declarations with Located for line tracking
+        // (statement() already handles its own Located wrapping)
+        Ok(match inner {
+            Statement::Located { .. } => inner,
+            other => Statement::Located {
+                line: decl_line,
+                col: decl_col,
+                stmt: Box::new(other),
+            },
+        })
     }
 
     fn parse_attributes(&mut self) -> Result<Vec<Attribute>> {
@@ -2754,6 +2773,14 @@ mod tests {
         parser.parse()
     }
 
+    /// Unwrap a Located wrapper to get the inner statement
+    fn unwrap_located(stmt: &Statement) -> &Statement {
+        match stmt {
+            Statement::Located { stmt, .. } => stmt,
+            other => other,
+        }
+    }
+
     #[test]
     fn test_let_statement() {
         let program = parse("let x = 42;").unwrap();
@@ -2787,7 +2814,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(program.statements.len(), 1);
-        match &program.statements[0] {
+        match unwrap_located(&program.statements[0]) {
             Statement::Server { port, routes, .. } => {
                 match port {
                     Expression::Integer(p) => assert_eq!(*p, 8080),
@@ -2812,7 +2839,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        match &program.statements[0] {
+        match unwrap_located(&program.statements[0]) {
             Statement::Server { routes, .. } => {
                 assert_eq!(routes.len(), 2);
                 // Check typed param
@@ -2839,7 +2866,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        match &program.statements[0] {
+        match unwrap_located(&program.statements[0]) {
             Statement::Server { directives, .. } => {
                 assert_eq!(directives.len(), 1);
                 match &directives[0] {
@@ -2867,7 +2894,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        match &program.statements[0] {
+        match unwrap_located(&program.statements[0]) {
             Statement::Server { groups, .. } => {
                 assert_eq!(groups.len(), 1);
                 assert_eq!(groups[0].prefix, "/admin");
@@ -2890,7 +2917,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        match &program.statements[0] {
+        match unwrap_located(&program.statements[0]) {
             Statement::Server { directives, .. } => {
                 assert_eq!(directives.len(), 1);
                 match &directives[0] {
@@ -2913,7 +2940,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        match &program.statements[0] {
+        match unwrap_located(&program.statements[0]) {
             Statement::Server { directives, .. } => {
                 assert_eq!(directives.len(), 1);
                 match &directives[0] {
@@ -2939,7 +2966,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        match &program.statements[0] {
+        match unwrap_located(&program.statements[0]) {
             Statement::Server { routes, .. } => {
                 assert_eq!(routes.len(), 5);
                 assert_eq!(routes[0].method, "GET");
