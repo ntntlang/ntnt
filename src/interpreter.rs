@@ -2769,9 +2769,11 @@ impl Interpreter {
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
 
-        // Re-define builtins and types in the new environment
+        // Re-define builtins, types, and stdlib in the new environment
+        // (lib modules should have the same execution context as route handlers)
         self.define_builtins();
         self.define_builtin_types();
+        self.define_stdlib();
 
         // Evaluate the module
         self.eval(&ast)?;
@@ -2892,9 +2894,10 @@ impl Interpreter {
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
 
-        // Re-define builtins and types
+        // Re-define builtins, types, and stdlib modules
         self.define_builtins();
         self.define_builtin_types();
+        self.define_stdlib();
 
         // Inject lib modules into the environment
         for (name, exports) in lib_modules {
@@ -2977,9 +2980,10 @@ impl Interpreter {
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string());
 
-        // Re-define builtins and types
+        // Re-define builtins, types, and stdlib modules
         self.define_builtins();
         self.define_builtin_types();
+        self.define_stdlib();
 
         // Inject lib modules (same as initial route processing)
         for (name, exports) in &self.lib_modules {
