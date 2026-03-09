@@ -2125,7 +2125,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
         issues: &mut Vec<serde_json::Value>,
         http_route_functions: &std::collections::HashSet<&str>,
     ) {
-        match stmt {
+        match unwrap_located(stmt) {
             Statement::Expression(expr) => {
                 check_expr_for_issues(expr, source_lines, issues, http_route_functions);
             }
@@ -2244,7 +2244,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
         let mut last_import_line: usize = 0;
 
         for stmt in &ast.statements {
-            if let Statement::Import { items, source, .. } = stmt {
+            if let Statement::Import { items, source, .. } = unwrap_located(stmt) {
                 let current_line = find_import_line(&source_lines, source, last_import_line);
                 if current_line > 0 {
                     last_import_line = current_line;
@@ -3391,6 +3391,7 @@ fn analyze_ast_warnings(ast: &ntnt::ast::Program, _source: &str) -> Vec<serde_js
 /// Collect used identifiers from a statement (comprehensive AST traversal)
 fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections::HashSet<String>) {
     use ntnt::ast::{Expression, Statement, StringPart};
+    let stmt = unwrap_located(stmt);
 
     fn collect_from_expr(expr: &Expression, names: &mut std::collections::HashSet<String>) {
         match expr {

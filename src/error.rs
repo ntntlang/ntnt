@@ -84,7 +84,7 @@ pub enum IntentError {
     UndefinedVariable {
         name: String,
         suggestion: Option<String>,
-        #[allow(dead_code)]
+
         line: usize,
     },
 
@@ -92,7 +92,7 @@ pub enum IntentError {
     UndefinedFunction {
         name: String,
         suggestion: Option<String>,
-        #[allow(dead_code)]
+
         line: usize,
     },
 
@@ -101,7 +101,7 @@ pub enum IntentError {
         name: String,
         expected: String,
         got: usize,
-        #[allow(dead_code)]
+
         line: usize,
     },
 
