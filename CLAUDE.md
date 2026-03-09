@@ -71,6 +71,14 @@ NTNT_TYPE_MODE=strict NTNT_LINT_MODE=strict ntnt run server.tnt
 NTNT_TYPE_MODE=warn ntnt run server.tnt
 ```
 
+**Type syntax (v0.4.0+):**
+- Optional shorthand: `fn find(id: Int) -> User?` (equivalent to `Optional<User>`)
+- Type aliases: `type UserId = Int`, `type Handler = (Request) -> Response`
+- Array types: `fn sum(nums: [Int]) -> Int`
+- Generics: `fn identity<T>(x: T) -> T` — type checker infers concrete types from call args
+
+**Error messages** include file:line, source snippets, expected/got context, and fix hints.
+
 `NTNT_STRICT` is deprecated — use `NTNT_LINT_MODE=strict`.
 
 ---

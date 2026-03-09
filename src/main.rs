@@ -4923,6 +4923,11 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             "option_result",
             "union",
             "annotation",
+            "optional_shorthand",
+            "type_alias",
+            "function_type",
+            "array_type",
+            "generics",
         ];
         for cat in &type_categories {
             if let Some(t) = types.get(*cat) {

@@ -279,6 +279,36 @@ Syntax: `let x: Type = value`
 
 Optional type annotations on variables
 
+### OPTIONAL SHORTHAND
+
+Syntax: `T?`
+
+Shorthand for Optional<T> in type annotations
+
+### TYPE ALIAS
+
+Syntax: `type Name = Type`
+
+Type alias declaration
+
+### FUNCTION TYPE
+
+Syntax: `(ParamTypes) -> ReturnType`
+
+Function type annotation for parameters and type aliases
+
+### ARRAY TYPE
+
+Syntax: `[ElementType]`
+
+Array type annotation
+
+### GENERICS
+
+Syntax: `fn name<T>(param: T) -> T { }`
+
+Generic type parameters on functions
+
 ---
 
 ## Imports
