@@ -424,72 +424,80 @@ print(result)
 
 #[test]
 fn test_strict_lint_warns_untyped_params() {
-    let code = r#"fn greet(name) {
+    let source = r#"fn greet(name) {
     return "hello " + name
 }
 
 print(greet("world"))
 "#;
 
-    let (stdout, _stderr, _code) = lint_strict_code(code);
+    let (stdout, _stderr, exit_code) = lint_strict_code(source);
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("lint --strict should output valid JSON");
 
-    let warnings = json["summary"]["warnings"].as_i64().unwrap_or(0);
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
     assert!(
-        warnings > 0,
-        "Strict lint should produce warnings for untyped params, got 0 warnings"
+        errors > 0,
+        "Strict lint should produce errors for untyped params, got 0 errors"
     );
 
-    // Verify the warnings mention the untyped parameter
+    // In strict mode, missing annotations are promoted to errors (not warnings)
     let files = json["files"].as_array().unwrap();
     let issues = files[0]["issues"].as_array().unwrap();
-    let type_warnings: Vec<&serde_json::Value> = issues
+    let type_errors: Vec<&serde_json::Value> = issues
         .iter()
         .filter(|issue| {
             issue["rule"].as_str() == Some("type_check")
-                && issue["severity"].as_str() == Some("warning")
+                && issue["severity"].as_str() == Some("error")
         })
         .collect();
 
     assert!(
-        !type_warnings.is_empty(),
-        "Should have type_check warnings for untyped parameters"
+        !type_errors.is_empty(),
+        "Should have type_check errors for untyped parameters in strict mode"
     );
 
-    let has_param_warning = type_warnings.iter().any(|w| {
+    let has_param_error = type_errors.iter().any(|w| {
         let msg = w["message"].as_str().unwrap_or("");
         msg.contains("no type annotation") && msg.contains("name")
     });
     assert!(
-        has_param_warning,
-        "Should warn about untyped parameter 'name'. Warnings: {:?}",
-        type_warnings
+        has_param_error,
+        "Should error about untyped parameter 'name' in strict mode. Errors: {:?}",
+        type_errors
+    );
+
+    // Strict lint with errors should exit non-zero
+    assert!(
+        exit_code != 0,
+        "ntnt lint --strict should exit non-zero when annotation errors exist, got exit code {}",
+        exit_code
     );
 }
 
 #[test]
 fn test_strict_lint_warns_missing_return_type() {
-    let code = r#"fn add(a: Int, b: Int) {
+    let source = r#"fn add(a: Int, b: Int) {
     return a + b
 }
 
 print(add(1, 2))
 "#;
 
-    let (stdout, _stderr, _code) = lint_strict_code(code);
+    let (stdout, _stderr, exit_code) = lint_strict_code(source);
 
     let json: serde_json::Value =
         serde_json::from_str(&stdout).expect("lint --strict should output valid JSON");
 
     let files = json["files"].as_array().unwrap();
     let issues = files[0]["issues"].as_array().unwrap();
-    let return_warnings: Vec<&serde_json::Value> = issues
+    // In strict mode, missing return type annotations are promoted to errors
+    let return_errors: Vec<&serde_json::Value> = issues
         .iter()
         .filter(|issue| {
             issue["rule"].as_str() == Some("type_check")
-                && issue["severity"].as_str() == Some("warning")
+                && issue["severity"].as_str() == Some("error")
                 && issue["message"]
                     .as_str()
                     .unwrap_or("")
@@ -498,8 +506,15 @@ print(add(1, 2))
         .collect();
 
     assert!(
-        !return_warnings.is_empty(),
-        "Strict lint should warn about missing return type on 'add'"
+        !return_errors.is_empty(),
+        "Strict lint should error about missing return type on 'add'"
+    );
+
+    // Strict lint with errors should exit non-zero
+    assert!(
+        exit_code != 0,
+        "ntnt lint --strict should exit non-zero when annotation errors exist, got exit code {}",
+        exit_code
     );
 }
 
@@ -570,6 +585,90 @@ print(greet("world"))
         assert!(
             type_warnings.is_empty(),
             "Without --strict, untyped code should have zero type_check warnings, found: {:?}",
+            type_warnings
+        );
+    }
+}
+
+// ============================================================================
+// --warn-untyped integration tests (DD-009)
+// ============================================================================
+
+/// Helper to run `ntnt lint --warn-untyped` on code
+fn lint_warn_untyped_code(code: &str) -> (String, String, i32) {
+    let test_file = unique_test_file("lint_warn_untyped");
+    let mut file = fs::File::create(&test_file).expect("Failed to create test file");
+    write!(file, "{}", code).expect("Failed to write test file");
+    drop(file);
+    let result = run_ntnt(&["lint", "--warn-untyped", &test_file]);
+    fs::remove_file(&test_file).ok();
+    result
+}
+
+#[test]
+fn test_warn_untyped_produces_warnings_not_errors() {
+    let source = r#"fn greet(name) {
+    return "hello " + name
+}
+
+print(greet("world"))
+"#;
+
+    let (stdout, _stderr, exit_code) = lint_warn_untyped_code(source);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint --warn-untyped should output valid JSON");
+
+    let warnings = json["summary"]["warnings"].as_i64().unwrap_or(0);
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+
+    assert!(
+        warnings > 0,
+        "--warn-untyped should produce warnings for untyped params, got 0"
+    );
+    assert_eq!(
+        errors, 0,
+        "--warn-untyped should NOT produce errors (warnings are non-fatal), got {} errors",
+        errors
+    );
+
+    // Exit code should be 0 (warnings are non-fatal)
+    assert_eq!(
+        exit_code, 0,
+        "--warn-untyped should exit 0 (warnings are non-fatal), got exit code {}",
+        exit_code
+    );
+}
+
+#[test]
+fn test_warn_untyped_no_warnings_on_fully_typed() {
+    let code = r#"fn add(a: Int, b: Int) -> Int {
+    return a + b
+}
+
+print(add(1, 2))
+"#;
+
+    let (stdout, _stderr, _code) = lint_warn_untyped_code(code);
+
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("lint --warn-untyped should output valid JSON");
+
+    let files = json["files"].as_array().unwrap();
+    if !files.is_empty() {
+        let issues = files[0]["issues"].as_array().unwrap();
+        let type_warnings: Vec<&serde_json::Value> = issues
+            .iter()
+            .filter(|issue| {
+                issue["rule"].as_str() == Some("type_check")
+                    && (issue["severity"].as_str() == Some("warning")
+                        || issue["severity"].as_str() == Some("error"))
+            })
+            .collect();
+
+        assert!(
+            type_warnings.is_empty(),
+            "Fully typed code with --warn-untyped should have zero type warnings, found: {:?}",
             type_warnings
         );
     }
@@ -845,5 +944,83 @@ fn check(x: Int, y: String) -> Bool {
         has_conversion_hint,
         "Comparison hint should suggest int()/str() conversion. Warnings: {:?}",
         comparison_warnings
+    );
+}
+
+// ============================================================================
+// Generic type parameter unification tests (DD-009 Phase 7.4)
+// ============================================================================
+
+#[test]
+fn test_generic_identity_infers_return_type() {
+    // identity<T>(42) should infer T=Int, return type Int
+    // Assigning to String should produce a type error
+    let source = r#"
+fn identity<T>(x: T) -> T {
+    return x
+}
+let result: String = identity(42)
+"#;
+    let (stdout, _stderr, exit_code) = lint_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert!(
+        errors > 0,
+        "identity<T>(42) assigned to String should produce a type error"
+    );
+    assert_ne!(exit_code, 0);
+}
+
+#[test]
+fn test_generic_identity_correct_usage() {
+    // identity<T>(42) assigned to Int should be fine
+    let source = r#"
+fn identity<T>(x: T) -> T {
+    return x
+}
+let result: Int = identity(42)
+"#;
+    let (stdout, _stderr, _exit_code) = lint_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert_eq!(
+        errors, 0,
+        "identity<T>(42) assigned to Int should not error"
+    );
+}
+
+#[test]
+fn test_generic_conflicting_type_params() {
+    // fn f<T>(a: T, b: T) called with (Int, String) should error
+    let source = r#"
+fn merge<T>(a: T, b: T) -> T {
+    return a
+}
+let result = merge(42, "hello")
+"#;
+    let (stdout, _stderr, _exit_code) = lint_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert!(
+        errors > 0,
+        "merge<T>(Int, String) should produce a type error for conflicting T"
+    );
+}
+
+#[test]
+fn test_generic_array_unification() {
+    // fn first<T>(arr: [T]) -> T should unify T from array element type
+    let source = r#"
+fn first<T>(arr: [T]) -> T {
+    return arr[0]
+}
+let x: Int = first([1, 2, 3])
+"#;
+    let (stdout, _stderr, _exit_code) = lint_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert_eq!(
+        errors, 0,
+        "first<T>([Int]) assigned to Int should not error"
     );
 }

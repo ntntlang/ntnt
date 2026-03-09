@@ -34,7 +34,7 @@ pub fn init() -> HashMap<String, Value> {
                         match part {
                             Value::String(s) => path.push(s),
                             _ => {
-                                return Err(IntentError::TypeError(
+                                return Err(IntentError::type_error(
                                     "join() requires array of strings".to_string(),
                                 ))
                             }
@@ -42,7 +42,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     Ok(Value::String(path.to_string_lossy().to_string()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "join() requires an array of path parts".to_string(),
                 )),
             },
@@ -75,7 +75,7 @@ pub fn init() -> HashMap<String, Value> {
                             match part {
                                 Value::String(s) => path.push(s),
                                 _ => {
-                                    return Err(IntentError::TypeError(
+                                    return Err(IntentError::type_error(
                                         "join() requires array of strings".to_string(),
                                     ))
                                 }
@@ -83,7 +83,7 @@ pub fn init() -> HashMap<String, Value> {
                         }
                         Ok(Value::String(path.to_string_lossy().to_string()))
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "join() requires an array of path parts".to_string(),
                     )),
                 }
@@ -111,7 +111,7 @@ pub fn init() -> HashMap<String, Value> {
                     Some(p) => Ok(Value::some(Value::String(p.to_string_lossy().to_string()))),
                     None => Ok(Value::none()),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "dirname() requires a string path".to_string(),
                 )),
             },
@@ -140,7 +140,7 @@ pub fn init() -> HashMap<String, Value> {
                     ))),
                     None => Ok(Value::none()),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "basename() requires a string path".to_string(),
                 )),
             },
@@ -169,7 +169,7 @@ pub fn init() -> HashMap<String, Value> {
                     ))),
                     None => Ok(Value::none()),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "extension() requires a string path".to_string(),
                 )),
             },
@@ -198,7 +198,7 @@ pub fn init() -> HashMap<String, Value> {
                     ))),
                     None => Ok(Value::none()),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "stem() requires a string path".to_string(),
                 )),
             },
@@ -226,7 +226,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(abs) => Ok(Value::ok(Value::String(abs.to_string_lossy().to_string()))),
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "resolve() requires a string path".to_string(),
                 )),
             },
@@ -251,7 +251,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(Path::new(path).is_absolute())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_absolute() requires a string path".to_string(),
                 )),
             },
@@ -276,7 +276,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(Path::new(path).is_relative())),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_relative() requires a string path".to_string(),
                 )),
             },
@@ -304,7 +304,7 @@ pub fn init() -> HashMap<String, Value> {
                     let new_path = Path::new(path).with_extension(ext);
                     Ok(Value::String(new_path.to_string_lossy().to_string()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "with_extension() requires two strings".to_string(),
                 )),
             },
@@ -344,7 +344,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     Ok(Value::String(normalized.to_string_lossy().to_string()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "normalize() requires a string path".to_string(),
                 )),
             },

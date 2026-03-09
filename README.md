@@ -110,7 +110,7 @@ NTNT explores a different approach. Requirements are executable specifications w
 | **Intent-Driven Development** | Write requirements in `.intent` files. Link code with `@implements`. Run `ntnt intent check` to verify. Full traceability from requirement to implementation. |
 | **Design by Contract** | `requires` and `ensures` built into function syntax. In HTTP routes, contract violations return 400/500 automatically. |
 | **Agent-Native Tooling** | `ntnt inspect` outputs JSON describing every function, route, and contract. `ntnt validate` returns machine-readable errors. |
-| **Gradual Type System** | Optional type annotations with inference. Types catch structural errors at lint time; contracts catch semantic errors. Strict mode for full enforcement. |
+| **Gradual Type System** | Optional type annotations with inference, generics (`fn identity<T>(x: T) -> T`), type aliases (`type Handler = (Request) -> Response`), and `T?` shorthand. Two independent axes: **lint mode** (`--warn-untyped` / `--strict`) controls static analysis depth; **runtime mode** (`NTNT_TYPE_MODE=strict\|warn\|forgiving`) controls what happens on type mismatches. |
 | **Batteries Included** | HTTP servers, PostgreSQL, SQLite, JSON, CSV, file I/O, crypto, concurrency - all in the standard library. No package manager needed. |
 | **Hot Reload** | HTTP servers reload automatically when you save. Edit code, refresh browser, see changes. |
 
@@ -160,7 +160,8 @@ fn withdraw(amount: Int) -> Int
 ```bash
 ntnt run <file>              # Run a .tnt file
 ntnt lint <file>             # Check for errors
-ntnt lint --strict <file>    # Check with strict type warnings
+ntnt lint --warn-untyped <f> # Warn on missing type annotations
+ntnt lint --strict <file>    # Require type annotations (errors)
 ntnt validate <file>         # Validate with JSON output
 ntnt test <file> --get /     # Quick HTTP endpoint testing
 ntnt intent check <file>     # Verify code matches intent

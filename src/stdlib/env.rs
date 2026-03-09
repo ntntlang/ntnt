@@ -33,7 +33,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(val) => Ok(Value::some(Value::String(val))),
                     Err(_) => Ok(Value::none()),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "get_env() requires a string".to_string(),
                 )),
             },
@@ -80,7 +80,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             func: |_args| match std::env::current_dir() {
                 Ok(path) => Ok(Value::String(path.to_string_lossy().to_string())),
-                Err(e) => Err(IntentError::RuntimeError(format!(
+                Err(e) => Err(IntentError::runtime_error(format!(
                     "Failed to get cwd: {}",
                     e
                 ))),
@@ -132,7 +132,7 @@ pub fn init() -> HashMap<String, Value> {
                             )))),
                         }
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "load_env() requires a string path".to_string(),
                     )),
                 }

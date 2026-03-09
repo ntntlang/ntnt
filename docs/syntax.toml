@@ -513,3 +513,30 @@ example = "fn add(a: Int, b: Int = 10) -> Int { return a + b }"
 syntax = "fn name(a = 0, b = a + 10) { }"
 description = "Default expressions can reference earlier parameters"
 example = "fn make_range(start = 0, end = start + 10) { }"
+
+# === Type System (v0.4.0) ===
+
+[types.optional_shorthand]
+syntax = "T?"
+description = "Shorthand for Optional<T> in type annotations"
+example = "fn find(id: Int) -> User? { }"
+
+[types.type_alias]
+syntax = "type Name = Type"
+description = "Type alias declaration"
+example = "type UserId = Int"
+
+[types.function_type]
+syntax = "(ParamTypes) -> ReturnType"
+description = "Function type annotation for parameters and type aliases"
+example = "type Handler = (Request) -> Response"
+
+[types.array_type]
+syntax = "[ElementType]"
+description = "Array type annotation"
+example = "fn sum(nums: [Int]) -> Int { }"
+
+[types.generics]
+syntax = "fn name<T>(param: T) -> T { }"
+description = "Generic type parameters on functions"
+example = "fn identity<T>(x: T) -> T { return x }"

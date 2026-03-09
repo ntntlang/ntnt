@@ -220,11 +220,11 @@ impl InterpreterHandle {
         self.tx
             .send(handler_request)
             .await
-            .map_err(|_| IntentError::RuntimeError("Interpreter channel closed".to_string()))?;
+            .map_err(|_| IntentError::runtime_error("Interpreter channel closed".to_string()))?;
 
         reply_rx
             .await
-            .map_err(|_| IntentError::RuntimeError("Interpreter did not respond".to_string()))
+            .map_err(|_| IntentError::runtime_error("Interpreter did not respond".to_string()))
     }
 }
 

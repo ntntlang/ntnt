@@ -37,7 +37,7 @@ where
 /// Parse timezone string to chrono_tz::Tz
 fn parse_timezone(tz: &str) -> Result<Tz, IntentError> {
     tz.parse::<Tz>().map_err(|_| {
-        IntentError::RuntimeError(format!(
+        IntentError::runtime_error(format!(
             "Invalid timezone: '{}'. Use IANA format like 'America/New_York'",
             tz
         ))
@@ -116,7 +116,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             func: |_args| match Utc::now().timestamp_nanos_opt() {
                 Some(nanos) => Ok(Value::Int(nanos)),
-                None => Err(IntentError::RuntimeError(
+                None => Err(IntentError::runtime_error(
                     "Timestamp out of range for nanoseconds".to_string(),
                 )),
             },
@@ -152,11 +152,11 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::Int(ts), Value::String(tz_str)) => {
                     let tz = parse_timezone(tz_str)?;
                     let dt = DateTime::from_timestamp(*ts, 0)
-                        .ok_or_else(|| IntentError::RuntimeError("Invalid timestamp".to_string()))?
+                        .ok_or_else(|| IntentError::runtime_error("Invalid timestamp".to_string()))?
                         .with_timezone(&tz);
                     Ok(Value::Map(datetime_to_map(&dt, tz_str)))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "to_timezone() requires (timestamp: Int, timezone: String)".to_string(),
                 )),
             },
@@ -187,11 +187,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::Map(datetime_to_map(&dt, "UTC")))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "to_utc() requires a timestamp".to_string(),
                 )),
             },
@@ -225,11 +225,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::String(fmt)) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::String(dt.format(fmt).to_string()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "format() requires (timestamp: Int, format: String)".to_string(),
                 )),
             },
@@ -264,11 +264,11 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::Int(ts), Value::String(tz_str), Value::String(fmt)) => {
                     let tz = parse_timezone(tz_str)?;
                     let dt = DateTime::from_timestamp(*ts, 0)
-                        .ok_or_else(|| IntentError::RuntimeError("Invalid timestamp".to_string()))?
+                        .ok_or_else(|| IntentError::runtime_error("Invalid timestamp".to_string()))?
                         .with_timezone(&tz);
                     Ok(Value::String(dt.format(fmt).to_string()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "format_in() requires (timestamp: Int, timezone: String, format: String)"
                         .to_string(),
                 )),
@@ -300,11 +300,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::String(dt.to_rfc3339()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "to_iso() requires a timestamp".to_string(),
                 )),
             },
@@ -345,7 +345,7 @@ pub fn init() -> HashMap<String, Value> {
                         Err(e) => Ok(Value::err(Value::String(format!("Parse error: {}", e)))),
                     }
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "parse_datetime() requires (date_str: String, format: String)".to_string(),
                 )),
             },
@@ -377,7 +377,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(dt) => Ok(Value::ok(Value::Int(dt.timestamp()))),
                     Err(e) => Ok(Value::err(Value::String(format!("Parse error: {}", e)))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "parse_iso() requires a string".to_string(),
                 )),
             },
@@ -436,7 +436,7 @@ pub fn init() -> HashMap<String, Value> {
                         ))),
                     }
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "make_time() requires 6 integers: (year, month, day, hour, minute, second)"
                         .to_string(),
                 )),
@@ -477,7 +477,7 @@ pub fn init() -> HashMap<String, Value> {
                         ))),
                     }
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "make_date() requires 3 integers: (year, month, day)".to_string(),
                 )),
             },
@@ -508,7 +508,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::Int(secs)) => Ok(Value::Int(ts + secs)),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "add_seconds() requires (timestamp: Int, seconds: Int)".to_string(),
                 )),
             },
@@ -537,7 +537,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::Int(mins)) => Ok(Value::Int(ts + mins * 60)),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "add_minutes() requires (timestamp: Int, minutes: Int)".to_string(),
                 )),
             },
@@ -566,7 +566,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::Int(hours)) => Ok(Value::Int(ts + hours * 3600)),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "add_hours() requires (timestamp: Int, hours: Int)".to_string(),
                 )),
             },
@@ -597,7 +597,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::Int(days)) => Ok(Value::Int(ts + days * 86400)),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "add_days() requires (timestamp: Int, days: Int)".to_string(),
                 )),
             },
@@ -627,7 +627,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::Int(weeks)) => Ok(Value::Int(ts + weeks * 604800)),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "add_weeks() requires (timestamp: Int, weeks: Int)".to_string(),
                 )),
             },
@@ -662,7 +662,7 @@ pub fn init() -> HashMap<String, Value> {
                 match (&args[0], &args[1]) {
                     (Value::Int(ts), Value::Int(months)) => {
                         let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                            IntentError::RuntimeError("Invalid timestamp".to_string())
+                            IntentError::runtime_error("Invalid timestamp".to_string())
                         })?;
 
                         // Proper calendar-aware month addition
@@ -702,12 +702,12 @@ pub fn init() -> HashMap<String, Value> {
                             chrono::LocalResult::Single(new_dt) => {
                                 Ok(Value::Int(new_dt.timestamp()))
                             }
-                            _ => Err(IntentError::RuntimeError(
+                            _ => Err(IntentError::runtime_error(
                                 "Invalid date after month addition".to_string(),
                             )),
                         }
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "add_months() requires (timestamp: Int, months: Int)".to_string(),
                     )),
                 }
@@ -742,7 +742,7 @@ pub fn init() -> HashMap<String, Value> {
                 match (&args[0], &args[1]) {
                     (Value::Int(ts), Value::Int(years)) => {
                         let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                            IntentError::RuntimeError("Invalid timestamp".to_string())
+                            IntentError::runtime_error("Invalid timestamp".to_string())
                         })?;
 
                         let new_year = dt.year() + (*years as i32);
@@ -773,12 +773,12 @@ pub fn init() -> HashMap<String, Value> {
                             chrono::LocalResult::Single(new_dt) => {
                                 Ok(Value::Int(new_dt.timestamp()))
                             }
-                            _ => Err(IntentError::RuntimeError(
+                            _ => Err(IntentError::runtime_error(
                                 "Invalid date after year addition".to_string(),
                             )),
                         }
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "add_years() requires (timestamp: Int, years: Int)".to_string(),
                     )),
                 }
@@ -819,7 +819,7 @@ pub fn init() -> HashMap<String, Value> {
                     map.insert("days".to_string(), Value::Int(diff_secs / 86400));
                     Ok(Value::Map(map))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "diff() requires two timestamps".to_string(),
                 )),
             },
@@ -851,7 +851,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 < ts2)),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "before() requires two timestamps".to_string(),
                 )),
             },
@@ -881,7 +881,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 > ts2)),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "after() requires two timestamps".to_string(),
                 )),
             },
@@ -911,7 +911,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 == ts2)),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "equal() requires two timestamps".to_string(),
                 )),
             },
@@ -942,11 +942,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::Int(dt.year() as i64))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "year() requires a timestamp".to_string(),
                 )),
             },
@@ -975,11 +975,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::Int(dt.month() as i64))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "month() requires a timestamp".to_string(),
                 )),
             },
@@ -1008,11 +1008,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::Int(dt.day() as i64))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "day() requires a timestamp".to_string(),
                 )),
             },
@@ -1041,11 +1041,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::Int(dt.hour() as i64))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "hour() requires a timestamp".to_string(),
                 )),
             },
@@ -1074,11 +1074,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::Int(dt.minute() as i64))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "minute() requires a timestamp".to_string(),
                 )),
             },
@@ -1107,11 +1107,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::Int(dt.second() as i64))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "second() requires a timestamp".to_string(),
                 )),
             },
@@ -1141,11 +1141,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::Int(dt.weekday().num_days_from_sunday() as i64))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "weekday() requires a timestamp".to_string(),
                 )),
             },
@@ -1176,7 +1176,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     let name = match dt.weekday() {
                         chrono::Weekday::Sun => "Sunday",
@@ -1189,7 +1189,7 @@ pub fn init() -> HashMap<String, Value> {
                     };
                     Ok(Value::String(name.to_string()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "weekday_name() requires a timestamp".to_string(),
                 )),
             },
@@ -1219,7 +1219,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     let name = match dt.month() {
                         1 => "January",
@@ -1238,7 +1238,7 @@ pub fn init() -> HashMap<String, Value> {
                     };
                     Ok(Value::String(name.to_string()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "month_name() requires a timestamp".to_string(),
                 )),
             },
@@ -1268,11 +1268,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::Int(dt.ordinal() as i64))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "day_of_year() requires a timestamp".to_string(),
                 )),
             },
@@ -1303,13 +1303,13 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     let year = dt.year();
                     let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
                     Ok(Value::Bool(is_leap))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "is_leap_year() requires a timestamp".to_string(),
                 )),
             },
@@ -1343,14 +1343,14 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(ms) => {
                     if *ms < 0 {
-                        return Err(IntentError::RuntimeError(
+                        return Err(IntentError::runtime_error(
                             "sleep() requires non-negative milliseconds".to_string(),
                         ));
                     }
                     std::thread::sleep(Duration::from_millis(*ms as u64));
                     Ok(Value::Unit)
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "sleep() requires an integer (milliseconds)".to_string(),
                 )),
             },
@@ -1382,7 +1382,7 @@ pub fn init() -> HashMap<String, Value> {
                     let now = Utc::now().timestamp_millis();
                     Ok(Value::Int(now - start))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "elapsed() requires a start timestamp".to_string(),
                 )),
             },
@@ -1485,11 +1485,11 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::String(fmt)) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
-                        IntentError::RuntimeError("Invalid timestamp".to_string())
+                        IntentError::runtime_error("Invalid timestamp".to_string())
                     })?;
                     Ok(Value::String(dt.format(fmt).to_string()))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "format_timestamp() requires int and format string".to_string(),
                 )),
             },
@@ -1526,7 +1526,7 @@ pub fn init() -> HashMap<String, Value> {
                     map.insert("nanos".to_string(), Value::Int(*secs * 1_000_000_000));
                     Ok(Value::Map(map))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "duration_secs() requires an integer".to_string(),
                 )),
             },
@@ -1563,7 +1563,7 @@ pub fn init() -> HashMap<String, Value> {
                     map.insert("nanos".to_string(), Value::Int(*ms * 1_000_000));
                     Ok(Value::Map(map))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "duration_millis() requires an integer".to_string(),
                 )),
             },

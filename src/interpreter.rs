@@ -11,8 +11,9 @@
 //! - `result` to reference the return value in postconditions
 
 use crate::ast::*;
+use crate::config::{get_type_mode, TypeMode};
 use crate::contracts::{ContractChecker, OldValues, StoredValue};
-use crate::error::{IntentError, Result};
+use crate::error::{IntentError, Result, TypeContext};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
@@ -492,6 +493,46 @@ fn is_production_mode() -> bool {
     })
 }
 
+/// # Type Error Categories (DD-009)
+///
+/// The interpreter has ~130 `IntentError::TypeError` / `RuntimeError` / `InvalidOperation`
+/// throw sites. Only a subset are gated behind `get_type_mode()` (the TypeMode-aware
+/// boundaries). The rest are intentional hard errors. Here's the categorization:
+///
+/// ## TypeMode-Aware (gated behind `get_type_mode()`)
+/// These are **data boundary** errors — the mismatch comes from external data
+/// (database, API, user input) rather than a code bug:
+/// - Index type mismatch (`obj[key]` where types don't match)
+/// - `for..in` on non-collection values
+/// - Field access on non-struct/map
+/// - Template expression/filter/for-loop errors
+///
+/// ## Hard Errors — Code Bugs (always crash, TypeMode does NOT apply)
+/// These indicate a bug in the source code, not a data mismatch:
+/// - **Arity**: wrong number of arguments to a function
+/// - **Binary op mismatch**: `5 + [1,2]`, `"a" - 3`
+/// - **Unary op mismatch**: `-"hello"`, `!42` (when bool expected)
+/// - **Missing field on known struct**: struct schema is static, field absence is a typo
+/// - **push/pop on non-array**: calling collection methods on wrong types
+/// - **Assignment to immutable**: `const` or `let` reassignment where disallowed
+///
+/// ## Hard Errors — Explicit Conversion Failures (always crash)
+/// User explicitly requested a type conversion that failed:
+/// - `int("not_a_number")`, `float("abc")` — parse failures
+/// - `round()`, `floor()`, `ceil()` on non-numeric — wrong type passed to math
+/// - `abs()`, `sqrt()`, `pow()` on non-numeric
+///
+/// ## Hard Errors — Arithmetic Invariants (always crash)
+/// Mathematical invariants that can't produce a meaningful result:
+/// - Division by zero
+/// - `sqrt()` of negative number
+/// - `clamp()` with min > max
+///
+/// ## Hard Errors — Control Flow / Internal (always crash)
+/// Interpreter-internal errors that shouldn't reach user code:
+/// - Calling a non-function value
+/// - Pattern match exhaustiveness failures
+/// - `break`/`continue` outside a loop
 impl Interpreter {
     pub fn new() -> Self {
         let env = Rc::new(RefCell::new(Environment::new()));
@@ -628,6 +669,8 @@ impl Interpreter {
     /// This is useful for external callers (like the IAL test runner) that want
     /// to invoke NTNT functions after loading a module.
     pub fn call_function_by_name(&mut self, name: &str, args: Vec<Value>) -> Result<Value> {
+        // Clear warning dedup state for each request/call
+        crate::config::clear_type_warnings();
         // Look up the function in the environment
         let func = self.environment.borrow().get(name).ok_or_else(|| {
             let candidates = self.environment.borrow().keys();
@@ -635,6 +678,7 @@ impl Interpreter {
             IntentError::UndefinedVariable {
                 name: name.to_string(),
                 suggestion,
+                line: 0,
             }
         })?;
 
@@ -642,7 +686,7 @@ impl Interpreter {
         match &func {
             Value::Function { .. } | Value::NativeFunction { .. } => {}
             _ => {
-                return Err(IntentError::TypeError(format!(
+                return Err(IntentError::type_error(format!(
                     "Expected function, got {}",
                     func.type_name()
                 )))
@@ -1060,8 +1104,10 @@ impl Interpreter {
                     Value::String(s) => Ok(Value::Int(s.len() as i64)),
                     Value::Array(a) => Ok(Value::Int(a.len() as i64)),
                     Value::Map(m) => Ok(Value::Int(m.len() as i64)),
-                    _ => Err(IntentError::TypeError(
-                        "len() requires a string, array, or map".to_string(),
+                    other => Err(IntentError::type_error_with_context(
+                        format!("len() requires a collection, got {}", other.type_name()),
+                        TypeContext::new("String, Array, or Map", other.type_name())
+                            .with_hint("Use type(x) to check the type before calling len()"),
                     )),
                 },
             },
@@ -1168,9 +1214,9 @@ impl Interpreter {
                     Value::String(s) => s
                         .parse::<i64>()
                         .map(Value::Int)
-                        .map_err(|_| IntentError::TypeError("Cannot parse as int".to_string())),
+                        .map_err(|_| IntentError::type_error("Cannot parse as int".to_string())),
                     Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
-                    _ => Err(IntentError::TypeError("Cannot convert to int".to_string())),
+                    _ => Err(IntentError::type_error("Cannot convert to int".to_string())),
                 },
             },
         );
@@ -1201,8 +1247,8 @@ impl Interpreter {
                     Value::String(s) => s
                         .parse::<f64>()
                         .map(Value::Float)
-                        .map_err(|_| IntentError::TypeError("Cannot parse as float".to_string())),
-                    _ => Err(IntentError::TypeError(
+                        .map_err(|_| IntentError::type_error("Cannot parse as float".to_string())),
+                    _ => Err(IntentError::type_error(
                         "Cannot convert to float".to_string(),
                     )),
                 },
@@ -1234,7 +1280,7 @@ impl Interpreter {
                         arr.push(args[1].clone());
                         Ok(Value::Array(arr))
                     } else {
-                        Err(IntentError::TypeError(
+                        Err(IntentError::type_error(
                             "push() requires an array".to_string(),
                         ))
                     }
@@ -1295,7 +1341,7 @@ impl Interpreter {
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(n.abs())),
                     Value::Float(f) => Ok(Value::Float(f.abs())),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "abs() requires a number".to_string(),
                     )),
                 },
@@ -1327,7 +1373,9 @@ impl Interpreter {
                     (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.min(*b))),
                     (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).min(*b))),
                     (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.min(*b as f64))),
-                    _ => Err(IntentError::TypeError("min() requires numbers".to_string())),
+                    _ => Err(IntentError::type_error(
+                        "min() requires numbers".to_string(),
+                    )),
                 },
             },
         );
@@ -1357,7 +1405,9 @@ impl Interpreter {
                     (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.max(*b))),
                     (Value::Int(a), Value::Float(b)) => Ok(Value::Float((*a as f64).max(*b))),
                     (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a.max(*b as f64))),
-                    _ => Err(IntentError::TypeError("max() requires numbers".to_string())),
+                    _ => Err(IntentError::type_error(
+                        "max() requires numbers".to_string(),
+                    )),
                 },
             },
         );
@@ -1387,7 +1437,7 @@ impl Interpreter {
                 max_arity: 0,
                 func: |args| {
                     if args.is_empty() || args.len() > 2 {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "round() requires 1 or 2 arguments".to_string(),
                         ));
                     }
@@ -1396,7 +1446,7 @@ impl Interpreter {
                         Value::Int(n) => *n as f64,
                         Value::Float(f) => *f,
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "round() requires a number as first argument".to_string(),
                             ))
                         }
@@ -1411,14 +1461,14 @@ impl Interpreter {
                     let decimals = match &args[1] {
                         Value::Int(n) => *n,
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "round() requires an integer for decimal places".to_string(),
                             ))
                         }
                     };
 
                     if decimals < 0 {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "round() decimal places must be non-negative".to_string(),
                         ));
                     }
@@ -1452,7 +1502,7 @@ impl Interpreter {
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "floor() requires a number".to_string(),
                     )),
                 },
@@ -1481,7 +1531,7 @@ impl Interpreter {
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "ceil() requires a number".to_string(),
                     )),
                 },
@@ -1512,7 +1562,7 @@ impl Interpreter {
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.trunc() as i64)),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "trunc() requires a number".to_string(),
                     )),
                 },
@@ -1542,7 +1592,7 @@ impl Interpreter {
                 func: |args| match &args[0] {
                     Value::Int(n) => {
                         if *n < 0 {
-                            Err(IntentError::RuntimeError(
+                            Err(IntentError::runtime_error(
                                 "sqrt() of negative number".to_string(),
                             ))
                         } else {
@@ -1551,14 +1601,14 @@ impl Interpreter {
                     }
                     Value::Float(f) => {
                         if *f < 0.0 {
-                            Err(IntentError::RuntimeError(
+                            Err(IntentError::runtime_error(
                                 "sqrt() of negative number".to_string(),
                             ))
                         } else {
                             Ok(Value::Float(f.sqrt()))
                         }
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "sqrt() requires a number".to_string(),
                     )),
                 },
@@ -1600,7 +1650,9 @@ impl Interpreter {
                         Ok(Value::Float((*base as f64).powf(*exp)))
                     }
                     (Value::Float(base), Value::Float(exp)) => Ok(Value::Float(base.powf(*exp))),
-                    _ => Err(IntentError::TypeError("pow() requires numbers".to_string())),
+                    _ => Err(IntentError::type_error(
+                        "pow() requires numbers".to_string(),
+                    )),
                 },
             },
         );
@@ -1637,7 +1689,7 @@ impl Interpreter {
                             Ok(Value::Int(0))
                         }
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "sign() requires a number".to_string(),
                     )),
                 },
@@ -1674,7 +1726,7 @@ impl Interpreter {
                     (Value::Float(val), Value::Float(min), Value::Float(max)) => {
                         Ok(Value::Float(val.max(*min).min(*max)))
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "clamp() requires numbers of same type".to_string(),
                     )),
                 },
@@ -1810,7 +1862,7 @@ impl Interpreter {
                     Value::EnumValue {
                         enum_name, variant, ..
                     } if enum_name == "Option" => Ok(Value::Bool(variant == "Some")),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "is_some() requires an Option".to_string(),
                     )),
                 },
@@ -1840,7 +1892,7 @@ impl Interpreter {
                     Value::EnumValue {
                         enum_name, variant, ..
                     } if enum_name == "Option" => Ok(Value::Bool(variant == "None")),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "is_none() requires an Option".to_string(),
                     )),
                 },
@@ -1870,7 +1922,7 @@ impl Interpreter {
                     Value::EnumValue {
                         enum_name, variant, ..
                     } if enum_name == "Result" => Ok(Value::Bool(variant == "Ok")),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "is_ok() requires a Result".to_string(),
                     )),
                 },
@@ -1900,7 +1952,7 @@ impl Interpreter {
                     Value::EnumValue {
                         enum_name, variant, ..
                     } if enum_name == "Result" => Ok(Value::Bool(variant == "Err")),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "is_err() requires a Result".to_string(),
                     )),
                 },
@@ -2068,22 +2120,22 @@ impl Interpreter {
                         ("Option", "Some") | ("Result", "Ok") => values
                             .first()
                             .cloned()
-                            .ok_or_else(|| IntentError::RuntimeError("Empty variant".to_string())),
-                        ("Option", "None") => Err(IntentError::RuntimeError(
+                            .ok_or_else(|| IntentError::runtime_error("Empty variant".to_string())),
+                        ("Option", "None") => Err(IntentError::runtime_error(
                             "Called unwrap() on None".to_string(),
                         )),
                         ("Result", "Err") => {
                             let err_val = values.first().map(|v| v.to_string()).unwrap_or_default();
-                            Err(IntentError::RuntimeError(format!(
+                            Err(IntentError::runtime_error(format!(
                                 "Called unwrap() on Err({})",
                                 err_val
                             )))
                         }
-                        _ => Err(IntentError::TypeError(
+                        _ => Err(IntentError::type_error(
                             "unwrap() requires Option or Result".to_string(),
                         )),
                     },
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "unwrap() requires Option or Result".to_string(),
                     )),
                 },
@@ -2120,13 +2172,13 @@ impl Interpreter {
                         ("Option", "Some") | ("Result", "Ok") => values
                             .first()
                             .cloned()
-                            .ok_or_else(|| IntentError::RuntimeError("Empty variant".to_string())),
+                            .ok_or_else(|| IntentError::runtime_error("Empty variant".to_string())),
                         ("Option", "None") | ("Result", "Err") => Ok(args[1].clone()),
-                        _ => Err(IntentError::TypeError(
+                        _ => Err(IntentError::type_error(
                             "unwrap_or() requires Option or Result".to_string(),
                         )),
                     },
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "unwrap_or() requires Option or Result".to_string(),
                     )),
                 },
@@ -2154,7 +2206,7 @@ impl Interpreter {
                 func: |_args| {
                     // This is a placeholder - actual implementation is in eval_call
                     // because we need access to the interpreter to call handlers
-                    Err(IntentError::RuntimeError(
+                    Err(IntentError::runtime_error(
                         "listen() must be called directly, not stored in a variable".to_string(),
                     ))
                 },
@@ -2180,7 +2232,7 @@ impl Interpreter {
                 arity: 2,
                 max_arity: 2,
                 func: |_args| {
-                    Err(IntentError::RuntimeError(
+                    Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
                     ))
                 },
@@ -2206,7 +2258,7 @@ impl Interpreter {
                 arity: 2,
                 max_arity: 2,
                 func: |_args| {
-                    Err(IntentError::RuntimeError(
+                    Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
                     ))
                 },
@@ -2232,7 +2284,7 @@ impl Interpreter {
                 arity: 2,
                 max_arity: 2,
                 func: |_args| {
-                    Err(IntentError::RuntimeError(
+                    Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
                     ))
                 },
@@ -2258,7 +2310,7 @@ impl Interpreter {
                 arity: 2,
                 max_arity: 2,
                 func: |_args| {
-                    Err(IntentError::RuntimeError(
+                    Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
                     ))
                 },
@@ -2284,7 +2336,7 @@ impl Interpreter {
                 arity: 2,
                 max_arity: 2,
                 func: |_args| {
-                    Err(IntentError::RuntimeError(
+                    Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
                     ))
                 },
@@ -2309,7 +2361,7 @@ impl Interpreter {
                 max_arity: 0,
                 func: |_args| {
                     // Placeholder - actual implementation clears server_state
-                    Err(IntentError::RuntimeError(
+                    Err(IntentError::runtime_error(
                         "new_server() must be called directly".to_string(),
                     ))
                 },
@@ -2345,7 +2397,7 @@ impl Interpreter {
                 max_arity: 0,
                 func: |_args| {
                     // Placeholder - actual implementation is in eval_call
-                    Err(IntentError::RuntimeError(
+                    Err(IntentError::runtime_error(
                         "enable_cors() must be called directly, not stored in a variable"
                             .to_string(),
                     ))
@@ -2398,7 +2450,7 @@ impl Interpreter {
             if let Some(s) = suggestion {
                 msg.push_str(&format!("\n  Did you mean: {}?", s));
             }
-            IntentError::RuntimeError(msg)
+            IntentError::runtime_error(msg)
         })?;
 
         self.bind_imports(items, &module, source, alias)
@@ -2444,7 +2496,7 @@ impl Interpreter {
                     if sorted_exports.len() > 8 {
                         msg.push_str(&format!(", ... ({} total)", sorted_exports.len()));
                     }
-                    IntentError::RuntimeError(msg)
+                    IntentError::runtime_error(msg)
                 })?;
                 let bind_name = item.alias.as_ref().unwrap_or(&item.name);
                 self.environment
@@ -2489,7 +2541,7 @@ impl Interpreter {
 
         // Read and parse the file
         let source_code = fs::read_to_string(&file_path).map_err(|e| {
-            IntentError::RuntimeError(format!(
+            IntentError::runtime_error(format!(
                 "Failed to read module '{}': {}",
                 file_path.display(),
                 e
@@ -2702,7 +2754,7 @@ impl Interpreter {
         use std::fs;
 
         let source_code = fs::read_to_string(file_path).map_err(|e| {
-            IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path.display(), e))
+            IntentError::runtime_error(format!("Failed to read '{}': {}", file_path.display(), e))
         })?;
 
         let lexer = Lexer::new(&source_code);
@@ -2717,9 +2769,11 @@ impl Interpreter {
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
 
-        // Re-define builtins and types in the new environment
+        // Re-define builtins, types, and stdlib in the new environment
+        // (lib modules should have the same execution context as route handlers)
         self.define_builtins();
         self.define_builtin_types();
+        self.define_stdlib();
 
         // Evaluate the module
         self.eval(&ast)?;
@@ -2762,14 +2816,14 @@ impl Interpreter {
         let mut routes = Vec::new();
 
         if !dir.exists() || !dir.is_dir() {
-            return Err(IntentError::RuntimeError(format!(
+            return Err(IntentError::runtime_error(format!(
                 "Routes directory does not exist: {}",
                 dir.display()
             )));
         }
 
         let mut entries: Vec<_> = fs::read_dir(dir)
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to read directory: {}", e)))?
+            .map_err(|e| IntentError::runtime_error(format!("Failed to read directory: {}", e)))?
             .flatten()
             .collect();
 
@@ -2818,13 +2872,13 @@ impl Interpreter {
         // Convert file path to URL pattern
         let relative_path = file_path
             .strip_prefix(base_dir)
-            .map_err(|_| IntentError::RuntimeError("Failed to get relative path".to_string()))?;
+            .map_err(|_| IntentError::runtime_error("Failed to get relative path".to_string()))?;
 
         let url_pattern = self.file_path_to_url_pattern(relative_path);
 
         // Read and parse the file
         let source_code = fs::read_to_string(file_path).map_err(|e| {
-            IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path.display(), e))
+            IntentError::runtime_error(format!("Failed to read '{}': {}", file_path.display(), e))
         })?;
 
         let lexer = Lexer::new(&source_code);
@@ -2840,9 +2894,10 @@ impl Interpreter {
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string_lossy().to_string());
 
-        // Re-define builtins and types
+        // Re-define builtins, types, and stdlib modules
         self.define_builtins();
         self.define_builtin_types();
+        self.define_stdlib();
 
         // Inject lib modules into the environment
         for (name, exports) in lib_modules {
@@ -2909,7 +2964,7 @@ impl Interpreter {
 
         // Read and parse the file
         let source_code = fs::read_to_string(path).map_err(|e| {
-            IntentError::RuntimeError(format!("Failed to read '{}': {}", file_path, e))
+            IntentError::runtime_error(format!("Failed to read '{}': {}", file_path, e))
         })?;
 
         let lexer = Lexer::new(&source_code);
@@ -2925,9 +2980,10 @@ impl Interpreter {
         self.environment = Rc::new(RefCell::new(Environment::new()));
         self.current_file = Some(file_path.to_string());
 
-        // Re-define builtins and types
+        // Re-define builtins, types, and stdlib modules
         self.define_builtins();
         self.define_builtin_types();
+        self.define_stdlib();
 
         // Inject lib modules (same as initial route processing)
         for (name, exports) in &self.lib_modules {
@@ -2962,7 +3018,7 @@ impl Interpreter {
         self.imported_files = previous_imports;
 
         let handler = handler.ok_or_else(|| {
-            IntentError::RuntimeError(format!(
+            IntentError::runtime_error(format!(
                 "Handler '{}' not found in {}",
                 method_name, file_path
             ))
@@ -3015,6 +3071,8 @@ impl Interpreter {
 
     /// Evaluate a program
     pub fn eval(&mut self, program: &Program) -> Result<Value> {
+        // Clear warning dedup state so each eval/request gets fresh warnings
+        crate::config::clear_type_warnings();
         let mut result = Value::Unit;
         for stmt in &program.statements {
             result = self.eval_statement(stmt)?;
@@ -3031,7 +3089,14 @@ impl Interpreter {
             Statement::Located { line, col, stmt } => {
                 self.current_line = *line;
                 self.current_col = *col;
-                return self.eval_statement(stmt);
+                return self.eval_statement(stmt).map_err(|e| {
+                    // Annotate errors with line info if they don't already have it
+                    if e.line().is_none() {
+                        e.at_line(*line)
+                    } else {
+                        e
+                    }
+                });
             }
             Statement::Let {
                 name,
@@ -3107,7 +3172,7 @@ impl Interpreter {
                                         return Ok(result)
                                     }
                                     _ => {
-                                        return Err(IntentError::RuntimeError(
+                                        return Err(IntentError::runtime_error(
                                             "otherwise block must diverge (use return, break, or continue)".to_string(),
                                         ))
                                     }
@@ -3382,30 +3447,59 @@ impl Interpreter {
                 let iterable_value = self.eval_expression(iterable)?;
 
                 // Convert iterable to something we can iterate over
-                let items: Vec<Value> = match &iterable_value {
-                    Value::Array(arr) => arr.clone(),
+                // Resolve the iterable into items.  Non-collection values are handled
+                // according to the current NTNT_TYPE_MODE:
+                //   strict    → RuntimeError (halts)
+                //   warn      → [WARN] to stderr, then empty iteration (default)
+                //   forgiving → empty iteration, silently
+                let items_result: Result<Vec<Value>> = match &iterable_value {
+                    Value::Array(arr) => Ok(arr.clone()),
                     Value::Range {
                         start,
                         end,
                         inclusive,
                     } => {
                         let end_val = if *inclusive { *end + 1 } else { *end };
-                        (*start..end_val).map(Value::Int).collect()
+                        Ok((*start..end_val).map(Value::Int).collect())
                     }
-                    Value::Map(map) => map.keys().map(|k| Value::String(k.clone())).collect(),
-                    // String and non-collection types: zero iterations with dev-mode warning.
+                    Value::Map(map) => Ok(map.keys().map(|k| Value::String(k.clone())).collect()),
+                    // String and non-collection types: behaviour depends on TypeMode.
                     // Use chars() builtin for explicit string character iteration.
-                    _ => {
-                        if !is_production_mode() {
-                            eprintln!(
-                                "[WARN] for..in on {} — skipping (not a collection). \
+                    _ => match get_type_mode() {
+                        TypeMode::Strict => {
+                            let hint = if iterable_value.type_name() == "String" {
+                                "Use chars(s) to iterate over string characters"
+                            } else {
+                                "Use ?? to provide a fallback collection, or check the type before iterating"
+                            };
+                            Err(IntentError::runtime_error_with_context(
+                                format!(
+                                    "for..in requires a collection, got {}",
+                                    iterable_value.type_name()
+                                ),
+                                TypeContext::new(
+                                    "Array, Map, or Range",
+                                    iterable_value.type_name(),
+                                )
+                                .with_hint(hint),
+                            ))
+                        }
+                        TypeMode::Warn => {
+                            let msg = format!(
+                                "for..in on {} — skipping (not a collection). \
                                  Use chars() for string iteration.",
                                 iterable_value.type_name()
                             );
+                            crate::config::type_warn_dedup(
+                                &format!("for_in:{}", iterable_value.type_name()),
+                                &msg,
+                            );
+                            Ok(vec![])
                         }
-                        vec![]
-                    }
+                        TypeMode::Forgiving => Ok(vec![]),
+                    },
                 };
+                let items = items_result?;
 
                 let mut result = Value::Unit;
                 for item in items {
@@ -3511,6 +3605,7 @@ impl Interpreter {
                 IntentError::UndefinedVariable {
                     name: name.clone(),
                     suggestion,
+                    line: 0,
                 }
             }),
 
@@ -3570,7 +3665,7 @@ impl Interpreter {
                     UnaryOp::Neg => match val {
                         Value::Int(n) => Ok(Value::Int(-n)),
                         Value::Float(f) => Ok(Value::Float(-f)),
-                        _ => Err(IntentError::TypeError(
+                        _ => Err(IntentError::type_error(
                             "Cannot negate non-numeric value".to_string(),
                         )),
                     },
@@ -3617,7 +3712,7 @@ impl Interpreter {
                                 return self.run_async_http_server(effective_port);
                             }
                         } else {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "listen() requires an integer port".to_string(),
                             ));
                         }
@@ -3663,7 +3758,7 @@ impl Interpreter {
                                 return Ok(Value::Unit);
                             }
                             _ => {
-                                return Err(IntentError::TypeError(
+                                return Err(IntentError::type_error(
                                     "serve_static() requires two string arguments: (url_prefix, directory)".to_string()
                                 ));
                             }
@@ -3679,7 +3774,7 @@ impl Interpreter {
                         if let Value::String(dir_str) = directory {
                             return self.load_file_based_routes(&dir_str);
                         } else {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "routes() requires a string directory path".to_string(),
                             ));
                         }
@@ -3726,7 +3821,7 @@ impl Interpreter {
                             match self.eval_expression(&arguments[0])? {
                                 Value::Map(m) => m,
                                 _ => {
-                                    return Err(IntentError::TypeError(
+                                    return Err(IntentError::type_error(
                                         "enable_cors() options must be a map".to_string(),
                                     ))
                                 }
@@ -3759,7 +3854,7 @@ impl Interpreter {
                         let path_str = match &path {
                             Value::String(s) => s.clone(),
                             _ => {
-                                return Err(IntentError::TypeError(
+                                return Err(IntentError::type_error(
                                     "template() first argument must be a string path".to_string(),
                                 ))
                             }
@@ -3768,7 +3863,7 @@ impl Interpreter {
                         let data_map = match &data {
                             Value::Map(m) => m.clone(),
                             _ => {
-                                return Err(IntentError::TypeError(
+                                return Err(IntentError::type_error(
                                     "template() second argument must be a map".to_string(),
                                 ))
                             }
@@ -3790,7 +3885,7 @@ impl Interpreter {
                         let path_str = match &path {
                             Value::String(s) => s.clone(),
                             _ => {
-                                return Err(IntentError::TypeError(
+                                return Err(IntentError::type_error(
                                     "compile() argument must be a string path".to_string(),
                                 ))
                             }
@@ -3846,14 +3941,14 @@ impl Interpreter {
                             Value::Map(m) => match m.get("_template_id") {
                                 Some(Value::Int(id)) => *id as u64,
                                 _ => {
-                                    return Err(IntentError::TypeError(
+                                    return Err(IntentError::type_error(
                                         "render() first argument must be a compiled template"
                                             .to_string(),
                                     ))
                                 }
                             },
                             _ => {
-                                return Err(IntentError::TypeError(
+                                return Err(IntentError::type_error(
                                     "render() first argument must be a compiled template"
                                         .to_string(),
                                 ))
@@ -3863,7 +3958,7 @@ impl Interpreter {
                         let data_map = match &data {
                             Value::Map(m) => m.clone(),
                             _ => {
-                                return Err(IntentError::TypeError(
+                                return Err(IntentError::type_error(
                                     "render() second argument must be a map".to_string(),
                                 ))
                             }
@@ -3874,7 +3969,7 @@ impl Interpreter {
                             match crate::stdlib::template::get_compiled_template(template_id) {
                                 Some(t) => t.content,
                                 None => {
-                                    return Err(IntentError::RuntimeError(
+                                    return Err(IntentError::runtime_error(
                                         "Template not found in cache".to_string(),
                                     ))
                                 }
@@ -3955,7 +4050,7 @@ impl Interpreter {
                             }
                             return Ok(Value::Array(result));
                         } else {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "filter() requires an array as first argument".to_string(),
                             ));
                         }
@@ -3975,7 +4070,7 @@ impl Interpreter {
                             }
                             return Ok(Value::Array(result));
                         } else {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "transform() requires an array as first argument".to_string(),
                             ));
                         }
@@ -4015,7 +4110,7 @@ impl Interpreter {
                             items = keyed.into_iter().map(|(_, v)| v).collect();
                             return Ok(Value::Array(items));
                         } else {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "sort() requires an array as first argument".to_string(),
                             ));
                         }
@@ -4054,7 +4149,7 @@ impl Interpreter {
                             items = keyed.into_iter().map(|(_, v)| v).collect();
                             return Ok(Value::Array(items));
                         } else {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "sort_desc() requires an array as first argument".to_string(),
                             ));
                         }
@@ -4075,7 +4170,7 @@ impl Interpreter {
                             }
                             return Ok(Value::none());
                         } else {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "find() requires an array as first argument".to_string(),
                             ));
                         }
@@ -4095,7 +4190,7 @@ impl Interpreter {
                             }
                             return Ok(Value::Bool(false));
                         } else {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "any() requires an array as first argument".to_string(),
                             ));
                         }
@@ -4115,7 +4210,7 @@ impl Interpreter {
                             }
                             return Ok(Value::Bool(true));
                         } else {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "all() requires an array as first argument".to_string(),
                             ));
                         }
@@ -4151,7 +4246,7 @@ impl Interpreter {
                             }
                             return Ok(acc);
                         } else {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "reduce() requires an array as first argument".to_string(),
                             ));
                         }
@@ -4173,7 +4268,7 @@ impl Interpreter {
                             }
                             return Ok(Value::Array(result));
                         } else {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "flat_map() requires an array as first argument".to_string(),
                             ));
                         }
@@ -4263,13 +4358,38 @@ impl Interpreter {
                     // Struct access with string key: struct["field"]
                     (Value::Struct { fields, .. }, Value::String(key)) => {
                         fields.get(&key).cloned().ok_or_else(|| {
-                            IntentError::RuntimeError(format!("Unknown field: {}", key))
+                            IntentError::runtime_error(format!("Unknown field: {}", key))
                         })
                     }
-                    // Type mismatch on index returns None instead of crashing.
-                    // This makes ?? the universal safety net: data["key"] ?? "default"
-                    // works regardless of whether data is a map, string, int, or None.
-                    _ => Ok(Value::none()),
+                    // Type mismatch on index: behaviour depends on NTNT_TYPE_MODE.
+                    //   strict    → RuntimeError
+                    //   warn      → [WARN] to stderr, return None  (default)
+                    //   forgiving → return None silently
+                    // ?? remains the universal safety net in warn/forgiving modes.
+                    (obj, idx) => match get_type_mode() {
+                        TypeMode::Strict => Err(IntentError::runtime_error_with_context(
+                            format!("Cannot index {} with {}", obj.type_name(), idx.type_name()),
+                            TypeContext::new(
+                                "Array[Int], Map[String], or String[Int]",
+                                format!("{}[{}]", obj.type_name(), idx.type_name()),
+                            )
+                            .with_hint("Use ?? to provide a default: value[key] ?? fallback"),
+                        )),
+                        TypeMode::Warn => {
+                            let msg = format!(
+                                "Type mismatch: indexing {} with {} — returning None. \
+                                 Use ?? for a safe default.",
+                                obj.type_name(),
+                                idx.type_name()
+                            );
+                            crate::config::type_warn_dedup(
+                                &format!("index:{}:{}", obj.type_name(), idx.type_name()),
+                                &msg,
+                            );
+                            Ok(Value::none())
+                        }
+                        TypeMode::Forgiving => Ok(Value::none()),
+                    },
                 }
             }
 
@@ -4277,12 +4397,34 @@ impl Interpreter {
                 let obj = self.eval_expression(object)?;
                 match obj {
                     Value::Struct { fields, .. } => fields.get(field).cloned().ok_or_else(|| {
-                        IntentError::RuntimeError(format!("Unknown field: {}", field))
+                        IntentError::runtime_error(format!("Unknown field: {}", field))
                     }),
                     Value::Map(map) => Ok(map.get(field).cloned().unwrap_or_else(|| Value::none())),
-                    _ => Err(IntentError::TypeError(
-                        "Field access on non-struct value".to_string(),
-                    )),
+                    // Field access on non-struct/map: behaviour depends on TypeMode.
+                    // Real-world scenario: JSON from DB decoded as wrong type.
+                    _ => match get_type_mode() {
+                        TypeMode::Strict => Err(IntentError::runtime_error_with_context(
+                            format!("Field access .{} on {}", field, obj.type_name()),
+                            TypeContext::new("Struct or Map", obj.type_name()).with_hint(format!(
+                                "Use .{} ?? fallback to handle unexpected types",
+                                field
+                            )),
+                        )),
+                        TypeMode::Warn => {
+                            let msg = format!(
+                                "Field access .{} on {} — returning None. \
+                                 Expected Struct or Map.",
+                                field,
+                                obj.type_name()
+                            );
+                            crate::config::type_warn_dedup(
+                                &format!("field:{}:{}", field, obj.type_name()),
+                                &msg,
+                            );
+                            Ok(Value::none())
+                        }
+                        TypeMode::Forgiving => Ok(Value::none()),
+                    },
                 }
             }
 
@@ -4341,6 +4483,7 @@ impl Interpreter {
                             Err(IntentError::UndefinedVariable {
                                 name: name.clone(),
                                 suggestion,
+                                line: 0,
                             })
                         }
                     }
@@ -4356,6 +4499,7 @@ impl Interpreter {
                                     IntentError::UndefinedVariable {
                                         name: var_name.clone(),
                                         suggestion,
+                                        line: 0,
                                     }
                                 })?;
 
@@ -4380,18 +4524,18 @@ impl Interpreter {
                                     self.environment.borrow_mut().set(var_name, new_struct);
                                     Ok(val)
                                 } else {
-                                    Err(IntentError::RuntimeError(format!(
+                                    Err(IntentError::runtime_error(format!(
                                         "Unknown field '{}' on struct '{}'",
                                         field, struct_name
                                     )))
                                 }
                             } else {
-                                Err(IntentError::RuntimeError(
+                                Err(IntentError::runtime_error(
                                     "Cannot assign field on non-struct value".to_string(),
                                 ))
                             }
                         } else {
-                            Err(IntentError::RuntimeError(
+                            Err(IntentError::runtime_error(
                                 "Cannot assign to complex field access".to_string(),
                             ))
                         }
@@ -4409,7 +4553,7 @@ impl Interpreter {
                                 }
                                 Expression::Identifier(_) => break,
                                 _ => {
-                                    return Err(IntentError::RuntimeError(
+                                    return Err(IntentError::runtime_error(
                                         "Invalid nested assignment target".to_string(),
                                     ))
                                 }
@@ -4426,7 +4570,7 @@ impl Interpreter {
 
                         // Check mutability
                         if !self.environment.borrow().is_mutable(&root_name) {
-                            return Err(IntentError::RuntimeError(format!(
+                            return Err(IntentError::runtime_error(format!(
                                 "Cannot mutate '{}': variable is not declared with 'let mut'",
                                 root_name
                             )));
@@ -4441,6 +4585,7 @@ impl Interpreter {
                                 IntentError::UndefinedVariable {
                                     name: root_name.clone(),
                                     suggestion,
+                                    line: 0,
                                 }
                             })?;
 
@@ -4462,7 +4607,7 @@ impl Interpreter {
                                             let index = match idx_val {
                                                 Value::Int(n) => *n as usize,
                                                 _ => {
-                                                    return Err(IntentError::RuntimeError(
+                                                    return Err(IntentError::runtime_error(
                                                         "Array index must be an integer"
                                                             .to_string(),
                                                     ))
@@ -4480,7 +4625,7 @@ impl Interpreter {
                                             let key = match idx_val {
                                                 Value::String(s) => s.clone(),
                                                 _ => {
-                                                    return Err(IntentError::RuntimeError(
+                                                    return Err(IntentError::runtime_error(
                                                         "Map key must be a string".to_string(),
                                                     ))
                                                 }
@@ -4488,7 +4633,7 @@ impl Interpreter {
                                             map.insert(key, val.clone());
                                         }
                                         _ => {
-                                            return Err(IntentError::RuntimeError(
+                                            return Err(IntentError::runtime_error(
                                                 "Cannot index into non-collection value"
                                                     .to_string(),
                                             ))
@@ -4501,7 +4646,7 @@ impl Interpreter {
                                             let index = match idx_val {
                                                 Value::Int(n) => *n as usize,
                                                 _ => {
-                                                    return Err(IntentError::RuntimeError(
+                                                    return Err(IntentError::runtime_error(
                                                         "Array index must be an integer"
                                                             .to_string(),
                                                     ))
@@ -4519,20 +4664,20 @@ impl Interpreter {
                                             let key = match idx_val {
                                                 Value::String(s) => s.clone(),
                                                 _ => {
-                                                    return Err(IntentError::RuntimeError(
+                                                    return Err(IntentError::runtime_error(
                                                         "Map key must be a string".to_string(),
                                                     ))
                                                 }
                                             };
                                             map.get_mut(&key).ok_or_else(|| {
-                                                IntentError::RuntimeError(format!(
+                                                IntentError::runtime_error(format!(
                                                     "Key '{}' not found in map",
                                                     key
                                                 ))
                                             })?
                                         }
                                         _ => {
-                                            return Err(IntentError::RuntimeError(
+                                            return Err(IntentError::runtime_error(
                                                 "Cannot index into non-collection value"
                                                     .to_string(),
                                             ))
@@ -4546,7 +4691,7 @@ impl Interpreter {
                         self.environment.borrow_mut().set(&root_name, root_val);
                         Ok(val)
                     }
-                    _ => Err(IntentError::RuntimeError(
+                    _ => Err(IntentError::runtime_error(
                         "Invalid assignment target".to_string(),
                     )),
                 }
@@ -4606,7 +4751,7 @@ impl Interpreter {
                                 .strip_prefix("module:")
                                 .or_else(|| name.strip_prefix("lib:"))
                                 .unwrap_or(name);
-                            return Err(IntentError::RuntimeError(format!(
+                            return Err(IntentError::runtime_error(format!(
                                 "Module '{}' has no function '{}'",
                                 module_name, method
                             )));
@@ -4643,6 +4788,7 @@ impl Interpreter {
                     Err(IntentError::UndefinedFunction {
                         name: method.clone(),
                         suggestion: None,
+                        line: 0,
                     })
                 }
             }
@@ -4704,14 +4850,14 @@ impl Interpreter {
                     }
                 }
 
-                Err(IntentError::RuntimeError(
+                Err(IntentError::runtime_error(
                     "No pattern matched in match expression".to_string(),
                 ))
             }
 
             Expression::Await(_) => {
                 // TODO: Implement async
-                Err(IntentError::RuntimeError(
+                Err(IntentError::runtime_error(
                     "Async/Await not yet implemented".to_string(),
                 ))
             }
@@ -4762,7 +4908,7 @@ impl Interpreter {
                         Value::String(s) => s.clone(),
                         Value::Int(n) => n.to_string(),
                         _ => {
-                            return Err(IntentError::RuntimeError(
+                            return Err(IntentError::runtime_error(
                                 "Map keys must be strings or integers".to_string(),
                             ))
                         }
@@ -4786,7 +4932,7 @@ impl Interpreter {
                         end: *e,
                         inclusive: *inclusive,
                     }),
-                    _ => Err(IntentError::RuntimeError(
+                    _ => Err(IntentError::runtime_error(
                         "Range bounds must be integers".to_string(),
                     )),
                 }
@@ -4872,7 +5018,7 @@ impl Interpreter {
                         config.providers.push(provider);
                     }
                 } else {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "enable_auth() requires a provider or config with 'providers' array"
                             .to_string(),
                     ));
@@ -4897,7 +5043,7 @@ impl Interpreter {
 
                 Ok(config)
             }
-            _ => Err(IntentError::TypeError(
+            _ => Err(IntentError::type_error(
                 "enable_auth() requires a provider or config map".to_string(),
             )),
         }
@@ -4987,7 +5133,7 @@ impl Interpreter {
         for candidate in &candidates {
             if candidate.is_file() {
                 return std::fs::read_to_string(candidate).map_err(|e| {
-                    IntentError::RuntimeError(format!(
+                    IntentError::runtime_error(format!(
                         "Failed to read partial '{}' from {}: {}",
                         name,
                         candidate.display(),
@@ -4997,7 +5143,7 @@ impl Interpreter {
             }
         }
 
-        Err(IntentError::RuntimeError(format!(
+        Err(IntentError::runtime_error(format!(
             "Partial '{}' not found. Searched:\n{}",
             name,
             candidates
@@ -5024,9 +5170,9 @@ impl Interpreter {
         let tokens: Vec<_> = lexer.collect();
         let mut parser = Parser::new(tokens);
 
-        let template_expr = parser
-            .expression()
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to compile template: {}", e)))?;
+        let template_expr = parser.expression().map_err(|e| {
+            IntentError::runtime_error(format!("Failed to compile template: {}", e))
+        })?;
 
         // Create a new scope for template data
         let previous = Rc::clone(&self.environment);
@@ -5048,6 +5194,44 @@ impl Interpreter {
         result
     }
 
+    /// Format a template error for HTML output in warn mode.
+    /// In development, renders detailed error as HTML comment.
+    /// In production, renders a generic marker to avoid leaking internals.
+    fn template_warn_comment(error: &IntentError) -> String {
+        if is_production_mode() {
+            "<!-- template error -->".to_string()
+        } else {
+            format!(
+                "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
+                sanitize_html_comment(&error.to_string())
+            )
+        }
+    }
+
+    /// Handle a template error according to `NTNT_TYPE_MODE`.
+    ///
+    /// - `Strict`: returns `Err(e)` (caller should propagate)
+    /// - `Warn`: logs to stderr, appends HTML comment to `result`
+    /// - `Forgiving`: silently ignores the error
+    ///
+    /// Returns `Ok(())` when the error is handled (warn/forgiving), or `Err(e)` in strict mode.
+    fn handle_template_error(e: IntentError, context: &str, result: &mut String) -> Result<()> {
+        match get_type_mode() {
+            TypeMode::Strict => Err(e),
+            TypeMode::Warn => {
+                let key = format!("template:{}:{}", context, e);
+                if crate::config::type_warn_dedup(
+                    &key,
+                    &format!("Template {} failed: {}", context, e),
+                ) {
+                    result.push_str(&Self::template_warn_comment(&e));
+                }
+                Ok(())
+            }
+            TypeMode::Forgiving => Ok(()),
+        }
+    }
+
     /// Evaluate template string parts
     fn eval_template_parts(&mut self, parts: &[TemplatePart]) -> Result<Value> {
         let mut result = String::new();
@@ -5056,7 +5240,10 @@ impl Interpreter {
             match part {
                 TemplatePart::Literal(s) => result.push_str(s),
                 TemplatePart::Expr(expr) => {
-                    // Error boundary: catch all errors, render gracefully
+                    // Error boundary: behaviour depends on NTNT_TYPE_MODE.
+                    //   strict    → propagate error (HTTP 500)
+                    //   warn      → [WARN] to stderr + HTML comment  (default)
+                    //   forgiving → render empty string silently
                     match self.eval_expression(expr) {
                         Ok(v) => {
                             let s = v.to_string();
@@ -5064,37 +5251,18 @@ impl Interpreter {
                         }
                         // Undefined variables render as empty string (standard Mustache behavior)
                         Err(IntentError::UndefinedVariable { .. }) => {}
-                        Err(e) => {
-                            let is_prod = is_production_mode();
-                            eprintln!("[ERROR] Template expression failed: {}", e);
-                            if !is_prod {
-                                result.push_str(&format!(
-                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                    sanitize_html_comment(&e.to_string())
-                                ));
-                            }
-                            // prod: empty string (push nothing)
-                        }
+                        Err(e) => Self::handle_template_error(e, "expression", &mut result)?,
                     }
                 }
                 TemplatePart::RawExpr(expr) => {
-                    // Error boundary: catch all errors, render gracefully
+                    // Error boundary: behaviour depends on NTNT_TYPE_MODE.
                     match self.eval_expression(expr) {
                         Ok(v) => {
                             result.push_str(&v.to_string());
                         }
                         // Undefined variables render as empty string (standard Mustache behavior)
                         Err(IntentError::UndefinedVariable { .. }) => {}
-                        Err(e) => {
-                            let is_prod = is_production_mode();
-                            eprintln!("[ERROR] Template expression failed: {}", e);
-                            if !is_prod {
-                                result.push_str(&format!(
-                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                    sanitize_html_comment(&e.to_string())
-                                ));
-                            }
-                        }
+                        Err(e) => Self::handle_template_error(e, "raw expression", &mut result)?,
                     }
                 }
                 TemplatePart::FilteredExpr { expr, filters } => {
@@ -5106,26 +5274,17 @@ impl Interpreter {
                         Err(e) => {
                             if has_default {
                                 // Log non-variable errors even with default filter
-                                if !matches!(e, IntentError::UndefinedVariable { .. }) {
-                                    let is_prod = is_production_mode();
-                                    if !is_prod {
-                                        eprintln!(
-                                            "[WARN] Template expression error (using default): {}",
-                                            e
-                                        );
-                                    }
+                                if !matches!(e, IntentError::UndefinedVariable { .. })
+                                    && get_type_mode() == TypeMode::Warn
+                                {
+                                    eprintln!(
+                                        "[WARN] Template expression error (using default): {}",
+                                        e
+                                    );
                                 }
                                 Value::Unit
                             } else {
-                                // Error boundary: render gracefully
-                                let is_prod = is_production_mode();
-                                eprintln!("[ERROR] Template expression failed: {}", e);
-                                if !is_prod {
-                                    result.push_str(&format!(
-                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                        sanitize_html_comment(&e.to_string())
-                                    ));
-                                }
+                                Self::handle_template_error(e, "filtered expression", &mut result)?;
                                 continue;
                             }
                         }
@@ -5152,26 +5311,17 @@ impl Interpreter {
                         Err(e) => {
                             if has_default {
                                 // Log non-variable errors even with default filter
-                                if !matches!(e, IntentError::UndefinedVariable { .. }) {
-                                    let is_prod = is_production_mode();
-                                    if !is_prod {
-                                        eprintln!(
-                                            "[WARN] Template expression error (using default): {}",
-                                            e
-                                        );
-                                    }
+                                if !matches!(e, IntentError::UndefinedVariable { .. })
+                                    && get_type_mode() == TypeMode::Warn
+                                {
+                                    eprintln!(
+                                        "[WARN] Template expression error (using default): {}",
+                                        e
+                                    );
                                 }
                                 Value::Unit
                             } else {
-                                // Error boundary: render gracefully
-                                let is_prod = is_production_mode();
-                                eprintln!("[ERROR] Template expression failed: {}", e);
-                                if !is_prod {
-                                    result.push_str(&format!(
-                                        "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: {} -->",
-                                        sanitize_html_comment(&e.to_string())
-                                    ));
-                                }
+                                Self::handle_template_error(e, "filtered expression", &mut result)?;
                                 continue;
                             }
                         }
@@ -5190,15 +5340,7 @@ impl Interpreter {
                     let iterable_value = match self.eval_expression(iterable) {
                         Ok(v) => v,
                         Err(e) => {
-                            // Error boundary: treat errored iterable as empty
-                            let is_prod = is_production_mode();
-                            eprintln!("[ERROR] Template for-loop iterable failed: {}", e);
-                            if !is_prod {
-                                result.push_str(&format!(
-                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR (for): {} -->",
-                                    sanitize_html_comment(&e.to_string())
-                                ));
-                            }
+                            Self::handle_template_error(e, "for-loop iterable", &mut result)?;
                             // Render empty_body if present, otherwise skip
                             if !empty_body.is_empty() {
                                 if let Ok(Value::String(s)) = self.eval_template_parts(empty_body) {
@@ -5320,18 +5462,12 @@ impl Interpreter {
                             }
                         }
                         _ => {
-                            // Non-iterable value: skip with warning (consistent with for..in behavior)
-                            let is_prod = is_production_mode();
-                            if !is_prod {
-                                eprintln!(
-                                    "[WARN] Template for loop on {} — skipping (not a collection)",
-                                    iterable_value.type_name()
-                                );
-                                result.push_str(&format!(
-                                    "<!-- \u{26a0}\u{fe0f} TEMPLATE ERROR: for loop on {}, expected array or map -->",
-                                    sanitize_html_comment(iterable_value.type_name())
-                                ));
-                            }
+                            // Non-iterable value: behaviour depends on NTNT_TYPE_MODE
+                            let err = IntentError::runtime_error(format!(
+                                "Template for loop requires a collection (Array or Map), got {}",
+                                iterable_value.type_name()
+                            ));
+                            Self::handle_template_error(err, "for-loop non-iterable", &mut result)?;
                             if !empty_body.is_empty() {
                                 if let Ok(Value::String(s)) = self.eval_template_parts(empty_body) {
                                     result.push_str(&s);
@@ -5405,7 +5541,7 @@ impl Interpreter {
                         match self.eval_expression(expr)? {
                             Value::Map(m) => m,
                             other => {
-                                return Err(IntentError::TypeError(format!(
+                                return Err(IntentError::type_error(format!(
                                     "Partial '{}' data expression must be a map, got {}",
                                     name,
                                     other.type_name()
@@ -5468,7 +5604,7 @@ impl Interpreter {
                 let max_len = match args.first() {
                     Some(Value::Int(n)) => *n as usize,
                     _ => {
-                        return Err(IntentError::RuntimeError(
+                        return Err(IntentError::runtime_error(
                             "truncate filter requires an integer argument".to_string(),
                         ))
                     }
@@ -5484,7 +5620,7 @@ impl Interpreter {
                 let (from, to) = match (args.first(), args.get(1)) {
                     (Some(Value::String(f)), Some(Value::String(t))) => (f.as_str(), t.as_str()),
                     _ => {
-                        return Err(IntentError::RuntimeError(
+                        return Err(IntentError::runtime_error(
                             "replace filter requires two string arguments".to_string(),
                         ))
                     }
@@ -5530,7 +5666,7 @@ impl Interpreter {
                 Value::String(s) => Ok(Value::Int(s.len() as i64)),
                 Value::Array(arr) => Ok(Value::Int(arr.len() as i64)),
                 Value::Map(m) => Ok(Value::Int(m.len() as i64)),
-                _ => Err(IntentError::RuntimeError(format!(
+                _ => Err(IntentError::runtime_error(format!(
                     "length filter not supported for {}",
                     value.type_name()
                 ))),
@@ -5540,7 +5676,7 @@ impl Interpreter {
                 Value::String(s) => Ok(Value::String(
                     s.chars().next().map(|c| c.to_string()).unwrap_or_default(),
                 )),
-                _ => Err(IntentError::RuntimeError(format!(
+                _ => Err(IntentError::runtime_error(format!(
                     "first filter not supported for {}",
                     value.type_name()
                 ))),
@@ -5550,7 +5686,7 @@ impl Interpreter {
                 Value::String(s) => Ok(Value::String(
                     s.chars().last().map(|c| c.to_string()).unwrap_or_default(),
                 )),
-                _ => Err(IntentError::RuntimeError(format!(
+                _ => Err(IntentError::runtime_error(format!(
                     "last filter not supported for {}",
                     value.type_name()
                 ))),
@@ -5562,7 +5698,7 @@ impl Interpreter {
                     Ok(Value::Array(reversed))
                 }
                 Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
-                _ => Err(IntentError::RuntimeError(format!(
+                _ => Err(IntentError::runtime_error(format!(
                     "reverse filter not supported for {}",
                     value.type_name()
                 ))),
@@ -5577,7 +5713,7 @@ impl Interpreter {
                         let strings: Vec<String> = arr.iter().map(|v| v.to_string()).collect();
                         Ok(Value::String(strings.join(separator)))
                     }
-                    _ => Err(IntentError::RuntimeError(format!(
+                    _ => Err(IntentError::runtime_error(format!(
                         "join filter not supported for {}",
                         value.type_name()
                     ))),
@@ -5604,7 +5740,7 @@ impl Interpreter {
                         let start = start.min(end);
                         Ok(Value::String(chars[start..end].iter().collect()))
                     }
-                    _ => Err(IntentError::RuntimeError(format!(
+                    _ => Err(IntentError::runtime_error(format!(
                         "slice filter not supported for {}",
                         value.type_name()
                     ))),
@@ -5636,7 +5772,7 @@ impl Interpreter {
                 Ok(Value::String(urlencoding::encode(&s).to_string()))
             }
 
-            _ => Err(IntentError::RuntimeError(format!(
+            _ => Err(IntentError::runtime_error(format!(
                 "Unknown template filter: {}",
                 filter.name
             ))),
@@ -5866,7 +6002,7 @@ impl Interpreter {
                 }
                 Ok(())
             }
-            None => Err(IntentError::RuntimeError(
+            None => Err(IntentError::runtime_error(
                 "Pattern destructuring failed: value does not match pattern".to_string(),
             )),
         }
@@ -5909,7 +6045,7 @@ impl Interpreter {
             .collect();
 
         if !missing.is_empty() {
-            return Err(IntentError::RuntimeError(format!(
+            return Err(IntentError::runtime_error(format!(
                 "Non-exhaustive match: missing variants {:?}",
                 missing
             )));
@@ -5930,7 +6066,7 @@ impl Interpreter {
             } => {
                 // Check recursion depth limit
                 if self.call_depth >= self.max_recursion_depth {
-                    return Err(IntentError::RuntimeError(format!(
+                    return Err(IntentError::runtime_error(format!(
                         "Maximum recursion depth ({}) exceeded. Use NTNT_MAX_RECURSION env var to increase.",
                         self.max_recursion_depth
                     )));
@@ -5954,6 +6090,7 @@ impl Interpreter {
                             name: fn_name.clone(),
                             expected: format!("{}", arity),
                             got: args.len(),
+                            line: 0,
                         });
                     }
                 } else {
@@ -5967,6 +6104,7 @@ impl Interpreter {
                                 format!("{}-{}", arity, max_arity)
                             },
                             got: args.len(),
+                            line: 0,
                         });
                     }
                 }
@@ -5983,6 +6121,7 @@ impl Interpreter {
                         name: format!("{}::{}", enum_name, variant),
                         expected: format!("{}", arity),
                         got: args.len(),
+                        line: 0,
                     });
                 }
                 Ok(Value::EnumValue {
@@ -5992,7 +6131,7 @@ impl Interpreter {
                 })
             }
 
-            _ => Err(IntentError::TypeError(
+            _ => Err(IntentError::type_error(
                 "Can only call functions".to_string(),
             )),
         }
@@ -6023,6 +6162,7 @@ impl Interpreter {
                 name: name.clone(),
                 expected,
                 got: args.len(),
+                line: 0,
             });
         }
 
@@ -6152,7 +6292,7 @@ impl Interpreter {
         let has_static = !self.server_state.static_dirs.is_empty();
 
         if !has_routes && !has_static {
-            return Err(IntentError::RuntimeError(
+            return Err(IntentError::runtime_error(
                 "No routes or static directories registered. Use get(), post(), serve_static(), etc. before calling listen()".to_string()
             ));
         }
@@ -6562,7 +6702,7 @@ impl Interpreter {
 
         // Check if any routes are registered
         if self.server_state.route_count() == 0 && self.server_state.static_dirs.is_empty() {
-            return Err(IntentError::RuntimeError(
+            return Err(IntentError::runtime_error(
                 "No routes or static directories registered. Use get(), post(), serve_static(), etc. before calling listen()".to_string()
             ));
         }
@@ -6612,7 +6752,7 @@ impl Interpreter {
         let sync_rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to create runtime: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Failed to create runtime: {}", e)))?;
 
         // Initial route sync from interpreter to async state
         sync_routes_to_async(&self.server_state, &async_routes, &sync_rt);
@@ -7291,12 +7431,48 @@ impl Interpreter {
             (BinaryOp::Ge, Value::Int(a), Value::Float(b)) => Ok(Value::Bool((a as f64) >= b)),
             (BinaryOp::Ge, Value::Float(a), Value::Int(b)) => Ok(Value::Bool(a >= (b as f64))),
 
-            (op, lhs, rhs) => Err(IntentError::InvalidOperation(format!(
-                "Cannot apply {:?} to {} and {}",
-                op,
-                lhs.type_name(),
-                rhs.type_name()
-            ))),
+            (op, lhs, rhs) => {
+                let op_symbol = match op {
+                    BinaryOp::Add => "+",
+                    BinaryOp::Sub => "-",
+                    BinaryOp::Mul => "*",
+                    BinaryOp::Div => "/",
+                    BinaryOp::Mod => "%",
+                    BinaryOp::Pow => "**",
+                    BinaryOp::Eq => "==",
+                    BinaryOp::Ne => "!=",
+                    BinaryOp::Lt => "<",
+                    BinaryOp::Le => "<=",
+                    BinaryOp::Gt => ">",
+                    BinaryOp::Ge => ">=",
+                    _ => "??",
+                };
+                let hint = match (&op, lhs.type_name(), rhs.type_name()) {
+                    (BinaryOp::Add, "String", _) => {
+                        Some(format!("Convert to string first: \"...\" + string(value)"))
+                    }
+                    (BinaryOp::Add, _, "String") => {
+                        Some(format!("Convert to string first: string(value) + \"...\""))
+                    }
+                    _ => None,
+                };
+                let mut ctx = TypeContext::new(
+                    format!("compatible types for '{}'", op_symbol),
+                    format!("{} {} {}", lhs.type_name(), op_symbol, rhs.type_name()),
+                );
+                if let Some(h) = hint {
+                    ctx = ctx.with_hint(h);
+                }
+                Err(IntentError::type_error_with_context(
+                    format!(
+                        "Cannot apply '{}' to {} and {}",
+                        op_symbol,
+                        lhs.type_name(),
+                        rhs.type_name()
+                    ),
+                    ctx,
+                ))
+            }
         }
     }
 
@@ -7355,7 +7531,7 @@ impl Interpreter {
                             crate::stdlib::http_server::CorsConfig::from_value(&options);
                         self.server_state.enable_cors(cors_config);
                     } else {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "cors directive expects a map".to_string(),
                         ));
                     }
@@ -7373,7 +7549,7 @@ impl Interpreter {
                             self.server_state.add_middleware(mw_val);
                         }
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "middleware directive expects a function or array of functions"
                                     .to_string(),
                             ));
@@ -7398,7 +7574,7 @@ impl Interpreter {
         let port_num = match port_val {
             Value::Int(p) => p as u16,
             _ => {
-                return Err(IntentError::TypeError(
+                return Err(IntentError::type_error(
                     "Server port must be an integer".to_string(),
                 ))
             }
@@ -7417,7 +7593,7 @@ impl Interpreter {
         match &handler {
             Value::Function { .. } | Value::NativeFunction { .. } => {}
             _ => {
-                return Err(IntentError::TypeError(format!(
+                return Err(IntentError::type_error(format!(
                     "Route handler must be a function, got {}",
                     handler.type_name()
                 )));
@@ -7433,7 +7609,7 @@ impl Interpreter {
             .server_state
             .detect_route_conflict(&route.method, &segments)
         {
-            return Err(IntentError::RuntimeError(format!(
+            return Err(IntentError::runtime_error(format!(
                 "Route conflict: {} {} conflicts with existing route {}. Routes with the same method and parameter positions are ambiguous.",
                 route.method, full_pattern, conflicting_pattern
             )));
@@ -7480,7 +7656,7 @@ impl Interpreter {
                     self.server_state.add_middleware(mw_val);
                 }
                 _ => {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "Group middleware expects a function or array of functions".to_string(),
                     ));
                 }
@@ -9309,6 +9485,8 @@ c")
 
     #[test]
     fn test_for_in_string_skips() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on a string now yields zero iterations (use chars() instead)
         let result = eval(
             r#"
@@ -10663,6 +10841,8 @@ c")
 
     #[test]
     fn test_for_in_int_skips() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on an int should yield zero iterations, not crash
         let result = eval(
             r#"
@@ -10679,6 +10859,8 @@ c")
 
     #[test]
     fn test_for_in_none_skips() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on None should yield zero iterations, not crash
         let result = eval(
             r#"
@@ -10695,6 +10877,8 @@ c")
 
     #[test]
     fn test_for_in_bool_skips() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on a bool should yield zero iterations
         let result = eval(
             r#"
@@ -10779,9 +10963,13 @@ c")
     // ============================================
     // Change 1: [] returns None on type mismatch
     // ============================================
+    // These tests assume forgiving/warn mode (pre-DD-009 behavior).
+    // Lock the mutex and set forgiving to prevent strict mode from leaking in.
 
     #[test]
     fn test_index_string_with_string_key_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // string["key"] should return None, not TypeError
         let result = eval(r#"let s = "hello"; s["key"]"#).unwrap();
         assert!(matches!(
@@ -10795,6 +10983,8 @@ c")
 
     #[test]
     fn test_index_int_with_string_key_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // 42["key"] should return None, not TypeError
         let result = eval(r#"42["key"]"#).unwrap();
         assert!(matches!(
@@ -10808,6 +10998,8 @@ c")
 
     #[test]
     fn test_index_none_with_string_key_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // None["key"] should return None, not TypeError
         let result = eval(r#"let x = None; x["key"]"#).unwrap();
         assert!(matches!(
@@ -10821,6 +11013,8 @@ c")
 
     #[test]
     fn test_index_array_out_of_bounds_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // [1,2,3][99] should return None, not IndexOutOfBounds
         let result = eval(r#"[1, 2, 3][99]"#).unwrap();
         assert!(matches!(
@@ -10834,6 +11028,8 @@ c")
 
     #[test]
     fn test_index_array_negative_out_of_bounds_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // [1,2,3][-99] should return None, not IndexOutOfBounds
         let result = eval(r#"[1, 2, 3][-99]"#).unwrap();
         assert!(matches!(
@@ -10847,6 +11043,8 @@ c")
 
     #[test]
     fn test_index_string_char_out_of_bounds_returns_none() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // "hi"[99] should return None, not IndexOutOfBounds
         let result = eval(r#""hi"[99]"#).unwrap();
         assert!(matches!(
@@ -10860,6 +11058,8 @@ c")
 
     #[test]
     fn test_index_type_mismatch_with_null_coalescing() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // string["key"] ?? "fallback" should return "fallback"
         let result = eval(r#"let s = "hello"; s["key"] ?? "fallback""#).unwrap();
         assert!(matches!(result, Value::String(ref s) if s == "fallback"));
@@ -11001,8 +11201,9 @@ page
 
     #[test]
     fn test_recursion_limit_exceeded() {
-        // Use a small limit to avoid stack overflow in debug mode
-        let result = eval_with_recursion_limit("fn inf(n) { return inf(n + 1) } inf(0)", 10);
+        // Use a very small limit (3) to avoid stack overflow on platforms
+        // with small default thread stacks (macOS CI).
+        let result = eval_with_recursion_limit("fn inf(n) { return inf(n + 1) } inf(0)", 3);
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(
@@ -11011,7 +11212,7 @@ page
             err
         );
         assert!(
-            err.contains("10"),
+            err.contains("3"),
             "Error should show the limit value: {}",
             err
         );
@@ -11229,6 +11430,149 @@ page
         assert!(
             interpreter.server_state.get_error_handler().is_none(),
             "No error handler should be registered by default"
+        );
+    }
+
+    // ── TypeMode tests (DD-009) ──────────────────────────────────────────────
+    //
+    // These tests manipulate NTNT_TYPE_MODE. Because get_type_mode() bypasses
+    // caching in test builds, each test reads fresh from the environment.
+    // A process-wide mutex serialises env var access to avoid races when
+    // tests run in parallel (cargo test default).
+
+    use std::sync::Mutex;
+    static TYPE_MODE_MUTEX: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_strict_mode_crashes_on_type_mismatch() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        // Indexing an Int with a String key — strict mode should return RuntimeError
+        let result = eval(r#"let x = 42; x["key"]"#);
+        assert!(
+            result.is_err(),
+            "strict mode: indexing Int with String should return Err, got {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Type mismatch")
+                || msg.contains("Cannot index")
+                || msg.contains("cannot index"),
+            "error should mention type mismatch, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_warn_mode_logs_and_continues() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
+        // Indexing an Int with a String key — warn mode returns None, no crash
+        let result = eval(r#"let x = 42; x["key"]"#);
+        assert!(
+            result.is_ok(),
+            "warn mode: indexing Int with String should return Ok(None), got {:?}",
+            result
+        );
+        // The result should be None (represented as EnumValue { Option, None })
+        match result.unwrap() {
+            Value::EnumValue {
+                enum_name, variant, ..
+            } if enum_name == "Option" && variant == "None" => {}
+            other => panic!("expected Option::None, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_forgiving_mode_silent() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        // Forgiving mode: same None result, no warnings (we can't capture stderr here
+        // but we verify no panic and correct return value)
+        let result = eval(r#"let x = 42; x["key"]"#);
+        assert!(
+            result.is_ok(),
+            "forgiving mode: indexing Int with String should return Ok(None), got {:?}",
+            result
+        );
+        match result.unwrap() {
+            Value::EnumValue {
+                enum_name, variant, ..
+            } if enum_name == "Option" && variant == "None" => {}
+            other => panic!("expected Option::None, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_for_in_strict_crashes() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        // for..in on an Int — strict mode should return RuntimeError
+        let result = eval(
+            r#"
+            let count = 0
+            for i in 42 {
+                count = count + 1
+            }
+            count
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "strict mode: for..in on Int should return Err, got {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("collection") || msg.contains("for..in"),
+            "error should mention collection requirement, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_for_in_warn_skips() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
+        // for..in on an Int — warn mode skips the loop body, count stays 0
+        let result = eval(
+            r#"
+            let count = 0
+            for i in 42 {
+                count = count + 1
+            }
+            count
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "warn mode: for..in on Int should return Ok, got {:?}",
+            result
+        );
+        assert!(
+            matches!(result.unwrap(), Value::Int(0)),
+            "warn mode: for..in on Int should skip loop body (count should be 0)"
         );
     }
 }

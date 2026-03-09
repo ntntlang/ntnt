@@ -195,9 +195,13 @@ enum Commands {
         #[arg(long)]
         fix: bool,
 
-        /// Enable strict type checking (warn on untyped function signatures)
-        #[arg(long)]
+        /// Enable strict type checking (require type annotations on all functions)
+        #[arg(long, conflicts_with = "warn_untyped")]
         strict: bool,
+
+        /// Warn about untyped function signatures (non-fatal)
+        #[arg(long, conflicts_with = "strict")]
+        warn_untyped: bool,
     },
     /// Intent-Driven Development commands
     ///
@@ -379,7 +383,12 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
             code.red().bold(),
             "]".dimmed(),
         );
-        eprintln!("  {} {}", "-->".blue().bold(), intent_err);
+        // Show file:line location if available
+        if let (Some(line), Some(path)) = (line_info, file_path) {
+            let display_path = path.display();
+            eprintln!("  {} {}:{}", "-->".blue().bold(), display_path, line);
+        }
+        eprintln!("  {} {}", "=".blue().bold(), intent_err);
 
         // Source code snippet (for errors with line numbers and a known file)
         if let (Some(line), Some(path)) = (line_info, file_path) {
@@ -431,6 +440,15 @@ fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
                 }
 
                 eprintln!("   {}", "|".blue().bold());
+            }
+        }
+
+        // Rich type context (expected/got)
+        if let Some(ctx) = intent_err.type_context() {
+            eprintln!("  {} {}", "expected:".cyan().bold(), ctx.expected.green());
+            eprintln!("     {} {}", "found:".cyan().bold(), ctx.got.red());
+            if let Some(hint) = &ctx.hint {
+                eprintln!("      {} {}", "hint:".cyan().bold(), hint);
             }
         }
 
@@ -493,7 +511,8 @@ fn main() {
             quiet,
             fix,
             strict,
-        }) => lint_project(&path, quiet, fix, strict),
+            warn_untyped,
+        }) => lint_project(&path, quiet, fix, strict, warn_untyped),
         Some(Commands::Intent(intent_cmd)) => run_intent_command(intent_cmd),
         Some(Commands::Docs {
             query,
@@ -1763,13 +1782,26 @@ fn lint_project(
     quiet: bool,
     show_fixes: bool,
     strict_flag: bool,
+    warn_untyped_flag: bool,
 ) -> anyhow::Result<()> {
     use serde_json::{json, Value as JsonValue};
 
-    // Strict lint mode: CLI flag OR env var OR project config
-    let strict =
-        strict_flag || ntnt::typechecker::is_strict_mode() || read_project_config_strict(path);
-
+    // Resolve lint mode: CLI flag > NTNT_LINT_MODE env > NTNT_STRICT env > project config > default
+    let lint_mode = if strict_flag {
+        ntnt::config::LintMode::Strict
+    } else if warn_untyped_flag {
+        ntnt::config::LintMode::Warn
+    } else if std::env::var("NTNT_LINT_MODE").is_ok() {
+        // NTNT_LINT_MODE was explicitly set — respect it, even if "default"
+        ntnt::config::get_lint_mode()
+    } else {
+        // No NTNT_LINT_MODE set — fall back to legacy NTNT_STRICT and project config
+        if ntnt::typechecker::is_strict_mode() || read_project_config_strict(path) {
+            ntnt::config::LintMode::Strict
+        } else {
+            ntnt::config::LintMode::Default
+        }
+    };
     let files = collect_tnt_files(path)?;
 
     let mut results: Vec<JsonValue> = Vec::new();
@@ -1805,17 +1837,14 @@ fn lint_project(
                 // Run comprehensive lint checks
                 let mut issues = lint_ast(&ast, &source, &relative_path);
 
-                // Run type checker (strict mode adds warnings for untyped signatures)
+                // Run type checker with lint mode
                 let lint_file_path_str = file_path.to_string_lossy();
-                let type_diagnostics = if strict {
-                    ntnt::typechecker::check_program_strict_with_file(
-                        &ast,
-                        &source,
-                        &lint_file_path_str,
-                    )
-                } else {
-                    ntnt::typechecker::check_program_with_file(&ast, &source, &lint_file_path_str)
-                };
+                let type_diagnostics = ntnt::typechecker::check_program_with_lint_mode(
+                    &ast,
+                    &source,
+                    lint_mode,
+                    Some(&lint_file_path_str),
+                );
                 for diag in type_diagnostics {
                     let severity = match diag.severity {
                         ntnt::typechecker::Severity::Error => "error",
@@ -2096,7 +2125,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
         issues: &mut Vec<serde_json::Value>,
         http_route_functions: &std::collections::HashSet<&str>,
     ) {
-        match stmt {
+        match unwrap_located(stmt) {
             Statement::Expression(expr) => {
                 check_expr_for_issues(expr, source_lines, issues, http_route_functions);
             }
@@ -2215,7 +2244,7 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
         let mut last_import_line: usize = 0;
 
         for stmt in &ast.statements {
-            if let Statement::Import { items, source, .. } = stmt {
+            if let Statement::Import { items, source, .. } = unwrap_located(stmt) {
                 let current_line = find_import_line(&source_lines, source, last_import_line);
                 if current_line > 0 {
                     last_import_line = current_line;
@@ -2483,22 +2512,27 @@ fn run_intent_check_command(
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to start app server: {}", e))?;
 
-    // Wait for the server to be ready (poll /health or root, up to 30 seconds)
+    // Wait for the server to be ready (TCP connect poll, up to 30 seconds)
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(30);
     let mut server_ready = false;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     while start.elapsed() < timeout {
         std::thread::sleep(std::time::Duration::from_millis(500));
-        if let Ok(resp) = reqwest::blocking::get(format!("http://127.0.0.1:{}/health", port)) {
-            if resp.status().is_success() || resp.status().is_redirection() {
-                server_ready = true;
-                break;
-            }
-        } else if let Ok(resp) = reqwest::blocking::get(format!("http://127.0.0.1:{}/", port)) {
-            if resp.status().is_success() || resp.status().is_redirection() {
-                server_ready = true;
-                break;
-            }
+        // Check if subprocess died
+        if let Some(status) = app_process.try_wait().ok().flatten() {
+            let _ = app_process.kill();
+            anyhow::bail!(
+                "Server process exited with status {} before becoming ready",
+                status
+            );
+        }
+        // Try TCP connect with a short timeout
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
+            .is_ok()
+        {
+            server_ready = true;
+            break;
         }
     }
     if !server_ready {
@@ -3357,6 +3391,7 @@ fn analyze_ast_warnings(ast: &ntnt::ast::Program, _source: &str) -> Vec<serde_js
 /// Collect used identifiers from a statement (comprehensive AST traversal)
 fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections::HashSet<String>) {
     use ntnt::ast::{Expression, Statement, StringPart};
+    let stmt = unwrap_located(stmt);
 
     fn collect_from_expr(expr: &Expression, names: &mut std::collections::HashSet<String>) {
         match expr {
@@ -4888,6 +4923,11 @@ fn generate_syntax_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             "option_result",
             "union",
             "annotation",
+            "optional_shorthand",
+            "type_alias",
+            "function_type",
+            "array_type",
+            "generics",
         ];
         for cat in &type_categories {
             if let Some(t) = types.get(*cat) {
@@ -5514,6 +5554,16 @@ fn generate_runtime_markdown(docs_dir: &std::path::Path) -> anyhow::Result<()> {
             }
         }
         md.push_str("```\n\n");
+        md.push_str("---\n\n");
+    }
+
+    // Type Safety Modes section (DD-009)
+    if let Some(tsm) = runtime.get("type_safety_modes") {
+        md.push_str("## Type Safety Modes\n\n");
+        if let Some(content) = tsm.get("content").and_then(|v| v.as_str()) {
+            md.push_str(content);
+            md.push_str("\n\n");
+        }
         md.push_str("---\n\n");
     }
 

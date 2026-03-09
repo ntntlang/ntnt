@@ -372,7 +372,7 @@ async fn axum_to_bridge_request(
     // Read body
     let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
         .await
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to read body: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to read body: {}", e)))?;
     let body = String::from_utf8_lossy(&body_bytes).to_string();
 
     Ok(BridgeRequest {
@@ -770,7 +770,7 @@ pub async fn start_server_with_bridge(
 ) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
-        .map_err(|e| IntentError::RuntimeError(format!("Invalid address: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Invalid address: {}", e)))?;
 
     let route_count = routes.route_count().await;
     let static_count = routes.static_dir_count().await;
@@ -821,13 +821,13 @@ pub async fn start_server_with_bridge(
     // Create the listener
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to bind: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to bind: {}", e)))?;
 
     // Run the server with graceful shutdown
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(|e| IntentError::RuntimeError(format!("Server error: {}", e)))
+        .map_err(|e| IntentError::runtime_error(format!("Server error: {}", e)))
 }
 
 /// Signal handler for graceful shutdown

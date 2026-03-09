@@ -16,10 +16,27 @@ pub enum Severity {
     Warning,
 }
 
+/// Classification of type diagnostics for structured matching.
+///
+/// Used by `check_program_with_lint_mode` to promote annotation warnings
+/// to errors in strict mode without brittle substring matching.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiagnosticKind {
+    /// Missing type annotation on function parameter
+    MissingParamAnnotation,
+    /// Missing return type annotation on function
+    MissingReturnAnnotation,
+    /// Missing type annotation on lambda parameter
+    MissingLambdaParamAnnotation,
+    /// General type error (mismatch, undefined, etc.)
+    General,
+}
+
 /// A diagnostic produced by the type checker
 #[derive(Debug, Clone)]
 pub struct TypeDiagnostic {
     pub severity: Severity,
+    pub kind: DiagnosticKind,
     pub message: String,
     pub line: usize,
     pub column: usize,
@@ -34,6 +51,9 @@ pub struct FunctionSig {
     pub variadic: bool,
     /// Number of required parameters (those without defaults). Defaults to params.len().
     pub required_params: usize,
+    /// Generic type parameter names (e.g., ["T", "U"] for `fn foo<T, U>`).
+    /// Empty for non-generic functions.
+    pub type_params: Vec<String>,
 }
 
 /// Exported type definitions from a parsed file (functions, structs, enums, aliases)
@@ -79,9 +99,22 @@ pub struct TypeContext {
     resolving_files: Vec<String>,
 }
 
-/// Returns true if NTNT_STRICT mode is enabled
+/// Returns true if NTNT_STRICT mode is enabled.
+///
+/// **Deprecated:** Use `NTNT_LINT_MODE=strict` instead.
+/// This function emits a one-time deprecation warning to stderr when
+/// `NTNT_STRICT` is detected.
 pub fn is_strict_mode() -> bool {
-    std::env::var("NTNT_STRICT").map_or(false, |v| v == "1" || v == "true")
+    use std::sync::Once;
+    static DEPRECATION_WARNED: Once = Once::new();
+
+    let is_set = std::env::var("NTNT_STRICT").map_or(false, |v| v == "1" || v == "true");
+    if is_set {
+        DEPRECATION_WARNED.call_once(|| {
+            eprintln!("[DEPRECATED] NTNT_STRICT is deprecated. Use NTNT_LINT_MODE=strict instead.");
+        });
+    }
+    is_set
 }
 
 /// Run the type checker in strict mode. Returns `Some(errors)` if strict mode is
@@ -90,13 +123,19 @@ pub fn strict_check(ast: &Program, source: &str) -> Option<Vec<TypeDiagnostic>> 
     strict_check_with_file(ast, source, None)
 }
 
-/// Strict check with file path for cross-file import resolution
+/// Strict check with file path for cross-file import resolution.
+///
+/// Runs when either `NTNT_STRICT=1` (deprecated) or `NTNT_LINT_MODE=strict` is set.
 pub fn strict_check_with_file(
     ast: &Program,
     source: &str,
     file_path: Option<&str>,
 ) -> Option<Vec<TypeDiagnostic>> {
-    if !is_strict_mode() {
+    let lint_strict = matches!(
+        crate::config::get_lint_mode(),
+        crate::config::LintMode::Strict
+    );
+    if !is_strict_mode() && !lint_strict {
         return None;
     }
     let errors: Vec<_> = check_program_with_options(ast, source, false, file_path)
@@ -136,6 +175,38 @@ pub fn check_program_strict_with_file(
     file_path: &str,
 ) -> Vec<TypeDiagnostic> {
     check_program_with_options(ast, source, true, Some(file_path))
+}
+
+/// Entry point using `LintMode` enum (from `NTNT_LINT_MODE` env or CLI flags).
+pub fn check_program_with_lint_mode(
+    ast: &Program,
+    source: &str,
+    lint_mode: crate::config::LintMode,
+    file_path: Option<&str>,
+) -> Vec<TypeDiagnostic> {
+    let strict = matches!(
+        lint_mode,
+        crate::config::LintMode::Warn | crate::config::LintMode::Strict
+    );
+    let mut diagnostics = check_program_with_options(ast, source, strict, file_path);
+
+    // In strict mode, promote annotation warnings to errors using structured kind
+    if matches!(lint_mode, crate::config::LintMode::Strict) {
+        for d in &mut diagnostics {
+            if d.severity == Severity::Warning
+                && matches!(
+                    d.kind,
+                    DiagnosticKind::MissingParamAnnotation
+                        | DiagnosticKind::MissingReturnAnnotation
+                        | DiagnosticKind::MissingLambdaParamAnnotation
+                )
+            {
+                d.severity = Severity::Error;
+            }
+        }
+    }
+
+    diagnostics
 }
 
 fn check_program_with_options(
@@ -339,14 +410,26 @@ impl TypeContext {
 
     // ── Diagnostics ───────────────────────────────────────────────────
 
-    fn emit(&mut self, severity: Severity, message: String, line: usize, hint: Option<String>) {
+    fn emit_with_kind(
+        &mut self,
+        severity: Severity,
+        kind: DiagnosticKind,
+        message: String,
+        line: usize,
+        hint: Option<String>,
+    ) {
         self.diagnostics.push(TypeDiagnostic {
             severity,
+            kind,
             message,
             line,
             column: 0,
             hint,
         });
+    }
+
+    fn emit(&mut self, severity: Severity, message: String, line: usize, hint: Option<String>) {
+        self.emit_with_kind(severity, DiagnosticKind::General, message, line, hint);
     }
 
     fn error(&mut self, message: String, line: usize, hint: Option<String>) {
@@ -413,7 +496,15 @@ impl TypeContext {
                     if self.structs.contains_key(name) || self.enums.contains_key(name) {
                         return Type::Named(name.clone());
                     }
-                    // Treat unresolved type names as Any (likely type parameters like T, U)
+                    // Single uppercase letter or common type param names: keep as Named
+                    // so generic unification can resolve them (e.g., T, U, V, K, V2, etc.)
+                    // Multi-char all-uppercase names also treated as type params.
+                    let looks_like_type_param = name.len() == 1
+                        || name.chars().all(|c| c.is_uppercase() || c.is_ascii_digit());
+                    if looks_like_type_param {
+                        return Type::Named(name.clone());
+                    }
+                    // Treat other unresolved names as Any
                     Type::Any
                 }
             },
@@ -535,9 +626,11 @@ impl TypeContext {
                 name,
                 params,
                 return_type,
-                type_params: _,
+                type_params,
                 ..
             } => {
+                let tp_names: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+
                 let param_types: Vec<(String, Type)> = params
                     .iter()
                     .map(|p| {
@@ -567,6 +660,7 @@ impl TypeContext {
                         return_type: ret,
                         variadic: false,
                         required_params,
+                        type_params: tp_names,
                     },
                 );
             }
@@ -732,7 +826,9 @@ impl TypeContext {
                     let fn_line = self.find_line_near(&format!("fn {}", name));
                     for param in params {
                         if param.type_annotation.is_none() {
-                            self.warning(
+                            self.emit_with_kind(
+                                Severity::Warning,
+                                DiagnosticKind::MissingParamAnnotation,
                                 format!(
                                     "Parameter '{}' in function '{}' has no type annotation",
                                     param.name, name
@@ -743,7 +839,9 @@ impl TypeContext {
                         }
                     }
                     if return_type.is_none() {
-                        self.warning(
+                        self.emit_with_kind(
+                            Severity::Warning,
+                            DiagnosticKind::MissingReturnAnnotation,
                             format!("Function '{}' has no return type annotation", name),
                             fn_line,
                             Some(format!("Add a return type: fn {}(...) -> Type", name)),
@@ -1759,6 +1857,23 @@ impl TypeContext {
 
             Expression::Lambda { params, body } => {
                 self.push_scope();
+
+                // Strict lint: warn about untyped lambda parameters
+                if self.strict_lint {
+                    for param in params {
+                        if param.type_annotation.is_none() {
+                            let line = self.find_line_near(&param.name);
+                            self.emit_with_kind(
+                                Severity::Warning,
+                                DiagnosticKind::MissingLambdaParamAnnotation,
+                                format!("Lambda parameter '{}' has no type annotation", param.name),
+                                line,
+                                Some(format!("Add a type: {}: Type", param.name)),
+                            );
+                        }
+                    }
+                }
+
                 // Save and reset collected_returns for lambda scope
                 let prev_return = self.current_return_type.take();
                 let prev_collected = std::mem::take(&mut self.collected_returns);
@@ -2343,6 +2458,12 @@ impl TypeContext {
                         .zip(sig.params.iter())
                         .enumerate()
                     {
+                        // Skip type-checking for generic type params — they accept any type.
+                        let is_type_param =
+                            matches!(param_type, Type::Named(n) if sig.type_params.contains(n));
+                        if is_type_param {
+                            continue;
+                        }
                         if !self.compatible(arg_type, param_type)
                             && !matches!(arg_type, Type::Any)
                             && !matches!(param_type, Type::Any)
@@ -2364,12 +2485,172 @@ impl TypeContext {
                     }
                 }
 
+                // Generic type unification: if the function has type params,
+                // infer T from the concrete argument types and substitute into return type.
+                if !sig.type_params.is_empty() {
+                    let (bindings, conflicts) =
+                        Self::unify_type_params(&sig.type_params, &sig.params, &arg_types);
+                    // Emit errors for conflicting type param bindings
+                    // e.g., fn f<T>(a: T, b: T) called with (Int, String)
+                    for (param_name, first_type, second_type) in &conflicts {
+                        let line = self.find_line_near(&format!("{}(", name));
+                        self.error(
+                            format!(
+                                "Type parameter '{}' in '{}': conflicting types {} and {}",
+                                param_name,
+                                name,
+                                first_type.name(),
+                                second_type.name()
+                            ),
+                            line,
+                            Some(format!(
+                                "All arguments for '{}' must have the same type",
+                                param_name
+                            )),
+                        );
+                    }
+                    if !bindings.is_empty() {
+                        return Self::substitute_type_params(&sig.return_type, &bindings);
+                    }
+                }
+
                 return sig.return_type;
             }
         }
 
         // Unknown function or dynamic call
         Type::Any
+    }
+
+    /// Unify generic type parameters with concrete argument types.
+    /// Returns a map from type param name → concrete type, and a list of
+    /// conflicts (type param bound to incompatible types across arguments).
+    ///
+    /// Example: `fn identity<T>(x: T) -> T` called with `Int` arg → `{"T": Int}`
+    /// Example: `fn f<T>(a: T, b: T)` called with `(Int, String)` → conflict on T
+    fn unify_type_params(
+        type_params: &[String],
+        param_sigs: &[(String, Type)],
+        arg_types: &[Type],
+    ) -> (HashMap<String, Type>, Vec<(String, Type, Type)>) {
+        let mut bindings: HashMap<String, Type> = HashMap::new();
+        let mut conflicts: Vec<(String, Type, Type)> = Vec::new();
+        for ((_param_name, param_type), arg_type) in param_sigs.iter().zip(arg_types.iter()) {
+            Self::unify_one(
+                param_type,
+                arg_type,
+                type_params,
+                &mut bindings,
+                &mut conflicts,
+            );
+        }
+        (bindings, conflicts)
+    }
+
+    /// Recursively unify a single param type pattern with a concrete type.
+    fn unify_one(
+        pattern: &Type,
+        concrete: &Type,
+        type_params: &[String],
+        bindings: &mut HashMap<String, Type>,
+        conflicts: &mut Vec<(String, Type, Type)>,
+    ) {
+        match pattern {
+            // If the pattern is a named type that's a type parameter → bind it
+            Type::Any => {} // Any is already maximally general
+            Type::Named(name) if type_params.contains(name) => {
+                if let Some(existing) = bindings.get(name) {
+                    // Check for conflict: same type param bound to different types
+                    if existing != concrete
+                        && !matches!(existing, Type::Any)
+                        && !matches!(concrete, Type::Any)
+                    {
+                        conflicts.push((name.clone(), existing.clone(), concrete.clone()));
+                    }
+                } else {
+                    bindings.insert(name.clone(), concrete.clone());
+                }
+            }
+            // Recurse into compound types
+            Type::Array(inner_pattern) => {
+                if let Type::Array(inner_concrete) = concrete {
+                    Self::unify_one(
+                        inner_pattern,
+                        inner_concrete,
+                        type_params,
+                        bindings,
+                        conflicts,
+                    );
+                }
+            }
+            Type::Optional(inner_pattern) => {
+                let inner_concrete = match concrete {
+                    Type::Optional(c) => c.as_ref(),
+                    other => other, // T? unified with T also binds T
+                };
+                Self::unify_one(
+                    inner_pattern,
+                    inner_concrete,
+                    type_params,
+                    bindings,
+                    conflicts,
+                );
+            }
+            Type::Function {
+                params: fn_params,
+                return_type: fn_ret,
+            } => {
+                if let Type::Function {
+                    params: concrete_params,
+                    return_type: concrete_ret,
+                } = concrete
+                {
+                    for (fp, cp) in fn_params.iter().zip(concrete_params.iter()) {
+                        Self::unify_one(fp, cp, type_params, bindings, conflicts);
+                    }
+                    Self::unify_one(fn_ret, concrete_ret, type_params, bindings, conflicts);
+                }
+            }
+            _ => {} // Concrete types don't produce bindings
+        }
+    }
+
+    /// Substitute resolved type parameter bindings into a type.
+    ///
+    /// Example: return type `T` with bindings `{"T": Int}` → `Int`
+    fn substitute_type_params(ty: &Type, bindings: &HashMap<String, Type>) -> Type {
+        match ty {
+            Type::Named(name) => {
+                if let Some(resolved) = bindings.get(name) {
+                    resolved.clone()
+                } else {
+                    ty.clone()
+                }
+            }
+            Type::Array(inner) => {
+                Type::Array(Box::new(Self::substitute_type_params(inner, bindings)))
+            }
+            Type::Optional(inner) => {
+                Type::Optional(Box::new(Self::substitute_type_params(inner, bindings)))
+            }
+            Type::Function {
+                params,
+                return_type,
+            } => Type::Function {
+                params: params
+                    .iter()
+                    .map(|p| Self::substitute_type_params(p, bindings))
+                    .collect(),
+                return_type: Box::new(Self::substitute_type_params(return_type, bindings)),
+            },
+            Type::Tuple(types) => Type::Tuple(
+                types
+                    .iter()
+                    .map(|t| Self::substitute_type_params(t, bindings))
+                    .collect(),
+            ),
+            _ => ty.clone(),
+        }
     }
 
     /// Bind pattern variables with their inferred types
@@ -2665,6 +2946,7 @@ impl TypeContext {
                         return_type: $ret,
                         variadic: false,
                         required_params,
+                        type_params: vec![],
                     });
                 }
             };
@@ -2677,6 +2959,7 @@ impl TypeContext {
                         return_type: $ret,
                         variadic: true,
                         required_params,
+                        type_params: vec![],
                     });
                 }
             };
@@ -2803,6 +3086,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     return_type: $ret,
                     variadic: false,
                     required_params,
+                    type_params: vec![],
                 });
             }
         };
@@ -2815,6 +3099,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     return_type: $ret,
                     variadic: true,
                     required_params,
+                    type_params: vec![],
                 });
             }
         };
@@ -5694,6 +5979,7 @@ let n: Int = double(5)"#;
                 return_type: Type::String,
                 variadic: false,
                 required_params: 2,
+                type_params: vec![],
             },
         );
 
@@ -5936,6 +6222,7 @@ let n: Int = double(5)"#;
                 return_type: Type::String,
                 variadic: false,
                 required_params: 1,
+                type_params: vec![],
             },
         );
 

@@ -105,7 +105,7 @@ impl SerializedValue {
                 serialized.insert("__values".to_string(), SerializedValue::Array(vals?));
                 Ok(SerializedValue::Map(serialized))
             }
-            _ => Err(IntentError::TypeError(
+            _ => Err(IntentError::type_error(
                 "Only primitive types (Int, Float, String, Bool, Array, Map) can be sent through channels".to_string()
             )),
         }
@@ -181,10 +181,10 @@ fn get_channel_id(ch: &Value) -> Result<u64> {
             if let Some(Value::Int(id)) = map.get("_channel_id") {
                 Ok(*id as u64)
             } else {
-                Err(IntentError::TypeError("Expected a Channel".to_string()))
+                Err(IntentError::type_error("Expected a Channel".to_string()))
             }
         }
-        _ => Err(IntentError::TypeError("Expected a Channel".to_string())),
+        _ => Err(IntentError::type_error("Expected a Channel".to_string())),
     }
 }
 
@@ -215,7 +215,7 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
 
     let registry = CHANNEL_REGISTRY
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock registry: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
 
     if let Some(pair) = registry.get(&id) {
         // Check if closed
@@ -228,7 +228,7 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
             Err(_) => Ok(Value::Bool(false)), // Receiver dropped
         }
     } else {
-        Err(IntentError::RuntimeError("Invalid channel".to_string()))
+        Err(IntentError::runtime_error("Invalid channel".to_string()))
     }
 }
 
@@ -241,18 +241,18 @@ fn concurrent_recv(ch: &Value) -> Result<Value> {
     let receiver = {
         let registry = CHANNEL_REGISTRY
             .lock()
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to lock registry: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
 
         if let Some(pair) = registry.get(&id) {
             Arc::clone(&pair.receiver)
         } else {
-            return Err(IntentError::RuntimeError("Invalid channel".to_string()));
+            return Err(IntentError::runtime_error("Invalid channel".to_string()));
         }
     };
 
     let rx = receiver
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock receiver: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock receiver: {}", e)))?;
 
     match rx.recv() {
         Ok(serialized) => Ok(serialized.to_value()),
@@ -268,18 +268,18 @@ fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
     let receiver = {
         let registry = CHANNEL_REGISTRY
             .lock()
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to lock registry: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
 
         if let Some(pair) = registry.get(&id) {
             Arc::clone(&pair.receiver)
         } else {
-            return Err(IntentError::RuntimeError("Invalid channel".to_string()));
+            return Err(IntentError::runtime_error("Invalid channel".to_string()));
         }
     };
 
     let rx = receiver
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock receiver: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock receiver: {}", e)))?;
 
     match rx.recv_timeout(Duration::from_millis(timeout_ms as u64)) {
         Ok(serialized) => Ok(Value::some(serialized.to_value())),
@@ -296,18 +296,18 @@ fn concurrent_try_recv(ch: &Value) -> Result<Value> {
     let receiver = {
         let registry = CHANNEL_REGISTRY
             .lock()
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to lock registry: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
 
         if let Some(pair) = registry.get(&id) {
             Arc::clone(&pair.receiver)
         } else {
-            return Err(IntentError::RuntimeError("Invalid channel".to_string()));
+            return Err(IntentError::runtime_error("Invalid channel".to_string()));
         }
     };
 
     let rx = receiver
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock receiver: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock receiver: {}", e)))?;
 
     match rx.try_recv() {
         Ok(serialized) => Ok(Value::some(serialized.to_value())),
@@ -323,7 +323,7 @@ fn concurrent_close(ch: &Value) -> Result<Value> {
 
     let registry = CHANNEL_REGISTRY
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock registry: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
 
     if let Some(pair) = registry.get(&id) {
         let mut closed = pair.closed.lock().unwrap();
@@ -430,7 +430,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match &args[1] {
                 Value::Int(ms) => concurrent_recv_timeout(&args[0], *ms),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "recv_timeout requires (channel, int_millis)".to_string(),
                 )),
             },
@@ -492,7 +492,7 @@ pub fn init() -> HashMap<String, Value> {
                 );
                 match &args[0] {
                     Value::Int(ms) => concurrent_sleep_ms(*ms),
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "sleep_ms requires an integer".to_string(),
                     )),
                 }

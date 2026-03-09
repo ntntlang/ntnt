@@ -196,7 +196,7 @@ impl SQLiteKV {
         } else {
             Connection::open(path)
         }
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to open KV store: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to open KV store: {}", e)))?;
 
         // Create the KV table if it doesn't exist
         conn.execute(
@@ -208,7 +208,7 @@ impl SQLiteKV {
             )",
             [],
         )
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to create KV table: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to create KV table: {}", e)))?;
 
         // Create indices for performance
         conn.execute(
@@ -236,7 +236,7 @@ impl SQLiteKV {
         match result {
             Ok((value, type_hint)) => Ok(Some(deserialize_value(&value, &type_hint))),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(IntentError::RuntimeError(format!("KV get error: {}", e))),
+            Err(e) => Err(IntentError::runtime_error(format!("KV get error: {}", e))),
         }
     }
 
@@ -255,7 +255,7 @@ impl SQLiteKV {
                 "INSERT OR REPLACE INTO _kv (key, value, type, expires_at) VALUES (?, ?, ?, ?)",
                 params![key, serialized, type_hint, expires_at],
             )
-            .map_err(|e| IntentError::RuntimeError(format!("KV set error: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("KV set error: {}", e)))?;
 
         Ok(())
     }
@@ -265,7 +265,7 @@ impl SQLiteKV {
         let changes = self
             .conn
             .execute("DELETE FROM _kv WHERE key = ?", params![key])
-            .map_err(|e| IntentError::RuntimeError(format!("KV del error: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("KV del error: {}", e)))?;
 
         Ok(changes > 0)
     }
@@ -281,7 +281,7 @@ impl SQLiteKV {
                 params![key, now],
                 |row| row.get(0),
             )
-            .map_err(|e| IntentError::RuntimeError(format!("KV has error: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("KV has error: {}", e)))?;
 
         Ok(count > 0)
     }
@@ -296,24 +296,24 @@ impl SQLiteKV {
                 .prepare(
                     "SELECT key FROM _kv WHERE key LIKE ? AND (expires_at IS NULL OR expires_at > ?)",
                 )
-                .map_err(|e| IntentError::RuntimeError(format!("KV list error: {}", e)))?,
+                .map_err(|e| IntentError::runtime_error(format!("KV list error: {}", e)))?,
             None => self
                 .conn
                 .prepare("SELECT key FROM _kv WHERE expires_at IS NULL OR expires_at > ?")
-                .map_err(|e| IntentError::RuntimeError(format!("KV list error: {}", e)))?,
+                .map_err(|e| IntentError::runtime_error(format!("KV list error: {}", e)))?,
         };
 
         let keys: Vec<String> = match prefix {
             Some(p) => {
                 let pattern = format!("{}%", p);
                 stmt.query_map(params![pattern, now], |row| row.get(0))
-                    .map_err(|e| IntentError::RuntimeError(format!("KV list error: {}", e)))?
+                    .map_err(|e| IntentError::runtime_error(format!("KV list error: {}", e)))?
                     .filter_map(|r| r.ok())
                     .collect()
             }
             None => stmt
                 .query_map(params![now], |row| row.get(0))
-                .map_err(|e| IntentError::RuntimeError(format!("KV list error: {}", e)))?
+                .map_err(|e| IntentError::runtime_error(format!("KV list error: {}", e)))?
                 .filter_map(|r| r.ok())
                 .collect(),
         };
@@ -338,7 +338,7 @@ impl SQLiteKV {
                 "UPDATE _kv SET expires_at = ? WHERE key = ? AND (expires_at IS NULL OR expires_at > ?)",
                 params![expires_at, key, now],
             )
-            .map_err(|e| IntentError::RuntimeError(format!("KV expire error: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("KV expire error: {}", e)))?;
 
         Ok(changes > 0)
     }
@@ -357,7 +357,7 @@ impl SQLiteKV {
             Ok(Some(expires_at)) => Ok(Some((expires_at - now).max(0))),
             Ok(None) => Ok(None), // Key exists but has no expiry
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None), // Key doesn't exist
-            Err(e) => Err(IntentError::RuntimeError(format!("KV ttl error: {}", e))),
+            Err(e) => Err(IntentError::runtime_error(format!("KV ttl error: {}", e))),
         }
     }
 
@@ -365,7 +365,7 @@ impl SQLiteKV {
     pub fn flush(&self) -> Result<()> {
         self.conn
             .execute("DELETE FROM _kv", [])
-            .map_err(|e| IntentError::RuntimeError(format!("KV flush error: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("KV flush error: {}", e)))?;
 
         Ok(())
     }
@@ -386,12 +386,12 @@ impl RedisKV {
         };
 
         let client = redis::Client::open(normalized_url.as_str()).map_err(|e| {
-            IntentError::RuntimeError(format!("Failed to create Redis client: {}", e))
+            IntentError::runtime_error(format!("Failed to create Redis client: {}", e))
         })?;
 
-        let conn = client
-            .get_connection()
-            .map_err(|e| IntentError::RuntimeError(format!("Failed to connect to Redis: {}", e)))?;
+        let conn = client.get_connection().map_err(|e| {
+            IntentError::runtime_error(format!("Failed to connect to Redis: {}", e))
+        })?;
 
         Ok(RedisKV { conn })
     }
@@ -401,7 +401,7 @@ impl RedisKV {
         let value: Option<String> = self
             .conn
             .get(key)
-            .map_err(|e| IntentError::RuntimeError(format!("Redis get error: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Redis get error: {}", e)))?;
 
         match value {
             Some(data) => {
@@ -431,12 +431,12 @@ impl RedisKV {
             Some(ttl) => {
                 self.conn
                     .set_ex::<_, _, ()>(key, &serialized, ttl as u64)
-                    .map_err(|e| IntentError::RuntimeError(format!("Redis set error: {}", e)))?;
+                    .map_err(|e| IntentError::runtime_error(format!("Redis set error: {}", e)))?;
             }
             None => {
                 self.conn
                     .set::<_, _, ()>(key, &serialized)
-                    .map_err(|e| IntentError::RuntimeError(format!("Redis set error: {}", e)))?;
+                    .map_err(|e| IntentError::runtime_error(format!("Redis set error: {}", e)))?;
             }
         }
 
@@ -453,7 +453,7 @@ impl RedisKV {
         let deleted: i32 = self
             .conn
             .del(key)
-            .map_err(|e| IntentError::RuntimeError(format!("Redis del error: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Redis del error: {}", e)))?;
         // Also delete the type key
         let _: i32 = self.conn.del(&type_key).unwrap_or(0);
         Ok(deleted > 0)
@@ -464,7 +464,7 @@ impl RedisKV {
         let exists: bool = self
             .conn
             .exists(key)
-            .map_err(|e| IntentError::RuntimeError(format!("Redis exists error: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Redis exists error: {}", e)))?;
         Ok(exists)
     }
 
@@ -486,7 +486,7 @@ impl RedisKV {
                 .arg("COUNT")
                 .arg(100)
                 .query(&mut self.conn)
-                .map_err(|e| IntentError::RuntimeError(format!("Redis scan error: {}", e)))?;
+                .map_err(|e| IntentError::runtime_error(format!("Redis scan error: {}", e)))?;
 
             all_keys.extend(batch);
             cursor = next_cursor;
@@ -514,7 +514,7 @@ impl RedisKV {
         let success: bool = self
             .conn
             .expire(key, seconds)
-            .map_err(|e| IntentError::RuntimeError(format!("Redis expire error: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Redis expire error: {}", e)))?;
 
         Ok(success)
     }
@@ -524,7 +524,7 @@ impl RedisKV {
         let ttl: i64 = self
             .conn
             .ttl(key)
-            .map_err(|e| IntentError::RuntimeError(format!("Redis ttl error: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Redis ttl error: {}", e)))?;
 
         match ttl {
             -2 => Ok(None), // Key doesn't exist
@@ -537,7 +537,7 @@ impl RedisKV {
     pub fn flush(&mut self) -> Result<()> {
         redis::cmd("FLUSHDB")
             .query::<()>(&mut self.conn)
-            .map_err(|e| IntentError::RuntimeError(format!("Redis flush error: {}", e)))?;
+            .map_err(|e| IntentError::runtime_error(format!("Redis flush error: {}", e)))?;
         Ok(())
     }
 }
@@ -554,18 +554,18 @@ fn get_backend_type(handle: &Value) -> Result<KVBackend> {
                 match backend.as_str() {
                     "sqlite" => Ok(KVBackend::SQLite),
                     "redis" | "valkey" => Ok(KVBackend::Redis),
-                    _ => Err(IntentError::TypeError(format!(
+                    _ => Err(IntentError::type_error(format!(
                         "Unknown KV backend: {}",
                         backend
                     ))),
                 }
             } else {
-                Err(IntentError::TypeError(
+                Err(IntentError::type_error(
                     "Expected a KV store handle".to_string(),
                 ))
             }
         }
-        _ => Err(IntentError::TypeError(
+        _ => Err(IntentError::type_error(
             "Expected a KV store handle".to_string(),
         )),
     }
@@ -581,16 +581,16 @@ fn get_sqlite_kv(handle: &Value) -> Result<Arc<Mutex<SQLiteKV>>> {
                         return Ok(Arc::clone(kv));
                     }
                 }
-                Err(IntentError::RuntimeError(
+                Err(IntentError::runtime_error(
                     "Invalid or closed KV store".to_string(),
                 ))
             } else {
-                Err(IntentError::TypeError(
+                Err(IntentError::type_error(
                     "Expected a KV store handle".to_string(),
                 ))
             }
         }
-        _ => Err(IntentError::TypeError(
+        _ => Err(IntentError::type_error(
             "Expected a KV store handle".to_string(),
         )),
     }
@@ -606,16 +606,16 @@ fn get_redis_kv(handle: &Value) -> Result<Arc<Mutex<RedisKV>>> {
                         return Ok(Arc::clone(kv));
                     }
                 }
-                Err(IntentError::RuntimeError(
+                Err(IntentError::runtime_error(
                     "Invalid or closed KV store".to_string(),
                 ))
             } else {
-                Err(IntentError::TypeError(
+                Err(IntentError::type_error(
                     "Expected a KV store handle".to_string(),
                 ))
             }
         }
-        _ => Err(IntentError::TypeError(
+        _ => Err(IntentError::type_error(
             "Expected a KV store handle".to_string(),
         )),
     }
@@ -651,7 +651,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.len() != 1 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "open() requires 1 argument (url)".to_string(),
                     ));
                 }
@@ -659,7 +659,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 let url = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "open() requires a string argument".to_string(),
                         ))
                     }
@@ -731,7 +731,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() != 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "get() requires 2 arguments (kv, key)".to_string(),
                     ));
                 }
@@ -739,7 +739,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 let key = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "get() requires a string key".to_string(),
                         ))
                     }
@@ -750,14 +750,14 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     KVBackend::SQLite => {
                         let kv_arc = get_sqlite_kv(&args[0])?;
                         let kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.get(&key)?
                     }
                     KVBackend::Redis => {
                         let kv_arc = get_redis_kv(&args[0])?;
                         let mut kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.get(&key)?
                     }
@@ -795,7 +795,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             max_arity: 4,
             func: |args| {
                 if args.len() < 3 || args.len() > 4 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "set() requires 3-4 arguments (kv, key, value, opts?)".to_string(),
                     ));
                 }
@@ -803,7 +803,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 let key = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "set() requires a string key".to_string(),
                         ))
                     }
@@ -828,14 +828,14 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     KVBackend::SQLite => {
                         let kv_arc = get_sqlite_kv(&args[0])?;
                         let kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.set(&key, value, ttl)?;
                     }
                     KVBackend::Redis => {
                         let kv_arc = get_redis_kv(&args[0])?;
                         let mut kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.set(&key, value, ttl)?;
                     }
@@ -864,7 +864,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() != 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "del() requires 2 arguments (kv, key)".to_string(),
                     ));
                 }
@@ -872,7 +872,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 let key = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "del() requires a string key".to_string(),
                         ))
                     }
@@ -883,14 +883,14 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     KVBackend::SQLite => {
                         let kv_arc = get_sqlite_kv(&args[0])?;
                         let kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.del(&key)?
                     }
                     KVBackend::Redis => {
                         let kv_arc = get_redis_kv(&args[0])?;
                         let mut kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.del(&key)?
                     }
@@ -919,7 +919,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() != 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "has() requires 2 arguments (kv, key)".to_string(),
                     ));
                 }
@@ -927,7 +927,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 let key = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "has() requires a string key".to_string(),
                         ))
                     }
@@ -938,14 +938,14 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     KVBackend::SQLite => {
                         let kv_arc = get_sqlite_kv(&args[0])?;
                         let kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.has(&key)?
                     }
                     KVBackend::Redis => {
                         let kv_arc = get_redis_kv(&args[0])?;
                         let mut kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.has(&key)?
                     }
@@ -976,7 +976,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "list() requires 1-2 arguments (kv, prefix?)".to_string(),
                     ));
                 }
@@ -986,7 +986,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                         Value::String(s) => Some(s.clone()),
                         Value::Unit => None,
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "list() prefix must be a string".to_string(),
                             ))
                         }
@@ -1000,14 +1000,14 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     KVBackend::SQLite => {
                         let kv_arc = get_sqlite_kv(&args[0])?;
                         let kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.list(prefix.as_deref())?
                     }
                     KVBackend::Redis => {
                         let kv_arc = get_redis_kv(&args[0])?;
                         let mut kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.list(prefix.as_deref())?
                     }
@@ -1039,7 +1039,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             max_arity: 3,
             func: |args| {
                 if args.len() != 3 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "expire() requires 3 arguments (kv, key, seconds)".to_string(),
                     ));
                 }
@@ -1047,7 +1047,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 let key = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "expire() requires a string key".to_string(),
                         ))
                     }
@@ -1056,7 +1056,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 let seconds = match &args[2] {
                     Value::Int(i) => *i,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "expire() requires an integer for seconds".to_string(),
                         ))
                     }
@@ -1067,14 +1067,14 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     KVBackend::SQLite => {
                         let kv_arc = get_sqlite_kv(&args[0])?;
                         let kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.expire(&key, seconds)?
                     }
                     KVBackend::Redis => {
                         let kv_arc = get_redis_kv(&args[0])?;
                         let mut kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.expire(&key, seconds)?
                     }
@@ -1103,7 +1103,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| {
                 if args.len() != 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "ttl() requires 2 arguments (kv, key)".to_string(),
                     ));
                 }
@@ -1111,7 +1111,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 let key = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "ttl() requires a string key".to_string(),
                         ))
                     }
@@ -1122,14 +1122,14 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     KVBackend::SQLite => {
                         let kv_arc = get_sqlite_kv(&args[0])?;
                         let kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.ttl(&key)?
                     }
                     KVBackend::Redis => {
                         let kv_arc = get_redis_kv(&args[0])?;
                         let mut kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.ttl(&key)?
                     }
@@ -1162,7 +1162,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| {
                 if args.len() != 1 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "flush() requires 1 argument (kv)".to_string(),
                     ));
                 }
@@ -1172,14 +1172,14 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     KVBackend::SQLite => {
                         let kv_arc = get_sqlite_kv(&args[0])?;
                         let kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.flush()?;
                     }
                     KVBackend::Redis => {
                         let kv_arc = get_redis_kv(&args[0])?;
                         let mut kv = kv_arc.lock().map_err(|e| {
-                            IntentError::RuntimeError(format!("KV lock error: {}", e))
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
                         })?;
                         kv.flush()?;
                     }

@@ -624,7 +624,7 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
     let url = match opts.get("url") {
         Some(Value::String(u)) => u.clone(),
         _ => {
-            return Err(IntentError::TypeError(
+            return Err(IntentError::type_error(
                 "fetch() requires 'url' option".to_string(),
             ))
         }
@@ -647,7 +647,7 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
     let client = reqwest::blocking::Client::builder()
         .cookie_store(true)
         .build()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to create HTTP client: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to create HTTP client: {}", e)))?;
 
     let mut request = match method.as_str() {
         "GET" => client.get(&url),
@@ -657,7 +657,7 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
         "PATCH" => client.patch(&url),
         "HEAD" => client.head(&url),
         _ => {
-            return Err(IntentError::RuntimeError(format!(
+            return Err(IntentError::runtime_error(format!(
                 "Unsupported HTTP method: {}",
                 method
             )))
@@ -802,7 +802,7 @@ fn http_download(url: &str, file_path: &str) -> Result<Value> {
     if let Some(parent) = path.parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                IntentError::RuntimeError(format!("Failed to create directory: {}", e))
+                IntentError::runtime_error(format!("Failed to create directory: {}", e))
             })?;
         }
     }
@@ -895,7 +895,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::String(url) => http_get(url),
                 Value::Map(opts) => http_fetch(opts),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "fetch() requires a URL string or options map".to_string(),
                 )),
             },
@@ -929,7 +929,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 2,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(url), Value::String(file_path)) => http_download(url, file_path),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "download() requires URL string and file path string".to_string(),
                 )),
             },
@@ -973,7 +973,7 @@ pub fn init() -> HashMap<String, Value> {
 
                     Ok(Value::Map(cache_obj))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "Cache() requires TTL in seconds (integer)".to_string(),
                 )),
             },
@@ -1011,10 +1011,10 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Map(m) => match m.get("_cache_id") {
                         Some(Value::Int(id)) => *id as u64,
                         _ => {
-                            return Err(IntentError::TypeError("Invalid cache object".to_string()))
+                            return Err(IntentError::type_error("Invalid cache object".to_string()))
                         }
                     },
-                    _ => return Err(IntentError::TypeError("Expected cache object".to_string())),
+                    _ => return Err(IntentError::type_error("Expected cache object".to_string())),
                 };
 
                 match &args[1] {
@@ -1023,14 +1023,14 @@ pub fn init() -> HashMap<String, Value> {
                         let url = match opts.get("url") {
                             Some(Value::String(u)) => u.clone(),
                             _ => {
-                                return Err(IntentError::TypeError(
+                                return Err(IntentError::type_error(
                                     "Options must include 'url'".to_string(),
                                 ))
                             }
                         };
                         cache_fetch(cache_id, &url, Some(opts))
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "cache.fetch() requires URL string or options map".to_string(),
                     )),
                 }
@@ -1066,17 +1066,17 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Map(m) => match m.get("_cache_id") {
                         Some(Value::Int(id)) => *id as u64,
                         _ => {
-                            return Err(IntentError::TypeError("Invalid cache object".to_string()))
+                            return Err(IntentError::type_error("Invalid cache object".to_string()))
                         }
                     },
-                    _ => return Err(IntentError::TypeError("Expected cache object".to_string())),
+                    _ => return Err(IntentError::type_error("Expected cache object".to_string())),
                 };
 
                 if let Value::String(url) = &args[1] {
                     cache_delete(cache_id, url);
                     Ok(Value::Unit)
                 } else {
-                    Err(IntentError::TypeError(
+                    Err(IntentError::type_error(
                         "cache.delete() requires URL string".to_string(),
                     ))
                 }
@@ -1110,10 +1110,10 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Map(m) => match m.get("_cache_id") {
                         Some(Value::Int(id)) => *id as u64,
                         _ => {
-                            return Err(IntentError::TypeError("Invalid cache object".to_string()))
+                            return Err(IntentError::type_error("Invalid cache object".to_string()))
                         }
                     },
-                    _ => return Err(IntentError::TypeError("Expected cache object".to_string())),
+                    _ => return Err(IntentError::type_error("Expected cache object".to_string())),
                 };
 
                 cache_clear(cache_id);

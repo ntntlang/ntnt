@@ -56,7 +56,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "sin() requires a number".to_string(),
                         ))
                     }
@@ -91,7 +91,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "cos() requires a number".to_string(),
                         ))
                     }
@@ -125,7 +125,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "tan() requires a number".to_string(),
                         ))
                     }
@@ -161,7 +161,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "asin() requires a number".to_string(),
                         ))
                     }
@@ -197,7 +197,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "acos() requires a number".to_string(),
                         ))
                     }
@@ -232,7 +232,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "atan() requires a number".to_string(),
                         ))
                     }
@@ -270,7 +270,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "atan2() requires numbers".to_string(),
                         ))
                     }
@@ -279,7 +279,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "atan2() requires numbers".to_string(),
                         ))
                     }
@@ -314,7 +314,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "sinh() requires a number".to_string(),
                         ))
                     }
@@ -349,7 +349,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "cosh() requires a number".to_string(),
                         ))
                     }
@@ -384,7 +384,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "tanh() requires a number".to_string(),
                         ))
                     }
@@ -421,13 +421,13 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "log() requires a number".to_string(),
                         ))
                     }
                 };
                 if x <= 0.0 {
-                    return Err(IntentError::RuntimeError(
+                    return Err(IntentError::runtime_error(
                         "log() requires positive number".to_string(),
                     ));
                 }
@@ -463,13 +463,13 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "log10() requires a number".to_string(),
                         ))
                     }
                 };
                 if x <= 0.0 {
-                    return Err(IntentError::RuntimeError(
+                    return Err(IntentError::runtime_error(
                         "log10() requires positive number".to_string(),
                     ));
                 }
@@ -505,13 +505,13 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "log2() requires a number".to_string(),
                         ))
                     }
                 };
                 if x <= 0.0 {
-                    return Err(IntentError::RuntimeError(
+                    return Err(IntentError::runtime_error(
                         "log2() requires positive number".to_string(),
                     ));
                 }
@@ -545,7 +545,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "exp() requires a number".to_string(),
                         ))
                     }
@@ -581,7 +581,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "exp2() requires a number".to_string(),
                         ))
                     }
@@ -617,7 +617,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "cbrt() requires a number".to_string(),
                         ))
                     }
@@ -654,7 +654,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "hypot() requires numbers".to_string(),
                         ))
                     }
@@ -663,7 +663,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "hypot() requires numbers".to_string(),
                         ))
                     }
@@ -698,7 +698,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "degrees() requires a number".to_string(),
                         ))
                     }
@@ -733,7 +733,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "radians() requires a number".to_string(),
                         ))
                     }
@@ -794,7 +794,7 @@ pub fn init() -> HashMap<String, Value> {
                 let min = match &args[0] {
                     Value::Int(i) => *i,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "random_int() requires integers".to_string(),
                         ))
                     }
@@ -802,13 +802,13 @@ pub fn init() -> HashMap<String, Value> {
                 let max = match &args[1] {
                     Value::Int(i) => *i,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "random_int() requires integers".to_string(),
                         ))
                     }
                 };
                 if min > max {
-                    return Err(IntentError::RuntimeError(
+                    return Err(IntentError::runtime_error(
                         "random_int() min must be <= max".to_string(),
                     ));
                 }
@@ -846,7 +846,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "random_range() requires numbers".to_string(),
                         ))
                     }
@@ -855,13 +855,13 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => *f,
                     Value::Int(i) => *i as f64,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "random_range() requires numbers".to_string(),
                         ))
                     }
                 };
                 if min > max {
-                    return Err(IntentError::RuntimeError(
+                    return Err(IntentError::runtime_error(
                         "random_range() min must be <= max".to_string(),
                     ));
                 }
@@ -897,7 +897,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => f.is_nan(),
                     Value::Int(_) => false,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "is_nan() requires a number".to_string(),
                         ))
                     }
@@ -933,7 +933,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => f.is_infinite(),
                     Value::Int(_) => false,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "is_infinite() requires a number".to_string(),
                         ))
                     }
@@ -969,7 +969,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Float(f) => f.is_finite(),
                     Value::Int(_) => true,
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "is_finite() requires a number".to_string(),
                         ))
                     }

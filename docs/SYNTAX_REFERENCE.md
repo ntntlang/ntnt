@@ -2,7 +2,7 @@
 
 > **Auto-generated from [syntax.toml](syntax.toml)** - Do not edit directly.
 >
-> Last updated: v0.3.17
+> Last updated: v0.4.0
 
 ## Table of Contents
 
@@ -278,6 +278,36 @@ Union types for values that can be multiple types
 Syntax: `let x: Type = value`
 
 Optional type annotations on variables
+
+### OPTIONAL SHORTHAND
+
+Syntax: `T?`
+
+Shorthand for Optional<T> in type annotations
+
+### TYPE ALIAS
+
+Syntax: `type Name = Type`
+
+Type alias declaration
+
+### FUNCTION TYPE
+
+Syntax: `(ParamTypes) -> ReturnType`
+
+Function type annotation for parameters and type aliases
+
+### ARRAY TYPE
+
+Syntax: `[ElementType]`
+
+Array type annotation
+
+### GENERICS
+
+Syntax: `fn name<T>(param: T) -> T { }`
+
+Generic type parameters on functions
 
 ---
 

@@ -99,16 +99,16 @@ fn get_connection(conn: &Value) -> Result<Arc<Mutex<Connection>>> {
                         return Ok(Arc::clone(client));
                     }
                 }
-                Err(IntentError::RuntimeError(
+                Err(IntentError::runtime_error(
                     "Invalid or closed SQLite connection".to_string(),
                 ))
             } else {
-                Err(IntentError::TypeError(
+                Err(IntentError::type_error(
                     "Expected a SQLite connection handle".to_string(),
                 ))
             }
         }
-        _ => Err(IntentError::TypeError(
+        _ => Err(IntentError::type_error(
             "Expected a SQLite connection handle".to_string(),
         )),
     }
@@ -119,13 +119,13 @@ fn sqlite_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     let conn_arc = get_connection(conn)?;
     let conn_guard = conn_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     let sqlite_params: Vec<rusqlite::types::Value> = params.iter().map(value_to_sqlite).collect();
 
     let mut stmt = conn_guard
         .prepare(sql)
-        .map_err(|e| IntentError::RuntimeError(format!("Query preparation failed: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Query preparation failed: {}", e)))?;
 
     let column_count = stmt.column_count();
     let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -160,13 +160,13 @@ fn sqlite_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> 
     let conn_arc = get_connection(conn)?;
     let conn_guard = conn_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     let sqlite_params: Vec<rusqlite::types::Value> = params.iter().map(value_to_sqlite).collect();
 
     let mut stmt = conn_guard
         .prepare(sql)
-        .map_err(|e| IntentError::RuntimeError(format!("Query preparation failed: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Query preparation failed: {}", e)))?;
 
     let column_count = stmt.column_count();
     let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
@@ -191,7 +191,7 @@ fn sqlite_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
     let conn_arc = get_connection(conn)?;
     let conn_guard = conn_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     let sqlite_params: Vec<rusqlite::types::Value> = params.iter().map(value_to_sqlite).collect();
 
@@ -213,7 +213,7 @@ fn sqlite_close(conn: &Value) -> Result<Value> {
             }
             Ok(Value::Bool(false))
         }
-        _ => Err(IntentError::TypeError(
+        _ => Err(IntentError::type_error(
             "Expected a SQLite connection handle".to_string(),
         )),
     }
@@ -224,7 +224,7 @@ fn sqlite_begin(conn: &Value) -> Result<Value> {
     let conn_arc = get_connection(conn)?;
     let conn_guard = conn_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     match conn_guard.execute_batch("BEGIN") {
         Ok(_) => Ok(Value::ok(conn.clone())),
@@ -237,7 +237,7 @@ fn sqlite_commit(conn: &Value) -> Result<Value> {
     let conn_arc = get_connection(conn)?;
     let conn_guard = conn_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     match conn_guard.execute_batch("COMMIT") {
         Ok(_) => Ok(Value::Bool(true)),
@@ -250,7 +250,7 @@ fn sqlite_rollback(conn: &Value) -> Result<Value> {
     let conn_arc = get_connection(conn)?;
     let conn_guard = conn_arc
         .lock()
-        .map_err(|e| IntentError::RuntimeError(format!("Failed to lock connection: {}", e)))?;
+        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
 
     match conn_guard.execute_batch("ROLLBACK") {
         Ok(_) => Ok(Value::Bool(true)),
@@ -288,7 +288,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(path) => sqlite_connect(path),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "connect() requires a database path string".to_string(),
                 )),
             },
@@ -326,7 +326,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (conn, Value::String(sql), Value::Array(params)) => sqlite_query(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => sqlite_query(conn, sql, &[]),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "query() requires (connection, sql_string, params_array)".to_string(),
                 )),
             },
@@ -365,7 +365,7 @@ pub fn init() -> HashMap<String, Value> {
                     sqlite_query_one(conn, sql, params)
                 }
                 (conn, Value::String(sql), Value::Unit) => sqlite_query_one(conn, sql, &[]),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "query_one() requires (connection, sql_string, params_array)".to_string(),
                 )),
             },
@@ -404,7 +404,7 @@ pub fn init() -> HashMap<String, Value> {
                     sqlite_execute(conn, sql, params)
                 }
                 (conn, Value::String(sql), Value::Unit) => sqlite_execute(conn, sql, &[]),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "execute() requires (connection, sql_string, params_array)".to_string(),
                 )),
             },

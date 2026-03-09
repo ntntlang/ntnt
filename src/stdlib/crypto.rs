@@ -57,7 +57,7 @@ pub fn init() -> HashMap<String, Value> {
                             .iter()
                             .map(|v| match v {
                                 Value::Int(i) => Ok(*i as u8),
-                                _ => Err(IntentError::TypeError(
+                                _ => Err(IntentError::type_error(
                                     "sha256() array must contain integers".to_string(),
                                 )),
                             })
@@ -68,7 +68,7 @@ pub fn init() -> HashMap<String, Value> {
                         let result = hasher.finalize();
                         Ok(Value::String(hex::encode(result)))
                     }
-                    _ => Err(IntentError::TypeError(
+                    _ => Err(IntentError::type_error(
                         "sha256() requires a string or byte array".to_string(),
                     )),
                 }
@@ -99,7 +99,7 @@ pub fn init() -> HashMap<String, Value> {
                     let bytes: Vec<Value> = result.iter().map(|b| Value::Int(*b as i64)).collect();
                     Ok(Value::Array(bytes))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "sha256_bytes() requires a string".to_string(),
                 )),
             },
@@ -126,12 +126,12 @@ pub fn init() -> HashMap<String, Value> {
                 (Value::String(key), Value::String(data)) => {
                     type HmacSha256 = Hmac<Sha256>;
                     let mut mac = <HmacSha256 as Mac>::new_from_slice(key.as_bytes())
-                        .map_err(|e| IntentError::RuntimeError(format!("HMAC error: {}", e)))?;
+                        .map_err(|e| IntentError::runtime_error(format!("HMAC error: {}", e)))?;
                     mac.update(data.as_bytes());
                     let result = mac.finalize();
                     Ok(Value::String(hex::encode(result.into_bytes())))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "hmac_sha256() requires two strings (key, data)".to_string(),
                 )),
             },
@@ -171,7 +171,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(n) => {
                     if *n < 0 || *n > 1024 * 1024 {
-                        return Err(IntentError::RuntimeError(
+                        return Err(IntentError::runtime_error(
                             "random_bytes() size must be 0-1048576".to_string(),
                         ));
                     }
@@ -180,7 +180,7 @@ pub fn init() -> HashMap<String, Value> {
                     let values: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
                     Ok(Value::Array(values))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "random_bytes() requires an integer".to_string(),
                 )),
             },
@@ -204,7 +204,7 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| match &args[0] {
                 Value::Int(n) => {
                     if *n < 0 || *n > 1024 * 1024 {
-                        return Err(IntentError::RuntimeError(
+                        return Err(IntentError::runtime_error(
                             "random_hex() size must be 0-1048576".to_string(),
                         ));
                     }
@@ -212,7 +212,7 @@ pub fn init() -> HashMap<String, Value> {
                     rand::thread_rng().fill_bytes(&mut bytes);
                     Ok(Value::String(hex::encode(bytes)))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "random_hex() requires an integer".to_string(),
                 )),
             },
@@ -240,7 +240,7 @@ pub fn init() -> HashMap<String, Value> {
                         .iter()
                         .map(|v| match v {
                             Value::Int(i) => Ok(*i as u8),
-                            _ => Err(IntentError::TypeError(
+                            _ => Err(IntentError::type_error(
                                 "hex_encode() array must contain integers".to_string(),
                             )),
                         })
@@ -248,7 +248,7 @@ pub fn init() -> HashMap<String, Value> {
                     Ok(Value::String(hex::encode(byte_vec?)))
                 }
                 Value::String(s) => Ok(Value::String(hex::encode(s.as_bytes()))),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "hex_encode() requires array or string".to_string(),
                 )),
             },
@@ -280,7 +280,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "hex_decode() requires a string".to_string(),
                 )),
             },
@@ -314,7 +314,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
-                    return Err(IntentError::TypeError(
+                    return Err(IntentError::type_error(
                         "hash_password() requires 1 or 2 arguments (password, optional cost)"
                             .to_string(),
                     ));
@@ -323,7 +323,7 @@ pub fn init() -> HashMap<String, Value> {
                 let password = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "hash_password() requires a string password".to_string(),
                         ))
                     }
@@ -341,7 +341,7 @@ pub fn init() -> HashMap<String, Value> {
                             *c as u32
                         }
                         _ => {
-                            return Err(IntentError::TypeError(
+                            return Err(IntentError::type_error(
                                 "hash_password() cost must be an integer".to_string(),
                             ))
                         }
@@ -384,7 +384,7 @@ pub fn init() -> HashMap<String, Value> {
                 let password = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "verify_password() requires a string password".to_string(),
                         ))
                     }
@@ -393,7 +393,7 @@ pub fn init() -> HashMap<String, Value> {
                 let hash = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "verify_password() requires a string hash".to_string(),
                         ))
                     }
@@ -433,7 +433,7 @@ pub fn init() -> HashMap<String, Value> {
                 let hash = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "is_valid_hash() requires a string".to_string(),
                         ))
                     }
@@ -467,7 +467,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(data) => Ok(Value::String(STANDARD.encode(data.as_bytes()))),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "base64_encode() requires a string".to_string(),
                 )),
             },
@@ -503,7 +503,7 @@ pub fn init() -> HashMap<String, Value> {
                         e
                     )))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "base64_decode() requires a string".to_string(),
                 )),
             },
@@ -529,7 +529,7 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             func: |args| match &args[0] {
                 Value::String(data) => Ok(Value::String(URL_SAFE_NO_PAD.encode(data.as_bytes()))),
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "base64url_encode() requires a string".to_string(),
                 )),
             },
@@ -565,7 +565,7 @@ pub fn init() -> HashMap<String, Value> {
                         e
                     )))),
                 },
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "base64url_decode() requires a string".to_string(),
                 )),
             },
@@ -619,7 +619,7 @@ pub fn init() -> HashMap<String, Value> {
                 let plaintext = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "aes_encrypt() requires a string plaintext".to_string(),
                         ))
                     }
@@ -627,7 +627,7 @@ pub fn init() -> HashMap<String, Value> {
                 let key_hex = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "aes_encrypt() requires a hex string key".to_string(),
                         ))
                     }
@@ -689,7 +689,7 @@ pub fn init() -> HashMap<String, Value> {
                 let ciphertext_b64 = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "aes_decrypt() requires a string ciphertext".to_string(),
                         ))
                     }
@@ -697,7 +697,7 @@ pub fn init() -> HashMap<String, Value> {
                 let key_hex = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "aes_decrypt() requires a hex string key".to_string(),
                         ))
                     }
@@ -772,21 +772,21 @@ pub fn init() -> HashMap<String, Value> {
                 let password = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "argon2_hash() requires a string password".to_string(),
                         ))
                     }
                 };
 
                 let params = Params::new(19456, 2, 1, None).map_err(|e| {
-                    IntentError::RuntimeError(format!("Argon2 params error: {}", e))
+                    IntentError::runtime_error(format!("Argon2 params error: {}", e))
                 })?;
                 let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
                 let salt = SaltString::generate(&mut OsRng);
 
                 match argon2.hash_password(password.as_bytes(), &salt) {
                     Ok(hash) => Ok(Value::String(hash.to_string())),
-                    Err(e) => Err(IntentError::RuntimeError(format!(
+                    Err(e) => Err(IntentError::runtime_error(format!(
                         "Argon2 hash error: {}",
                         e
                     ))),
@@ -818,7 +818,7 @@ pub fn init() -> HashMap<String, Value> {
                 let password = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "argon2_verify() requires a string password".to_string(),
                         ))
                     }
@@ -826,7 +826,7 @@ pub fn init() -> HashMap<String, Value> {
                 let hash_str = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
-                        return Err(IntentError::TypeError(
+                        return Err(IntentError::type_error(
                             "argon2_verify() requires a string hash".to_string(),
                         ))
                     }
@@ -872,7 +872,7 @@ pub fn init() -> HashMap<String, Value> {
 
                 type HmacSha256 = Hmac<Sha256>;
                 let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes())
-                    .map_err(|e| IntentError::RuntimeError(format!("HMAC error: {}", e)))?;
+                    .map_err(|e| IntentError::runtime_error(format!("HMAC error: {}", e)))?;
                 mac.update(token.as_bytes());
                 let hash = hex::encode(mac.finalize().into_bytes());
 
@@ -910,13 +910,13 @@ pub fn init() -> HashMap<String, Value> {
 
                     type HmacSha256 = Hmac<Sha256>;
                     let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes())
-                        .map_err(|e| IntentError::RuntimeError(format!("HMAC error: {}", e)))?;
+                        .map_err(|e| IntentError::runtime_error(format!("HMAC error: {}", e)))?;
                     mac.update(token.as_bytes());
                     let expected = hex::encode(mac.finalize().into_bytes());
 
                     Ok(Value::Bool(expected == *hash))
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "csrf_validate() requires two string arguments (token, hash)".to_string(),
                 )),
             },

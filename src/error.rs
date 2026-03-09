@@ -5,6 +5,45 @@ use thiserror::Error;
 /// Result type alias for Intent operations
 pub type Result<T> = std::result::Result<T, IntentError>;
 
+/// Rich context for type mismatch errors.
+///
+/// Provides structured expected/got information and optional hints,
+/// inspired by Elm and Rust's error messages.
+#[derive(Debug, Clone)]
+pub struct TypeContext {
+    /// What type was expected
+    pub expected: String,
+    /// What type was actually found
+    pub got: String,
+    /// Optional hint for how to fix
+    pub hint: Option<String>,
+}
+
+impl TypeContext {
+    pub fn new(expected: impl Into<String>, got: impl Into<String>) -> Self {
+        Self {
+            expected: expected.into(),
+            got: got.into(),
+            hint: None,
+        }
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+}
+
+impl std::fmt::Display for TypeContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "expected {}, found {}", self.expected, self.got)?;
+        if let Some(hint) = &self.hint {
+            write!(f, "\n  hint: {}", hint)?;
+        }
+        Ok(())
+    }
+}
+
 /// Main error type for Intent language operations
 #[derive(Error, Debug)]
 pub enum IntentError {
@@ -22,25 +61,39 @@ pub enum IntentError {
         message: String,
     },
 
-    #[error("Type error: {0}")]
-    TypeError(String),
+    #[error("Type error: {message}")]
+    TypeError {
+        message: String,
+        context: Option<TypeContext>,
+        /// Source line (set by interpreter from current_line, 0 = unknown)
+        line: usize,
+    },
 
     #[error("Contract violation: {0}")]
     ContractViolation(String),
 
-    #[error("Runtime error: {0}")]
-    RuntimeError(String),
+    #[error("Runtime error: {message}")]
+    RuntimeError {
+        message: String,
+        context: Option<TypeContext>,
+        /// Source line (set by interpreter from current_line, 0 = unknown)
+        line: usize,
+    },
 
     #[error("Undefined variable: {name}")]
     UndefinedVariable {
         name: String,
         suggestion: Option<String>,
+
+        line: usize,
     },
 
     #[error("Undefined function: {name}")]
     UndefinedFunction {
         name: String,
         suggestion: Option<String>,
+
+        line: usize,
     },
 
     #[error("Arity mismatch: function '{name}' expected {expected} arguments, got {got}")]
@@ -48,6 +101,8 @@ pub enum IntentError {
         name: String,
         expected: String,
         got: usize,
+
+        line: usize,
     },
 
     #[error("Division by zero")]
@@ -64,14 +119,97 @@ pub enum IntentError {
 }
 
 impl IntentError {
+    /// Create a TypeError with just a message (backward compatible)
+    pub fn type_error(message: impl Into<String>) -> Self {
+        IntentError::TypeError {
+            message: message.into(),
+            context: None,
+            line: 0,
+        }
+    }
+
+    /// Create a TypeError with rich context (expected/got/hint)
+    pub fn type_error_with_context(message: impl Into<String>, context: TypeContext) -> Self {
+        IntentError::TypeError {
+            message: message.into(),
+            context: Some(context),
+            line: 0,
+        }
+    }
+
+    /// Create a RuntimeError with just a message (backward compatible)
+    pub fn runtime_error(message: impl Into<String>) -> Self {
+        IntentError::RuntimeError {
+            message: message.into(),
+            context: None,
+            line: 0,
+        }
+    }
+
+    /// Create a RuntimeError with rich context (expected/got/hint)
+    pub fn runtime_error_with_context(message: impl Into<String>, context: TypeContext) -> Self {
+        IntentError::RuntimeError {
+            message: message.into(),
+            context: Some(context),
+            line: 0,
+        }
+    }
+
+    /// Set the line number on a TypeError or RuntimeError (builder pattern).
+    /// Usage: `IntentError::type_error("msg").at_line(42)`
+    pub fn at_line(mut self, line: usize) -> Self {
+        match &mut self {
+            IntentError::TypeError { line: l, .. } => *l = line,
+            IntentError::RuntimeError { line: l, .. } => *l = line,
+            IntentError::UndefinedVariable { line: l, .. } => *l = line,
+            IntentError::UndefinedFunction { line: l, .. } => *l = line,
+            IntentError::ArityMismatch { line: l, .. } => *l = line,
+            _ => {}
+        }
+        self
+    }
+
+    /// Get the TypeContext if this error has one
+    pub fn type_context(&self) -> Option<&TypeContext> {
+        match self {
+            IntentError::TypeError { context, .. } => context.as_ref(),
+            IntentError::RuntimeError { context, .. } => context.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Format the error with rich context for terminal display
+    pub fn rich_display(&self) -> String {
+        let base = self.to_string();
+        match self.type_context() {
+            Some(ctx) => {
+                let mut out = base;
+                out.push_str(&format!("\n  │ expected: {}", ctx.expected));
+                out.push_str(&format!("\n  │     found: {}", ctx.got));
+                if let Some(hint) = &ctx.hint {
+                    out.push_str(&format!("\n  │\n  └─ hint: {}", hint));
+                }
+                out
+            }
+            None => {
+                // Add suggestion for known error types
+                if let Some(suggestion) = self.suggestion() {
+                    format!("{}\n  └─ did you mean: {}?", base, suggestion)
+                } else {
+                    base
+                }
+            }
+        }
+    }
+
     /// Return a unique error code for this error variant
     pub fn error_code(&self) -> &'static str {
         match self {
             IntentError::LexerError { .. } => "E001",
             IntentError::ParserError { .. } => "E002",
-            IntentError::TypeError(_) => "E003",
+            IntentError::TypeError { .. } => "E003",
             IntentError::ContractViolation(_) => "E004",
-            IntentError::RuntimeError(_) => "E005",
+            IntentError::RuntimeError { .. } => "E005",
             IntentError::UndefinedVariable { .. } => "E006",
             IntentError::UndefinedFunction { .. } => "E007",
             IntentError::ArityMismatch { .. } => "E008",
@@ -87,6 +225,11 @@ impl IntentError {
         match self {
             IntentError::LexerError { line, .. } => Some(*line),
             IntentError::ParserError { line, .. } => Some(*line),
+            IntentError::TypeError { line, .. } if *line > 0 => Some(*line),
+            IntentError::RuntimeError { line, .. } if *line > 0 => Some(*line),
+            IntentError::UndefinedVariable { line, .. } if *line > 0 => Some(*line),
+            IntentError::UndefinedFunction { line, .. } if *line > 0 => Some(*line),
+            IntentError::ArityMismatch { line, .. } if *line > 0 => Some(*line),
             _ => None,
         }
     }
@@ -275,21 +418,24 @@ mod tests {
                 column: 0,
                 message: String::new(),
             },
-            IntentError::TypeError(String::new()),
+            IntentError::type_error(""),
             IntentError::ContractViolation(String::new()),
-            IntentError::RuntimeError(String::new()),
+            IntentError::runtime_error(""),
             IntentError::UndefinedVariable {
                 name: String::new(),
                 suggestion: None,
+                line: 0,
             },
             IntentError::UndefinedFunction {
                 name: String::new(),
                 suggestion: None,
+                line: 0,
             },
             IntentError::ArityMismatch {
                 name: String::new(),
                 expected: "0".to_string(),
                 got: 0,
+                line: 0,
             },
             IntentError::DivisionByZero,
             IntentError::IndexOutOfBounds {
@@ -317,7 +463,7 @@ mod tests {
         assert_eq!(e.line(), Some(42));
         assert_eq!(e.column(), Some(10));
 
-        let e = IntentError::RuntimeError("test".into());
+        let e = IntentError::runtime_error("test");
         assert_eq!(e.line(), None);
         assert_eq!(e.column(), None);
     }
@@ -327,13 +473,60 @@ mod tests {
         let e = IntentError::UndefinedVariable {
             name: "usres".into(),
             suggestion: Some("users".into()),
+            line: 0,
         };
         assert_eq!(e.suggestion(), Some("users"));
 
         let e = IntentError::UndefinedVariable {
             name: "xyz".into(),
             suggestion: None,
+            line: 0,
         };
         assert_eq!(e.suggestion(), None);
+    }
+
+    #[test]
+    fn test_type_context_display() {
+        let ctx = TypeContext::new("Int", "String").with_hint("Use int(x) to convert");
+        let display = format!("{}", ctx);
+        assert!(display.contains("expected Int"));
+        assert!(display.contains("found String"));
+        assert!(display.contains("hint: Use int(x) to convert"));
+    }
+
+    #[test]
+    fn test_rich_display_with_context() {
+        let err = IntentError::type_error_with_context(
+            "Cannot index Array with String",
+            TypeContext::new("Int", "String").with_hint("Use int(key) or iterate instead"),
+        );
+        let display = err.rich_display();
+        assert!(display.contains("Cannot index Array with String"));
+        assert!(display.contains("expected: Int"));
+        assert!(display.contains("found: String"));
+        assert!(display.contains("hint: Use int(key)"));
+    }
+
+    #[test]
+    fn test_rich_display_without_context() {
+        let err = IntentError::type_error("simple error");
+        let display = err.rich_display();
+        assert_eq!(display, "Type error: simple error");
+    }
+
+    #[test]
+    fn test_type_error_constructors() {
+        let e1 = IntentError::type_error("msg");
+        assert!(matches!(e1, IntentError::TypeError { context: None, .. }));
+
+        let e2 = IntentError::type_error_with_context("msg", TypeContext::new("Int", "String"));
+        assert!(matches!(
+            e2,
+            IntentError::TypeError {
+                context: Some(_),
+                ..
+            }
+        ));
+        assert!(e2.type_context().is_some());
     }
 }

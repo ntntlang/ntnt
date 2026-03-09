@@ -114,7 +114,7 @@ pub fn init() -> HashMap<String, Value> {
                         Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                     }
                 }
-                _ => Err(IntentError::TypeError(
+                _ => Err(IntentError::type_error(
                     "parse_json() requires a JSON string".to_string(),
                 )),
             },
