@@ -4549,7 +4549,7 @@ print(greet("test"))
 fn test_array_type_literal_syntax() {
     let code = r#"
 fn sum(nums: [Int]) -> Int {
-    let total = 0
+    let mut total = 0
     for n in nums {
         total = total + n
     }

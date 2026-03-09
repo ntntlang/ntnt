@@ -946,3 +946,81 @@ fn check(x: Int, y: String) -> Bool {
         comparison_warnings
     );
 }
+
+// ============================================================================
+// Generic type parameter unification tests (DD-009 Phase 7.4)
+// ============================================================================
+
+#[test]
+fn test_generic_identity_infers_return_type() {
+    // identity<T>(42) should infer T=Int, return type Int
+    // Assigning to String should produce a type error
+    let source = r#"
+fn identity<T>(x: T) -> T {
+    return x
+}
+let result: String = identity(42)
+"#;
+    let (stdout, _stderr, exit_code) = lint_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert!(
+        errors > 0,
+        "identity<T>(42) assigned to String should produce a type error"
+    );
+    assert_ne!(exit_code, 0);
+}
+
+#[test]
+fn test_generic_identity_correct_usage() {
+    // identity<T>(42) assigned to Int should be fine
+    let source = r#"
+fn identity<T>(x: T) -> T {
+    return x
+}
+let result: Int = identity(42)
+"#;
+    let (stdout, _stderr, _exit_code) = lint_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert_eq!(
+        errors, 0,
+        "identity<T>(42) assigned to Int should not error"
+    );
+}
+
+#[test]
+fn test_generic_conflicting_type_params() {
+    // fn f<T>(a: T, b: T) called with (Int, String) should error
+    let source = r#"
+fn merge<T>(a: T, b: T) -> T {
+    return a
+}
+let result = merge(42, "hello")
+"#;
+    let (stdout, _stderr, _exit_code) = lint_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert!(
+        errors > 0,
+        "merge<T>(Int, String) should produce a type error for conflicting T"
+    );
+}
+
+#[test]
+fn test_generic_array_unification() {
+    // fn first<T>(arr: [T]) -> T should unify T from array element type
+    let source = r#"
+fn first<T>(arr: [T]) -> T {
+    return arr[0]
+}
+let x: Int = first([1, 2, 3])
+"#;
+    let (stdout, _stderr, _exit_code) = lint_code(source);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let errors = json["summary"]["errors"].as_i64().unwrap_or(0);
+    assert_eq!(
+        errors, 0,
+        "first<T>([Int]) assigned to Int should not error"
+    );
+}

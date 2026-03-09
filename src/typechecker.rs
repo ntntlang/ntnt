@@ -2488,8 +2488,27 @@ impl TypeContext {
                 // Generic type unification: if the function has type params,
                 // infer T from the concrete argument types and substitute into return type.
                 if !sig.type_params.is_empty() {
-                    let bindings =
+                    let (bindings, conflicts) =
                         Self::unify_type_params(&sig.type_params, &sig.params, &arg_types);
+                    // Emit errors for conflicting type param bindings
+                    // e.g., fn f<T>(a: T, b: T) called with (Int, String)
+                    for (param_name, first_type, second_type) in &conflicts {
+                        let line = self.find_line_near(&format!("{}(", name));
+                        self.error(
+                            format!(
+                                "Type parameter '{}' in '{}': conflicting types {} and {}",
+                                param_name,
+                                name,
+                                first_type.name(),
+                                second_type.name()
+                            ),
+                            line,
+                            Some(format!(
+                                "All arguments for '{}' must have the same type",
+                                param_name
+                            )),
+                        );
+                    }
                     if !bindings.is_empty() {
                         return Self::substitute_type_params(&sig.return_type, &bindings);
                     }
@@ -2504,19 +2523,28 @@ impl TypeContext {
     }
 
     /// Unify generic type parameters with concrete argument types.
-    /// Returns a map from type param name → concrete type.
+    /// Returns a map from type param name → concrete type, and a list of
+    /// conflicts (type param bound to incompatible types across arguments).
     ///
     /// Example: `fn identity<T>(x: T) -> T` called with `Int` arg → `{"T": Int}`
+    /// Example: `fn f<T>(a: T, b: T)` called with `(Int, String)` → conflict on T
     fn unify_type_params(
         type_params: &[String],
         param_sigs: &[(String, Type)],
         arg_types: &[Type],
-    ) -> HashMap<String, Type> {
+    ) -> (HashMap<String, Type>, Vec<(String, Type, Type)>) {
         let mut bindings: HashMap<String, Type> = HashMap::new();
+        let mut conflicts: Vec<(String, Type, Type)> = Vec::new();
         for ((_param_name, param_type), arg_type) in param_sigs.iter().zip(arg_types.iter()) {
-            Self::unify_one(param_type, arg_type, type_params, &mut bindings);
+            Self::unify_one(
+                param_type,
+                arg_type,
+                type_params,
+                &mut bindings,
+                &mut conflicts,
+            );
         }
-        bindings
+        (bindings, conflicts)
     }
 
     /// Recursively unify a single param type pattern with a concrete type.
@@ -2525,19 +2553,34 @@ impl TypeContext {
         concrete: &Type,
         type_params: &[String],
         bindings: &mut HashMap<String, Type>,
+        conflicts: &mut Vec<(String, Type, Type)>,
     ) {
         match pattern {
             // If the pattern is a named type that's a type parameter → bind it
             Type::Any => {} // Any is already maximally general
             Type::Named(name) if type_params.contains(name) => {
-                bindings
-                    .entry(name.clone())
-                    .or_insert_with(|| concrete.clone());
+                if let Some(existing) = bindings.get(name) {
+                    // Check for conflict: same type param bound to different types
+                    if existing != concrete
+                        && !matches!(existing, Type::Any)
+                        && !matches!(concrete, Type::Any)
+                    {
+                        conflicts.push((name.clone(), existing.clone(), concrete.clone()));
+                    }
+                } else {
+                    bindings.insert(name.clone(), concrete.clone());
+                }
             }
             // Recurse into compound types
             Type::Array(inner_pattern) => {
                 if let Type::Array(inner_concrete) = concrete {
-                    Self::unify_one(inner_pattern, inner_concrete, type_params, bindings);
+                    Self::unify_one(
+                        inner_pattern,
+                        inner_concrete,
+                        type_params,
+                        bindings,
+                        conflicts,
+                    );
                 }
             }
             Type::Optional(inner_pattern) => {
@@ -2545,7 +2588,13 @@ impl TypeContext {
                     Type::Optional(c) => c.as_ref(),
                     other => other, // T? unified with T also binds T
                 };
-                Self::unify_one(inner_pattern, inner_concrete, type_params, bindings);
+                Self::unify_one(
+                    inner_pattern,
+                    inner_concrete,
+                    type_params,
+                    bindings,
+                    conflicts,
+                );
             }
             Type::Function {
                 params: fn_params,
@@ -2557,9 +2606,9 @@ impl TypeContext {
                 } = concrete
                 {
                     for (fp, cp) in fn_params.iter().zip(concrete_params.iter()) {
-                        Self::unify_one(fp, cp, type_params, bindings);
+                        Self::unify_one(fp, cp, type_params, bindings, conflicts);
                     }
-                    Self::unify_one(fn_ret, concrete_ret, type_params, bindings);
+                    Self::unify_one(fn_ret, concrete_ret, type_params, bindings, conflicts);
                 }
             }
             _ => {} // Concrete types don't produce bindings
