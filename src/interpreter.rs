@@ -11355,11 +11355,15 @@ c")
     fn test_template_error_boundary_expr_no_crash() {
         // Template with an expression that would error should not crash
         // undefined_fn() doesn't exist, but template should render gracefully
+        // Must hold TYPE_MODE_MUTEX — strict mode would crash instead of degrade.
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        std::env::set_var("NTNT_TYPE_MODE", "warn");
         let code = r#####"
 let page = """before{{undefined_fn()}}after"""
 page
 "#####;
         let result = eval(code);
+        std::env::set_var("NTNT_TYPE_MODE", "warn"); // restore
         assert!(
             result.is_ok(),
             "Template with bad expression should not crash"
@@ -11373,11 +11377,15 @@ page
     #[test]
     fn test_template_error_boundary_if_treats_error_as_false() {
         // {{#if bad_expr}} should treat error as false, not crash
+        // Must hold TYPE_MODE_MUTEX — strict mode would crash instead of degrade.
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        std::env::set_var("NTNT_TYPE_MODE", "warn");
         let code = r#####"
 let page = """{{#if undefined_fn()}}shown{{#else}}hidden{{/if}}"""
 page
 "#####;
         let result = eval(code);
+        std::env::set_var("NTNT_TYPE_MODE", "warn"); // restore
         assert!(
             result.is_ok(),
             "Template with bad if condition should not crash"
