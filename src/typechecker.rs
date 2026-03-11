@@ -100,6 +100,8 @@ pub struct TypeContext {
     module_cache: HashMap<String, FileExports>,
     /// Set of files currently being resolved (for circular import detection)
     resolving_files: Vec<String>,
+    /// Detected circular import cycles (accumulated from nested contexts)
+    detected_cycles: Vec<String>,
 }
 
 /// Returns true if NTNT_STRICT mode is enabled.
@@ -231,6 +233,31 @@ fn check_program_with_options(
     // Pass 2: type-check all statements
     for stmt in &ast.statements {
         ctx.check_statement(stmt);
+    }
+
+    // Emit diagnostics for any circular imports detected during resolution.
+    // Deduplicate: the same cycle may be detected from multiple nested contexts.
+    let mut seen_cycles = std::collections::HashSet::new();
+    for cycle_msg in std::mem::take(&mut ctx.detected_cycles) {
+        if seen_cycles.insert(cycle_msg.clone()) {
+            // Try to find the import line that participates in the cycle
+            let line = ctx
+                .source_lines
+                .iter()
+                .position(|l| {
+                    let trimmed = l.trim();
+                    trimmed.starts_with("import ")
+                        && cycle_msg.lines().next().unwrap_or("").contains(
+                            &std::path::Path::new(trimmed.split('"').nth(1).unwrap_or(""))
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default(),
+                        )
+                })
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            ctx.warning(cycle_msg, line, None);
+        }
     }
 
     ctx.diagnostics
@@ -371,6 +398,7 @@ impl TypeContext {
             current_file: None,
             module_cache: HashMap::new(),
             resolving_files: Vec::new(),
+            detected_cycles: Vec::new(),
         }
     }
 
@@ -2893,14 +2921,43 @@ impl TypeContext {
 
         let path_str = file_path.to_string_lossy().to_string();
 
-        // Check cache
-        if let Some(cached) = self.module_cache.get(&path_str) {
-            return cached.clone();
+        // Check for circular imports — must come before the cache check because
+        // Pass 1 exports are cached early to break infinite recursion, but we still
+        // want to warn the user about the cycle.
+        if self.resolving_files.contains(&path_str) {
+            // Build cycle chain for diagnostic
+            if let Some(start) = self.resolving_files.iter().position(|f| f == &path_str) {
+                let mut chain: Vec<String> = self.resolving_files[start..]
+                    .iter()
+                    .map(|f| {
+                        std::path::Path::new(f)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| f.clone())
+                    })
+                    .collect();
+                chain.push(
+                    std::path::Path::new(&path_str)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path_str.clone()),
+                );
+                self.detected_cycles.push(format!(
+                    "Circular import detected: {}\n  \
+                     Hint: break one of these imports to resolve the cycle",
+                    chain.join(" → ")
+                ));
+            }
+            // Return cached Pass 1 exports if available, otherwise empty
+            if let Some(cached) = self.module_cache.get(&path_str) {
+                return cached.clone();
+            }
+            return FileExports::default();
         }
 
-        // Check for circular imports
-        if self.resolving_files.contains(&path_str) {
-            return FileExports::default();
+        // Check cache (non-circular — fully resolved from a previous import)
+        if let Some(cached) = self.module_cache.get(&path_str) {
+            return cached.clone();
         }
 
         // Read and parse
@@ -2924,9 +2981,10 @@ impl TypeContext {
         let mut temp_ctx = TypeContext::new(&source_code);
         temp_ctx.current_file = Some(path_str.clone());
         temp_ctx.register_builtins();
-        // Share module cache and resolving files to prevent infinite recursion
+        // Share module cache, resolving files, and cycle detector to prevent infinite recursion
         temp_ctx.module_cache = std::mem::take(&mut self.module_cache);
         temp_ctx.resolving_files = std::mem::take(&mut self.resolving_files);
+        temp_ctx.detected_cycles = std::mem::take(&mut self.detected_cycles);
 
         // Run Pass 1 on the imported file to collect declarations
         for stmt in &ast.statements {
@@ -2969,6 +3027,7 @@ impl TypeContext {
         self.module_cache = temp_ctx.module_cache;
         self.resolving_files = temp_ctx.resolving_files;
         self.resolving_files.retain(|f| f != &path_str);
+        self.detected_cycles = temp_ctx.detected_cycles;
 
         exports
     }
@@ -5826,15 +5885,107 @@ let n: Int = double(5)"#;
             a_path.to_str().unwrap(),
         );
 
-        // Should not panic/crash, just gracefully handle
+        // Should not panic/crash — no errors (cycle is a warning, not error)
         let errors: Vec<_> = diags
-            .into_iter()
+            .iter()
             .filter(|d| d.severity == Severity::Error)
             .collect();
         assert!(
             errors.is_empty(),
             "Circular imports should not crash or produce errors: {:?}",
             errors
+        );
+
+        // Should emit a warning about the circular import with the cycle chain
+        let warnings: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.severity == Severity::Warning && d.message.contains("Circular import detected")
+            })
+            .collect();
+        assert!(
+            !warnings.is_empty(),
+            "Circular imports should produce a warning diagnostic"
+        );
+
+        // Verify the cycle chain shows both files
+        let msg = &warnings[0].message;
+        assert!(
+            msg.contains("→"),
+            "Cycle warning should show chain with →, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("a.tnt") && msg.contains("b.tnt"),
+            "Cycle warning should name both files, got: {}",
+            msg
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_circular_import_three_file_cycle() {
+        use std::io::Write;
+        // Create a three-file cycle: a → b → c → a
+        let dir = std::env::temp_dir().join("ntnt_test_circular_three");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let a_path = dir.join("a.tnt");
+        let b_path = dir.join("b.tnt");
+        let c_path = dir.join("c.tnt");
+
+        let mut fa = std::fs::File::create(&a_path).unwrap();
+        writeln!(fa, "import {{ cfn }} from \"./c\"").unwrap();
+        writeln!(fa, "fn afn(x: Int) -> Int {{ return x + 1 }}").unwrap();
+
+        let mut fb = std::fs::File::create(&b_path).unwrap();
+        writeln!(fb, "import {{ afn }} from \"./a\"").unwrap();
+        writeln!(fb, "fn bfn(x: Int) -> Int {{ return x + 2 }}").unwrap();
+
+        let mut fc = std::fs::File::create(&c_path).unwrap();
+        writeln!(fc, "import {{ bfn }} from \"./b\"").unwrap();
+        writeln!(fc, "fn cfn(x: Int) -> Int {{ return x + 3 }}").unwrap();
+
+        let a_src = std::fs::read_to_string(&a_path).unwrap();
+        let diags = check_program_with_file(
+            &{
+                let lexer = crate::lexer::Lexer::new(&a_src);
+                let tokens: Vec<_> = lexer.collect();
+                let mut parser = crate::parser::Parser::new(tokens);
+                parser.parse().unwrap()
+            },
+            &a_src,
+            a_path.to_str().unwrap(),
+        );
+
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "Three-file circular import should not produce errors: {:?}",
+            errors
+        );
+
+        let warnings: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                d.severity == Severity::Warning && d.message.contains("Circular import detected")
+            })
+            .collect();
+        assert!(
+            !warnings.is_empty(),
+            "Three-file circular import should produce a cycle warning"
+        );
+
+        // The cycle chain should include all three files
+        let msg = &warnings[0].message;
+        assert!(
+            msg.contains("a.tnt"),
+            "Cycle should reference a.tnt, got: {}",
+            msg
         );
 
         let _ = std::fs::remove_dir_all(&dir);
