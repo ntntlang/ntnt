@@ -9753,7 +9753,7 @@ c")
 
     #[test]
     fn test_for_in_string_skips() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on a string now yields zero iterations (use chars() instead)
         let result = eval(
@@ -11109,7 +11109,7 @@ c")
 
     #[test]
     fn test_for_in_int_skips() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on an int should yield zero iterations, not crash
         let result = eval(
@@ -11127,7 +11127,7 @@ c")
 
     #[test]
     fn test_for_in_none_skips() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on None should yield zero iterations, not crash
         let result = eval(
@@ -11145,7 +11145,7 @@ c")
 
     #[test]
     fn test_for_in_bool_skips() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // for..in on a bool should yield zero iterations
         let result = eval(
@@ -11236,7 +11236,7 @@ c")
 
     #[test]
     fn test_index_string_with_string_key_returns_none() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // string["key"] should return None, not TypeError
         let result = eval(r#"let s = "hello"; s["key"]"#).unwrap();
@@ -11251,7 +11251,7 @@ c")
 
     #[test]
     fn test_index_int_with_string_key_returns_none() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // 42["key"] should return None, not TypeError
         let result = eval(r#"42["key"]"#).unwrap();
@@ -11266,7 +11266,7 @@ c")
 
     #[test]
     fn test_index_none_with_string_key_returns_none() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // None["key"] should return None, not TypeError
         let result = eval(r#"let x = None; x["key"]"#).unwrap();
@@ -11281,7 +11281,7 @@ c")
 
     #[test]
     fn test_index_array_out_of_bounds_returns_none() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // [1,2,3][99] should return None, not IndexOutOfBounds
         let result = eval(r#"[1, 2, 3][99]"#).unwrap();
@@ -11296,7 +11296,7 @@ c")
 
     #[test]
     fn test_index_array_negative_out_of_bounds_returns_none() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // [1,2,3][-99] should return None, not IndexOutOfBounds
         let result = eval(r#"[1, 2, 3][-99]"#).unwrap();
@@ -11311,7 +11311,7 @@ c")
 
     #[test]
     fn test_index_string_char_out_of_bounds_returns_none() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // "hi"[99] should return None, not IndexOutOfBounds
         let result = eval(r#""hi"[99]"#).unwrap();
@@ -11326,7 +11326,7 @@ c")
 
     #[test]
     fn test_index_type_mismatch_with_null_coalescing() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // string["key"] ?? "fallback" should return "fallback"
         let result = eval(r#"let s = "hello"; s["key"] ?? "fallback""#).unwrap();
@@ -11356,7 +11356,7 @@ c")
         // Template with an expression that would error should not crash
         // undefined_fn() doesn't exist, but template should render gracefully
         // Must hold TYPE_MODE_MUTEX — strict mode would crash instead of degrade.
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("NTNT_TYPE_MODE", "warn");
         let code = r#####"
 let page = """before{{undefined_fn()}}after"""
@@ -11378,7 +11378,7 @@ page
     fn test_template_error_boundary_if_treats_error_as_false() {
         // {{#if bad_expr}} should treat error as false, not crash
         // Must hold TYPE_MODE_MUTEX — strict mode would crash instead of degrade.
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("NTNT_TYPE_MODE", "warn");
         let code = r#####"
 let page = """{{#if undefined_fn()}}shown{{#else}}hidden{{/if}}"""
@@ -11409,7 +11409,7 @@ page
         // {{#for x in bad_expr}} should iterate zero times, not crash
         // Must hold TYPE_MODE_MUTEX because this test depends on non-strict
         // runtime behaviour; concurrent strict-mode tests would make it fail.
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("NTNT_TYPE_MODE", "warn");
         let code = r#####"
 let page = """before{{#for x in undefined_fn()}}item{{/for}}after"""
@@ -11746,7 +11746,7 @@ page
 
     #[test]
     fn test_strict_mode_crashes_on_type_mismatch() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
         // Indexing an Int with a String key — strict mode should return RuntimeError
         let result = eval(r#"let x = 42; x["key"]"#);
@@ -11767,7 +11767,7 @@ page
 
     #[test]
     fn test_warn_mode_logs_and_continues() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
         // Indexing an Int with a String key — warn mode returns None, no crash
         let result = eval(r#"let x = 42; x["key"]"#);
@@ -11787,7 +11787,7 @@ page
 
     #[test]
     fn test_forgiving_mode_silent() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         // Forgiving mode: same None result, no warnings (we can't capture stderr here
         // but we verify no panic and correct return value)
@@ -11807,7 +11807,7 @@ page
 
     #[test]
     fn test_for_in_strict_crashes() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
         // for..in on an Int — strict mode should return RuntimeError
         let result = eval(
@@ -11834,7 +11834,7 @@ page
 
     #[test]
     fn test_for_in_warn_skips() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
         // for..in on an Int — warn mode skips the loop body, count stays 0
         let result = eval(
@@ -11861,7 +11861,7 @@ page
 
     #[test]
     fn test_strict_rejects_implicit_int_float_promotion() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
         let result = eval("3 + 2.5");
         assert!(
@@ -11879,7 +11879,7 @@ page
 
     #[test]
     fn test_warn_logs_implicit_int_float_promotion() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
         let result = eval("3 + 2.5");
         assert!(
@@ -11895,7 +11895,7 @@ page
 
     #[test]
     fn test_forgiving_allows_implicit_int_float_promotion() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
         let result = eval("3 + 2.5");
         assert!(
@@ -11911,7 +11911,7 @@ page
 
     #[test]
     fn test_strict_rejects_implicit_string_concat() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
         let result = eval(r#""hello" + 42"#);
         assert!(
@@ -11929,7 +11929,7 @@ page
 
     #[test]
     fn test_warn_allows_implicit_string_concat() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
         let result = eval(r#""hello" + 42"#);
         assert!(
@@ -11945,7 +11945,7 @@ page
 
     #[test]
     fn test_strict_rejects_non_bool_if_condition() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
         let result = eval(r#"if 1 { "yes" } else { "no" }"#);
         assert!(
@@ -11963,7 +11963,7 @@ page
 
     #[test]
     fn test_strict_allows_bool_if_condition() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
         let result = eval(r#"if true { "yes" } else { "no" }"#);
         assert!(
@@ -11979,7 +11979,7 @@ page
 
     #[test]
     fn test_strict_rejects_non_bool_while() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
         let result = eval(
             r#"
@@ -12005,7 +12005,7 @@ page
 
     #[test]
     fn test_mixed_numeric_comparison_always_works() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
         // Mixed Int↔Float comparisons must always work in all modes
         let result = eval("3 == 3.0");
@@ -12022,7 +12022,7 @@ page
 
     #[test]
     fn test_string_string_concat_always_works() {
-        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
         // String + String must always work in all modes
         let result = eval(r#""a" + "b""#);
