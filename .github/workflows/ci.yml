@@ -14,6 +14,7 @@ jobs:
     name: Test
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
@@ -39,6 +40,10 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+        env:
+          # macOS aarch64 has smaller default thread stack (512KB vs 8MB on Linux).
+          # Increase to 8MB to prevent stack overflow in recursive interpreter tests.
+          RUST_MIN_STACK: 8388608
 
   lint:
     name: Lint

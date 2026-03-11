@@ -63,6 +63,7 @@ struct FileExports {
     structs: HashMap<String, Vec<(String, Type)>>,
     enums: HashMap<String, Vec<(String, Option<Vec<Type>>)>>,
     type_aliases: HashMap<String, Type>,
+    struct_type_params: HashMap<String, Vec<String>>,
 }
 
 /// Type checking context with scoped variable bindings
@@ -77,6 +78,8 @@ pub struct TypeContext {
     enums: HashMap<String, Vec<(String, Option<Vec<Type>>)>>,
     /// Type aliases
     type_aliases: HashMap<String, Type>,
+    /// Generic struct type parameters: struct_name -> [param_names]
+    struct_type_params: HashMap<String, Vec<String>>,
     /// Builtin and stdlib function signatures
     builtin_sigs: HashMap<String, FunctionSig>,
     /// Return type of current function being checked
@@ -357,6 +360,7 @@ impl TypeContext {
             structs: HashMap::new(),
             enums: HashMap::new(),
             type_aliases: HashMap::new(),
+            struct_type_params: HashMap::new(),
             builtin_sigs: HashMap::new(),
             current_return_type: None,
             collected_returns: Vec::new(),
@@ -667,9 +671,14 @@ impl TypeContext {
             Statement::Struct {
                 name,
                 fields,
-                type_params: _,
+                type_params,
                 ..
             } => {
+                // Store type parameter names for generic structs (e.g., struct Pair<A, B>)
+                let tp_names: Vec<String> = type_params.iter().map(|t| t.name.clone()).collect();
+                if !tp_names.is_empty() {
+                    self.struct_type_params.insert(name.clone(), tp_names);
+                }
                 let field_types: Vec<(String, Type)> = fields
                     .iter()
                     .map(|f| (f.name.clone(), self.resolve_type_expr(&f.type_annotation)))
@@ -699,6 +708,10 @@ impl TypeContext {
                 target,
                 type_params: _,
             } => {
+                // Insert a placeholder first so self-references resolve to Type::Named(name)
+                // rather than Type::Any during resolution (supports recursive type aliases).
+                self.type_aliases
+                    .insert(name.clone(), Type::Named(name.clone()));
                 let resolved = self.resolve_type_expr(target);
                 self.type_aliases.insert(name.clone(), resolved);
             }
@@ -1624,6 +1637,24 @@ impl TypeContext {
                         }
                         Type::Any
                     }
+                    // Generic struct field access with type param substitution
+                    Type::Generic { name, args } => {
+                        if let Some(struct_fields) = self.structs.get(name).cloned() {
+                            if let Some(tp_names) = self.struct_type_params.get(name).cloned() {
+                                let bindings: HashMap<String, Type> = tp_names
+                                    .iter()
+                                    .zip(args.iter())
+                                    .map(|(n, t)| (n.clone(), t.clone()))
+                                    .collect();
+                                for (fname, ftype) in &struct_fields {
+                                    if fname == field {
+                                        return Self::substitute_type_params(ftype, &bindings);
+                                    }
+                                }
+                            }
+                        }
+                        Type::Any
+                    }
                     // Map field access: map.field is syntactic sugar for map["field"]
                     Type::Map { value_type, .. } => (**value_type).clone(),
                     _ => Type::Any,
@@ -1723,10 +1754,48 @@ impl TypeContext {
             Expression::StructLiteral { name, fields } => {
                 // Check field types match struct definition
                 if let Some(struct_fields) = self.structs.get(name).cloned() {
+                    let tp_names = self
+                        .struct_type_params
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default();
+                    // For generic structs, collect type param bindings from field values
+                    let mut bindings: HashMap<String, Type> = HashMap::new();
                     for (fname, fexpr) in fields {
                         let actual = self.infer_expression(fexpr);
                         if let Some((_, expected)) = struct_fields.iter().find(|(n, _)| n == fname)
                         {
+                            // If expected type is a generic type param, record/check the binding
+                            if let Type::Named(tp_name) = expected {
+                                if tp_names.contains(tp_name) {
+                                    if let Some(bound) = bindings.get(tp_name) {
+                                        // A binding for this type param already exists;
+                                        // ensure it is compatible (e.g., struct Pair<A> { a: A, b: A }
+                                        // with { a: 1, b: "x" } should error)
+                                        if !self.compatible(&actual, bound)
+                                            && !matches!(actual, Type::Any)
+                                            && !matches!(bound, Type::Any)
+                                        {
+                                            let line = self.find_line_near(name);
+                                            self.error(
+                                                format!(
+                                                    "In struct '{}', generic type parameter '{}' has incompatible bindings: {} and {}",
+                                                    name,
+                                                    tp_name,
+                                                    bound.name(),
+                                                    actual.name()
+                                                ),
+                                                line,
+                                                None,
+                                            );
+                                        }
+                                    } else {
+                                        bindings.insert(tp_name.clone(), actual.clone());
+                                    }
+                                    // Skip further field-vs-struct compatibility check
+                                    continue;
+                                }
+                            }
                             if !self.compatible(&actual, expected) && !matches!(actual, Type::Any) {
                                 let line = self.find_line_near(name);
                                 self.error(
@@ -1742,6 +1811,17 @@ impl TypeContext {
                                 );
                             }
                         }
+                    }
+                    // Return Generic type with resolved type args so field access can infer types
+                    if !tp_names.is_empty() {
+                        let args: Vec<Type> = tp_names
+                            .iter()
+                            .map(|n| bindings.get(n).cloned().unwrap_or(Type::Any))
+                            .collect();
+                        return Type::Generic {
+                            name: name.clone(),
+                            args,
+                        };
                     }
                 }
                 Type::Named(name.clone())
@@ -2849,6 +2929,7 @@ impl TypeContext {
             structs: temp_ctx.structs.clone(),
             enums: temp_ctx.enums.clone(),
             type_aliases: temp_ctx.type_aliases.clone(),
+            struct_type_params: temp_ctx.struct_type_params.clone(),
         };
         temp_ctx
             .module_cache
@@ -2866,6 +2947,7 @@ impl TypeContext {
             structs: temp_ctx.structs,
             enums: temp_ctx.enums,
             type_aliases: temp_ctx.type_aliases,
+            struct_type_params: temp_ctx.struct_type_params,
         };
 
         // Update cache with Pass 2 results
@@ -2911,6 +2993,11 @@ impl TypeContext {
                     self.builtin_sigs.insert(local_name.clone(), sig.clone());
                 } else if let Some(fields) = exports.structs.get(&item.name) {
                     self.structs.insert(local_name.clone(), fields.clone());
+                    // Also import generic type params if the struct has them
+                    if let Some(tp) = exports.struct_type_params.get(&item.name) {
+                        self.struct_type_params
+                            .insert(local_name.clone(), tp.clone());
+                    }
                 } else if let Some(variants) = exports.enums.get(&item.name) {
                     self.enums.insert(local_name.clone(), variants.clone());
                 } else if let Some(typ) = exports.type_aliases.get(&item.name) {
@@ -6441,6 +6528,124 @@ let n: Int = double(5)"#;
         assert!(
             errors.is_empty(),
             "Should accept 1-3 args with defaults: {:?}",
+            errors
+        );
+    }
+
+    // ── Recursive type aliases (DD-009 Phase 7.2) ───────────────
+
+    #[test]
+    fn test_recursive_type_alias_typechecks() {
+        // A recursive type alias should not produce errors — self-references
+        // resolve to Type::Named("JsonValue") via the placeholder mechanism.
+        let errors = check_errors(
+            r#"
+            type JsonValue = String | Int | Float | Bool | [JsonValue] | Map<String, JsonValue>
+            fn process(v: JsonValue) -> String {
+                return str(v)
+            }
+            process("hello")
+            process(42)
+            process(3.14)
+            process(true)
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Recursive type alias should type-check without errors: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_recursive_type_alias_no_infinite_loop() {
+        // Ensure collecting a recursive alias doesn't hang/panic
+        let diags = check(
+            r#"
+            type Tree = String | [Tree]
+            let x: Tree = "leaf"
+            "#,
+        );
+        // We only care that this completes (no panic), diagnostics may vary
+        let _ = diags;
+    }
+
+    // ── Generic struct support (DD-009 Phase 7.4) ────────────────
+
+    #[test]
+    fn test_generic_struct_declaration() {
+        // Declaring a generic struct should not produce errors
+        let errors = check_errors(
+            r#"
+            struct Pair<A, B> {
+                first: A,
+                second: B,
+            }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Generic struct declaration should not produce errors: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_generic_struct_construction() {
+        // Constructing a generic struct with concrete types should not error
+        let errors = check_errors(
+            r#"
+            struct Pair<A, B> {
+                first: A,
+                second: B,
+            }
+            let p = Pair { first: 42, second: "hello" }
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Generic struct construction should not produce errors: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_generic_struct_field_inference() {
+        // Field access on a generic struct should return the inferred concrete type
+        let errors = check_errors(
+            r#"
+            struct Pair<A, B> {
+                first: A,
+                second: B,
+            }
+            let p = Pair { first: 42, second: "hello" }
+            let x: Int = p.first
+            let y: String = p.second
+            "#,
+        );
+        assert!(
+            errors.is_empty(),
+            "Generic struct field access should infer concrete types: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_generic_struct_field_type_mismatch() {
+        // Annotating a generic struct field with the wrong concrete type should error
+        let errors = check_errors(
+            r#"
+            struct Pair<A, B> {
+                first: A,
+                second: B,
+            }
+            let p = Pair { first: 42, second: "hello" }
+            let x: String = p.first
+            "#,
+        );
+        assert!(
+            !errors.is_empty(),
+            "Assigning Int field to String variable should produce a type error: {:?}",
             errors
         );
     }

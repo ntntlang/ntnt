@@ -47,6 +47,7 @@ pub enum LintMode {
     Strict,
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn read_type_mode_from_env() -> TypeMode {
     match std::env::var("NTNT_TYPE_MODE").as_deref().unwrap_or("warn") {
         "strict" => TypeMode::Strict,
@@ -55,11 +56,13 @@ fn read_type_mode_from_env() -> TypeMode {
     }
 }
 
-/// Get the current runtime type mode from the `NTNT_TYPE_MODE` env var.
+/// Get the current runtime type mode.
 ///
-/// Default is [`TypeMode::Warn`]. In production builds the result is cached on
-/// first call; in test builds it reads fresh from the environment every call
-/// so tests can manipulate `NTNT_TYPE_MODE` with per-test isolation.
+/// Default is [`TypeMode::Warn`]. In production builds the result is read from
+/// `NTNT_TYPE_MODE` env var and cached via `OnceLock`. In test builds, a
+/// thread-local override is used instead of env vars (since `std::env::set_var`
+/// is unsafe in multi-threaded contexts on Rust 1.83+). Use
+/// [`set_test_type_mode`] to override in tests.
 #[cfg(not(test))]
 pub fn get_type_mode() -> TypeMode {
     use std::sync::OnceLock;
@@ -69,9 +72,38 @@ pub fn get_type_mode() -> TypeMode {
 
 #[cfg(test)]
 pub fn get_type_mode() -> TypeMode {
-    read_type_mode_from_env()
+    // In tests, use thread-local override only (no env var reads).
+    // std::env::var is unsafe to call concurrently with set_var on macOS
+    // (Rust 1.83+ / POSIX getenv is not thread-safe on all platforms).
+    TYPE_MODE_OVERRIDE.with(|cell| (*cell.borrow()).unwrap_or(TypeMode::Warn))
 }
 
+thread_local! {
+    /// Thread-local override for TypeMode in tests. Avoids `std::env::set_var`
+    /// which is unsafe in multi-threaded contexts (Rust 1.83+).
+    static TYPE_MODE_OVERRIDE: RefCell<Option<TypeMode>> = const { RefCell::new(None) };
+}
+
+/// Set a thread-local TypeMode override for the current test. Returns a guard
+/// that restores `None` on drop. Use instead of `std::env::set_var("NTNT_TYPE_MODE", ...)`.
+#[cfg(test)]
+pub fn set_test_type_mode(mode: TypeMode) -> TestTypeModeGuard {
+    TYPE_MODE_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(mode));
+    TestTypeModeGuard
+}
+
+/// RAII guard that clears the thread-local TypeMode override on drop.
+#[cfg(test)]
+pub struct TestTypeModeGuard;
+
+#[cfg(test)]
+impl Drop for TestTypeModeGuard {
+    fn drop(&mut self) {
+        TYPE_MODE_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
 fn read_lint_mode_from_env() -> LintMode {
     match std::env::var("NTNT_LINT_MODE")
         .as_deref()
@@ -83,11 +115,13 @@ fn read_lint_mode_from_env() -> LintMode {
     }
 }
 
-/// Get the current lint mode from the `NTNT_LINT_MODE` env var.
+/// Get the current lint mode.
 ///
-/// Default is [`LintMode::Default`]. CLI flags take precedence over this value
-/// (caller is responsible for applying the override). In production builds the
-/// result is cached; in test builds it reads fresh each call.
+/// Default is [`LintMode::Default`]. In production builds the result is read
+/// from `NTNT_LINT_MODE` env var and cached via `OnceLock`. CLI flags take
+/// precedence (caller applies the override). In test builds, always returns
+/// `LintMode::Default` for thread safety (no env var reads). Add a thread-local
+/// override similar to `TypeMode` if lint-mode testing is needed.
 #[cfg(not(test))]
 pub fn get_lint_mode() -> LintMode {
     use std::sync::OnceLock;
@@ -97,7 +131,8 @@ pub fn get_lint_mode() -> LintMode {
 
 #[cfg(test)]
 pub fn get_lint_mode() -> LintMode {
-    read_lint_mode_from_env()
+    // In tests, always return Default (no env var reads for thread safety).
+    LintMode::Default
 }
 
 use std::cell::RefCell;
