@@ -69,7 +69,39 @@ pub fn get_type_mode() -> TypeMode {
 
 #[cfg(test)]
 pub fn get_type_mode() -> TypeMode {
-    read_type_mode_from_env()
+    // In tests, check thread-local override first (avoids unsafe set_var).
+    TYPE_MODE_OVERRIDE.with(|cell| {
+        if let Some(mode) = *cell.borrow() {
+            mode
+        } else {
+            read_type_mode_from_env()
+        }
+    })
+}
+
+thread_local! {
+    /// Thread-local override for TypeMode in tests. Avoids `std::env::set_var`
+    /// which is unsafe in multi-threaded contexts (Rust 1.83+).
+    static TYPE_MODE_OVERRIDE: RefCell<Option<TypeMode>> = const { RefCell::new(None) };
+}
+
+/// Set a thread-local TypeMode override for the current test. Returns a guard
+/// that restores `None` on drop. Use instead of `std::env::set_var("NTNT_TYPE_MODE", ...)`.
+#[cfg(test)]
+pub fn set_test_type_mode(mode: TypeMode) -> TestTypeModeGuard {
+    TYPE_MODE_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(mode));
+    TestTypeModeGuard
+}
+
+/// RAII guard that clears the thread-local TypeMode override on drop.
+#[cfg(test)]
+pub struct TestTypeModeGuard;
+
+#[cfg(test)]
+impl Drop for TestTypeModeGuard {
+    fn drop(&mut self) {
+        TYPE_MODE_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+    }
 }
 
 fn read_lint_mode_from_env() -> LintMode {

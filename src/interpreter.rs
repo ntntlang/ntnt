@@ -9754,7 +9754,7 @@ c")
     #[test]
     fn test_for_in_string_skips() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // for..in on a string now yields zero iterations (use chars() instead)
         let result = eval(
             r#"
@@ -11110,7 +11110,7 @@ c")
     #[test]
     fn test_for_in_int_skips() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // for..in on an int should yield zero iterations, not crash
         let result = eval(
             r#"
@@ -11128,7 +11128,7 @@ c")
     #[test]
     fn test_for_in_none_skips() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // for..in on None should yield zero iterations, not crash
         let result = eval(
             r#"
@@ -11146,7 +11146,7 @@ c")
     #[test]
     fn test_for_in_bool_skips() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // for..in on a bool should yield zero iterations
         let result = eval(
             r#"
@@ -11237,7 +11237,7 @@ c")
     #[test]
     fn test_index_string_with_string_key_returns_none() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // string["key"] should return None, not TypeError
         let result = eval(r#"let s = "hello"; s["key"]"#).unwrap();
         assert!(matches!(
@@ -11252,7 +11252,7 @@ c")
     #[test]
     fn test_index_int_with_string_key_returns_none() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // 42["key"] should return None, not TypeError
         let result = eval(r#"42["key"]"#).unwrap();
         assert!(matches!(
@@ -11267,7 +11267,7 @@ c")
     #[test]
     fn test_index_none_with_string_key_returns_none() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // None["key"] should return None, not TypeError
         let result = eval(r#"let x = None; x["key"]"#).unwrap();
         assert!(matches!(
@@ -11282,7 +11282,7 @@ c")
     #[test]
     fn test_index_array_out_of_bounds_returns_none() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // [1,2,3][99] should return None, not IndexOutOfBounds
         let result = eval(r#"[1, 2, 3][99]"#).unwrap();
         assert!(matches!(
@@ -11297,7 +11297,7 @@ c")
     #[test]
     fn test_index_array_negative_out_of_bounds_returns_none() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // [1,2,3][-99] should return None, not IndexOutOfBounds
         let result = eval(r#"[1, 2, 3][-99]"#).unwrap();
         assert!(matches!(
@@ -11312,7 +11312,7 @@ c")
     #[test]
     fn test_index_string_char_out_of_bounds_returns_none() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // "hi"[99] should return None, not IndexOutOfBounds
         let result = eval(r#""hi"[99]"#).unwrap();
         assert!(matches!(
@@ -11327,7 +11327,7 @@ c")
     #[test]
     fn test_index_type_mismatch_with_null_coalescing() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // string["key"] ?? "fallback" should return "fallback"
         let result = eval(r#"let s = "hello"; s["key"] ?? "fallback""#).unwrap();
         assert!(matches!(result, Value::String(ref s) if s == "fallback"));
@@ -11357,13 +11357,12 @@ c")
         // undefined_fn() doesn't exist, but template should render gracefully
         // Must hold TYPE_MODE_MUTEX — strict mode would crash instead of degrade.
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("NTNT_TYPE_MODE", "warn");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Warn);
         let code = r#####"
 let page = """before{{undefined_fn()}}after"""
 page
 "#####;
         let result = eval(code);
-        std::env::set_var("NTNT_TYPE_MODE", "warn"); // restore
         assert!(
             result.is_ok(),
             "Template with bad expression should not crash"
@@ -11379,13 +11378,12 @@ page
         // {{#if bad_expr}} should treat error as false, not crash
         // Must hold TYPE_MODE_MUTEX — strict mode would crash instead of degrade.
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("NTNT_TYPE_MODE", "warn");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Warn);
         let code = r#####"
 let page = """{{#if undefined_fn()}}shown{{#else}}hidden{{/if}}"""
 page
 "#####;
         let result = eval(code);
-        std::env::set_var("NTNT_TYPE_MODE", "warn"); // restore
         assert!(
             result.is_ok(),
             "Template with bad if condition should not crash"
@@ -11410,13 +11408,12 @@ page
         // Must hold TYPE_MODE_MUTEX because this test depends on non-strict
         // runtime behaviour; concurrent strict-mode tests would make it fail.
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("NTNT_TYPE_MODE", "warn");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Warn);
         let code = r#####"
 let page = """before{{#for x in undefined_fn()}}item{{/for}}after"""
 page
 "#####;
         let result = eval(code);
-        std::env::set_var("NTNT_TYPE_MODE", "warn"); // restore
         assert!(
             result.is_ok(),
             "Template with bad for iterable should not crash"
@@ -11724,30 +11721,14 @@ page
     use std::sync::Mutex;
     static TYPE_MODE_MUTEX: Mutex<()> = Mutex::new(());
 
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, prev }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
+    // EnvGuard removed — replaced by crate::config::set_test_type_mode()
+    // which uses a thread-local override instead of std::env::set_var
+    // (unsafe in multi-threaded contexts since Rust 1.83).
 
     #[test]
     fn test_strict_mode_crashes_on_type_mismatch() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
         // Indexing an Int with a String key — strict mode should return RuntimeError
         let result = eval(r#"let x = 42; x["key"]"#);
         assert!(
@@ -11768,7 +11749,7 @@ page
     #[test]
     fn test_warn_mode_logs_and_continues() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Warn);
         // Indexing an Int with a String key — warn mode returns None, no crash
         let result = eval(r#"let x = 42; x["key"]"#);
         assert!(
@@ -11788,7 +11769,7 @@ page
     #[test]
     fn test_forgiving_mode_silent() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         // Forgiving mode: same None result, no warnings (we can't capture stderr here
         // but we verify no panic and correct return value)
         let result = eval(r#"let x = 42; x["key"]"#);
@@ -11808,7 +11789,7 @@ page
     #[test]
     fn test_for_in_strict_crashes() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
         // for..in on an Int — strict mode should return RuntimeError
         let result = eval(
             r#"
@@ -11835,7 +11816,7 @@ page
     #[test]
     fn test_for_in_warn_skips() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Warn);
         // for..in on an Int — warn mode skips the loop body, count stays 0
         let result = eval(
             r#"
@@ -11862,7 +11843,7 @@ page
     #[test]
     fn test_strict_rejects_implicit_int_float_promotion() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
         let result = eval("3 + 2.5");
         assert!(
             result.is_err(),
@@ -11880,7 +11861,7 @@ page
     #[test]
     fn test_warn_logs_implicit_int_float_promotion() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Warn);
         let result = eval("3 + 2.5");
         assert!(
             result.is_ok(),
@@ -11896,7 +11877,7 @@ page
     #[test]
     fn test_forgiving_allows_implicit_int_float_promotion() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Forgiving);
         let result = eval("3 + 2.5");
         assert!(
             result.is_ok(),
@@ -11912,7 +11893,7 @@ page
     #[test]
     fn test_strict_rejects_implicit_string_concat() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
         let result = eval(r#""hello" + 42"#);
         assert!(
             result.is_err(),
@@ -11930,7 +11911,7 @@ page
     #[test]
     fn test_warn_allows_implicit_string_concat() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Warn);
         let result = eval(r#""hello" + 42"#);
         assert!(
             result.is_ok(),
@@ -11946,7 +11927,7 @@ page
     #[test]
     fn test_strict_rejects_non_bool_if_condition() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
         let result = eval(r#"if 1 { "yes" } else { "no" }"#);
         assert!(
             result.is_err(),
@@ -11964,7 +11945,7 @@ page
     #[test]
     fn test_strict_allows_bool_if_condition() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
         let result = eval(r#"if true { "yes" } else { "no" }"#);
         assert!(
             result.is_ok(),
@@ -11980,7 +11961,7 @@ page
     #[test]
     fn test_strict_rejects_non_bool_while() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
         let result = eval(
             r#"
             let mut x = 1
@@ -12006,7 +11987,7 @@ page
     #[test]
     fn test_mixed_numeric_comparison_always_works() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
         // Mixed Int↔Float comparisons must always work in all modes
         let result = eval("3 == 3.0");
         assert!(
@@ -12023,7 +12004,7 @@ page
     #[test]
     fn test_string_string_concat_always_works() {
         let _lock = TYPE_MODE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let _guard = crate::config::set_test_type_mode(crate::config::TypeMode::Strict);
         // String + String must always work in all modes
         let result = eval(r#""a" + "b""#);
         assert!(
