@@ -11,7 +11,7 @@
 //! - `result` to reference the return value in postconditions
 
 use crate::ast::*;
-use crate::config::{get_type_mode, TypeMode};
+use crate::config::{get_type_mode, type_warn_dedup, TypeMode};
 use crate::contracts::{ContractChecker, OldValues, StoredValue};
 use crate::error::{IntentError, Result, TypeContext};
 use std::cell::RefCell;
@@ -506,6 +506,14 @@ fn is_production_mode() -> bool {
 /// - `for..in` on non-collection values
 /// - Field access on non-struct/map
 /// - Template expression/filter/for-loop errors
+///
+/// ## TypeMode-Aware (DD-009 Phase 4 — implicit coercion controls)
+/// These are **implicit type coercions** that are gated by TypeMode:
+/// - Mixed Int↔Float arithmetic (`3 + 2.5`) — Strict rejects, Warn logs, Forgiving silently promotes
+/// - Non-String + String concatenation (`"hi" + 42`) — same three-tier behavior
+/// - Non-Bool condition in `if`/`while` (`if 1 { ... }`) — same three-tier behavior
+/// - Non-Bool operand for `!`, `&&`, `||` — same three-tier behavior
+/// Note: mixed Int↔Float **comparisons** (`3 == 3.0`) are always allowed in all modes.
 ///
 /// ## Hard Errors — Code Bugs (always crash, TypeMode does NOT apply)
 /// These indicate a bug in the source code, not a data mismatch:
@@ -3263,6 +3271,28 @@ impl Interpreter {
                 else_branch,
             } => {
                 let cond = self.eval_expression(condition)?;
+                // TypeMode gate (DD-009 Phase 4): Strict requires explicit Bool in if conditions.
+                // Warn logs a warning and continues; Forgiving uses is_truthy() silently.
+                if !matches!(cond, Value::Bool(_)) {
+                    match get_type_mode() {
+                        TypeMode::Strict => {
+                            return Err(IntentError::type_error(format!(
+                                "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                cond.type_name()
+                            )));
+                        }
+                        TypeMode::Warn => {
+                            type_warn_dedup(
+                                &format!("non_bool_cond:{}", cond.type_name()),
+                                &format!(
+                                    "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                    cond.type_name()
+                                ),
+                            );
+                        }
+                        TypeMode::Forgiving => {}
+                    }
+                }
                 if cond.is_truthy() {
                     self.eval_block(then_branch)
                 } else if let Some(else_b) = else_branch {
@@ -3275,6 +3305,27 @@ impl Interpreter {
             Statement::While { condition, body } => {
                 loop {
                     let cond = self.eval_expression(condition)?;
+                    // TypeMode gate (DD-009 Phase 4): Strict requires explicit Bool in while conditions.
+                    if !matches!(cond, Value::Bool(_)) {
+                        match get_type_mode() {
+                            TypeMode::Strict => {
+                                return Err(IntentError::type_error(format!(
+                                    "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                    cond.type_name()
+                                )));
+                            }
+                            TypeMode::Warn => {
+                                type_warn_dedup(
+                                    &format!("non_bool_while:{}", cond.type_name()),
+                                    &format!(
+                                        "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                        cond.type_name()
+                                    ),
+                                );
+                            }
+                            TypeMode::Forgiving => {}
+                        }
+                    }
                     if !cond.is_truthy() {
                         break;
                     }
@@ -3617,19 +3668,100 @@ impl Interpreter {
                 let lhs = self.eval_expression(left)?;
 
                 // Short-circuit evaluation for logical operators
+                // TypeMode gate (DD-009 Phase 4): Strict requires Bool operands for && and ||.
                 match operator {
                     BinaryOp::And => {
+                        if !matches!(lhs, Value::Bool(_)) {
+                            match get_type_mode() {
+                                TypeMode::Strict => {
+                                    return Err(IntentError::type_error(format!(
+                                        "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                        lhs.type_name()
+                                    )));
+                                }
+                                TypeMode::Warn => {
+                                    type_warn_dedup(
+                                        &format!("non_bool_and_lhs:{}", lhs.type_name()),
+                                        &format!(
+                                            "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                            lhs.type_name()
+                                        ),
+                                    );
+                                }
+                                TypeMode::Forgiving => {}
+                            }
+                        }
                         if !lhs.is_truthy() {
                             return Ok(Value::Bool(false));
                         }
                         let rhs = self.eval_expression(right)?;
+                        if !matches!(rhs, Value::Bool(_)) {
+                            match get_type_mode() {
+                                TypeMode::Strict => {
+                                    return Err(IntentError::type_error(format!(
+                                        "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                        rhs.type_name()
+                                    )));
+                                }
+                                TypeMode::Warn => {
+                                    type_warn_dedup(
+                                        &format!("non_bool_and_rhs:{}", rhs.type_name()),
+                                        &format!(
+                                            "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                            rhs.type_name()
+                                        ),
+                                    );
+                                }
+                                TypeMode::Forgiving => {}
+                            }
+                        }
                         return Ok(Value::Bool(rhs.is_truthy()));
                     }
                     BinaryOp::Or => {
+                        if !matches!(lhs, Value::Bool(_)) {
+                            match get_type_mode() {
+                                TypeMode::Strict => {
+                                    return Err(IntentError::type_error(format!(
+                                        "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                        lhs.type_name()
+                                    )));
+                                }
+                                TypeMode::Warn => {
+                                    type_warn_dedup(
+                                        &format!("non_bool_or_lhs:{}", lhs.type_name()),
+                                        &format!(
+                                            "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                            lhs.type_name()
+                                        ),
+                                    );
+                                }
+                                TypeMode::Forgiving => {}
+                            }
+                        }
                         if lhs.is_truthy() {
                             return Ok(Value::Bool(true));
                         }
                         let rhs = self.eval_expression(right)?;
+                        if !matches!(rhs, Value::Bool(_)) {
+                            match get_type_mode() {
+                                TypeMode::Strict => {
+                                    return Err(IntentError::type_error(format!(
+                                        "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                        rhs.type_name()
+                                    )));
+                                }
+                                TypeMode::Warn => {
+                                    type_warn_dedup(
+                                        &format!("non_bool_or_rhs:{}", rhs.type_name()),
+                                        &format!(
+                                            "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                            rhs.type_name()
+                                        ),
+                                    );
+                                }
+                                TypeMode::Forgiving => {}
+                            }
+                        }
                         return Ok(Value::Bool(rhs.is_truthy()));
                     }
                     BinaryOp::NullCoalesce => {
@@ -3669,7 +3801,30 @@ impl Interpreter {
                             "Cannot negate non-numeric value".to_string(),
                         )),
                     },
-                    UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
+                    UnaryOp::Not => {
+                        // TypeMode gate (DD-009 Phase 4): Strict requires Bool operand for !.
+                        if !matches!(val, Value::Bool(_)) {
+                            match get_type_mode() {
+                                TypeMode::Strict => {
+                                    return Err(IntentError::type_error(format!(
+                                        "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                        val.type_name()
+                                    )));
+                                }
+                                TypeMode::Warn => {
+                                    type_warn_dedup(
+                                        &format!("non_bool_not:{}", val.type_name()),
+                                        &format!(
+                                            "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                            val.type_name()
+                                        ),
+                                    );
+                                }
+                                TypeMode::Forgiving => {}
+                            }
+                        }
+                        Ok(Value::Bool(!val.is_truthy()))
+                    }
                 }
             }
 
@@ -7366,22 +7521,132 @@ impl Interpreter {
             (BinaryOp::Mod, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a % b)),
             (BinaryOp::Pow, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.powf(b))),
 
-            // Mixed numeric
-            (BinaryOp::Add, Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
-            (BinaryOp::Add, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + b as f64)),
-            (BinaryOp::Sub, Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 - b)),
-            (BinaryOp::Sub, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a - b as f64)),
-            (BinaryOp::Mul, Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 * b)),
-            (BinaryOp::Mul, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * b as f64)),
-            (BinaryOp::Div, Value::Int(a), Value::Float(b)) => Ok(Value::Float(a as f64 / b)),
-            (BinaryOp::Div, Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / b as f64)),
+            // Mixed numeric arithmetic (Int ↔ Float implicit promotion)
+            // TypeMode gate (DD-009 Phase 4): Strict rejects implicit promotion, Warn logs it,
+            // Forgiving silently promotes (legacy behaviour). Note: mixed COMPARISONS (Eq, Ne,
+            // Lt, Le, Gt, Ge) are NOT gated — comparing 3 == 3.0 is always valid.
+            (BinaryOp::Add, Value::Int(a), Value::Float(b)) => match get_type_mode() {
+                TypeMode::Strict => Err(IntentError::type_error(
+                    "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.".to_string(),
+                )),
+                TypeMode::Warn => {
+                    type_warn_dedup("implicit_int_float:add", "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.");
+                    Ok(Value::Float(a as f64 + b))
+                }
+                TypeMode::Forgiving => Ok(Value::Float(a as f64 + b)),
+            },
+            (BinaryOp::Add, Value::Float(a), Value::Int(b)) => match get_type_mode() {
+                TypeMode::Strict => Err(IntentError::type_error(
+                    "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.".to_string(),
+                )),
+                TypeMode::Warn => {
+                    type_warn_dedup("implicit_int_float:add_r", "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.");
+                    Ok(Value::Float(a + b as f64))
+                }
+                TypeMode::Forgiving => Ok(Value::Float(a + b as f64)),
+            },
+            (BinaryOp::Sub, Value::Int(a), Value::Float(b)) => match get_type_mode() {
+                TypeMode::Strict => Err(IntentError::type_error(
+                    "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.".to_string(),
+                )),
+                TypeMode::Warn => {
+                    type_warn_dedup("implicit_int_float:sub", "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.");
+                    Ok(Value::Float(a as f64 - b))
+                }
+                TypeMode::Forgiving => Ok(Value::Float(a as f64 - b)),
+            },
+            (BinaryOp::Sub, Value::Float(a), Value::Int(b)) => match get_type_mode() {
+                TypeMode::Strict => Err(IntentError::type_error(
+                    "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.".to_string(),
+                )),
+                TypeMode::Warn => {
+                    type_warn_dedup("implicit_int_float:sub_r", "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.");
+                    Ok(Value::Float(a - b as f64))
+                }
+                TypeMode::Forgiving => Ok(Value::Float(a - b as f64)),
+            },
+            (BinaryOp::Mul, Value::Int(a), Value::Float(b)) => match get_type_mode() {
+                TypeMode::Strict => Err(IntentError::type_error(
+                    "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.".to_string(),
+                )),
+                TypeMode::Warn => {
+                    type_warn_dedup("implicit_int_float:mul", "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.");
+                    Ok(Value::Float(a as f64 * b))
+                }
+                TypeMode::Forgiving => Ok(Value::Float(a as f64 * b)),
+            },
+            (BinaryOp::Mul, Value::Float(a), Value::Int(b)) => match get_type_mode() {
+                TypeMode::Strict => Err(IntentError::type_error(
+                    "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.".to_string(),
+                )),
+                TypeMode::Warn => {
+                    type_warn_dedup("implicit_int_float:mul_r", "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.");
+                    Ok(Value::Float(a * b as f64))
+                }
+                TypeMode::Forgiving => Ok(Value::Float(a * b as f64)),
+            },
+            (BinaryOp::Div, Value::Int(a), Value::Float(b)) => match get_type_mode() {
+                TypeMode::Strict => Err(IntentError::type_error(
+                    "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.".to_string(),
+                )),
+                TypeMode::Warn => {
+                    type_warn_dedup("implicit_int_float:div", "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.");
+                    Ok(Value::Float(a as f64 / b))
+                }
+                TypeMode::Forgiving => Ok(Value::Float(a as f64 / b)),
+            },
+            (BinaryOp::Div, Value::Float(a), Value::Int(b)) => match get_type_mode() {
+                TypeMode::Strict => Err(IntentError::type_error(
+                    "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.".to_string(),
+                )),
+                TypeMode::Warn => {
+                    type_warn_dedup("implicit_int_float:div_r", "Implicit Int\u{2192}Float promotion in arithmetic. Use float(intVal) for explicit conversion.");
+                    Ok(Value::Float(a / b as f64))
+                }
+                TypeMode::Forgiving => Ok(Value::Float(a / b as f64)),
+            },
 
             // String concatenation
+            // String+String always works in all modes — this is unambiguous.
+            // Non-String + String or String + Non-String is gated by TypeMode (DD-009 Phase 4):
+            // Strict rejects implicit coercion, Warn logs it, Forgiving silently coerces.
             (BinaryOp::Add, Value::String(a), Value::String(b)) => {
                 Ok(Value::String(format!("{}{}", a, b)))
             }
-            (BinaryOp::Add, Value::String(a), b) => Ok(Value::String(format!("{}{}", a, b))),
-            (BinaryOp::Add, a, Value::String(b)) => Ok(Value::String(format!("{}{}", a, b))),
+            (BinaryOp::Add, Value::String(a), b) => match get_type_mode() {
+                TypeMode::Strict => Err(IntentError::type_error(format!(
+                    "Implicit conversion of {} to String in concatenation. Use str(value) explicitly.",
+                    b.type_name()
+                ))),
+                TypeMode::Warn => {
+                    type_warn_dedup(
+                        &format!("implicit_str_concat:rhs:{}", b.type_name()),
+                        &format!(
+                            "Implicit conversion of {} to String in concatenation. Use str(value) explicitly.",
+                            b.type_name()
+                        ),
+                    );
+                    Ok(Value::String(format!("{}{}", a, b)))
+                }
+                TypeMode::Forgiving => Ok(Value::String(format!("{}{}", a, b))),
+            },
+            (BinaryOp::Add, a, Value::String(b)) => match get_type_mode() {
+                TypeMode::Strict => Err(IntentError::type_error(format!(
+                    "Implicit conversion of {} to String in concatenation. Use str(value) explicitly.",
+                    a.type_name()
+                ))),
+                TypeMode::Warn => {
+                    type_warn_dedup(
+                        &format!("implicit_str_concat:lhs:{}", a.type_name()),
+                        &format!(
+                            "Implicit conversion of {} to String in concatenation. Use str(value) explicitly.",
+                            a.type_name()
+                        ),
+                    );
+                    Ok(Value::String(format!("{}{}", a, b)))
+                }
+                TypeMode::Forgiving => Ok(Value::String(format!("{}{}", a, b))),
+            },
 
             // Array concatenation
             (BinaryOp::Add, Value::Array(mut a), Value::Array(b)) => {
@@ -11131,11 +11396,16 @@ page
     #[test]
     fn test_template_error_boundary_for_treats_error_as_empty() {
         // {{#for x in bad_expr}} should iterate zero times, not crash
+        // Must hold TYPE_MODE_MUTEX because this test depends on non-strict
+        // runtime behaviour; concurrent strict-mode tests would make it fail.
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        std::env::set_var("NTNT_TYPE_MODE", "warn");
         let code = r#####"
 let page = """before{{#for x in undefined_fn()}}item{{/for}}after"""
 page
 "#####;
         let result = eval(code);
+        std::env::set_var("NTNT_TYPE_MODE", "warn"); // restore
         assert!(
             result.is_ok(),
             "Template with bad for iterable should not crash"
@@ -11574,5 +11844,193 @@ page
             matches!(result.unwrap(), Value::Int(0)),
             "warn mode: for..in on Int should skip loop body (count should be 0)"
         );
+    }
+
+    // DD-009 Phase 4: Type coercion control tests
+
+    #[test]
+    fn test_strict_rejects_implicit_int_float_promotion() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let result = eval("3 + 2.5");
+        assert!(
+            result.is_err(),
+            "strict mode: Int + Float should return Err, got {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Implicit") || msg.contains("promotion") || msg.contains("Float"),
+            "error should mention implicit promotion, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_warn_logs_implicit_int_float_promotion() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
+        let result = eval("3 + 2.5");
+        assert!(
+            result.is_ok(),
+            "warn mode: Int + Float should succeed, got {:?}",
+            result
+        );
+        match result.unwrap() {
+            Value::Float(f) => assert!(
+                (f - 5.5).abs() < 1e-10,
+                "expected 5.5, got {}",
+                f
+            ),
+            other => panic!("expected Float(5.5), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_forgiving_allows_implicit_int_float_promotion() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "forgiving");
+        let result = eval("3 + 2.5");
+        assert!(
+            result.is_ok(),
+            "forgiving mode: Int + Float should succeed, got {:?}",
+            result
+        );
+        match result.unwrap() {
+            Value::Float(f) => assert!(
+                (f - 5.5).abs() < 1e-10,
+                "expected 5.5, got {}",
+                f
+            ),
+            other => panic!("expected Float(5.5), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_strict_rejects_implicit_string_concat() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let result = eval(r#""hello" + 42"#);
+        assert!(
+            result.is_err(),
+            "strict mode: String + Int should return Err, got {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Implicit") || msg.contains("conversion") || msg.contains("String"),
+            "error should mention implicit conversion, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_warn_allows_implicit_string_concat() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "warn");
+        let result = eval(r#""hello" + 42"#);
+        assert!(
+            result.is_ok(),
+            "warn mode: String + Int should succeed, got {:?}",
+            result
+        );
+        match result.unwrap() {
+            Value::String(s) => assert_eq!(s, "hello42", "expected 'hello42', got '{}'", s),
+            other => panic!("expected String('hello42'), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_strict_rejects_non_bool_if_condition() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let result = eval(r#"if 1 { "yes" } else { "no" }"#);
+        assert!(
+            result.is_err(),
+            "strict mode: if with Int condition should return Err, got {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Non-boolean") || msg.contains("boolean") || msg.contains("Bool"),
+            "error should mention non-boolean condition, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_strict_allows_bool_if_condition() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let result = eval(r#"if true { "yes" } else { "no" }"#);
+        assert!(
+            result.is_ok(),
+            "strict mode: if with Bool condition should succeed, got {:?}",
+            result
+        );
+        match result.unwrap() {
+            Value::String(s) => assert_eq!(s, "yes", "expected 'yes', got '{}'", s),
+            other => panic!("expected String('yes'), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_strict_rejects_non_bool_while() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        let result = eval(
+            r#"
+            let mut x = 1
+            while x {
+                break
+            }
+            x
+        "#,
+        );
+        assert!(
+            result.is_err(),
+            "strict mode: while with Int condition should return Err, got {:?}",
+            result
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Non-boolean") || msg.contains("boolean") || msg.contains("Bool"),
+            "error should mention non-boolean condition, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_mixed_numeric_comparison_always_works() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        // Mixed Int↔Float comparisons must always work in all modes
+        let result = eval("3 == 3.0");
+        assert!(
+            result.is_ok(),
+            "strict mode: Int == Float comparison should always succeed, got {:?}",
+            result
+        );
+        match result.unwrap() {
+            Value::Bool(true) => {}
+            other => panic!("expected Bool(true), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_string_string_concat_always_works() {
+        let _lock = TYPE_MODE_MUTEX.lock().unwrap();
+        let _guard = EnvGuard::set("NTNT_TYPE_MODE", "strict");
+        // String + String must always work in all modes
+        let result = eval(r#""a" + "b""#);
+        assert!(
+            result.is_ok(),
+            "strict mode: String + String should always succeed, got {:?}",
+            result
+        );
+        match result.unwrap() {
+            Value::String(s) => assert_eq!(s, "ab", "expected 'ab', got '{}'", s),
+            other => panic!("expected String('ab'), got {:?}", other),
+        }
     }
 }
