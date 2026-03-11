@@ -3212,7 +3212,10 @@ impl Interpreter {
                 type_params: _,
                 target,
             } => {
-                // Store type alias for later resolution
+                // Insert placeholder first to support recursive type aliases
+                // (self-references during resolution will find the placeholder)
+                self.type_aliases
+                    .insert(name.clone(), TypeExpr::Named(name.clone()));
                 self.type_aliases.insert(name.clone(), target.clone());
                 Ok(Value::Unit)
             }
