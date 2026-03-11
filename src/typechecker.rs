@@ -901,9 +901,11 @@ impl TypeContext {
                         .as_ref()
                         .map(|t| self.resolve_type_expr(t))
                         .unwrap_or(Type::Any);
-                    self.bind(&param.name, typ.clone());
                     if let Some(ref pat) = param.pattern {
+                        // Destructured param: only bind pattern variables, not the synthetic name
                         self.bind_pattern(pat, &typ);
+                    } else {
+                        self.bind(&param.name, typ);
                     }
                 }
 
@@ -5189,7 +5191,7 @@ mod tests {
     // ── Phase 2: Block divergence analysis ──────────────────────
 
     #[test]
-    fn test_otherwise_without_return_warns() {
+    fn test_otherwise_without_return_errors() {
         // Non-diverging otherwise blocks are now errors (not warnings) since they
         // always crash at runtime — catching this at lint time prevents outages.
         let diags = check(
@@ -5304,9 +5306,7 @@ mod tests {
 
     #[test]
     fn test_phase2_gradual_preserved() {
-        // Gradual typing: untyped code produces no type errors.
-        // Note: a non-diverging otherwise block is now an error (not a type error),
-        // so we use a properly diverging otherwise to isolate the gradual typing check.
+        // Gradual typing: untyped code (including unannotated lambdas) produces no type errors.
         let diags = check(
             r#"
             fn foo(a) {

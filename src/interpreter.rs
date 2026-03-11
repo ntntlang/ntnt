@@ -6339,11 +6339,11 @@ impl Interpreter {
                 // Should not reach here due to arity check above
                 Value::Unit
             };
-            func_env
-                .borrow_mut()
-                .define(param.name.clone(), value.clone());
             if let Some(ref pat) = param.pattern {
+                // Destructured param: only bind pattern variables, not the synthetic name
                 self.bind_pattern(pat, &value)?;
+            } else {
+                func_env.borrow_mut().define(param.name.clone(), value);
             }
         }
 
