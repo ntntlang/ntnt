@@ -1765,13 +1765,34 @@ impl TypeContext {
                         let actual = self.infer_expression(fexpr);
                         if let Some((_, expected)) = struct_fields.iter().find(|(n, _)| n == fname)
                         {
-                            // If expected type is a generic type param, record the binding
+                            // If expected type is a generic type param, record/check the binding
                             if let Type::Named(tp_name) = expected {
                                 if tp_names.contains(tp_name) {
-                                    bindings
-                                        .entry(tp_name.clone())
-                                        .or_insert_with(|| actual.clone());
-                                    // Skip compatibility check — type param accepts any type
+                                    if let Some(bound) = bindings.get(tp_name) {
+                                        // A binding for this type param already exists;
+                                        // ensure it is compatible (e.g., struct Pair<A> { a: A, b: A }
+                                        // with { a: 1, b: "x" } should error)
+                                        if !self.compatible(&actual, bound)
+                                            && !matches!(actual, Type::Any)
+                                            && !matches!(bound, Type::Any)
+                                        {
+                                            let line = self.find_line_near(name);
+                                            self.error(
+                                                format!(
+                                                    "In struct '{}', generic type parameter '{}' has incompatible bindings: {} and {}",
+                                                    name,
+                                                    tp_name,
+                                                    bound.name(),
+                                                    actual.name()
+                                                ),
+                                                line,
+                                                None,
+                                            );
+                                        }
+                                    } else {
+                                        bindings.insert(tp_name.clone(), actual.clone());
+                                    }
+                                    // Skip further field-vs-struct compatibility check
                                     continue;
                                 }
                             }

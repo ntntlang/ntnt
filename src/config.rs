@@ -56,11 +56,13 @@ fn read_type_mode_from_env() -> TypeMode {
     }
 }
 
-/// Get the current runtime type mode from the `NTNT_TYPE_MODE` env var.
+/// Get the current runtime type mode.
 ///
-/// Default is [`TypeMode::Warn`]. In production builds the result is cached on
-/// first call; in test builds it reads fresh from the environment every call
-/// so tests can manipulate `NTNT_TYPE_MODE` with per-test isolation.
+/// Default is [`TypeMode::Warn`]. In production builds the result is read from
+/// `NTNT_TYPE_MODE` env var and cached via `OnceLock`. In test builds, a
+/// thread-local override is used instead of env vars (since `std::env::set_var`
+/// is unsafe in multi-threaded contexts on Rust 1.83+). Use
+/// [`set_test_type_mode`] to override in tests.
 #[cfg(not(test))]
 pub fn get_type_mode() -> TypeMode {
     use std::sync::OnceLock;
@@ -113,11 +115,13 @@ fn read_lint_mode_from_env() -> LintMode {
     }
 }
 
-/// Get the current lint mode from the `NTNT_LINT_MODE` env var.
+/// Get the current lint mode.
 ///
-/// Default is [`LintMode::Default`]. CLI flags take precedence over this value
-/// (caller is responsible for applying the override). In production builds the
-/// result is cached; in test builds it reads fresh each call.
+/// Default is [`LintMode::Default`]. In production builds the result is read
+/// from `NTNT_LINT_MODE` env var and cached via `OnceLock`. CLI flags take
+/// precedence (caller applies the override). In test builds, always returns
+/// `LintMode::Default` for thread safety (no env var reads). Add a thread-local
+/// override similar to `TypeMode` if lint-mode testing is needed.
 #[cfg(not(test))]
 pub fn get_lint_mode() -> LintMode {
     use std::sync::OnceLock;

@@ -3212,10 +3212,8 @@ impl Interpreter {
                 type_params: _,
                 target,
             } => {
-                // Insert placeholder first to support recursive type aliases
-                // (self-references during resolution will find the placeholder)
-                self.type_aliases
-                    .insert(name.clone(), TypeExpr::Named(name.clone()));
+                // Store the raw TypeExpr. The interpreter doesn't resolve type
+                // aliases at runtime — they're used by the type checker only.
                 self.type_aliases.insert(name.clone(), target.clone());
                 Ok(Value::Unit)
             }
@@ -3678,7 +3676,7 @@ impl Interpreter {
                             match get_type_mode() {
                                 TypeMode::Strict => {
                                     return Err(IntentError::type_error(format!(
-                                        "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                        "Non-boolean operand for &&. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
                                         lhs.type_name()
                                     )));
                                 }
@@ -3686,7 +3684,7 @@ impl Interpreter {
                                     type_warn_dedup(
                                         &format!("non_bool_and_lhs:{}", lhs.type_name()),
                                         &format!(
-                                            "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                            "Non-boolean operand for &&. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
                                             lhs.type_name()
                                         ),
                                     );
@@ -3702,7 +3700,7 @@ impl Interpreter {
                             match get_type_mode() {
                                 TypeMode::Strict => {
                                     return Err(IntentError::type_error(format!(
-                                        "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                        "Non-boolean operand for &&. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
                                         rhs.type_name()
                                     )));
                                 }
@@ -3710,7 +3708,7 @@ impl Interpreter {
                                     type_warn_dedup(
                                         &format!("non_bool_and_rhs:{}", rhs.type_name()),
                                         &format!(
-                                            "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                            "Non-boolean operand for &&. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
                                             rhs.type_name()
                                         ),
                                     );
@@ -3725,7 +3723,7 @@ impl Interpreter {
                             match get_type_mode() {
                                 TypeMode::Strict => {
                                     return Err(IntentError::type_error(format!(
-                                        "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                        "Non-boolean operand for ||. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
                                         lhs.type_name()
                                     )));
                                 }
@@ -3733,7 +3731,7 @@ impl Interpreter {
                                     type_warn_dedup(
                                         &format!("non_bool_or_lhs:{}", lhs.type_name()),
                                         &format!(
-                                            "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                            "Non-boolean operand for ||. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
                                             lhs.type_name()
                                         ),
                                     );
@@ -3749,7 +3747,7 @@ impl Interpreter {
                             match get_type_mode() {
                                 TypeMode::Strict => {
                                     return Err(IntentError::type_error(format!(
-                                        "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                        "Non-boolean operand for ||. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
                                         rhs.type_name()
                                     )));
                                 }
@@ -3757,7 +3755,7 @@ impl Interpreter {
                                     type_warn_dedup(
                                         &format!("non_bool_or_rhs:{}", rhs.type_name()),
                                         &format!(
-                                            "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                            "Non-boolean operand for ||. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
                                             rhs.type_name()
                                         ),
                                     );
@@ -3810,7 +3808,7 @@ impl Interpreter {
                             match get_type_mode() {
                                 TypeMode::Strict => {
                                     return Err(IntentError::type_error(format!(
-                                        "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                        "Non-boolean operand for !. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
                                         val.type_name()
                                     )));
                                 }
@@ -3818,7 +3816,7 @@ impl Interpreter {
                                     type_warn_dedup(
                                         &format!("non_bool_not:{}", val.type_name()),
                                         &format!(
-                                            "Non-boolean condition in if/while. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
+                                            "Non-boolean operand for !. Got {}. Use explicit comparison (e.g., value != None, len(arr) > 0).",
                                             val.type_name()
                                         ),
                                     );
