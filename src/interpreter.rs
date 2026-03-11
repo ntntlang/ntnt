@@ -11877,11 +11877,7 @@ page
             result
         );
         match result.unwrap() {
-            Value::Float(f) => assert!(
-                (f - 5.5).abs() < 1e-10,
-                "expected 5.5, got {}",
-                f
-            ),
+            Value::Float(f) => assert!((f - 5.5).abs() < 1e-10, "expected 5.5, got {}", f),
             other => panic!("expected Float(5.5), got {:?}", other),
         }
     }
@@ -11897,11 +11893,7 @@ page
             result
         );
         match result.unwrap() {
-            Value::Float(f) => assert!(
-                (f - 5.5).abs() < 1e-10,
-                "expected 5.5, got {}",
-                f
-            ),
+            Value::Float(f) => assert!((f - 5.5).abs() < 1e-10, "expected 5.5, got {}", f),
             other => panic!("expected Float(5.5), got {:?}", other),
         }
     }
