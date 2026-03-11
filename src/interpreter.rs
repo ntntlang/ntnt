@@ -11498,10 +11498,12 @@ page
 
     #[test]
     fn test_recursion_depth_resets() {
-        // After a deep call returns, depth resets so another deep call works
+        // After a deep call returns, depth resets so another deep call works.
+        // Keep depth small (3) to avoid real stack overflow on platforms with
+        // small default thread stacks (macOS aarch64 CI).
         let result = eval_with_recursion_limit(
-            "fn deep(n) { if n <= 0 { return 0 } return deep(n - 1) } deep(8); deep(8)",
-            10,
+            "fn deep(n) { if n <= 0 { return 0 } return deep(n - 1) } deep(3); deep(3)",
+            5,
         );
         assert!(result.is_ok(), "Depth should reset between calls");
     }

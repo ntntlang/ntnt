@@ -47,6 +47,7 @@ pub enum LintMode {
     Strict,
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn read_type_mode_from_env() -> TypeMode {
     match std::env::var("NTNT_TYPE_MODE").as_deref().unwrap_or("warn") {
         "strict" => TypeMode::Strict,
@@ -100,6 +101,7 @@ impl Drop for TestTypeModeGuard {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn read_lint_mode_from_env() -> LintMode {
     match std::env::var("NTNT_LINT_MODE")
         .as_deref()
