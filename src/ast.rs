@@ -377,6 +377,8 @@ pub struct Parameter {
     pub name: String,
     pub type_annotation: Option<TypeExpr>,
     pub default: Option<Expression>,
+    #[serde(default)]
+    pub pattern: Option<Pattern>,
 }
 
 /// Import item for selective imports: `import { foo as bar } from "module"`

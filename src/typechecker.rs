@@ -744,10 +744,14 @@ impl TypeContext {
 
                 // When otherwise is present, unwrap Result<T,E> -> T or Option<T> -> T
                 let inferred = if let Some(otherwise_block) = otherwise {
-                    // Check that the otherwise block diverges
+                    // Check that the otherwise block diverges.
+                    // This is an error, not a warning: non-diverging otherwise blocks
+                    // always crash at runtime ("otherwise block must diverge"), so
+                    // catching this at lint time prevents production outages.
+                    // See Finding #76: production outage from silent runtime error.
                     if !self.block_diverges(otherwise_block) {
                         let line = self.find_line_near("otherwise");
-                        self.warning(
+                        self.error(
                             "otherwise block does not diverge — it must end with return, break, or continue".to_string(),
                             line,
                             Some("Add a return, break, or continue statement".to_string()),
@@ -838,7 +842,7 @@ impl TypeContext {
                 if self.strict_lint {
                     let fn_line = self.find_line_near(&format!("fn {}", name));
                     for param in params {
-                        if param.type_annotation.is_none() {
+                        if param.type_annotation.is_none() && param.pattern.is_none() {
                             self.emit_with_kind(
                                 Severity::Warning,
                                 DiagnosticKind::MissingParamAnnotation,
@@ -869,7 +873,10 @@ impl TypeContext {
                         .as_ref()
                         .map(|t| self.resolve_type_expr(t))
                         .unwrap_or(Type::Any);
-                    self.bind(&param.name, typ);
+                    self.bind(&param.name, typ.clone());
+                    if let Some(ref pat) = param.pattern {
+                        self.bind_pattern(pat, &typ);
+                    }
                 }
 
                 // Set expected return type
@@ -1941,7 +1948,7 @@ impl TypeContext {
                 // Strict lint: warn about untyped lambda parameters
                 if self.strict_lint {
                     for param in params {
-                        if param.type_annotation.is_none() {
+                        if param.type_annotation.is_none() && param.pattern.is_none() {
                             let line = self.find_line_near(&param.name);
                             self.emit_with_kind(
                                 Severity::Warning,
@@ -1966,6 +1973,9 @@ impl TypeContext {
                             .map(|t| self.resolve_type_expr(t))
                             .unwrap_or(Type::Any);
                         self.bind(&p.name, typ.clone());
+                        if let Some(ref pat) = p.pattern {
+                            self.bind_pattern(pat, &typ);
+                        }
                         typ
                     })
                     .collect();
@@ -5121,21 +5131,30 @@ mod tests {
 
     #[test]
     fn test_otherwise_without_return_warns() {
-        let warnings = check_warnings(
+        // Non-diverging otherwise blocks are now errors (not warnings) since they
+        // always crash at runtime — catching this at lint time prevents outages.
+        let diags = check(
             r#"
             let x = Some(42) otherwise {
                 let y = 1
             }
             "#,
         );
-        let otherwise_warnings: Vec<_> = warnings
+        let otherwise_diags: Vec<_> = diags
             .iter()
-            .filter(|w| w.message.contains("otherwise"))
+            .filter(|d| d.message.contains("otherwise"))
             .collect();
         assert!(
-            !otherwise_warnings.is_empty(),
-            "otherwise block without return should warn: {:?}",
-            warnings
+            !otherwise_diags.is_empty(),
+            "otherwise block without return should produce a diagnostic: {:?}",
+            diags
+        );
+        assert!(
+            otherwise_diags
+                .iter()
+                .any(|d| d.severity == Severity::Error),
+            "otherwise block without return should be an error: {:?}",
+            otherwise_diags
         );
     }
 
@@ -5226,17 +5245,16 @@ mod tests {
 
     #[test]
     fn test_phase2_gradual_preserved() {
+        // Gradual typing: untyped code produces no type errors.
+        // Note: a non-diverging otherwise block is now an error (not a type error),
+        // so we use a properly diverging otherwise to isolate the gradual typing check.
         let diags = check(
             r#"
-            let val = Some(42) otherwise {
-                let x = 1
-            }
             fn foo(a) {
                 let b = fn(x) { x + 1 }
             }
             "#,
         );
-        // Only the otherwise warning, no type errors
         let errors: Vec<_> = diags
             .iter()
             .filter(|d| d.severity == Severity::Error)
