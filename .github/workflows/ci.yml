@@ -38,7 +38,7 @@ jobs:
         run: cargo build --locked
 
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --locked -- ${{ runner.os == 'macOS' && '--test-threads=1' || '' }}
 
   lint:
     name: Lint

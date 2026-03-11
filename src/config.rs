@@ -69,14 +69,10 @@ pub fn get_type_mode() -> TypeMode {
 
 #[cfg(test)]
 pub fn get_type_mode() -> TypeMode {
-    // In tests, check thread-local override first (avoids unsafe set_var).
-    TYPE_MODE_OVERRIDE.with(|cell| {
-        if let Some(mode) = *cell.borrow() {
-            mode
-        } else {
-            read_type_mode_from_env()
-        }
-    })
+    // In tests, use thread-local override only (no env var reads).
+    // std::env::var is unsafe to call concurrently with set_var on macOS
+    // (Rust 1.83+ / POSIX getenv is not thread-safe on all platforms).
+    TYPE_MODE_OVERRIDE.with(|cell| (*cell.borrow()).unwrap_or(TypeMode::Warn))
 }
 
 thread_local! {
@@ -129,7 +125,8 @@ pub fn get_lint_mode() -> LintMode {
 
 #[cfg(test)]
 pub fn get_lint_mode() -> LintMode {
-    read_lint_mode_from_env()
+    // In tests, always return Default (no env var reads for thread safety).
+    LintMode::Default
 }
 
 use std::cell::RefCell;
