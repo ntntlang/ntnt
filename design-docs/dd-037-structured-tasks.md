@@ -601,37 +601,65 @@ The persistent backends (PostgreSQL, Redis) add durability on top of the same sp
 ## 9. Implementation Plan
 
 ### Phase 1: `spawn` + `await_task` (Minimal)
-- Add `spawn(fn)` to `std/concurrent`
-- Returns `Task` value
-- `await_task(task)` blocks and returns `Result`
-- `try_await(task)` non-blocking check
-- Error capture in task handle
-- Typechecker: warn on capturing non-serializable values
-- **Tests:** spawn + await, spawn + error, spawn + channel communication
+- [ ] Add `spawn(fn)` to `std/concurrent` — starts function on Tokio thread pool
+- [ ] `Task` value type (opaque handle with id, result, cancel token)
+- [ ] `SerializedValue` capture — snapshot captured variables at spawn time
+- [ ] Typechecker: error on capturing non-serializable values (closures, mutable bindings)
+- [ ] `await_task(task)` — blocks interpreter thread, returns `Result`
+- [ ] `try_await(task)` — non-blocking check, returns `Option<Result>`
+- [ ] Error capture: panics/throws in spawned fn stored in task handle
+- [ ] `cancel_task(task)` — cooperative cancellation via watch channel
+- [ ] Test: spawn + await returns correct value
+- [ ] Test: spawn + error propagates on await
+- [ ] Test: spawn + channel communication (send from spawned task, recv in main)
+- [ ] Test: spawn + cancel (verify task stops at next cancellation point)
+- [ ] Test: spawn captures snapshot (mutation in spawn doesn't affect parent)
+- [ ] Docs: update AI_AGENT_GUIDE.md with spawn examples
+- [ ] Docs: update ROADMAP.md
 
 ### Phase 2: `scope` (Structured Concurrency)
-- Add `scope(fn(s))` to `std/concurrent`
-- `s.spawn(fn)` for scoped tasks
-- `s.result(task)` for retrieving results
-- FailFast cancellation policy
-- Cooperative cancellation at I/O points
-- **Tests:** scope + all-succeed, scope + fail-fast, scope + cancellation
+- [ ] `scope(fn(s))` function in `std/concurrent` — creates TaskScope
+- [ ] `s.spawn(fn)` — spawns task bound to scope
+- [ ] `s.result(task)` — retrieves task result (blocks if not ready)
+- [ ] Scope exit: waits for all spawned tasks to complete
+- [ ] FailFast policy: first failure cancels all siblings via shared cancel token
+- [ ] Error propagation: scope returns `Err` with first failed task's error
+- [ ] Cooperative cancellation at I/O points (recv, sleep_ms, fetch)
+- [ ] Test: scope + all tasks succeed → returns combined results
+- [ ] Test: scope + one task fails → siblings cancelled, error propagated
+- [ ] Test: scope + nested scopes (inner scope failure propagates to outer)
+- [ ] Test: scope + cancellation at sleep_ms point
+- [ ] Test: scope + cancellation at recv point
+- [ ] Docs: update AI_AGENT_GUIDE.md with scope examples
 
 ### Phase 3: `schedule` + `after` (Web Integration)
-- Add `schedule(interval, fn)` as server builtin
-- Interval parsing ("every Ns/Nm/Nh")
-- Integration with server lifecycle (auto-cancel on shutdown)
-- Overlap prevention (skip if previous execution still running)
-- `after(ms, fn)` convenience
-- Hot-reload support (re-register schedules)
-- **Tests:** schedule + execution, schedule + shutdown, schedule + overlap
+- [ ] `schedule(interval, fn)` as server-level builtin (alongside listen, on_shutdown)
+- [ ] Interval parsing: "every Ns", "every Nm", "every Nh" format
+- [ ] Schedule registry in server runtime (list of active schedules)
+- [ ] Background execution: scheduled fns run on Tokio threads via bridge
+- [ ] Overlap prevention: skip execution if previous run still in progress
+- [ ] Error handling: log errors, continue schedule (no crash)
+- [ ] Server lifecycle: auto-cancel all schedules on shutdown
+- [ ] `after(ms, fn)` — one-shot delayed execution
+- [ ] Hot-reload: cancel + re-register schedules on source file change
+- [ ] `listen()` integration: schedules start when server starts
+- [ ] Test: schedule executes at correct interval
+- [ ] Test: schedule survives function errors (continues running)
+- [ ] Test: schedule overlap prevention (long task skips next tick)
+- [ ] Test: schedule cancels on server shutdown
+- [ ] Test: after executes once after delay
+- [ ] Docs: update AI_AGENT_GUIDE.md and SYNTAX_REFERENCE.md
 
-### Phase 4: Polish
-- Shield scope policy
-- `spawn_with` (retry, backoff, timeout)
-- Concurrency limits (max spawned tasks)
-- Observability: `tasks()` returns list of active tasks
-- Documentation and examples
+### Phase 4: Polish & Advanced Features
+- [ ] Shield scope policy (`s.policy("shield")` — isolate failures)
+- [ ] `spawn_with(options, fn)` — retry count, exponential backoff, timeout
+- [ ] Global concurrency limit (configurable max spawned tasks, default 1000)
+- [ ] Task naming: `spawn("fetch-users", fn() { ... })` for debugging
+- [ ] `tasks()` builtin — returns list of active task names/ids
+- [ ] `await_task` + `otherwise` integration (natural error handling)
+- [ ] Consecutive failure alerting for scheduled tasks
+- [ ] Docs: comprehensive guide with patterns and anti-patterns
+- [ ] Docs: update design-docs/background_jobs.md to reference DD-037 as foundation
 
 ---
 
