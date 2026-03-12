@@ -1,6 +1,6 @@
 <!-- NTNT coding guide sections are sourced from docs/AI_AGENT_GUIDE.md -->
 <!-- To update NTNT coding instructions, edit AI_AGENT_GUIDE.md and copy to all agent files -->
-<!-- Last synced: 2026-03-11 -->
+<!-- Last synced: 2026-03-12 -->
 
 # NTNT Language - Claude Code Instructions
 
@@ -597,7 +597,7 @@ let x = if true { 1 }  // ERROR: If-expressions require an else branch
 
 ### 11. Destructuring Assignment
 
-Map, array, and nested destructuring in `let` bindings, `match`, and `for` loops:
+Map, array, and nested destructuring in `let` bindings, `match`, `for` loops, and function parameters:
 
 ```ntnt
 // Map destructuring
@@ -634,6 +634,20 @@ for { name } in users {
 match data {
     { name, age } => print("{name} is {age}"),
     _ => print("no match")
+}
+
+// Function parameter destructuring
+fn greet({ name, email }) {
+    print("Hello {name} ({email})")
+}
+
+fn first_two([a, b, ...rest]) {
+    print("{a}, {b}")
+}
+
+// With type annotation
+fn process({ name, email }: Map) {
+    print("{name}: {email}")
 }
 ```
 
@@ -1070,6 +1084,7 @@ The type checker tracks types through common operations:
 - **`parse_csv()`** — returns `Array<Array<String>>`
 - **Match arm narrowing** — `Ok(data)` on `Result<T, E>` binds `data` as `T`; `Some(x)` on `Option<T>` binds `x` as `T`; struct patterns bind field types
 - **Cross-file imports** — `import { foo } from "./lib/utils"` resolves function signatures from the imported `.tnt` file
+- **Circular import detection** — if files form an import cycle (e.g. `a.tnt → b.tnt → a.tnt`), a warning is emitted showing the exact chain
 
 ### What the Type Checker Catches
 
