@@ -1699,6 +1699,65 @@ for [num, word] in pairs {
 }
 
 // ============================================================================
+// Destructuring in Function Parameters
+// ============================================================================
+
+#[test]
+fn test_destructured_map_param() {
+    let code = r#"
+fn greet({ name, email }) {
+    return name + " <" + email + ">"
+}
+print(greet(map { "name": "Alice", "email": "a@b.com" }))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Destructured map param should work");
+    assert!(stdout.trim().contains("Alice <a@b.com>"));
+}
+
+#[test]
+fn test_destructured_map_param_with_type() {
+    let code = r#"
+fn greet({ name, email }: Map) -> String {
+    return name + " <" + email + ">"
+}
+print(greet(map { "name": "Bob", "email": "b@b.com" }))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Destructured map param with type should work");
+    assert!(stdout.trim().contains("Bob <b@b.com>"));
+}
+
+#[test]
+fn test_destructured_array_param() {
+    let code = r#"
+fn sum_first_two([a, b, ...rest]) {
+    return a + b
+}
+print(sum_first_two([10, 20, 30]))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Destructured array param should work");
+    assert!(stdout.trim().contains("30"));
+}
+
+#[test]
+fn test_destructured_param_with_regular_params() {
+    let code = r#"
+fn process(id, { name }) {
+    return str(id) + ": " + name
+}
+print(process(42, map { "name": "Alice" }))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "Destructured param mixed with regular params should work"
+    );
+    assert!(stdout.trim().contains("42: Alice"));
+}
+
+// ============================================================================
 // Higher-Order Functions: filter, transform
 // ============================================================================
 

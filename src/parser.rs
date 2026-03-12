@@ -307,7 +307,15 @@ impl Parser {
 
         if !self.check(&TokenKind::RightParen) {
             loop {
-                let name = self.consume_identifier("Expected parameter name")?;
+                let (name, pattern) =
+                    if self.check(&TokenKind::LeftBrace) || self.check(&TokenKind::LeftBracket) {
+                        let pat = self.parse_pattern()?;
+                        let synth_name = format!("_destructure_{}", params.len());
+                        (synth_name, Some(pat))
+                    } else {
+                        let name = self.consume_identifier("Expected parameter name")?;
+                        (name, None)
+                    };
 
                 let type_annotation = if self.match_token(&[TokenKind::Colon]) {
                     Some(self.parse_type()?)
@@ -325,6 +333,7 @@ impl Parser {
                     name,
                     type_annotation,
                     default,
+                    pattern,
                 });
 
                 if !self.match_token(&[TokenKind::Comma]) {
@@ -522,6 +531,7 @@ impl Parser {
                         name: param_name,
                         type_annotation,
                         default: None,
+                        pattern: None,
                     });
                 }
 

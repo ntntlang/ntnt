@@ -6339,7 +6339,12 @@ impl Interpreter {
                 // Should not reach here due to arity check above
                 Value::Unit
             };
-            func_env.borrow_mut().define(param.name.clone(), value);
+            if let Some(ref pat) = param.pattern {
+                // Destructured param: only bind pattern variables, not the synthetic name
+                self.bind_pattern(pat, &value)?;
+            } else {
+                func_env.borrow_mut().define(param.name.clone(), value);
+            }
         }
 
         // Environment is already set to func_env for contract checking and body execution
@@ -12015,6 +12020,71 @@ page
         match result.unwrap() {
             Value::String(s) => assert_eq!(s, "ab", "expected 'ab', got '{}'", s),
             other => panic!("expected String('ab'), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_destructured_map_param() {
+        let result = eval(
+            r#"
+            fn greet({ name, email }) {
+                return name + " <" + email + ">"
+            }
+            greet(map { "name": "Alice", "email": "a@b.com" })
+        "#,
+        )
+        .unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "Alice <a@b.com>"),
+            other => panic!("expected String, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_destructured_map_param_with_type() {
+        let result = eval(
+            r#"
+            fn greet({ name, email }: Map) -> String {
+                return name + " <" + email + ">"
+            }
+            greet(map { "name": "Bob", "email": "b@b.com" })
+        "#,
+        )
+        .unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "Bob <b@b.com>"),
+            other => panic!("expected String, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_destructured_array_param() {
+        let result = eval(
+            r#"
+            fn first_two([a, b, ...rest]) {
+                return a + b
+            }
+            first_two([10, 20, 30])
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(30)));
+    }
+
+    #[test]
+    fn test_destructured_param_with_regular_params() {
+        let result = eval(
+            r#"
+            fn process(id, { name }) {
+                return str(id) + ": " + name
+            }
+            process(42, map { "name": "Alice" })
+        "#,
+        )
+        .unwrap();
+        match result {
+            Value::String(s) => assert_eq!(s, "42: Alice"),
+            other => panic!("expected String, got {:?}", other),
         }
     }
 }

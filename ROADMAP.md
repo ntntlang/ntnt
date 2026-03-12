@@ -519,7 +519,7 @@ fn divide(a: Int, b: Int) -> Int
 - [x] Union type soundness: union VALUES require ALL members compatible with target, union TARGETS require ANY member match
 - [x] Union type flattening and deduplication in `union_type()` computation
 - [x] Block divergence analysis (`block_diverges`) for otherwise/lambda validation
-- [x] `otherwise` block divergence warning (must end with return/break/continue)
+- [x] `otherwise` block divergence enforcement (lint error, not just warning — must end with return/break/continue)
 - [x] Lambda return type inference via `collected_returns` (early returns included in union)
 - [x] Flow-sensitive type narrowing after guards (`if x == None { return }` narrows `x` to inner type)
 - [x] Narrowing patterns: `x == None`, `x != None`, `is_some(x)`, `is_none(x)`, `is_ok(x)`, `is_err(x)`, `!cond`
@@ -531,6 +531,7 @@ fn divide(a: Int, b: Int) -> Int
 - [x] Variadic functions check minimum argument count
 - [x] Cross-file Pass 2 inference: unannotated exported functions get inferred return types
 - [x] Circular import safety: shared module cache prevents infinite recursion during cross-file analysis
+- [x] Circular import diagnostics: cycle chain shown in warnings (e.g. `a.tnt → b.tnt → a.tnt`)
 - [x] Strict mode: string interpolation warning for complex types (Array, Map, Function)
 - [x] Strict mode: Float→Int precision loss warning
 - [ ] Cross-file struct/enum propagation (extend import type resolution to include struct and enum definitions)
@@ -639,7 +640,7 @@ for line in lines {
 - [x] Works with `Option<T>` — unwrap Some or run otherwise on None
 - [x] Verify otherwise block diverges (return/break/continue)
 - [x] Type checker unwraps `Result<T, E>` → `T` and `Option<T>` → `T` for let with otherwise
-- [ ] Lint integration: warn if otherwise block doesn't diverge
+- [x] Lint integration: error if otherwise block doesn't diverge
 
 ### 7.3 Anonymous Functions / Closures ✅
 
@@ -865,7 +866,7 @@ fn create_user({ name, email }: Map) -> User {
 - [x] Rest patterns: `let [head, ...tail] = arr`, `let { name, ...other } = map`
 - [x] Nested destructuring: `let { user: { name } } = data`
 - [ ] Destructuring with type annotations
-- [ ] Destructuring in function parameters
+- [x] Destructuring in function parameters
 - [x] Destructuring in `for` loops: `for { name, email } in users { ... }`
 - [x] Type checking: destructured fields are type-inferred from the source expression
 - [x] Map destructuring with rename: `let { name: n } = data`
