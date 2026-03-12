@@ -110,9 +110,13 @@ npx vsce package
 code --install-extension ntnt-lang-0.1.0.vsix
 ```
 
+## Grammar
+
+The TextMate grammars used by this extension are maintained in the [ntnt-grammar](https://github.com/ntntlang/ntnt-grammar) repository. This is the canonical source for NTNT syntax grammars, also used by GitHub Linguist for syntax highlighting on GitHub.com.
+
 ## Contributing
 
-Contributions are welcome! Please see the [main NTNT repository](https://github.com/ntntlang/ntnt) for guidelines.
+Contributions are welcome! Please see the [main NTNT repository](https://github.com/ntntlang/ntnt) for guidelines. For grammar issues (highlighting bugs), file them on [ntnt-grammar](https://github.com/ntntlang/ntnt-grammar/issues).
 
 ## License
 
