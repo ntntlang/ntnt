@@ -163,6 +163,18 @@ impl AsyncServerState {
                 }
             }
         }
+
+        // HEAD falls back to GET (RFC 9110 §9.3.2)
+        if method == "HEAD" {
+            for info in routes.iter() {
+                if info.route.method == "GET" {
+                    if let Some(params) = match_route(path, &info.route) {
+                        return Some((info.handler_name.clone(), params));
+                    }
+                }
+            }
+        }
+
         None
     }
 
@@ -552,7 +564,7 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
     match route_match {
         Some((handler_name, params)) => {
             // Convert request and send to interpreter
-            match axum_to_bridge_request(req, params).await {
+            let mut response = match axum_to_bridge_request(req, params).await {
                 Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
                     Ok(response) => bridge_to_axum_response(response),
                     Err(e) => {
@@ -587,13 +599,28 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
                         state.is_production,
                     )
                 }
+            };
+
+            // HEAD responses: preserve status + headers, strip body (RFC 9110 §9.3.2)
+            if method == axum::http::Method::HEAD {
+                *response.body_mut() = Body::empty();
             }
+
+            response
         }
         None => {
-            // No dynamic route - check static files (GET only)
-            if method == axum::http::Method::GET {
+            // No dynamic route - check static files (GET and HEAD)
+            if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
                 if let Some((file_path, _prefix)) = state.routes.find_static_file(&path).await {
-                    return serve_static_file(&file_path, if_none_match.as_deref()).await;
+                    let mut response =
+                        serve_static_file(&file_path, if_none_match.as_deref()).await;
+
+                    // HEAD responses: preserve status + headers, strip body (RFC 9110 §9.3.2)
+                    if method == axum::http::Method::HEAD {
+                        *response.body_mut() = Body::empty();
+                    }
+
+                    return response;
                 }
             }
 
@@ -1024,5 +1051,69 @@ mod tests {
 
         state.register_static_dir("/assets", "./public").await;
         assert_eq!(state.static_dir_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_head_falls_back_to_get_route() {
+        let state = AsyncServerState::new();
+        state.register_route("GET", "/", "home_handler").await;
+
+        // HEAD should match a GET route (RFC 9110 §9.3.2)
+        let found = state.find_route("HEAD", "/").await;
+        assert!(found.is_some(), "HEAD should fall back to GET route");
+        let (handler_name, params) = found.unwrap();
+        assert_eq!(handler_name, "home_handler");
+        assert!(params.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_head_falls_back_to_get_with_params() {
+        let state = AsyncServerState::new();
+        state.register_route("GET", "/users/{id}", "get_user").await;
+
+        // HEAD should match GET route with params
+        let found = state.find_route("HEAD", "/users/42").await;
+        assert!(found.is_some(), "HEAD should fall back to GET route");
+        let (handler_name, params) = found.unwrap();
+        assert_eq!(handler_name, "get_user");
+        assert_eq!(params.get("id"), Some(&"42".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_head_prefers_explicit_head_route() {
+        let state = AsyncServerState::new();
+        state.register_route("HEAD", "/health", "head_health").await;
+        state.register_route("GET", "/health", "get_health").await;
+
+        // Explicit HEAD route should be preferred over GET fallback
+        let found = state.find_route("HEAD", "/health").await;
+        assert!(found.is_some());
+        let (handler_name, _) = found.unwrap();
+        assert_eq!(handler_name, "head_health");
+    }
+
+    #[tokio::test]
+    async fn test_head_no_fallback_for_post_routes() {
+        let state = AsyncServerState::new();
+        state
+            .register_route("POST", "/submit", "submit_handler")
+            .await;
+
+        // HEAD should NOT match POST routes
+        let found = state.find_route("HEAD", "/submit").await;
+        assert!(found.is_none(), "HEAD should not fall back to POST routes");
+    }
+
+    #[tokio::test]
+    async fn test_head_no_match_returns_none() {
+        let state = AsyncServerState::new();
+        state.register_route("GET", "/users", "list_users").await;
+
+        // HEAD to a non-existent path should return None
+        let found = state.find_route("HEAD", "/nonexistent").await;
+        assert!(
+            found.is_none(),
+            "HEAD to non-existent path should return None"
+        );
     }
 }

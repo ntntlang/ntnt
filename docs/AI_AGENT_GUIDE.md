@@ -787,6 +787,42 @@ fn custom_handler(req) {
 }
 ```
 
+### HTTP Client (`std/http`)
+
+`fetch()` takes **ONE argument** — either a URL string (simple GET) or a single map with all options including the URL. Arity is 1.
+
+```ntnt
+import { fetch, download } from "std/http"
+
+// Simple GET (string argument)
+let resp = fetch("https://api.example.com/data")
+
+// POST with JSON body (single map — url goes INSIDE the map)
+let resp = fetch(map {
+    "url": "https://api.example.com/users",
+    "method": "POST",
+    "json": map { "name": "Alice", "age": 30 }
+})
+
+// POST with form body
+let resp = fetch(map {
+    "url": "https://api.example.com/submit",
+    "method": "POST",
+    "form": map { "field": "value" }
+})
+
+// Custom headers
+let resp = fetch(map {
+    "url": "https://api.example.com/data",
+    "headers": map { "Authorization": "Bearer {token}" }
+})
+```
+
+**⚠️ WRONG:** `fetch(url, map { ... })` — this passes TWO arguments and will error: "expected 1 arguments, got 2"
+**✅ RIGHT:** `fetch(map { "url": url, ... })` — single map with `url` key inside
+
+Use `"json": map{...}` for JSON POST or `"form": map{...}` for form POST — auto-encodes and sets Content-Type.
+
 ---
 
 ## Design by Contract
