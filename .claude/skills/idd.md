@@ -137,10 +137,10 @@ let data = { "key": "value" }      // WRONG
 let msg = "Hello, {name}!"  // CORRECT
 ```
 
-### Route Patterns REQUIRE Raw Strings
+### Route Patterns Auto-Detect Parameters
 ```ntnt
-get(r"/users/{id}", handler)  // CORRECT
-get("/users/{id}", handler)   // WRONG
+get("/users/{id}", handler)   // CORRECT — {id} auto-detected as route param
+get(r"/users/{id}", handler)  // Also works (backward compatible)
 ```
 
 ### HTTP Server - Global Builtins vs Imports
@@ -150,16 +150,16 @@ import { json, html } from "std/http/server"
 
 // Routing functions are GLOBAL - no import needed
 get("/", home_handler)
-post(r"/api/users", create_user)
+post("/api/users", create_user)
 listen(8080)
 ```
 
-### Named Handlers Required (No Inline Lambdas)
+### Named Handlers Preferred (Inline Lambdas Work But Named Is Cleaner)
 ```ntnt
 fn handler(req) { ... }
-get("/path", handler)  // CORRECT
+get("/path", handler)  // PREFERRED — readable, reusable
 
-get("/path", |req| { ... })  // WRONG - parser error
+get("/health", fn(req) { json(map { "ok": true }) })  // OK for simple routes
 ```
 
 ## Standard Assertions (IAL)

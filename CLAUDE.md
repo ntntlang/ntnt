@@ -35,6 +35,112 @@ ntnt test server.tnt --get /health  # Test HTTP endpoints
 
 <!-- BEGIN NTNT CODING GUIDE (sourced from docs/AI_AGENT_GUIDE.md) -->
 
+## Quick Start
+
+### Installation
+
+```bash
+# One-line install (installs Rust if needed, clones repo, builds)
+curl -sSf https://raw.githubusercontent.com/ntntlang/ntnt/main/install.sh | bash
+source "$HOME/.cargo/env"
+ntnt --version  # Verify: should print ntnt 0.4.2 or later
+```
+
+### Your First App (60 seconds)
+
+Create `hello.tnt`:
+
+```ntnt
+import { html } from "std/http/server"
+
+fn home(req) {
+    let name = req.query_params["name"] ?? "World"
+    return html("<h1>Hello, {name}!</h1>")
+}
+
+get("/", home)
+listen(3000)
+```
+
+Create `hello.intent`:
+
+```yaml
+## Glossary
+
+| Term | Means |
+|------|-------|
+| a user visits {path} | GET {path} |
+| page loads | status 200 |
+| they see "{text}" | body contains "{text}" |
+
+---
+
+Feature: Greeting
+  id: feature.greeting
+
+  Scenario: Default greeting
+    When a user visits /
+    → page loads
+    → they see "Hello, World!"
+
+  Scenario: Named greeting
+    When a user visits /?name=Alice
+    → page loads
+    → they see "Hello, Alice!"
+```
+
+Verify and run:
+
+```bash
+ntnt lint hello.tnt              # Check for errors
+ntnt intent check hello.tnt -v   # Verify intent specs pass
+ntnt run hello.tnt               # Visit http://localhost:3000
+```
+
+### Set Up Your Agent for NTNT Development
+
+After trying NTNT, set up persistent agent knowledge so every future session writes correct code. Add the following to your project's agent configuration (`CLAUDE.md`, `.cursorrules`, `AGENTS.md`, or equivalent):
+
+~~~markdown
+# NTNT Language Rules
+
+## Critical Syntax (memorize these — every rule prevents a real mistake)
+- Maps REQUIRE `map` keyword: `map { "key": "val" }` — bare `{}` is a code block
+- String interpolation: `{expr}` — NO dollar sign, never `${expr}`
+- Template strings: `"""..{{expr}}.."""` — double braces inside triple quotes
+- No semicolons — use newlines to separate statements. `;` silently corrupts the parser.
+- Free functions, not methods: `len(s)` not `s.len()`, `trim(s)` not `s.trim()`
+- Dot notation reads properties: `req.params.id`, `user.name`
+- Mutable variables: `let mut x = 0`
+- Ranges: `0..10` — `range()` doesn't exist
+- Null coalescing: `expr ?? default`
+- Route params auto-detect: `get("/users/{id}", handler)` — no raw strings needed
+- HTTP routing functions are GLOBAL builtins — never import get/post/listen/serve_static
+- `otherwise` blocks MUST diverge: `otherwise { return x }` ✅ — `otherwise { x }` ❌
+- Module-level `let` doesn't support `map {}` literals — use arrays or move map inside a function
+- `for..in` skips non-collection values silently — use `chars(s)` to iterate string characters
+
+## Workflow
+1. `ntnt lint file.tnt` — ALWAYS lint first
+2. `ntnt intent check file.tnt` — verify code matches intent specs
+3. `ntnt run file.tnt` — run after lint + intent check pass
+
+## IDD (Intent-Driven Development)
+- Write `.intent` files describing features in plain English
+- Annotate code with `// @implements: feature.id`
+- Verify with `ntnt intent check` — automated testing from natural language specs
+- Use `ntnt intent studio file.intent` for live visual feedback
+
+## Full Reference
+- Syntax & patterns: `docs/AI_AGENT_GUIDE.md`
+- All stdlib functions: `docs/STDLIB_REFERENCE.md`
+- Language syntax: `docs/SYNTAX_REFERENCE.md`
+~~~
+
+**For agent systems that support skill files** (OpenClaw, Claude Code skills, etc.), create a skill containing the full Critical Syntax Rules and Quick Reference sections from this guide. The more context your agent has, the fewer mistakes it will make on the first try.
+
+---
+
 ## Mandatory Workflow
 
 **Always lint before run:**
@@ -85,119 +191,19 @@ NTNT_TYPE_MODE=warn ntnt run server.tnt
 
 ## Intent-Driven Development (IDD)
 
-IDD is **the core workflow** for NTNT development. You capture user requirements as executable specifications, then implement code that satisfies them.
+IDD is **the core workflow** for NTNT development. Write requirements as `.intent` files, implement with annotations, verify automatically.
 
-### The IDD Mindset
+### Workflow
 
-When a user describes what they want to build, your job is to:
-1. **Listen** for testable assertions (what should happen, what users should see)
-2. **Capture** these as Glossary terms and Scenarios in a `.intent` file
-3. **Present** the intent file for user approval before writing code
-4. **Implement** with `@implements` annotations
-5. **Verify** continuously with `ntnt intent check` or Intent Studio
+1. **Draft** a `.intent` file from user requirements
+2. **Present** to user for approval — **do NOT implement before approval**
+3. **Implement** with `@implements: feature.id` annotations
+4. **Verify** with `ntnt intent check` or `ntnt intent studio`
 
-### Workflow Steps
-
-| Step | Action | User Input | What You Do |
-|------|--------|------------|-------------|
-| 1 | Listen to requirements | User describes features | Extract testable behaviors |
-| 2 | Draft `.intent` file | No | Create Glossary + Features + Scenarios |
-| 3 | **Present to user** | **YES - STOP HERE** | Show the intent file, ask for feedback |
-| 4 | Refine based on feedback | Yes | Update Glossary and Scenarios |
-| 5 | User approves | **YES** | Get explicit approval before coding |
-| 6 | Generate scaffolding | No | Run `ntnt intent init` (optional) |
-| 7 | Implement with `@implements` | No | Write code, link to features |
-| 8 | Verify with Intent Studio | No | Run `ntnt intent studio` for live feedback |
-| 9 | Final check | No | Run `ntnt intent check` to confirm all passing |
-
-### Capturing User Requirements
-
-When users describe what they want, listen for:
-
-| User Says | Capture As |
-|-----------|------------|
-| "The home page should show a welcome message" | Scenario: `they see "Welcome"` |
-| "Users need to log in" | Feature: User Login |
-| "The API returns JSON" | Glossary: `returns JSON` → `content-type is json` |
-| "It should be fast" | Glossary: `responds quickly` → `response time < 500ms` |
-| "Only admins can delete" | Constraint: Admin Only, applies_to features |
-
-### Building the Glossary
-
-The Glossary is your **domain-specific vocabulary**. Build it from how the user naturally describes things:
+### Intent File Format
 
 ```yaml
-## Glossary
-
-| Term | Means |
-|------|-------|
-# Navigation terms (how users describe going places)
-| a user visits {path} | GET {path} |
-| a visitor goes to {path} | GET {path} |
-| the home page | / |
-| the login page | /login |
-| the dashboard | /dashboard |
-
-# Success terms (how users describe things working)
-| the page loads | status 200 |
-| it works | status 200 |
-| succeeds | status 200 |
-
-# Content terms (what users should see)
-| they see {text} | body contains {text} |
-| they don't see {text} | body not contains {text} |
-| shows {text} | body contains {text} |
-
-# API terms (for JSON APIs)
-| returns JSON | content-type is json |
-| returns the {field} | body has field {field} |
-
-# Error terms
-| shows an error | status 4xx |
-| page not found | status 404 |
-| unauthorized | status 401 |
-
-# Performance terms
-| responds quickly | response time < 500ms |
-```
-
-### Writing Scenarios
-
-Use the **When → outcomes** format with natural language that maps to your Glossary:
-
-```yaml
-Feature: User Dashboard
-  id: feature.dashboard
-  description: "Authenticated users can view their dashboard"
-
-  Scenario: User views dashboard
-    When a user visits the dashboard
-    → the page loads
-    → they see "Welcome back"
-    → they see "Recent Activity"
-
-  Scenario: Dashboard shows user data
-    When a user visits the dashboard
-    → they see their username
-    → they see their email
-```
-
-**Scenario naming tips:**
-- Use active voice: "User views dashboard" not "Dashboard is viewed"
-- Be specific: "User sees welcome message" not "Page works"
-- One scenario = one user story or behavior
-
-### Intent File Complete Template
-
-```yaml
-# Project Name
-# Run: ntnt intent check server.tnt
-
-## Title
-My Application Name
-
-## Overview
-Brief description of what this application does and who it's for.
+# server.intent
 
 ## Glossary
 
@@ -206,154 +212,46 @@ Brief description of what this application does and who it's for.
 | a user visits {path} | GET {path} |
 | the home page | / |
 | the page loads | status 200 |
-| they see {text} | body contains {text} |
-| they don't see {text} | body not contains {text} |
+| they see "{text}" | body contains "{text}" |
 
 ---
 
-Feature: Feature Name
-  id: feature.feature_name
-  description: "What this feature does for the user"
+Feature: Home Page
+  id: feature.home
+  description: "Welcome page for visitors"
 
-  Scenario: Descriptive scenario name
+  Scenario: Shows welcome message
     When a user visits the home page
     → the page loads
-    → they see "Expected content"
+    → they see "Welcome"
 
 ---
 
-Constraint: Constraint Name
-  description: "Cross-cutting concern that applies to multiple features"
-  applies_to: [feature.feature_name, feature.other_feature]
+Constraint: Security Headers
+  description: "All pages include security headers"
+  applies_to: [feature.home]
 ```
 
 ### Code Annotations
 
-Link your code to intent features:
-
 ```ntnt
-// @implements: feature.homepage
-fn home_handler(req) {
-    return html("<h1>Welcome</h1>")
-}
+// @implements: feature.home
+fn home_handler(req) { return html("<h1>Welcome</h1>") }
 
-// @implements: feature.user_login
-fn login_handler(req) {
-    // Login logic
-}
-
-// @utility - Helper function, not a feature
-fn hash_password(password) {
-    // Utility code
-}
-
-// @internal - Implementation detail
-fn validate_session(token) {
-    // Internal logic
-}
-
-// @infrastructure - Setup/config code
-fn setup_database() {
-    // Database initialization
-}
+// @utility — helper, not a feature
+fn hash_password(pw) { ... }
 ```
 
-### Intent Commands
+### Commands
 
 ```bash
-ntnt intent studio server.intent  # Visual preview with live tests (RECOMMENDED)
-ntnt intent check server.tnt      # Run tests from command line
-ntnt intent coverage server.tnt   # Show which features have implementations
-ntnt intent init server.intent    # Generate code scaffolding from intent
+ntnt intent check server.tnt       # Verify code matches intent
+ntnt intent studio server.intent   # Live visual feedback (opens :3001)
+ntnt intent coverage server.tnt    # Feature coverage report
+ntnt intent init server.intent     # Generate scaffolding from intent
 ```
 
-**Use Intent Studio during development** - it shows live pass/fail indicators as you code!
-
-### Unit Testing Functions with IAL
-
-IAL supports unit testing individual functions using the `call:` keyword in glossary terms.
-
-#### Glossary Syntax for Function Calls
-
-```yaml
-## Glossary
-
-| Term | Means |
-|------|-------|
-# Unit test terms - MUST include source: to specify the .tnt file
-| rounding {value} to 1dp | call: round_1dp({value}), source: myfile.tnt |
-| extracting name from {data} | call: extract_name({data}), source: myfile.tnt |
-| checking if {line} is valid | call: is_valid_line({line}), source: myfile.tnt |
-```
-
-**Key requirements:**
-- `call: function_name({params})` - specifies the function to call with parameter placeholders
-- `source: filename.tnt` - **REQUIRED** - specifies which .tnt file contains the function
-- Parameters in `{braces}` are captured from the When clause and substituted
-
-#### Writing Unit Test Scenarios
-
-```yaml
-Feature: Decimal Rounding
-  id: feature.unit_round_1dp
-  description: "Round values to one decimal place for display"
-
-  Scenario: Rounds down correctly
-    When rounding 45.24 to 1dp
-    → result is "45.2"
-
-  Scenario: Rounds up correctly
-    When rounding 45.25 to 1dp
-    → result is "45.3"
-
-  Scenario: Handles negative values
-    When rounding -5.67 to 1dp
-    → result is "-5.7"
-```
-
-#### Result Assertions
-
-| Assertion | Description |
-|-----------|-------------|
-| `result is {value}` | Exact equality check |
-| `result equals {value}` | Exact equality check (alias) |
-| `result.field is {value}` | Check a field on a map result |
-| `result is true` / `result is false` | Boolean checks |
-
-#### Complete Unit Test Example
-
-```yaml
-## Glossary
-
-| Term | Means |
-|------|-------|
-| validating email {email} | call: is_valid_email({email}), source: validators.tnt |
-| formatting date {date} | call: format_date({date}), source: utils.tnt |
-
----
-
-Feature: Email Validation
-  id: feature.unit_email_validation
-  description: "Validate email address format"
-
-  Scenario: Accepts valid email
-    When validating email "user@example.com"
-    → result is true
-
-  Scenario: Rejects email without @
-    When validating email "userexample.com"
-    → result is false
-
-  Scenario: Rejects empty string
-    When validating email ""
-    → result is false
-```
-
-#### Current Limitations
-
-- **Array parameters**: Complex types like `[1, 2, 3]` may not parse correctly as function arguments
-- **Nested results**: Deep field access like `result.nested.field` may have issues
-- Keep unit test parameters simple (strings, numbers, booleans)
+For unit testing individual functions with IAL `call:` syntax, see [IAL_REFERENCE.md](docs/IAL_REFERENCE.md).
 
 ---
 
@@ -526,7 +424,75 @@ let result = fn(x) { x + 1 }(5)  // 6
 let f = |x| x * 2               // Use fn(x) { x * 2 }
 ```
 
-### 9. Default Parameter Values
+### 9. No Semicolons — Use Newlines
+
+NTNT uses newlines as statement separators. **Never use semicolons** — `;` silently corrupts parser state and causes errors on unrelated lines.
+
+```ntnt
+// CORRECT — newlines separate statements
+let x = 1
+let y = 2
+print(x + y)
+
+// WRONG — semicolons corrupt the parser
+let x = 1; let y = 2; print(x + y)
+```
+
+### 10. `otherwise` Blocks MUST Diverge
+
+The `otherwise` block must use `return`, `break`, or `continue` — it cannot yield a value directly.
+
+```ntnt
+// CORRECT — block diverges with return
+let data = parse_json(req) otherwise {
+    return status(400, "Bad JSON: {err}")
+}
+
+// CORRECT — single-expression form with return
+let user = find(id) otherwise return not_found()
+
+// WRONG — yielding a value without return
+let data = parse_json(req) otherwise {
+    status(400, "Bad JSON")  // Missing return!
+}
+
+// WRONG — return-then-otherwise is a parse error
+return parse_json(req) otherwise { return status(400, "err") }
+// FIX: use let binding
+let data = parse_json(req) otherwise { return status(400, "err") }
+return data
+```
+
+### 11. Module-Level `let` Doesn't Support `map {}` Literals
+
+Top-level `let` bindings in lib files cannot use `map {}`. Use arrays instead, or move the map inside a function.
+
+```ntnt
+// WRONG — fails at module level
+let CONFIG = map { "timeout": 30, "retries": 3 }
+
+// CORRECT — use an array of pairs or a function
+let CONFIG_KEYS = ["timeout", "retries"]
+
+fn get_config() {
+    return map { "timeout": 30, "retries": 3 }
+}
+```
+
+### 12. `for..in` Skips Non-Collections Silently
+
+Iterating over a non-collection value (string, nil, number) does zero iterations instead of crashing. Use `chars()` for string character iteration.
+
+```ntnt
+// WRONG — does nothing, no error
+for c in "hello" { print(c) }
+
+// CORRECT — use chars() for string iteration
+import { chars } from "std/string"
+for c in chars("hello") { print(c) }
+```
+
+### 13. Default Parameter Values
 
 Functions and lambdas support default values for parameters. Parameters with defaults must come after all required parameters:
 
@@ -571,7 +537,7 @@ fn bad(a = 1, b) { }  // Parse error!
 
 The type checker infers parameter types from default expressions when no type annotation is provided.
 
-### 10. If-Expressions (Conditional Values)
+### 14. If-Expressions (Conditional Values)
 
 `if`/`else` can be used in expression position to return a value. Both branches are single expressions, and `else` is required:
 
@@ -595,7 +561,7 @@ let result = if outer { if inner { 1 } else { 2 } } else { 3 }
 let x = if true { 1 }  // ERROR: If-expressions require an else branch
 ```
 
-### 11. Destructuring Assignment
+### 15. Destructuring Assignment
 
 Map, array, and nested destructuring in `let` bindings, `match`, `for` loops, and function parameters:
 
@@ -651,7 +617,7 @@ fn process({ name, email }: Map) {
 }
 ```
 
-### 12. Regex Capture Groups
+### 16. Regex Capture Groups
 
 Extract capture groups from regex matches:
 
@@ -787,13 +753,17 @@ server 8080 {
 | `NTNT_ENV` | `production`, `prod` | Disables hot-reload for better performance |
 | `NTNT_STRICT` | `1`, `true` | Blocks execution on type errors (runs type checker before `ntnt run`) |
 | `NTNT_ALLOW_PRIVATE_IPS` | `true` | Allows `fetch()` to connect to private/internal IPs (see below) |
+| `NTNT_WORKERS` | `1` (dev) / CPU cores (prod) | Number of interpreter worker threads. Auto-scales in production. |
 
 ```bash
-# Development (default) - hot-reload enabled
+# Development (default) - hot-reload enabled, single worker
 ntnt run server.tnt
 
-# Production - hot-reload disabled
+# Production - hot-reload disabled, multi-worker
 NTNT_ENV=production ntnt run server.tnt
+
+# Custom worker count
+NTNT_WORKERS=4 ntnt run server.tnt
 ```
 
 **Hot-reload** watches your `.tnt` files and imported modules for changes, automatically reloading on the next request. Disable in production for zero filesystem overhead per request.
@@ -1112,39 +1082,7 @@ greet(42)  // Type error: expected String, got Int
 
 **This means existing untyped code produces zero type errors.**
 
-### Strict Mode
-
-Strict mode warns about untyped function signatures and blocks execution on type errors. Three ways to activate:
-
-1. **CLI flag:** `ntnt lint --strict`
-2. **Environment variable:** `NTNT_STRICT=1`
-3. **Project config:** Create `ntnt.toml` in project root:
-
-```toml
-[lint]
-strict = true
-```
-
-```bash
-# Lint with strict warnings (untyped params, missing return types)
-ntnt lint --strict server.tnt
-
-# Block execution on type errors
-NTNT_STRICT=1 ntnt run server.tnt
-
-# Also blocks hot-reload — keeps previous working version running
-NTNT_STRICT=1 ntnt run server.tnt
-```
-
-### Where Type Checking Runs
-
-| Command | Type Checker | Blocks? |
-|---------|-------------|---------|
-| `ntnt lint` | Always runs | Reports diagnostics (never blocks) |
-| `ntnt lint --strict` | Runs + warns on untyped signatures | Reports diagnostics (never blocks) |
-| `ntnt validate` | Always runs | Type errors count as validation failures |
-| `ntnt run` | Only with `NTNT_STRICT=1` | Blocks execution if type errors found |
-| Hot-reload | Only with `NTNT_STRICT=1` | Blocks reload, keeps previous version |
+Type checking strictness is controlled by `NTNT_TYPE_MODE` and `NTNT_LINT_MODE` — see [Type Safety Modes](#type-safety-modes-v040) above.
 
 ---
 
@@ -1171,7 +1109,9 @@ for user in users {
 close(db)
 ```
 
-### PostgreSQL
+### PostgreSQL (Connection Pooled)
+
+`connect()` returns a pooled connection handle (via deadpool-postgres). Connections are automatically managed — you don't need to worry about pool sizing or checkout/checkin.
 
 ```ntnt
 import { connect, query, execute, close } from "std/db/postgres"
@@ -1186,7 +1126,7 @@ for user in users {
 
 execute(db, "INSERT INTO users (name, age) VALUES ($1, $2)", [name, int(age_str)])
 
-close(db)
+close(db)  // Releases the connection pool
 ```
 
 **Type conversion for database:**
@@ -1378,15 +1318,6 @@ fn get(req) {
 
 ---
 
-## Debugging
-
-NTNT doesn't have a debugger. Use these strategies:
-
-1. **Print statements:** `print("Debug: {variable}")`
-2. **Contracts:** Add `requires`/`ensures` to catch invalid states
-3. **Lint first:** `ntnt lint` catches most syntax errors
-4. **Intent Studio:** Shows live test results as you code
-
 ---
 
 ## Quick Reference Tables
@@ -1453,24 +1384,7 @@ ntnt test <file> --get /     # Quick HTTP endpoint testing
 
 ## Troubleshooting
 
-### Error Message Format
-
-NTNT provides context-rich error messages with error codes, source snippets, and suggestions:
-
-- **Error codes (E001-E012):** Every error type has a unique code (e.g., `E001` for undefined variables, `E003` for arity mismatches). These are color-coded red in terminal output.
-- **"Did you mean?" suggestions:** Typos in variable or function names trigger Levenshtein-distance-based suggestions (shown in green). For example, writing `usr` when `user` is defined will suggest the correct name.
-- **Source code snippets:** Parser errors display 3 lines of context around the error location with line and column numbers (line numbers shown in blue).
-- **Function names in arity errors:** When calling a function with the wrong number of arguments, the error message includes the function name for easier debugging.
-
-Example error output:
-```
-Error[E001]: Undefined variable `usr`
-  --> server.tnt:45:12
-   |
-45 |     return json(usr)
-   |
-   help: did you mean `user`?
-```
+NTNT error messages include error codes (E001-E012), source snippets, line numbers, and "did you mean?" suggestions for typos.
 
 ### Common Parse Errors
 
@@ -1494,19 +1408,7 @@ Error[E001]: Undefined variable `usr`
 
 ### Contract Violations in HTTP Routes
 
-When contracts fail in HTTP handlers:
-
-- **`requires` fails** → Returns `400 Bad Request` with contract message
-- **`ensures` fails** → Returns `500 Internal Server Error` with contract message
-
-Example:
-```ntnt
-fn create_user(req)
-    requires len(req.body) > 0  // 400 if body is empty
-{
-    // ...
-}
-```
+`requires` failure → 400 Bad Request. `ensures` failure → 500 Internal Server Error.
 
 ### Intent Check Failures
 
@@ -1530,14 +1432,10 @@ When using `ntnt lint` or `NTNT_STRICT=1`, you may see type diagnostics:
 
 ### Debugging Tips
 
-1. **Always lint first**: `ntnt lint file.tnt` catches 90% of issues (including type errors)
-2. **Use print statements**: `print("Debug: {variable}")`
-3. **Check types**: `print("Type: {type(variable)}")`
-4. **Add type annotations**: Helps the type checker catch more bugs
-5. **Add contracts**: They catch bugs at precise locations
-6. **Use Intent Studio**: Live feedback as you code
-
-See [STDLIB_REFERENCE.md](docs/STDLIB_REFERENCE.md) for complete function documentation.
+1. `ntnt lint file.tnt` — catches 90% of issues
+2. `print("Debug: {variable}")` / `print("Type: {type(variable)}")`
+3. Add type annotations and contracts for precise error locations
+4. Use Intent Studio for live feedback
 
 ## Common Patterns & Gotchas
 
@@ -1619,75 +1517,18 @@ has_key(m, "b")   // false
 
 ### Truthy/Falsy Values
 
-NTNT's truthy/falsy rules differ from JavaScript and Python:
-
-| Value | Truthy? | Notes |
-|-------|---------|-------|
-| `true` | ✅ | |
-| `false` | ❌ | |
-| `0` | ✅ | **Unlike JS/Python, `0` is truthy!** |
-| `""` (empty string) | ❌ | |
-| `None` | ❌ | |
-| `[]` (empty array) | ❌ | |
-| `map {}` (empty map) | ❌ | |
-| Any non-empty string | ✅ | |
-| Any non-empty array/map | ✅ | |
-| Any number (including 0) | ✅ | |
-
-⚠️ **`0` is truthy** — this catches people coming from JS/Python. If you need to check for zero, use explicit comparison: `if value == 0 { ... }`.
+⚠️ **`0` is truthy** — unlike JS/Python. All numbers (including 0) are truthy. Falsy values: `false`, `""`, `None`, `[]`, `map {}`. Check zero explicitly: `if value == 0 { ... }`.
 
 ### Map Iteration
 
-`for k in map` iterates over **keys**, not entries:
+`for k in map` iterates over **keys**, not entries. Use `entries()` for key-value pairs, `values()` for values only:
 
 ```ntnt
-let users = map { "alice": 30, "bob": 25 }
+import { entries, values } from "std/collections"
 
-// Iterates keys
-for name in users {
-    print("{name}: {users[name]}")
-}
-// Output: alice: 30, bob: 25
-```
-
-To iterate key-value pairs, use `entries()` from `std/collections`:
-
-```ntnt
-import { entries } from "std/collections"
-
-for entry in entries(users) {
-    print("{entry[\"key\"]}: {entry[\"value\"]}")
-}
-```
-
-To get just values, use `values()`:
-
-```ntnt
-import { values } from "std/collections"
-
-for age in values(users) {
-    print(age)
-}
-```
-
-### Option/Result Display in Strings
-
-Option and Result values auto-unwrap when displayed (in `print()`, string interpolation, templates):
-
-- `Option::Some("hello")` displays as `hello`
-- `Option::None` displays as `none`
-- `Result::Ok(42)` displays as `42`
-- `Result::Err("failed")` displays as `error: failed`
-
-For explicit handling, use `unwrap()`, `unwrap_or()`, `otherwise`, or `match`:
-
-```ntnt
-import { get_env } from "std/env"
-
-// These all work for handling missing values explicitly:
-let home = unwrap_or(get_env("HOME"), "/default")
-let home = get_env("HOME") otherwise return error("HOME not set")
-let home = unwrap(get_env("HOME"))  // Panics if None
+for name in users { print("{name}: {users[name]}") }         // keys
+for entry in entries(users) { print("{entry[\"key\"]}") }    // key-value
+for age in values(users) { print(age) }                      // values only
 ```
 <!-- END NTNT CODING GUIDE -->
 
