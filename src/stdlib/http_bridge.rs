@@ -242,7 +242,10 @@ impl Default for BridgeConfig {
 /// Create a channel pair for interpreter communication (MPMC via flume)
 pub fn create_channel(
     config: &BridgeConfig,
-) -> (flume::Sender<HandlerRequest>, flume::Receiver<HandlerRequest>) {
+) -> (
+    flume::Sender<HandlerRequest>,
+    flume::Receiver<HandlerRequest>,
+) {
     flume::bounded(config.channel_buffer)
 }
 

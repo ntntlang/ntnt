@@ -24,14 +24,13 @@ type Result<T> = std::result::Result<T, IntentError>;
 
 /// Dedicated Tokio runtime for all database operations.
 /// The interpreter thread is not inside a Tokio runtime, so we need our own.
-static DB_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> =
-    std::sync::LazyLock::new(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(4)
-            .enable_all()
-            .build()
-            .expect("Failed to create DB runtime")
-    });
+static DB_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("Failed to create DB runtime")
+});
 
 /// Pool registry — maps connection IDs to deadpool-postgres pools
 static POOL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Pool>>> =
@@ -44,8 +43,7 @@ static TXN_REGISTRY: std::sync::LazyLock<
     Mutex<HashMap<u64, std::sync::Arc<tokio::sync::Mutex<deadpool_postgres::Client>>>>,
 > = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-static CONNECTION_ID_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+static CONNECTION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Enum to hold different SQL parameter types
 /// This allows us to properly serialize each type to PostgreSQL
@@ -104,9 +102,7 @@ impl ToSql for SqlParam {
                         "true" | "t" | "1" | "yes" => true,
                         "false" | "f" | "0" | "no" => false,
                         _ => {
-                            return Err(
-                                format!("Cannot coerce string \"{}\" to BOOLEAN", v).into()
-                            )
+                            return Err(format!("Cannot coerce string \"{}\" to BOOLEAN", v).into())
                         }
                     };
                     parsed.to_sql(ty, out)
@@ -390,14 +386,14 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
         Ok(p) => p,
         Err(e) => {
             let error_msg = e.to_string();
-            let sanitized =
-                if error_msg.contains("password") || error_msg.contains("authentication") {
-                    "Connection failed: authentication error (details hidden for security)"
-                        .to_string()
-                } else {
-                    let sanitized = error_msg.replace(connection_string, "<connection_string>");
-                    format!("Connection failed: {}", sanitized)
-                };
+            let sanitized = if error_msg.contains("password")
+                || error_msg.contains("authentication")
+            {
+                "Connection failed: authentication error (details hidden for security)".to_string()
+            } else {
+                let sanitized = error_msg.replace(connection_string, "<connection_string>");
+                format!("Connection failed: {}", sanitized)
+            };
             return Ok(Value::err(Value::String(sanitized)));
         }
     };
@@ -412,8 +408,7 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
 
     match verify_result {
         Ok(()) => {
-            let id =
-                CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
             // Store pool in registry
             if let Ok(mut registry) = POOL_REGISTRY.lock() {
@@ -428,14 +423,12 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
             Ok(Value::ok(Value::Map(handle)))
         }
         Err(e) => {
-            let sanitized =
-                if e.contains("password") || e.contains("authentication") {
-                    "Connection failed: authentication error (details hidden for security)"
-                        .to_string()
-                } else {
-                    let sanitized = e.replace(connection_string, "<connection_string>");
-                    format!("Connection failed: {}", sanitized)
-                };
+            let sanitized = if e.contains("password") || e.contains("authentication") {
+                "Connection failed: authentication error (details hidden for security)".to_string()
+            } else {
+                let sanitized = e.replace(connection_string, "<connection_string>");
+                format!("Connection failed: {}", sanitized)
+            };
             Ok(Value::err(Value::String(sanitized)))
         }
     }
@@ -546,9 +539,7 @@ fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
                     IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
                 })?;
                 registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
-                    IntentError::runtime_error(
-                        "Transaction connection lost".to_string(),
-                    )
+                    IntentError::runtime_error("Transaction connection lost".to_string())
                 })
             }?;
 
@@ -569,10 +560,7 @@ fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         let pool = get_pool(conn)?;
         DB_RUNTIME.block_on(async {
             let client = pool.get().await.map_err(|e| {
-                IntentError::runtime_error(format!(
-                    "Failed to get connection from pool: {}",
-                    e
-                ))
+                IntentError::runtime_error(format!("Failed to get connection from pool: {}", e))
             })?;
 
             match client.query(sql, &param_refs).await {
@@ -614,9 +602,7 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
                     IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
                 })?;
                 registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
-                    IntentError::runtime_error(
-                        "Transaction connection lost".to_string(),
-                    )
+                    IntentError::runtime_error("Transaction connection lost".to_string())
                 })
             }?;
 
@@ -634,10 +620,7 @@ fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         let pool = get_pool(conn)?;
         DB_RUNTIME.block_on(async {
             let client = pool.get().await.map_err(|e| {
-                IntentError::runtime_error(format!(
-                    "Failed to get connection from pool: {}",
-                    e
-                ))
+                IntentError::runtime_error(format!("Failed to get connection from pool: {}", e))
             })?;
 
             match client.query_opt(sql, &param_refs).await {
@@ -677,9 +660,7 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
                     IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
                 })?;
                 registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
-                    IntentError::runtime_error(
-                        "Transaction connection lost".to_string(),
-                    )
+                    IntentError::runtime_error("Transaction connection lost".to_string())
                 })
             }?;
 
@@ -696,10 +677,7 @@ fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
         let pool = get_pool(conn)?;
         DB_RUNTIME.block_on(async {
             let client = pool.get().await.map_err(|e| {
-                IntentError::runtime_error(format!(
-                    "Failed to get connection from pool: {}",
-                    e
-                ))
+                IntentError::runtime_error(format!("Failed to get connection from pool: {}", e))
             })?;
 
             match client.execute(sql, &param_refs).await {
@@ -765,10 +743,7 @@ fn pg_begin(conn: &Value) -> Result<Value> {
                         // Return the same connection handle
                         Ok(Value::ok(conn.clone()))
                     }
-                    Err(e) => Ok(Value::err(Value::String(format!(
-                        "BEGIN failed: {}",
-                        e
-                    )))),
+                    Err(e) => Ok(Value::err(Value::String(format!("BEGIN failed: {}", e)))),
                 }
             }
             Err(e) => Ok(Value::err(Value::String(format!(
@@ -789,19 +764,14 @@ fn pg_commit(conn: &Value) -> Result<Value> {
                 IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
             })?;
             registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
-                IntentError::runtime_error(
-                    "No active transaction to commit".to_string(),
-                )
+                IntentError::runtime_error("No active transaction to commit".to_string())
             })
         }?;
 
         let client = txn_client.lock().await;
         let result = match client.execute("COMMIT", &[]).await {
             Ok(_) => Ok(Value::Bool(true)),
-            Err(e) => Ok(Value::err(Value::String(format!(
-                "COMMIT failed: {}",
-                e
-            )))),
+            Err(e) => Ok(Value::err(Value::String(format!("COMMIT failed: {}", e)))),
         };
 
         // Remove the transaction client regardless of outcome
@@ -824,19 +794,14 @@ fn pg_rollback(conn: &Value) -> Result<Value> {
                 IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
             })?;
             registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
-                IntentError::runtime_error(
-                    "No active transaction to rollback".to_string(),
-                )
+                IntentError::runtime_error("No active transaction to rollback".to_string())
             })
         }?;
 
         let client = txn_client.lock().await;
         let result = match client.execute("ROLLBACK", &[]).await {
             Ok(_) => Ok(Value::Bool(true)),
-            Err(e) => Ok(Value::err(Value::String(format!(
-                "ROLLBACK failed: {}",
-                e
-            )))),
+            Err(e) => Ok(Value::err(Value::String(format!("ROLLBACK failed: {}", e)))),
         };
 
         // Remove the transaction client regardless of outcome
@@ -946,9 +911,7 @@ pub fn init() -> HashMap<String, Value> {
             arity: 3,
             max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
-                (conn, Value::String(sql), Value::Array(params)) => {
-                    pg_query_one(conn, sql, params)
-                }
+                (conn, Value::String(sql), Value::Array(params)) => pg_query_one(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => pg_query_one(conn, sql, &[]),
                 _ => Err(IntentError::type_error(
                     "query_one() requires (connection, sql_string, params_array)".to_string(),
@@ -981,9 +944,7 @@ pub fn init() -> HashMap<String, Value> {
             arity: 3,
             max_arity: 3,
             func: |args| match (&args[0], &args[1], &args[2]) {
-                (conn, Value::String(sql), Value::Array(params)) => {
-                    pg_execute(conn, sql, params)
-                }
+                (conn, Value::String(sql), Value::Array(params)) => pg_execute(conn, sql, params),
                 (conn, Value::String(sql), Value::Unit) => pg_execute(conn, sql, &[]),
                 _ => Err(IntentError::type_error(
                     "execute() requires (connection, sql_string, params_array)".to_string(),
