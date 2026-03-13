@@ -746,6 +746,7 @@ pub struct AsyncServerConfig {
     pub enable_compression: bool,
     pub request_timeout_secs: u64,
     pub max_connections: usize,
+    pub num_workers: usize,
 }
 
 impl Default for AsyncServerConfig {
@@ -756,6 +757,7 @@ impl Default for AsyncServerConfig {
             enable_compression: true,
             request_timeout_secs: 30,
             max_connections: 10_000,
+            num_workers: 1,
         }
     }
 }
@@ -809,11 +811,13 @@ pub async fn start_server_with_bridge(
         format!("http://{}", addr)
     };
 
+    let hot_reload_status = if is_production { "disabled" } else { "enabled" };
+
     println!();
     println!("🚀 Server running — visit {}", display_url);
     println!(
-        "   Routes: {}  |  Static: {}  |  Hot-reload: enabled",
-        route_count, static_count
+        "   Routes: {}  |  Static: {}  |  Workers: {}  |  Hot-reload: {}",
+        route_count, static_count, config.num_workers, hot_reload_status
     );
     println!();
     println!("Press Ctrl+C to stop");
