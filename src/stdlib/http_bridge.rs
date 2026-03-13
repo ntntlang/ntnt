@@ -1,9 +1,9 @@
 //! HTTP Bridge - Connects async Axum handlers to the sync NTNT interpreter
 //!
 //! This module provides the communication layer between the async HTTP server
-//! and the synchronous NTNT interpreter. Since the interpreter uses Rc<RefCell<>>
-//! internally (not thread-safe), we run it in a dedicated thread and communicate
-//! via channels.
+//! and the synchronous NTNT interpreter worker pool. Each worker has its own
+//! Interpreter instance (not thread-safe due to Rc<RefCell<>>), and workers
+//! share a multi-consumer channel (flume) for load balancing.
 //!
 //! ## Architecture
 //!
@@ -17,20 +17,17 @@
 //! │       └────────────┼────────────┘                               │
 //! │                    │                                            │
 //! │              ┌─────▼─────┐                                      │
-//! │              │  Channel  │  (mpsc: Request + oneshot reply)     │
+//! │              │  Channel  │  (flume MPMC + oneshot reply)        │
 //! │              └─────┬─────┘                                      │
 //! └────────────────────┼────────────────────────────────────────────┘
 //!                      │
 //! ┌────────────────────▼────────────────────────────────────────────┐
-//! │                  Interpreter Thread                              │
-//! │  ┌──────────────────────────────────────────────────────────┐   │
-//! │  │  loop {                                                   │   │
-//! │  │    let req = rx.recv();                                   │   │
-//! │  │    let handler = find_handler(req.method, req.path);      │   │
-//! │  │    let response = interpreter.call(handler, req.value);   │   │
-//! │  │    req.reply_tx.send(response);                           │   │
-//! │  │  }                                                        │   │
-//! │  └──────────────────────────────────────────────────────────┘   │
+//! │                  Worker Pool                                     │
+//! │  ┌────────────┐ ┌────────────┐ ┌────────────┐                   │
+//! │  │  Worker 1  │ │  Worker 2  │ │  Worker N  │                   │
+//! │  │  (own      │ │  (own      │ │  (own      │                   │
+//! │  │   Interp.) │ │   Interp.) │ │   Interp.) │                   │
+//! │  └────────────┘ └────────────┘ └────────────┘                   │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
@@ -38,7 +35,7 @@ use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 /// A serializable HTTP request that can be sent across thread boundaries
 #[derive(Debug, Clone)]
@@ -199,15 +196,15 @@ pub struct HandlerRequest {
     pub reply_tx: oneshot::Sender<BridgeResponse>,
 }
 
-/// Handle to send requests to the interpreter
+/// Handle to send requests to the interpreter worker pool
 #[derive(Clone)]
 pub struct InterpreterHandle {
-    tx: mpsc::Sender<HandlerRequest>,
+    tx: flume::Sender<HandlerRequest>,
 }
 
 impl InterpreterHandle {
     /// Create a new handle with the given sender
-    pub fn new(tx: mpsc::Sender<HandlerRequest>) -> Self {
+    pub fn new(tx: flume::Sender<HandlerRequest>) -> Self {
         InterpreterHandle { tx }
     }
 
@@ -218,7 +215,7 @@ impl InterpreterHandle {
         let handler_request = HandlerRequest { request, reply_tx };
 
         self.tx
-            .send(handler_request)
+            .send_async(handler_request)
             .await
             .map_err(|_| IntentError::runtime_error("Interpreter channel closed".to_string()))?;
 
@@ -242,11 +239,14 @@ impl Default for BridgeConfig {
     }
 }
 
-/// Create a channel pair for interpreter communication
+/// Create a channel pair for interpreter communication (MPMC via flume)
 pub fn create_channel(
     config: &BridgeConfig,
-) -> (mpsc::Sender<HandlerRequest>, mpsc::Receiver<HandlerRequest>) {
-    mpsc::channel(config.channel_buffer)
+) -> (
+    flume::Sender<HandlerRequest>,
+    flume::Receiver<HandlerRequest>,
+) {
+    flume::bounded(config.channel_buffer)
 }
 
 /// Wrapper to make InterpreterHandle work with Axum's State extractor
@@ -367,11 +367,11 @@ mod tests {
     #[tokio::test]
     async fn test_channel_creation() {
         let config = BridgeConfig::default();
-        let (tx, mut rx) = create_channel(&config);
+        let (tx, rx) = create_channel(&config);
 
         // Spawn a mock "interpreter" that echoes back
         tokio::spawn(async move {
-            if let Some(req) = rx.recv().await {
+            if let Ok(req) = rx.recv_async().await {
                 let response = BridgeResponse {
                     status: 200,
                     headers: Vec::new(),

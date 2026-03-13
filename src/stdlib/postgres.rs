@@ -1,6 +1,7 @@
 //! std/db/postgres module - PostgreSQL database driver
 //!
-//! Provides connection management, queries, and transactions for PostgreSQL.
+//! Provides connection pooling, queries, and transactions for PostgreSQL.
+//! Uses deadpool-postgres for async connection pooling with a dedicated Tokio runtime.
 //!
 //! ```intent
 //! import { connect, query, execute, transaction } from "std/db/postgres"
@@ -12,17 +13,36 @@
 use crate::error::IntentError;
 use crate::interpreter::Value;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use postgres::{types::ToSql, Client, NoTls, Row};
+use deadpool_postgres::{Config, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use tokio_postgres::types::ToSql;
+use tokio_postgres::NoTls;
 
 type Result<T> = std::result::Result<T, IntentError>;
 
-/// Thread-safe wrapper for PostgreSQL client
-/// We use a unique ID to track connections and store them in a global registry
-static CONNECTION_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Arc<Mutex<Client>>>>> =
+/// Dedicated Tokio runtime for all database operations.
+/// The interpreter thread is not inside a Tokio runtime, so we need our own.
+static DB_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("Failed to create DB runtime")
+});
+
+/// Pool registry — maps connection IDs to deadpool-postgres pools
+static POOL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Pool>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Transaction registry — maps connection handle IDs to dedicated client objects.
+/// Transactions must pin to a single connection, so we check out a client
+/// at BEGIN and hold it until COMMIT/ROLLBACK.
+static TXN_REGISTRY: std::sync::LazyLock<
+    Mutex<HashMap<u64, std::sync::Arc<tokio::sync::Mutex<deadpool_postgres::Client>>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
 static CONNECTION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Enum to hold different SQL parameter types
@@ -42,11 +62,11 @@ enum SqlParam {
 impl ToSql for SqlParam {
     fn to_sql(
         &self,
-        ty: &postgres::types::Type,
-        out: &mut postgres::types::private::BytesMut,
-    ) -> std::result::Result<postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>>
+        ty: &tokio_postgres::types::Type,
+        out: &mut tokio_postgres::types::private::BytesMut,
+    ) -> std::result::Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>>
     {
-        use postgres::types::Type;
+        use tokio_postgres::types::Type;
         match self {
             SqlParam::Int(v) => v.to_sql(ty, out),
             SqlParam::BigInt(v) => v.to_sql(ty, out),
@@ -90,18 +110,18 @@ impl ToSql for SqlParam {
                 _ => v.to_sql(ty, out),
             },
             SqlParam::Bool(v) => v.to_sql(ty, out),
-            SqlParam::Null => Ok(postgres::types::IsNull::Yes),
+            SqlParam::Null => Ok(tokio_postgres::types::IsNull::Yes),
             SqlParam::IntArray(v) => v.to_sql(ty, out),
             SqlParam::StringArray(v) => v.to_sql(ty, out),
         }
     }
 
-    fn accepts(_ty: &postgres::types::Type) -> bool {
+    fn accepts(_ty: &tokio_postgres::types::Type) -> bool {
         // Accept all types — we handle coercion in to_sql
         true
     }
 
-    postgres::types::to_sql_checked!();
+    tokio_postgres::types::to_sql_checked!();
 }
 
 /// Convert an Intent Value to a SQL parameter
@@ -158,8 +178,8 @@ fn value_to_sql_param(value: &Value) -> SqlParam {
     }
 }
 
-/// Convert a PostgreSQL row to an Intent Map
-fn row_to_value(row: &Row) -> Value {
+/// Convert a tokio-postgres row to an Intent Map
+fn row_to_value(row: &tokio_postgres::Row) -> Value {
     let mut map = HashMap::new();
 
     for (idx, column) in row.columns().iter().enumerate() {
@@ -177,8 +197,12 @@ fn sql_none() -> Value {
 }
 
 /// Convert a PostgreSQL value to an Intent Value based on type
-fn postgres_value_to_intent(row: &Row, idx: usize, pg_type: &postgres::types::Type) -> Value {
-    use postgres::types::Type;
+fn postgres_value_to_intent(
+    row: &tokio_postgres::Row,
+    idx: usize,
+    pg_type: &tokio_postgres::types::Type,
+) -> Value {
+    use tokio_postgres::types::Type;
 
     match *pg_type {
         // Boolean
@@ -344,16 +368,51 @@ fn json_to_intent_value(json: &serde_json::Value) -> Value {
     crate::stdlib::json::json_to_intent_value(json)
 }
 
-/// Connect to a PostgreSQL database
+/// Connect to a PostgreSQL database — creates a connection pool
 fn pg_connect(connection_string: &str) -> Result<Value> {
-    match Client::connect(connection_string, NoTls) {
-        Ok(client) => {
-            let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let wrapped = Arc::new(Mutex::new(client));
+    // Build deadpool-postgres Config from connection string URL
+    let mut cfg = Config::new();
+    cfg.url = Some(connection_string.to_string());
+    cfg.manager = Some(ManagerConfig {
+        recycling_method: RecyclingMethod::Fast,
+    });
+    cfg.pool = Some(deadpool_postgres::PoolConfig {
+        max_size: 20,
+        ..Default::default()
+    });
 
-            // Store in registry
-            if let Ok(mut registry) = CONNECTION_REGISTRY.lock() {
-                registry.insert(id, wrapped);
+    // Create the pool
+    let pool = match cfg.create_pool(Some(Runtime::Tokio1), NoTls) {
+        Ok(p) => p,
+        Err(e) => {
+            let error_msg = e.to_string();
+            let sanitized = if error_msg.contains("password")
+                || error_msg.contains("authentication")
+            {
+                "Connection failed: authentication error (details hidden for security)".to_string()
+            } else {
+                let sanitized = error_msg.replace(connection_string, "<connection_string>");
+                format!("Connection failed: {}", sanitized)
+            };
+            return Ok(Value::err(Value::String(sanitized)));
+        }
+    };
+
+    // Verify the pool works by getting a connection
+    let verify_result = DB_RUNTIME.block_on(async {
+        match pool.get().await {
+            Ok(_client) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    });
+
+    match verify_result {
+        Ok(()) => {
+            let id = CONNECTION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            // Store pool in registry
+            if let Ok(mut registry) = POOL_REGISTRY.lock() {
+                registry.insert(id, pool);
             }
 
             // Return a connection handle as a map
@@ -364,32 +423,25 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
             Ok(Value::ok(Value::Map(handle)))
         }
         Err(e) => {
-            // Sanitize error message to avoid leaking credentials from connection string
-            // @since v0.3.14
-            let error_msg = e.to_string();
-            let sanitized =
-                if error_msg.contains("password") || error_msg.contains("authentication") {
-                    format!("Connection failed: authentication error (details hidden for security)")
-                } else {
-                    // Remove any embedded connection strings from error messages
-                    let sanitized = error_msg
-                        .replace(connection_string, "<connection_string>")
-                        .to_string();
-                    format!("Connection failed: {}", sanitized)
-                };
+            let sanitized = if e.contains("password") || e.contains("authentication") {
+                "Connection failed: authentication error (details hidden for security)".to_string()
+            } else {
+                let sanitized = e.replace(connection_string, "<connection_string>");
+                format!("Connection failed: {}", sanitized)
+            };
             Ok(Value::err(Value::String(sanitized)))
         }
     }
 }
 
-/// Get a client from the connection handle
-fn get_client(conn: &Value) -> Result<Arc<Mutex<Client>>> {
+/// Get a pool from the connection handle
+fn get_pool(conn: &Value) -> Result<Pool> {
     match conn {
         Value::Map(map) => {
             if let Some(Value::Int(id)) = map.get("_pg_connection_id") {
-                if let Ok(registry) = CONNECTION_REGISTRY.lock() {
-                    if let Some(client) = registry.get(&(*id as u64)) {
-                        return Ok(Arc::clone(client));
+                if let Ok(registry) = POOL_REGISTRY.lock() {
+                    if let Some(pool) = registry.get(&(*id as u64)) {
+                        return Ok(pool.clone());
                     }
                 }
                 Err(IntentError::runtime_error(
@@ -407,8 +459,36 @@ fn get_client(conn: &Value) -> Result<Arc<Mutex<Client>>> {
     }
 }
 
-/// Format a postgres error with full detail from the database (#33)
-fn format_pg_error(prefix: &str, e: &postgres::Error) -> String {
+/// Get the connection ID from a connection handle
+fn get_connection_id(conn: &Value) -> Result<u64> {
+    match conn {
+        Value::Map(map) => {
+            if let Some(Value::Int(id)) = map.get("_pg_connection_id") {
+                Ok(*id as u64)
+            } else {
+                Err(IntentError::type_error(
+                    "Expected a database connection handle".to_string(),
+                ))
+            }
+        }
+        _ => Err(IntentError::type_error(
+            "Expected a database connection handle".to_string(),
+        )),
+    }
+}
+
+/// Check if the connection handle has an active transaction
+fn has_active_txn(conn: &Value) -> bool {
+    if let Ok(id) = get_connection_id(conn) {
+        if let Ok(registry) = TXN_REGISTRY.lock() {
+            return registry.contains_key(&id);
+        }
+    }
+    false
+}
+
+/// Format a tokio-postgres error with full detail from the database (#33)
+fn format_pg_error(prefix: &str, e: &tokio_postgres::Error) -> String {
     if let Some(db_err) = e.as_db_error() {
         let mut msg = format!("{}: {}", prefix, db_err.message());
         if let Some(detail) = db_err.detail() {
@@ -432,86 +512,200 @@ fn format_pg_error(prefix: &str, e: &postgres::Error) -> String {
     }
 }
 
-/// Execute a query and return rows
+/// Execute a query using either the transaction client or a fresh pool connection
 fn pg_query(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
-    let client_arc = get_client(conn)?;
-    let mut client = client_arc
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
-
-    // Convert params to SqlParam
     let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
-
-    // Create references for the query
     let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
         .iter()
         .map(|p| p as &(dyn ToSql + Sync))
         .collect();
 
-    match client.query(sql, &param_refs) {
-        Ok(rows) => {
-            let result: Vec<Value> = rows.iter().map(row_to_value).collect();
-            Ok(Value::ok(Value::Array(result)))
+    let conn_id = get_connection_id(conn)?;
+
+    // Check if there's an active transaction for this connection
+    let has_txn = {
+        if let Ok(registry) = TXN_REGISTRY.lock() {
+            registry.contains_key(&conn_id)
+        } else {
+            false
         }
-        Err(e) => Ok(Value::err(Value::String(format_pg_error(
-            "Query failed",
-            &e,
-        )))),
+    };
+
+    if has_txn {
+        // Use the transaction's dedicated connection
+        DB_RUNTIME.block_on(async {
+            let txn_client = {
+                let registry = TXN_REGISTRY.lock().map_err(|e| {
+                    IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
+                })?;
+                registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
+                    IntentError::runtime_error("Transaction connection lost".to_string())
+                })
+            }?;
+
+            let client = txn_client.lock().await;
+            match client.query(sql, &param_refs).await {
+                Ok(rows) => {
+                    let result: Vec<Value> = rows.iter().map(row_to_value).collect();
+                    Ok(Value::ok(Value::Array(result)))
+                }
+                Err(e) => Ok(Value::err(Value::String(format_pg_error(
+                    "Query failed",
+                    &e,
+                )))),
+            }
+        })
+    } else {
+        // Use a fresh connection from the pool
+        let pool = get_pool(conn)?;
+        DB_RUNTIME.block_on(async {
+            let client = pool.get().await.map_err(|e| {
+                IntentError::runtime_error(format!("Failed to get connection from pool: {}", e))
+            })?;
+
+            match client.query(sql, &param_refs).await {
+                Ok(rows) => {
+                    let result: Vec<Value> = rows.iter().map(row_to_value).collect();
+                    Ok(Value::ok(Value::Array(result)))
+                }
+                Err(e) => Ok(Value::err(Value::String(format_pg_error(
+                    "Query failed",
+                    &e,
+                )))),
+            }
+        })
     }
 }
 
 /// Execute a query and return a single row (or null)
 fn pg_query_one(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
-    let client_arc = get_client(conn)?;
-    let mut client = client_arc
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
-
     let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
     let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
         .iter()
         .map(|p| p as &(dyn ToSql + Sync))
         .collect();
 
-    match client.query_opt(sql, &param_refs) {
-        Ok(Some(row)) => Ok(Value::ok(Value::some(row_to_value(&row)))),
-        Ok(None) => Ok(Value::ok(sql_none())),
-        Err(e) => Ok(Value::err(Value::String(format_pg_error(
-            "Query failed",
-            &e,
-        )))),
+    let conn_id = get_connection_id(conn)?;
+
+    let has_txn = {
+        if let Ok(registry) = TXN_REGISTRY.lock() {
+            registry.contains_key(&conn_id)
+        } else {
+            false
+        }
+    };
+
+    if has_txn {
+        DB_RUNTIME.block_on(async {
+            let txn_client = {
+                let registry = TXN_REGISTRY.lock().map_err(|e| {
+                    IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
+                })?;
+                registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
+                    IntentError::runtime_error("Transaction connection lost".to_string())
+                })
+            }?;
+
+            let client = txn_client.lock().await;
+            match client.query_opt(sql, &param_refs).await {
+                Ok(Some(row)) => Ok(Value::ok(Value::some(row_to_value(&row)))),
+                Ok(None) => Ok(Value::ok(sql_none())),
+                Err(e) => Ok(Value::err(Value::String(format_pg_error(
+                    "Query failed",
+                    &e,
+                )))),
+            }
+        })
+    } else {
+        let pool = get_pool(conn)?;
+        DB_RUNTIME.block_on(async {
+            let client = pool.get().await.map_err(|e| {
+                IntentError::runtime_error(format!("Failed to get connection from pool: {}", e))
+            })?;
+
+            match client.query_opt(sql, &param_refs).await {
+                Ok(Some(row)) => Ok(Value::ok(Value::some(row_to_value(&row)))),
+                Ok(None) => Ok(Value::ok(sql_none())),
+                Err(e) => Ok(Value::err(Value::String(format_pg_error(
+                    "Query failed",
+                    &e,
+                )))),
+            }
+        })
     }
 }
 
 /// Execute a statement (INSERT/UPDATE/DELETE) and return affected row count
 fn pg_execute(conn: &Value, sql: &str, params: &[Value]) -> Result<Value> {
-    let client_arc = get_client(conn)?;
-    let mut client = client_arc
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
-
     let sql_params: Vec<SqlParam> = params.iter().map(value_to_sql_param).collect();
     let param_refs: Vec<&(dyn ToSql + Sync)> = sql_params
         .iter()
         .map(|p| p as &(dyn ToSql + Sync))
         .collect();
 
-    match client.execute(sql, &param_refs) {
-        Ok(count) => Ok(Value::ok(Value::Int(count as i64))),
-        Err(e) => Ok(Value::err(Value::String(format_pg_error(
-            "Execute failed",
-            &e,
-        )))),
+    let conn_id = get_connection_id(conn)?;
+
+    let has_txn = {
+        if let Ok(registry) = TXN_REGISTRY.lock() {
+            registry.contains_key(&conn_id)
+        } else {
+            false
+        }
+    };
+
+    if has_txn {
+        DB_RUNTIME.block_on(async {
+            let txn_client = {
+                let registry = TXN_REGISTRY.lock().map_err(|e| {
+                    IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
+                })?;
+                registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
+                    IntentError::runtime_error("Transaction connection lost".to_string())
+                })
+            }?;
+
+            let client = txn_client.lock().await;
+            match client.execute(sql, &param_refs).await {
+                Ok(count) => Ok(Value::ok(Value::Int(count as i64))),
+                Err(e) => Ok(Value::err(Value::String(format_pg_error(
+                    "Execute failed",
+                    &e,
+                )))),
+            }
+        })
+    } else {
+        let pool = get_pool(conn)?;
+        DB_RUNTIME.block_on(async {
+            let client = pool.get().await.map_err(|e| {
+                IntentError::runtime_error(format!("Failed to get connection from pool: {}", e))
+            })?;
+
+            match client.execute(sql, &param_refs).await {
+                Ok(count) => Ok(Value::ok(Value::Int(count as i64))),
+                Err(e) => Ok(Value::err(Value::String(format_pg_error(
+                    "Execute failed",
+                    &e,
+                )))),
+            }
+        })
     }
 }
 
-/// Close a database connection
+/// Close a database connection (drops the pool)
 fn pg_close(conn: &Value) -> Result<Value> {
     match conn {
         Value::Map(map) => {
             if let Some(Value::Int(id)) = map.get("_pg_connection_id") {
-                if let Ok(mut registry) = CONNECTION_REGISTRY.lock() {
-                    registry.remove(&(*id as u64));
+                let conn_id = *id as u64;
+
+                // Remove any active transaction
+                if let Ok(mut registry) = TXN_REGISTRY.lock() {
+                    registry.remove(&conn_id);
+                }
+
+                // Remove the pool
+                if let Ok(mut registry) = POOL_REGISTRY.lock() {
+                    registry.remove(&conn_id);
                     return Ok(Value::Bool(true));
                 }
             }
@@ -523,46 +717,101 @@ fn pg_close(conn: &Value) -> Result<Value> {
     }
 }
 
-/// Begin a transaction - returns a transaction handle
+/// Begin a transaction — checks out a dedicated connection from the pool
 fn pg_begin(conn: &Value) -> Result<Value> {
-    let client_arc = get_client(conn)?;
-    let mut client = client_arc
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
+    let pool = get_pool(conn)?;
+    let conn_id = get_connection_id(conn)?;
 
-    match client.execute("BEGIN", &[]) {
-        Ok(_) => {
-            // Return the same connection handle (transaction is implicit)
-            Ok(Value::ok(conn.clone()))
-        }
-        Err(e) => Ok(Value::err(Value::String(format!("BEGIN failed: {}", e)))),
+    // Check if there's already an active transaction
+    if has_active_txn(conn) {
+        return Ok(Value::err(Value::String(
+            "BEGIN failed: a transaction is already active on this connection".to_string(),
+        )));
     }
+
+    DB_RUNTIME.block_on(async {
+        match pool.get().await {
+            Ok(client) => {
+                // Issue BEGIN on this dedicated connection
+                match client.execute("BEGIN", &[]).await {
+                    Ok(_) => {
+                        // Store the dedicated client in the transaction registry
+                        let txn_client = std::sync::Arc::new(tokio::sync::Mutex::new(client));
+                        if let Ok(mut registry) = TXN_REGISTRY.lock() {
+                            registry.insert(conn_id, txn_client);
+                        }
+                        // Return the same connection handle
+                        Ok(Value::ok(conn.clone()))
+                    }
+                    Err(e) => Ok(Value::err(Value::String(format!("BEGIN failed: {}", e)))),
+                }
+            }
+            Err(e) => Ok(Value::err(Value::String(format!(
+                "BEGIN failed: could not get connection from pool: {}",
+                e
+            )))),
+        }
+    })
 }
 
 /// Commit a transaction
 fn pg_commit(conn: &Value) -> Result<Value> {
-    let client_arc = get_client(conn)?;
-    let mut client = client_arc
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
+    let conn_id = get_connection_id(conn)?;
 
-    match client.execute("COMMIT", &[]) {
-        Ok(_) => Ok(Value::Bool(true)),
-        Err(e) => Ok(Value::err(Value::String(format!("COMMIT failed: {}", e)))),
-    }
+    DB_RUNTIME.block_on(async {
+        let txn_client = {
+            let registry = TXN_REGISTRY.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
+            })?;
+            registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
+                IntentError::runtime_error("No active transaction to commit".to_string())
+            })
+        }?;
+
+        let client = txn_client.lock().await;
+        let result = match client.execute("COMMIT", &[]).await {
+            Ok(_) => Ok(Value::ok(Value::Bool(true))),
+            Err(e) => Ok(Value::err(Value::String(format!("COMMIT failed: {}", e)))),
+        };
+
+        // Remove the transaction client regardless of outcome
+        drop(client);
+        if let Ok(mut registry) = TXN_REGISTRY.lock() {
+            registry.remove(&conn_id);
+        }
+
+        result
+    })
 }
 
 /// Rollback a transaction
 fn pg_rollback(conn: &Value) -> Result<Value> {
-    let client_arc = get_client(conn)?;
-    let mut client = client_arc
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock connection: {}", e)))?;
+    let conn_id = get_connection_id(conn)?;
 
-    match client.execute("ROLLBACK", &[]) {
-        Ok(_) => Ok(Value::Bool(true)),
-        Err(e) => Ok(Value::err(Value::String(format!("ROLLBACK failed: {}", e)))),
-    }
+    DB_RUNTIME.block_on(async {
+        let txn_client = {
+            let registry = TXN_REGISTRY.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
+            })?;
+            registry.get(&conn_id).map(|c| c.clone()).ok_or_else(|| {
+                IntentError::runtime_error("No active transaction to rollback".to_string())
+            })
+        }?;
+
+        let client = txn_client.lock().await;
+        let result = match client.execute("ROLLBACK", &[]).await {
+            Ok(_) => Ok(Value::ok(Value::Bool(true))),
+            Err(e) => Ok(Value::err(Value::String(format!("ROLLBACK failed: {}", e)))),
+        };
+
+        // Remove the transaction client regardless of outcome
+        drop(client);
+        if let Ok(mut registry) = TXN_REGISTRY.lock() {
+            registry.remove(&conn_id);
+        }
+
+        result
+    })
 }
 
 /// Initialize the std/db/postgres module
@@ -573,12 +822,12 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/postgres
     // @module_description PostgreSQL database operations
     // @signature connect(connection_string: String) -> Result<Connection, String>
-    // Open a connection to a PostgreSQL database.
+    // Open a connection pool to a PostgreSQL database.
     //
-    // Establishes a TCP connection using the provided connection string and
+    // Establishes a connection pool using the provided connection string and
     // returns a connection handle that can be passed to query, execute, and
     // transaction functions. The handle is stored in a global registry keyed
-    // by an internal connection ID.
+    // by an internal connection ID. Uses deadpool-postgres for async pooling.
     // @param connection_string A PostgreSQL connection URI (e.g. "postgres://user:pass@localhost/mydb")
     // @returns Result::Ok containing a Connection map handle, or Result::Err with a description
     // @see_also close, query, execute, begin
@@ -707,11 +956,11 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt close
     // @module std/postgres
     // @signature close(conn: Connection) -> Bool
-    // Close a PostgreSQL database connection.
+    // Close a PostgreSQL database connection pool.
     //
-    // Removes the connection from the internal registry, allowing the
-    // underlying TCP socket to be released. Returns true if the connection
-    // was found and removed, false otherwise.
+    // Removes the connection pool from the internal registry, allowing all
+    // pooled connections to be released. Returns true if the pool was found
+    // and removed, false otherwise.
     // @param conn A Connection handle obtained from connect()
     // @returns true if the connection was successfully closed, false if it was not found
     // @see_also connect
@@ -734,10 +983,10 @@ pub fn init() -> HashMap<String, Value> {
     // @signature begin(conn: Connection) -> Result<Connection, String>
     // Begin a database transaction.
     //
-    // Issues a SQL BEGIN statement on the connection. On success the same
-    // connection handle is returned inside Result::Ok -- subsequent query()
-    // and execute() calls on that handle operate within the transaction
-    // until commit() or rollback() is called.
+    // Checks out a dedicated connection from the pool and issues a SQL BEGIN
+    // statement. On success the same connection handle is returned inside
+    // Result::Ok -- subsequent query() and execute() calls on that handle
+    // operate within the transaction until commit() or rollback() is called.
     // @param conn A Connection handle obtained from connect()
     // @returns Result::Ok containing the Connection handle (now in a transaction), or Result::Err with a description
     // @see_also commit, rollback, execute, query
@@ -760,8 +1009,9 @@ pub fn init() -> HashMap<String, Value> {
     // @signature commit(conn: Connection) -> Result<Bool, String>
     // Commit the current transaction.
     //
-    // Issues a SQL COMMIT on the connection, making all changes since the
-    // last begin() permanent. Returns true on success.
+    // Issues a SQL COMMIT on the dedicated transaction connection, making all
+    // changes since the last begin() permanent. Returns true on success.
+    // The dedicated connection is returned to the pool after commit.
     // @param conn A Connection handle with an active transaction from begin()
     // @returns true on success, or Result::Err with a description on failure
     // @see_also begin, rollback
@@ -784,9 +1034,9 @@ pub fn init() -> HashMap<String, Value> {
     // @signature rollback(conn: Connection) -> Result<Bool, String>
     // Roll back the current transaction.
     //
-    // Issues a SQL ROLLBACK on the connection, discarding all changes made
-    // since the last begin(). Returns true on success. Use this to abort a
-    // transaction when an error occurs mid-way.
+    // Issues a SQL ROLLBACK on the dedicated transaction connection, discarding
+    // all changes made since the last begin(). Returns true on success. The
+    // dedicated connection is returned to the pool after rollback.
     // @param conn A Connection handle with an active transaction from begin()
     // @returns true on success, or Result::Err with a description on failure
     // @see_also begin, commit

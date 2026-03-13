@@ -1,6 +1,6 @@
 [package]
 name = "ntnt"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 authors = ["NTNT Language Team"]
 description = "NTNT (Intent) - A programming language designed for AI-driven development"
@@ -62,6 +62,10 @@ tower-http = { version = "0.5", features = ["cors", "compression-gzip", "trace",
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 
+# Worker pool channels and CPU detection
+flume = "0.11"
+num_cpus = "1.16"
+
 # HTTP Server (tiny_http for synchronous test mode)
 tiny_http = "0.12"
 
@@ -69,9 +73,11 @@ tiny_http = "0.12"
 ctrlc = "3.4"
 
 # Database
+deadpool-postgres = "0.14"
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
-rust_decimal = { version = "1.36", features = ["db-postgres"] }
+rust_decimal = { version = "1.36", features = ["db-postgres", "db-tokio-postgres"] }
 chrono = "0.4"
 chrono-tz = "0.10.4"
 

@@ -391,6 +391,9 @@ pub enum ExecutionMode {
     Normal,
     /// Hot-reload mode - skip listen(), re-register routes
     HotReload,
+    /// Worker mode - skip listen(), on_shutdown(), on_error() but keep route registrations
+    /// Used when spawning worker interpreters that process requests from the shared channel
+    Worker,
     /// Unit test mode - skip all server-related calls
     UnitTest,
 }
@@ -615,6 +618,10 @@ impl Interpreter {
             ExecutionMode::Normal => false,
             ExecutionMode::HotReload => {
                 // In hot-reload, only skip listen(), on_shutdown(), and on_error()
+                matches!(name, "listen" | "on_shutdown" | "on_error")
+            }
+            ExecutionMode::Worker => {
+                // Workers skip listen(), on_shutdown(), on_error() but keep route registrations
                 matches!(name, "listen" | "on_shutdown" | "on_error")
             }
             ExecutionMode::UnitTest => {
@@ -6853,7 +6860,7 @@ impl Interpreter {
     /// This provides high-concurrency handling for production workloads
     fn run_async_http_server(&mut self, port: u16) -> Result<Value> {
         use crate::stdlib::http_bridge::{
-            create_channel, BridgeConfig, BridgeResponse, HandlerRequest, InterpreterHandle,
+            create_channel, BridgeConfig, HandlerRequest, InterpreterHandle,
         };
         use crate::stdlib::http_server_async::{
             start_server_with_bridge, AsyncServerConfig, AsyncServerState,
@@ -6882,9 +6889,9 @@ impl Interpreter {
             println!("Running in production mode (hot-reload disabled)");
         }
 
-        // Create the channel for interpreter communication
+        // Create the channel for interpreter communication (MPMC via flume)
         let config = BridgeConfig::default();
-        let (tx, mut rx) = create_channel(&config);
+        let (tx, rx) = create_channel(&config);
 
         // Create async server state with registered routes
         let async_routes = Arc::new(AsyncServerState::new());
@@ -6921,6 +6928,20 @@ impl Interpreter {
         // Create interpreter handle for async handlers
         let interpreter_handle = Arc::new(InterpreterHandle::new(tx));
 
+        // Determine worker count
+        let num_workers = if is_production {
+            std::env::var("NTNT_WORKERS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or_else(|| num_cpus::get().min(8).max(1))
+        } else {
+            // Dev mode: default to 1 worker for simpler hot-reload behavior
+            std::env::var("NTNT_WORKERS")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(1)
+        };
+
         // Create server config
         let server_config = AsyncServerConfig {
             port: actual_port,
@@ -6928,6 +6949,7 @@ impl Interpreter {
             enable_compression: true,
             request_timeout_secs: self.request_timeout_secs,
             max_connections: 10_000,
+            num_workers,
         };
 
         // Spawn async server in a separate thread
@@ -6949,12 +6971,25 @@ impl Interpreter {
             });
         });
 
-        // Main thread: process requests from the channel
-        // This runs the interpreter in a single thread (required since it's not Send+Sync)
+        // Spawn additional worker threads (workers 2..N)
+        let mut worker_handles = Vec::new();
+        if num_workers > 1 {
+            let source_file = self.main_source_file.clone().unwrap_or_default();
+            for worker_id in 1..num_workers {
+                let worker_rx = rx.clone();
+                let worker_source = source_file.clone();
+                let handle = thread::spawn(move || {
+                    Self::run_worker(worker_id, worker_rx, &worker_source);
+                });
+                worker_handles.push(handle);
+            }
+        }
+
+        // Main thread (worker 0): process requests with hot-reload support
         loop {
             // Block waiting for requests
-            match rx.blocking_recv() {
-                Some(handler_request) => {
+            match rx.recv() {
+                Ok(handler_request) => {
                     let HandlerRequest { request, reply_tx } = handler_request;
 
                     // Hot-reload check: if main source file changed, reload it
@@ -6976,245 +7011,11 @@ impl Interpreter {
                         sync_routes_to_async(&self.server_state, &async_routes, &sync_rt);
                     }
 
-                    // Find the matching route handler
-                    let method = &request.method;
-                    let path = &request.path;
-
-                    // Get request Origin header for CORS
-                    let request_origin = request.headers.get("origin").cloned();
-
-                    // Handle CORS preflight (OPTIONS) requests
-                    if method == "OPTIONS" {
-                        if let Some(cors_config) = self.server_state.get_cors_config() {
-                            let preflight_response =
-                                cors_config.create_preflight_response(request_origin.as_deref());
-                            let bridge_response = BridgeResponse::from_value(&preflight_response);
-                            let _ = reply_tx.send(bridge_response);
-                            continue;
-                        }
-                    }
-
-                    // Try to find a matching route with typed param validation
-                    let route_result = self.server_state.find_route_typed(method, path);
-
-                    // Handle typed parameter validation failure with 400 Bad Request
-                    if let crate::stdlib::http_server::RouteMatchResult::TypeMismatch {
-                        ref param_name,
-                        ref expected,
-                        ref got,
-                    } = route_result
-                    {
-                        let error_msg = format!(
-                            "Bad Request: Parameter '{}' must be type {}, got '{}'",
-                            param_name, expected, got
-                        );
-                        let mut bad_request =
-                            crate::stdlib::http_server::create_error_response(400, &error_msg);
-                        // Apply CORS headers if enabled
-                        if let Some(cors_config) = self.server_state.get_cors_config() {
-                            if let Value::Map(ref mut resp_map) = bad_request {
-                                cors_config.apply_to_response(resp_map, request_origin.as_deref());
-                            }
-                        }
-                        let bridge_response = BridgeResponse::from_value(&bad_request);
-                        let _ = reply_tx.send(bridge_response);
-                        continue;
-                    }
-
-                    if let crate::stdlib::http_server::RouteMatchResult::Matched {
-                        mut handler,
-                        params: route_params,
-                        route_index,
-                    } = route_result
-                    {
-                        // Hot-reload check: if route file, its imports, or lib modules changed, reload the handler
-                        if lib_modules_changed || self.server_state.needs_reload(route_index) {
-                            if let Some(source) =
-                                self.server_state.get_route_source(route_index).cloned()
-                            {
-                                if let Some(file_path) = &source.file_path {
-                                    match self.reload_route_handler(file_path, method) {
-                                        Ok((new_handler, new_imports)) => {
-                                            self.server_state.update_route_handler(
-                                                route_index,
-                                                new_handler.clone(),
-                                                new_imports,
-                                            );
-                                            handler = new_handler;
-                                            println!("[hot-reload] Reloaded: {}", file_path);
-                                            // Sync updated routes to async state
-                                            sync_routes_to_async(
-                                                &self.server_state,
-                                                &async_routes,
-                                                &sync_rt,
-                                            );
-                                        }
-                                        Err(e) => {
-                                            eprintln!(
-                                                "[hot-reload] Error reloading {}: {}",
-                                                file_path, e
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Merge route params with request params
-                        let mut full_request = request.clone();
-                        for (k, v) in route_params {
-                            full_request.params.insert(k, v);
-                        }
-
-                        // Convert to NTNT Value
-                        let req_value = full_request.to_value();
-
-                        // Run middleware
-                        let middleware_handlers: Vec<Value> =
-                            self.server_state.get_middleware().to_vec();
-                        let mut current_req = req_value;
-                        let mut early_response: Option<Value> = None;
-
-                        for mw in middleware_handlers {
-                            match self.call_function(mw.clone(), vec![current_req.clone()]) {
-                                Ok(result) => match &result {
-                                    Value::Map(map) if map.contains_key("status") => {
-                                        early_response = Some(result);
-                                        break;
-                                    }
-                                    Value::Map(_) => {
-                                        current_req = result;
-                                    }
-                                    _ => {}
-                                },
-                                Err(e) => {
-                                    eprintln!("[ERROR] {} {} | middleware | {}", method, path, e);
-                                    early_response =
-                                        Some(crate::stdlib::http_server::create_error_response_with_context(
-                                            500,
-                                            &e.to_string(),
-                                            &format!("{} {}", method, path),
-                                            "middleware",
-                                        ));
-                                    break;
-                                }
-                            }
-                        }
-
-                        // Determine final response
-                        let final_response = if let Some(resp) = early_response {
-                            resp
-                        } else {
-                            // Clone req for potential on_error handler use
-                            let req_for_error = current_req.clone();
-                            match self.call_function(handler, vec![current_req]) {
-                                Ok(response) => response,
-                                Err(e) => {
-                                    let handler_file = self
-                                        .server_state
-                                        .get_route_source(route_index)
-                                        .and_then(|s| s.file_path.clone())
-                                        .unwrap_or_default();
-                                    let loc = if self.current_line > 0 {
-                                        format!(":{}", self.current_line)
-                                    } else {
-                                        String::new()
-                                    };
-                                    eprintln!(
-                                        "[ERROR] {} {} | handler: {}{} | {}",
-                                        method, path, handler_file, loc, e
-                                    );
-                                    // Try on_error handler if registered
-                                    if let Some(error_handler) =
-                                        self.server_state.get_error_handler().cloned()
-                                    {
-                                        let error_msg = Value::String(e.to_string());
-                                        match self.call_function(
-                                            error_handler,
-                                            vec![req_for_error, error_msg],
-                                        ) {
-                                            Ok(response) => response,
-                                            Err(handler_err) => {
-                                                eprintln!(
-                                                    "[ERROR] on_error handler failed: {}",
-                                                    handler_err
-                                                );
-                                                crate::stdlib::http_server::create_error_response_with_context(
-                                                    500,
-                                                    &e.to_string(),
-                                                    &format!("{} {}", method, path),
-                                                    &handler_file,
-                                                )
-                                            }
-                                        }
-                                    } else {
-                                        crate::stdlib::http_server::create_error_response_with_context(
-                                            500,
-                                            &e.to_string(),
-                                            &format!("{} {}", method, path),
-                                            &handler_file,
-                                        )
-                                    }
-                                }
-                            }
-                        };
-
-                        // Apply CORS headers if enabled
-                        let final_response = if let Some(cors_config) =
-                            self.server_state.get_cors_config()
-                        {
-                            if let Value::Map(mut resp_map) = final_response {
-                                cors_config
-                                    .apply_to_response(&mut resp_map, request_origin.as_deref());
-                                Value::Map(resp_map)
-                            } else {
-                                final_response
-                            }
-                        } else {
-                            final_response
-                        };
-
-                        // Convert to BridgeResponse and send back
-                        let bridge_response = BridgeResponse::from_value(&final_response);
-                        let _ = reply_tx.send(bridge_response);
-                    } else {
-                        // No route found - apply CORS headers if enabled
-                        let not_found_response = if let Some(cors_config) =
-                            self.server_state.get_cors_config()
-                        {
-                            let preflight =
-                                cors_config.create_preflight_response(request_origin.as_deref());
-                            // Merge CORS headers into 404 response
-                            let mut not_found = crate::stdlib::http_server::create_error_response(
-                                404,
-                                &format!("Not Found: {} {}", method, path),
-                            );
-                            if let (Value::Map(ref mut nf_map), Value::Map(cors_map)) =
-                                (&mut not_found, preflight)
-                            {
-                                if let Some(Value::Map(cors_headers)) = cors_map.get("headers") {
-                                    let headers = nf_map
-                                        .entry("headers".to_string())
-                                        .or_insert_with(|| Value::Map(HashMap::new()));
-                                    if let Value::Map(h) = headers {
-                                        for (k, v) in cors_headers {
-                                            h.insert(k.clone(), v.clone());
-                                        }
-                                    }
-                                }
-                            }
-                            not_found
-                        } else {
-                            crate::stdlib::http_server::create_error_response(
-                                404,
-                                &format!("Not Found: {} {}", method, path),
-                            )
-                        };
-                        let bridge_response = BridgeResponse::from_value(&not_found_response);
-                        let _ = reply_tx.send(bridge_response);
-                    }
+                    // Process the request and send response
+                    let bridge_response = self.process_request(request, lib_modules_changed);
+                    let _ = reply_tx.send(bridge_response);
                 }
-                None => {
+                Err(_) => {
                     // Channel closed, server shutting down
                     println!("\n🛑 Server shutting down...");
                     break;
@@ -7222,10 +7023,292 @@ impl Interpreter {
             }
         }
 
+        // Wait for worker threads to finish (channel closed signals them too)
+        for handle in worker_handles {
+            let _ = handle.join();
+        }
+
         // Wait for server thread to finish
         let _ = server_handle.join();
 
         Ok(Value::Unit)
+    }
+
+    /// Process a single HTTP request: find route, run middleware, call handler, apply CORS
+    fn process_request(
+        &mut self,
+        request: crate::stdlib::http_bridge::BridgeRequest,
+        lib_modules_changed: bool,
+    ) -> crate::stdlib::http_bridge::BridgeResponse {
+        use crate::stdlib::http_bridge::BridgeResponse;
+
+        let method = &request.method;
+        let path = &request.path;
+
+        // Get request Origin header for CORS
+        let request_origin = request.headers.get("origin").cloned();
+
+        // Handle CORS preflight (OPTIONS) requests
+        if method == "OPTIONS" {
+            if let Some(cors_config) = self.server_state.get_cors_config() {
+                let preflight_response =
+                    cors_config.create_preflight_response(request_origin.as_deref());
+                return BridgeResponse::from_value(&preflight_response);
+            }
+        }
+
+        // Try to find a matching route with typed param validation
+        let route_result = self.server_state.find_route_typed(method, path);
+
+        // Handle typed parameter validation failure with 400 Bad Request
+        if let crate::stdlib::http_server::RouteMatchResult::TypeMismatch {
+            ref param_name,
+            ref expected,
+            ref got,
+        } = route_result
+        {
+            let error_msg = format!(
+                "Bad Request: Parameter '{}' must be type {}, got '{}'",
+                param_name, expected, got
+            );
+            let mut bad_request =
+                crate::stdlib::http_server::create_error_response(400, &error_msg);
+            // Apply CORS headers if enabled
+            if let Some(cors_config) = self.server_state.get_cors_config() {
+                if let Value::Map(ref mut resp_map) = bad_request {
+                    cors_config.apply_to_response(resp_map, request_origin.as_deref());
+                }
+            }
+            return BridgeResponse::from_value(&bad_request);
+        }
+
+        if let crate::stdlib::http_server::RouteMatchResult::Matched {
+            mut handler,
+            params: route_params,
+            route_index,
+        } = route_result
+        {
+            // Hot-reload check: if route file, its imports, or lib modules changed, reload the handler
+            if lib_modules_changed || self.server_state.needs_reload(route_index) {
+                if let Some(source) = self.server_state.get_route_source(route_index).cloned() {
+                    if let Some(file_path) = &source.file_path {
+                        match self.reload_route_handler(file_path, method) {
+                            Ok((new_handler, new_imports)) => {
+                                self.server_state.update_route_handler(
+                                    route_index,
+                                    new_handler.clone(),
+                                    new_imports,
+                                );
+                                handler = new_handler;
+                                println!("[hot-reload] Reloaded: {}", file_path);
+                            }
+                            Err(e) => {
+                                eprintln!("[hot-reload] Error reloading {}: {}", file_path, e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Merge route params with request params
+            let mut full_request = request.clone();
+            for (k, v) in route_params {
+                full_request.params.insert(k, v);
+            }
+
+            // Convert to NTNT Value
+            let req_value = full_request.to_value();
+
+            // Run middleware
+            let middleware_handlers: Vec<Value> = self.server_state.get_middleware().to_vec();
+            let mut current_req = req_value;
+            let mut early_response: Option<Value> = None;
+
+            for mw in middleware_handlers {
+                match self.call_function(mw.clone(), vec![current_req.clone()]) {
+                    Ok(result) => match &result {
+                        Value::Map(map) if map.contains_key("status") => {
+                            early_response = Some(result);
+                            break;
+                        }
+                        Value::Map(_) => {
+                            current_req = result;
+                        }
+                        _ => {}
+                    },
+                    Err(e) => {
+                        eprintln!("[ERROR] {} {} | middleware | {}", method, path, e);
+                        early_response = Some(
+                            crate::stdlib::http_server::create_error_response_with_context(
+                                500,
+                                &e.to_string(),
+                                &format!("{} {}", method, path),
+                                "middleware",
+                            ),
+                        );
+                        break;
+                    }
+                }
+            }
+
+            // Determine final response
+            let final_response = if let Some(resp) = early_response {
+                resp
+            } else {
+                // Clone req for potential on_error handler use
+                let req_for_error = current_req.clone();
+                match self.call_function(handler, vec![current_req]) {
+                    Ok(response) => response,
+                    Err(e) => {
+                        let handler_file = self
+                            .server_state
+                            .get_route_source(route_index)
+                            .and_then(|s| s.file_path.clone())
+                            .unwrap_or_default();
+                        let loc = if self.current_line > 0 {
+                            format!(":{}", self.current_line)
+                        } else {
+                            String::new()
+                        };
+                        eprintln!(
+                            "[ERROR] {} {} | handler: {}{} | {}",
+                            method, path, handler_file, loc, e
+                        );
+                        // Try on_error handler if registered
+                        if let Some(error_handler) = self.server_state.get_error_handler().cloned()
+                        {
+                            let error_msg = Value::String(e.to_string());
+                            match self.call_function(error_handler, vec![req_for_error, error_msg])
+                            {
+                                Ok(response) => response,
+                                Err(handler_err) => {
+                                    eprintln!("[ERROR] on_error handler failed: {}", handler_err);
+                                    crate::stdlib::http_server::create_error_response_with_context(
+                                        500,
+                                        &e.to_string(),
+                                        &format!("{} {}", method, path),
+                                        &handler_file,
+                                    )
+                                }
+                            }
+                        } else {
+                            crate::stdlib::http_server::create_error_response_with_context(
+                                500,
+                                &e.to_string(),
+                                &format!("{} {}", method, path),
+                                &handler_file,
+                            )
+                        }
+                    }
+                }
+            };
+
+            // Apply CORS headers if enabled
+            let final_response = if let Some(cors_config) = self.server_state.get_cors_config() {
+                if let Value::Map(mut resp_map) = final_response {
+                    cors_config.apply_to_response(&mut resp_map, request_origin.as_deref());
+                    Value::Map(resp_map)
+                } else {
+                    final_response
+                }
+            } else {
+                final_response
+            };
+
+            // Convert to BridgeResponse and send back
+            BridgeResponse::from_value(&final_response)
+        } else {
+            // No route found - apply CORS headers if enabled
+            let not_found_response = if let Some(cors_config) = self.server_state.get_cors_config()
+            {
+                let preflight = cors_config.create_preflight_response(request_origin.as_deref());
+                // Merge CORS headers into 404 response
+                let mut not_found = crate::stdlib::http_server::create_error_response(
+                    404,
+                    &format!("Not Found: {} {}", method, path),
+                );
+                if let (Value::Map(ref mut nf_map), Value::Map(cors_map)) =
+                    (&mut not_found, preflight)
+                {
+                    if let Some(Value::Map(cors_headers)) = cors_map.get("headers") {
+                        let headers = nf_map
+                            .entry("headers".to_string())
+                            .or_insert_with(|| Value::Map(HashMap::new()));
+                        if let Value::Map(h) = headers {
+                            for (k, v) in cors_headers {
+                                h.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                }
+                not_found
+            } else {
+                crate::stdlib::http_server::create_error_response(
+                    404,
+                    &format!("Not Found: {} {}", method, path),
+                )
+            };
+            BridgeResponse::from_value(&not_found_response)
+        }
+    }
+
+    /// Run a worker thread that processes requests from the shared channel.
+    /// Each worker creates its own Interpreter, parses the source file, and
+    /// processes requests independently without hot-reload.
+    fn run_worker(
+        worker_id: usize,
+        rx: flume::Receiver<crate::stdlib::http_bridge::HandlerRequest>,
+        source_file: &str,
+    ) {
+        use crate::stdlib::http_bridge::HandlerRequest;
+
+        // Read and parse the source file
+        let source_code = match std::fs::read_to_string(source_file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[worker {}] Failed to read source file: {}", worker_id, e);
+                return;
+            }
+        };
+
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+
+        let lexer = Lexer::new(&source_code);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+
+        let ast = match parser.parse() {
+            Ok(ast) => ast,
+            Err(e) => {
+                eprintln!("[worker {}] Parse error: {}", worker_id, e);
+                return;
+            }
+        };
+
+        // Create a new interpreter in Worker mode
+        let mut interpreter = Interpreter::new();
+        interpreter.set_execution_mode(ExecutionMode::Worker);
+        interpreter.server_state.hot_reload = false; // Workers don't hot-reload
+        interpreter.set_current_file(source_file);
+
+        // Evaluate the source to register routes, middleware, etc.
+        if let Err(e) = interpreter.eval(&ast) {
+            eprintln!("[worker {}] Eval error: {}", worker_id, e);
+            return;
+        }
+
+        // Worker request loop — no hot-reload, just process requests
+        loop {
+            match rx.recv() {
+                Ok(handler_request) => {
+                    let HandlerRequest { request, reply_tx } = handler_request;
+                    let bridge_response = interpreter.process_request(request, false);
+                    let _ = reply_tx.send(bridge_response);
+                }
+                Err(_) => break, // Channel closed, server shutting down
+            }
+        }
     }
 
     /// Capture old values from expressions in postconditions
@@ -11012,6 +11095,22 @@ c")
     }
 
     #[test]
+    fn test_should_skip_server_call_worker_mode() {
+        let mut interpreter = Interpreter::new();
+        interpreter.set_execution_mode(ExecutionMode::Worker);
+
+        // Worker mode should skip listen, on_shutdown, on_error (like hot-reload)
+        assert!(interpreter.should_skip_server_call("listen"));
+        assert!(interpreter.should_skip_server_call("on_shutdown"));
+        assert!(interpreter.should_skip_server_call("on_error"));
+
+        // But NOT these - workers need to register routes and middleware
+        assert!(!interpreter.should_skip_server_call("serve_static"));
+        assert!(!interpreter.should_skip_server_call("routes"));
+        assert!(!interpreter.should_skip_server_call("use_middleware"));
+    }
+
+    #[test]
     fn test_should_skip_route_registration() {
         let mut interpreter = Interpreter::new();
 
@@ -11020,6 +11119,10 @@ c")
 
         // Hot-reload mode - don't skip (need to re-register routes)
         interpreter.set_execution_mode(ExecutionMode::HotReload);
+        assert!(!interpreter.should_skip_route_registration());
+
+        // Worker mode - don't skip (workers need routes)
+        interpreter.set_execution_mode(ExecutionMode::Worker);
         assert!(!interpreter.should_skip_route_registration());
 
         // Unit test mode - skip route registration

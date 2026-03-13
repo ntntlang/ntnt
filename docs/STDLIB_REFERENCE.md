@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.4.1
+> Last updated: v0.4.2
 
 ## Table of Contents
 
@@ -7411,9 +7411,9 @@ import { connect, query, query_one } from "std/postgres"
 | Function | Description |
 |----------|-------------|
 | [`begin`](#begin) | Begin a database transaction. |
-| [`close`](#close) | Close a PostgreSQL database connection. |
+| [`close`](#close) | Close a PostgreSQL database connection pool. |
 | [`commit`](#commit) | Commit the current transaction. |
-| [`connect`](#connect) | Open a connection to a PostgreSQL database. |
+| [`connect`](#connect) | Open a connection pool to a PostgreSQL database. |
 | [`execute`](#execute) | Execute a SQL statement and return the number of affected rows. |
 | [`query`](#query) | Execute a SQL query and return all matching rows. |
 | [`query_one`](#queryone) | Execute a SQL query and return at most one row. |
@@ -7427,7 +7427,7 @@ begin(conn: Connection) -> Result<Connection, String>
 
 Begin a database transaction.
 
-Issues a SQL BEGIN statement on the connection. On success the same connection handle is returned inside Result::Ok -- subsequent query() and execute() calls on that handle operate within the transaction until commit() or rollback() is called.
+Checks out a dedicated connection from the pool and issues a SQL BEGIN statement. On success the same connection handle is returned inside Result::Ok -- subsequent query() and execute() calls on that handle operate within the transaction until commit() or rollback() is called.
 
 **Parameters:**
 
@@ -7457,9 +7457,9 @@ begin(db)  // => Result::Ok(Connection)  // Start a transaction
 close(conn: Connection) -> Bool
 ```
 
-Close a PostgreSQL database connection.
+Close a PostgreSQL database connection pool.
 
-Removes the connection from the internal registry, allowing the underlying TCP socket to be released. Returns true if the connection was found and removed, false otherwise.
+Removes the connection pool from the internal registry, allowing all pooled connections to be released. Returns true if the pool was found and removed, false otherwise.
 
 **Parameters:**
 
@@ -7491,7 +7491,7 @@ commit(conn: Connection) -> Result<Bool, String>
 
 Commit the current transaction.
 
-Issues a SQL COMMIT on the connection, making all changes since the last begin() permanent. Returns true on success.
+Issues a SQL COMMIT on the dedicated transaction connection, making all changes since the last begin() permanent. Returns true on success. The dedicated connection is returned to the pool after commit.
 
 **Parameters:**
 
@@ -7521,9 +7521,9 @@ commit(db)  // => true  // Commit an active transaction
 connect(connection_string: String) -> Result<Connection, String>
 ```
 
-Open a connection to a PostgreSQL database.
+Open a connection pool to a PostgreSQL database.
 
-Establishes a TCP connection using the provided connection string and returns a connection handle that can be passed to query, execute, and transaction functions. The handle is stored in a global registry keyed by an internal connection ID.
+Establishes a connection pool using the provided connection string and returns a connection handle that can be passed to query, execute, and transaction functions. The handle is stored in a global registry keyed by an internal connection ID. Uses deadpool-postgres for async pooling.
 
 **Parameters:**
 
@@ -7666,7 +7666,7 @@ rollback(conn: Connection) -> Result<Bool, String>
 
 Roll back the current transaction.
 
-Issues a SQL ROLLBACK on the connection, discarding all changes made since the last begin(). Returns true on success. Use this to abort a transaction when an error occurs mid-way.
+Issues a SQL ROLLBACK on the dedicated transaction connection, discarding all changes made since the last begin(). Returns true on success. The dedicated connection is returned to the pool after rollback.
 
 **Parameters:**
 
