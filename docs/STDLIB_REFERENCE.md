@@ -7523,7 +7523,7 @@ connect(connection_string: String) -> Result<Connection, String>
 
 Open a connection pool to a PostgreSQL database.
 
-Establishes a connection pool using the provided connection string and returns a connection handle that can be passed to query, execute, and transaction functions. The handle is stored in a global registry keyed by an internal connection ID. Uses deadpool-postgres for async pooling.
+Establishes a connection pool using the provided connection string and returns a connection handle that can be passed to query, execute, and transaction functions. The handle is stored in a global registry keyed by an internal connection ID. Uses deadpool-postgres for async pooling. Pool size defaults to 5 connections per pool (configurable via NTNT_DB_POOL_SIZE env var). Note: each worker creates its own pools, so total connections = num_workers × num_databases × pool_size.
 
 **Parameters:**
 

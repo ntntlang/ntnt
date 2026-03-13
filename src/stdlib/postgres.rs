@@ -376,8 +376,16 @@ fn pg_connect(connection_string: &str) -> Result<Value> {
     cfg.manager = Some(ManagerConfig {
         recycling_method: RecyclingMethod::Fast,
     });
+    // Pool size: configurable via NTNT_DB_POOL_SIZE env var, default 5.
+    // Each worker spawns its own interpreter with its own pools, so total connections =
+    // num_workers × num_databases × pool_size. With 8 workers and 2 databases,
+    // default 5 = 80 total connections (vs 320 at the old default of 20).
+    let pool_max_size: usize = std::env::var("NTNT_DB_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
     cfg.pool = Some(deadpool_postgres::PoolConfig {
-        max_size: 20,
+        max_size: pool_max_size,
         ..Default::default()
     });
 
@@ -828,6 +836,9 @@ pub fn init() -> HashMap<String, Value> {
     // returns a connection handle that can be passed to query, execute, and
     // transaction functions. The handle is stored in a global registry keyed
     // by an internal connection ID. Uses deadpool-postgres for async pooling.
+    // Pool size defaults to 5 connections per pool (configurable via NTNT_DB_POOL_SIZE
+    // env var). Note: each worker creates its own pools, so total connections =
+    // num_workers × num_databases × pool_size.
     // @param connection_string A PostgreSQL connection URI (e.g. "postgres://user:pass@localhost/mydb")
     // @returns Result::Ok containing a Connection map handle, or Result::Err with a description
     // @see_also close, query, execute, begin
