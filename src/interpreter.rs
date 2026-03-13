@@ -7289,6 +7289,7 @@ impl Interpreter {
         // Create a new interpreter in Worker mode
         let mut interpreter = Interpreter::new();
         interpreter.set_execution_mode(ExecutionMode::Worker);
+        interpreter.server_state.hot_reload = false; // Workers don't hot-reload
         interpreter.set_current_file(source_file);
 
         // Evaluate the source to register routes, middleware, etc.

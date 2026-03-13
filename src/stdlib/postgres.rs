@@ -36,7 +36,7 @@ static DB_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::Laz
 static POOL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Pool>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Transaction registry — maps transaction IDs to dedicated client objects.
+/// Transaction registry — maps connection handle IDs to dedicated client objects.
 /// Transactions must pin to a single connection, so we check out a client
 /// at BEGIN and hold it until COMMIT/ROLLBACK.
 static TXN_REGISTRY: std::sync::LazyLock<
@@ -770,7 +770,7 @@ fn pg_commit(conn: &Value) -> Result<Value> {
 
         let client = txn_client.lock().await;
         let result = match client.execute("COMMIT", &[]).await {
-            Ok(_) => Ok(Value::Bool(true)),
+            Ok(_) => Ok(Value::ok(Value::Bool(true))),
             Err(e) => Ok(Value::err(Value::String(format!("COMMIT failed: {}", e)))),
         };
 
@@ -800,7 +800,7 @@ fn pg_rollback(conn: &Value) -> Result<Value> {
 
         let client = txn_client.lock().await;
         let result = match client.execute("ROLLBACK", &[]).await {
-            Ok(_) => Ok(Value::Bool(true)),
+            Ok(_) => Ok(Value::ok(Value::Bool(true))),
             Err(e) => Ok(Value::err(Value::String(format!("ROLLBACK failed: {}", e)))),
         };
 
