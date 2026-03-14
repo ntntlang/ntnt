@@ -62,6 +62,13 @@ description = "**Deprecated — use `NTNT_LINT_MODE=strict` instead.** Enable st
 example = "NTNT_STRICT=1 ntnt run server.tnt"
 affects = ["type-checking", "lint"]
 
+[env_vars.NTNT_DB_POOL_SIZE]
+values = ["any positive integer"]
+default = "5"
+description = "Maximum number of connections per database pool. Each worker creates its own pools, so total connections = num_workers × num_databases × pool_size. For multi-worker production deployments with multiple databases, keep this low (2-5) to avoid exhausting PostgreSQL max_connections."
+example = "NTNT_DB_POOL_SIZE=3 ntnt run server.tnt"
+affects = ["database", "postgres"]
+
 # =============================================================================
 # TYPE SAFETY MODES (DD-009)
 # =============================================================================

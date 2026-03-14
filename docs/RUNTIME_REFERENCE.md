@@ -2,7 +2,7 @@
 
 > **Auto-generated from [runtime.toml](runtime.toml)** - Do not edit directly.
 >
-> Last updated: v0.4.2
+> Last updated: v0.4.3
 
 Runtime configuration, environment variables, and CLI commands for NTNT
 
@@ -24,6 +24,7 @@ Environment variables that control NTNT runtime behavior
 | Variable | Values | Default | Description |
 |----------|--------|---------|-------------|
 | `NTNT_ALLOW_PRIVATE_IPS` | `true` | unset (disabled — private IPs blocked) | Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x). Required for Docker inter-container communication (e.g., calling a sidecar at 172.19.0.1). Disabled by default to prevent SSRF attacks. |
+| `NTNT_DB_POOL_SIZE` | `any positive integer` | 5 | Maximum number of connections per database pool. Each worker creates its own pools, so total connections = num_workers × num_databases × pool_size. For multi-worker production deployments with multiple databases, keep this low (2-5) to avoid exhausting PostgreSQL max_connections. |
 | `NTNT_ENV` | `development`, `production`, `prod` | development (when unset) | Controls runtime mode. Production mode disables hot-reload for better performance. |
 | `NTNT_LINT_MODE` | `default`, `warn`, `strict` | default | Controls lint strictness for type annotations. `default`: only check annotated code. `warn`: also warn about missing annotations (non-fatal). `strict`: missing annotations are errors. CLI flags (`--strict`, `--warn-untyped`) override this. |
 | `NTNT_MAX_RECURSION` | integer | 256 | Maximum recursion depth for function calls. Prevents stack overflow from runaway recursion. |
@@ -36,6 +37,9 @@ Environment variables that control NTNT runtime behavior
 ```bash
 # Allow `fetch()` to connect to private/internal IP ranges (10.x, 172.16-31.x, 192.168.x, 127.x)
 NTNT_ALLOW_PRIVATE_IPS=true ntnt run server.tnt
+
+# Maximum number of connections per database pool
+NTNT_DB_POOL_SIZE=3 ntnt run server.tnt
 
 # Controls runtime mode
 NTNT_ENV=production ntnt run server.tnt
