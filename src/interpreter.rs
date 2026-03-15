@@ -541,6 +541,10 @@ fn is_production_mode() -> bool {
 ///
 /// ## Hard Errors — Control Flow / Internal (always crash)
 /// Interpreter-internal errors that shouldn't reach user code:
+/// - Calling a non-function value
+/// - Pattern match exhaustiveness failures
+/// - `break`/`continue` outside a loop
+
 /// Auto-unwrap a Result/Option inner value for bracket indexing.
 /// Used by both Warn and Forgiving TypeModes to avoid code duplication.
 /// Mirrors all supported indexing cases from Expression::Index so behavior
@@ -596,9 +600,6 @@ fn auto_unwrap_field(inner_val: Value, field: &str) -> Result<Value> {
     }
 }
 
-/// - Calling a non-function value
-/// - Pattern match exhaustiveness failures
-/// - `break`/`continue` outside a loop
 impl Interpreter {
     pub fn new() -> Self {
         let env = Rc::new(RefCell::new(Environment::new()));
