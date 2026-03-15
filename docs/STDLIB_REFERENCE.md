@@ -3106,6 +3106,7 @@ import { channel, send, recv } from "std/concurrent"
 | Function | Description |
 |----------|-------------|
 | [`await_task`](#awaittask) | Blocks until the task completes. Returns Ok(value) on success, Err(message) on failure. Integrates with `otherwise` for error handling. |
+| [`cancel_schedule`](#cancelschedule) | Cancels a scheduled task. Returns true if the schedule was found and cancelled, false if the schedule handle was not found. |
 | [`cancel_task`](#canceltask) | Requests cancellation of a task. Cancellation is cooperative — checked at yield points (recv, sleep, fetch). Returns true if the cancellation was set, false if task not found. |
 | [`channel`](#channel) | Creates a new unbounded channel for inter-task communication. |
 | [`close`](#close) | Closes a channel. Senders will fail, receivers get remaining messages then Unit. |
@@ -3139,6 +3140,32 @@ await_task(task)  // Wait for task to complete and get result
 ```
 
 **See also:** `spawn`, `try_await`, `cancel_task`
+
+*Since v0.5.0*
+
+---
+
+#### `cancel_schedule`
+
+```ntnt
+cancel_schedule(schedule: Schedule) -> Bool
+```
+
+Cancels a scheduled task. Returns true if the schedule was found and cancelled, false if the schedule handle was not found.
+
+**Parameters:**
+
+- `schedule` — The Schedule handle from schedule()
+
+**Returns:** true if cancellation flag was set
+
+**Examples:**
+
+```ntnt
+cancel_schedule(handle)  // Cancel a scheduled task
+```
+
+**See also:** `schedule`
 
 *Since v0.5.0*
 

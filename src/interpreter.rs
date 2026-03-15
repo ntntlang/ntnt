@@ -681,10 +681,12 @@ impl Interpreter {
                 )
             }
             ExecutionMode::Worker => {
-                // Workers skip listen(), on_shutdown(), on_error(), schedule(), after() but keep route registrations
+                // Workers skip listen(), on_shutdown(), on_error(), schedule(), after(), spawn()
+                // but keep route registrations. spawn() is skipped to prevent top-level
+                // spawn() calls from duplicating across worker threads.
                 matches!(
                     name,
-                    "listen" | "on_shutdown" | "on_error" | "schedule" | "after"
+                    "listen" | "on_shutdown" | "on_error" | "schedule" | "after" | "spawn"
                 )
             }
             ExecutionMode::UnitTest => {
@@ -747,6 +749,11 @@ impl Interpreter {
 
     /// Define all stdlib module functions as globals in the current environment.
     /// Used by spawned tasks so they can call stdlib functions without explicit imports.
+    ///
+    /// **Known limitation**: If multiple modules export functions with the same name,
+    /// the last module iterated wins non-deterministically (HashMap iteration order).
+    /// In practice, stdlib module names are unique, but if conflicts arise, spawned tasks
+    /// should use explicit imports. A namespace-aware lookup would be the proper fix.
     pub fn define_all_stdlib_as_globals(&mut self) {
         let modules: Vec<(String, HashMap<String, Value>)> = self
             .loaded_modules
@@ -4152,12 +4159,10 @@ impl Interpreter {
                                 closure,
                                 ..
                             } => {
-                                // Validate: scheduled functions must take no arguments
-                                let required =
-                                    params.iter().filter(|p| p.default.is_none()).count();
-                                if required > 0 {
+                                // Validate: scheduled functions must take no arguments (including defaults)
+                                if !params.is_empty() {
                                     return Err(IntentError::runtime_error(
-                                        "schedule() handler must take no arguments".to_string(),
+                                        "schedule() handler must take no arguments (use closure capture for data)".to_string(),
                                     ));
                                 }
                                 let bindings = closure.borrow().all_bindings();
@@ -4180,7 +4185,6 @@ impl Interpreter {
                                 }
                                 return crate::stdlib::concurrent::concurrent_schedule(
                                     &interval_str,
-                                    params.clone(),
                                     body.clone(),
                                     serialized,
                                 );
@@ -4222,12 +4226,10 @@ impl Interpreter {
                                 closure,
                                 ..
                             } => {
-                                // Validate: after() handler must take no arguments
-                                let required =
-                                    params.iter().filter(|p| p.default.is_none()).count();
-                                if required > 0 {
+                                // Validate: after() handler must take no arguments (including defaults)
+                                if !params.is_empty() {
                                     return Err(IntentError::runtime_error(
-                                        "after() handler must take no arguments".to_string(),
+                                        "after() handler must take no arguments (use closure capture for data)".to_string(),
                                     ));
                                 }
                                 let bindings = closure.borrow().all_bindings();
@@ -4250,7 +4252,6 @@ impl Interpreter {
                                 }
                                 return crate::stdlib::concurrent::concurrent_after(
                                     delay_ms,
-                                    params.clone(),
                                     body.clone(),
                                     serialized,
                                 );
@@ -11564,10 +11565,11 @@ c")
         let mut interpreter = Interpreter::new();
         interpreter.set_execution_mode(ExecutionMode::Worker);
 
-        // Worker mode should skip listen, on_shutdown, on_error (like hot-reload)
+        // Worker mode should skip listen, on_shutdown, on_error, spawn (like hot-reload + spawn)
         assert!(interpreter.should_skip_server_call("listen"));
         assert!(interpreter.should_skip_server_call("on_shutdown"));
         assert!(interpreter.should_skip_server_call("on_error"));
+        assert!(interpreter.should_skip_server_call("spawn"));
 
         // But NOT these - workers need to register routes and middleware
         assert!(!interpreter.should_skip_server_call("serve_static"));

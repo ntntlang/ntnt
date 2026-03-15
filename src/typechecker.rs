@@ -3467,6 +3467,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("await_task", ["task" => Type::Any], Type::Any);
             sig!("try_await", ["task" => Type::Any], Type::Any);
             sig!("cancel_task", ["task" => Type::Any], Type::Bool);
+            sig!("cancel_schedule", ["schedule" => Type::Any], Type::Bool);
         }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));

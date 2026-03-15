@@ -12,7 +12,7 @@
 //!
 //! // Spawn a background task
 //! let task = spawn(fn() { return 42 })
-//! let result = await_task(task)  // result == 42
+//! let result = await_task(task)  // result == Ok(42)
 //!
 //! // Spawn with channel communication
 //! let ch = channel()
@@ -20,7 +20,7 @@
 //! let msg = recv(ch)  // "hello from task"
 //! ```
 
-use crate::ast::{Block, Parameter};
+use crate::ast::Block;
 use crate::error::IntentError;
 use crate::interpreter::Value;
 use std::collections::HashMap;
@@ -229,6 +229,11 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
     }
 }
 
+/// Receive a value from a channel, blocking until one is available.
+///
+/// Note: channels are single-consumer — the receiver mutex is held for the
+/// full blocking duration, so only one active `recv()` caller per channel
+/// at a time. This matches Go's channel semantics.
 fn concurrent_recv(ch: &Value) -> Result<Value> {
     let id = get_channel_id(ch)?;
 
@@ -266,6 +271,9 @@ fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
     let timeout_ms = timeout_ms.max(0) as u64;
     let id = get_channel_id(ch)?;
 
+    // Cooperative cancellation check
+    check_cancellation()?;
+
     let receiver = {
         let registry = CHANNEL_REGISTRY
             .lock()
@@ -281,10 +289,21 @@ fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Failed to lock receiver: {}", e)))?;
 
-    match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
-        Ok(serialized) => Ok(Value::some(serialized.to_value())),
-        Err(mpsc::RecvTimeoutError::Timeout) => Ok(Value::none()),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Ok(Value::none()),
+    // Loop in slices to allow cancellation checks (like recv does)
+    let mut remaining = timeout_ms;
+    loop {
+        check_cancellation()?;
+        let slice = remaining.min(100);
+        match rx.recv_timeout(Duration::from_millis(slice)) {
+            Ok(serialized) => return Ok(Value::some(serialized.to_value())),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                remaining = remaining.saturating_sub(slice);
+                if remaining == 0 {
+                    return Ok(Value::none());
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(Value::none()),
+        }
     }
 }
 
@@ -394,7 +413,7 @@ pub fn check_cancellation() -> Result<()> {
     // Use thread-local to store the current task's cancellation flag
     CURRENT_TASK_CANCELLED.with(|flag| {
         if let Some(ref cancelled) = *flag.borrow() {
-            if cancelled.load(Ordering::Relaxed) {
+            if cancelled.load(Ordering::Acquire) {
                 return Err(IntentError::runtime_error("Task cancelled".to_string()));
             }
         }
@@ -487,13 +506,15 @@ pub fn concurrent_spawn(func: &Value) -> Result<Value> {
         }
     };
 
-    // Validate: spawned functions should take no arguments
-    let required_params = params.iter().filter(|p| p.default.is_none()).count();
-    if required_params > 0 {
+    // Validate: spawned functions must take no arguments (including default params)
+    if !params.is_empty() {
         return Err(IntentError::runtime_error(
-            "spawn() function must take no arguments (captured variables are serialized automatically)".to_string(),
+            "spawn() function must take no arguments (use closure capture for data)".to_string(),
         ));
     }
+
+    // Prune completed/failed/cancelled tasks to prevent registry leaks from fire-and-forget tasks
+    prune_completed_tasks();
 
     // Create task handle
     let task_id = TASK_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -524,15 +545,15 @@ pub fn concurrent_spawn(func: &Value) -> Result<Value> {
         // Update state to Running
         {
             let (lock, cvar) = &*task_state;
-            let mut state = lock.lock().unwrap();
+            let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
             *state = TaskState::Running;
             cvar.notify_all();
         }
 
         // Check cancellation before starting
-        if task_cancelled.load(Ordering::Relaxed) {
+        if task_cancelled.load(Ordering::Acquire) {
             let (lock, cvar) = &*task_state;
-            let mut state = lock.lock().unwrap();
+            let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
             *state = TaskState::Cancelled;
             cvar.notify_all();
             return;
@@ -549,18 +570,20 @@ pub fn concurrent_spawn(func: &Value) -> Result<Value> {
             interpreter.define_variable(name.clone(), sv.to_value());
         }
 
-        // Execute the function body
-        let result = interpreter.eval_block(&body);
+        // Execute the function body, catching panics to prevent mutex poisoning
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            interpreter.eval_block(&body)
+        }));
 
         // Update task state with result
         let (lock, cvar) = &*task_state;
-        let mut state = lock.lock().unwrap();
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
 
-        if task_cancelled.load(Ordering::Relaxed) {
+        if task_cancelled.load(Ordering::Acquire) {
             *state = TaskState::Cancelled;
         } else {
             match result {
-                Ok(value) => {
+                Ok(Ok(value)) => {
                     // Handle Return values (unwrap the inner value)
                     let final_value = match value {
                         Value::Return(inner) => *inner,
@@ -573,8 +596,18 @@ pub fn concurrent_spawn(func: &Value) -> Result<Value> {
                         }
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     *state = TaskState::Failed(format!("{}", e));
+                }
+                Err(panic_info) => {
+                    let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                        format!("Task panicked: {}", s)
+                    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        format!("Task panicked: {}", s)
+                    } else {
+                        "Task panicked (unknown cause)".to_string()
+                    };
+                    *state = TaskState::Failed(msg);
                 }
             }
         }
@@ -605,8 +638,10 @@ pub fn concurrent_await_task(task: &Value) -> Result<Value> {
     };
 
     // Wait for task completion using condvar
+    // Handle PoisonError gracefully — if the mutex was poisoned (e.g., a thread panicked
+    // while holding it), recover the inner data rather than propagating the panic.
     let (lock, cvar) = &*state_arc;
-    let mut state = lock.lock().unwrap();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     let result = loop {
         match &*state {
             TaskState::Completed(sv) => {
@@ -619,8 +654,8 @@ pub fn concurrent_await_task(task: &Value) -> Result<Value> {
                 break Ok(Value::err(Value::String("Task cancelled".to_string())));
             }
             TaskState::Pending | TaskState::Running => {
-                // Wait for state change
-                state = cvar.wait(state).unwrap();
+                // Wait for state change, handling poisoned mutex
+                state = cvar.wait(state).unwrap_or_else(|e| e.into_inner());
             }
         }
     };
@@ -635,7 +670,9 @@ pub fn concurrent_await_task(task: &Value) -> Result<Value> {
 }
 
 /// try_await(task) -> Option<Result>
-/// Non-blocking check. Returns None if still running, Some(Result) if done.
+/// Non-blocking peek at task status. Returns None if still running, Some(Result) if done.
+/// Unlike `await_task`, this does NOT consume the task from the registry — it's a peek,
+/// not a "I'm done with this task" call. Only `await_task` removes from the registry.
 pub fn concurrent_try_await(task: &Value) -> Result<Value> {
     let id = get_task_id(task)?;
 
@@ -654,55 +691,47 @@ pub fn concurrent_try_await(task: &Value) -> Result<Value> {
     };
 
     let (lock, _cvar) = &*state_arc;
-    let state = lock.lock().unwrap();
+    let state = lock.lock().unwrap_or_else(|e| e.into_inner());
 
-    let is_done = !matches!(&*state, TaskState::Pending | TaskState::Running);
-    let result = match &*state {
+    match &*state {
         TaskState::Completed(sv) => Ok(Value::some(Value::ok(sv.to_value()))),
         TaskState::Failed(msg) => Ok(Value::some(Value::err(Value::String(msg.clone())))),
         TaskState::Cancelled => Ok(Value::some(Value::err(Value::String(
             "Task cancelled".to_string(),
         )))),
         TaskState::Pending | TaskState::Running => Ok(Value::none()),
-    };
-
-    // Clean up completed tasks from registry to prevent memory leaks
-    if is_done {
-        drop(state);
-        if let Ok(mut registry) = TASK_REGISTRY.lock() {
-            registry.remove(&id);
-        }
     }
-
-    result
 }
 
 /// cancel_task(task) -> Bool
-/// Sets the cancellation flag on a task. Cancellation is cooperative.
+/// Sets the cancellation flag on a task. Cancellation is cooperative — the task
+/// thread itself transitions the state to Cancelled when it checks the flag at a
+/// yield point. This is true cooperative cancellation: await_task blocks until the
+/// task actually stops.
 pub fn concurrent_cancel_task(task: &Value) -> Result<Value> {
     let id = get_task_id(task)?;
 
-    let registry = TASK_REGISTRY
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock task registry: {}", e)))?;
-
-    if let Some(handle) = registry.get(&id) {
-        handle.cancelled.store(true, Ordering::SeqCst);
-        // Wake up anyone waiting on the condvar
-        let (lock, cvar) = &*handle.state;
-        let mut state = lock.lock().unwrap();
-        // Only change state if still Pending or Running
-        match *state {
-            TaskState::Pending | TaskState::Running => {
-                *state = TaskState::Cancelled;
-                cvar.notify_all();
-            }
-            _ => {} // Already completed/failed/cancelled
+    // Extract the Arcs from the registry, then drop the registry lock before
+    // acquiring the state lock. This prevents potential deadlock from nested locks.
+    let (cancelled, state_arc) = {
+        let registry = TASK_REGISTRY.lock().map_err(|e| {
+            IntentError::runtime_error(format!("Failed to lock task registry: {}", e))
+        })?;
+        if let Some(handle) = registry.get(&id) {
+            (Arc::clone(&handle.cancelled), Arc::clone(&handle.state))
+        } else {
+            return Ok(Value::Bool(false));
         }
-        Ok(Value::Bool(true))
-    } else {
-        Ok(Value::Bool(false))
-    }
+    }; // registry lock dropped here
+
+    // Set the cancellation flag — the task thread will check this at its next yield point
+    cancelled.store(true, Ordering::Release);
+
+    // Notify the condvar so await_task can re-evaluate
+    let (_lock, cvar) = &*state_arc;
+    cvar.notify_all();
+
+    Ok(Value::Bool(true))
 }
 
 // ============================================================
@@ -763,7 +792,6 @@ pub fn parse_interval(interval: &str) -> Result<Duration> {
 /// Returns a schedule ID. Overlap prevention: skips tick if previous execution still running.
 pub fn concurrent_schedule(
     interval_str: &str,
-    params: Vec<Parameter>,
     body: Block,
     closure_bindings: HashMap<String, SerializedValue>,
 ) -> Result<Value> {
@@ -785,29 +813,37 @@ pub fn concurrent_schedule(
 
     // Spawn a thread that periodically executes the function
     let schedule_cancelled = Arc::clone(&cancelled);
-    let _params = params;
 
     thread::spawn(move || {
         // Flag for overlap prevention
         let executing = Arc::new(AtomicBool::new(false));
 
         loop {
-            // Sleep for the interval
-            thread::sleep(duration);
+            // Sleep for the interval in small slices to allow cancellation
+            let total_ms = duration.as_millis() as u64;
+            let mut slept = 0u64;
+            while slept < total_ms {
+                if schedule_cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+                let slice = 50u64.min(total_ms - slept);
+                thread::sleep(Duration::from_millis(slice));
+                slept += slice;
+            }
 
-            // Check cancellation
-            if schedule_cancelled.load(Ordering::Relaxed) {
+            // Check cancellation after sleep
+            if schedule_cancelled.load(Ordering::Acquire) {
                 break;
             }
 
             // Overlap prevention: skip if previous execution still running
-            if executing.load(Ordering::Relaxed) {
+            if executing.load(Ordering::Acquire) {
                 eprintln!("[schedule] Skipping tick — previous execution still running");
                 continue;
             }
 
             // Execute the function
-            executing.store(true, Ordering::Relaxed);
+            executing.store(true, Ordering::Release);
             let exec_executing = Arc::clone(&executing);
             let exec_bindings = closure_bindings.clone();
             let exec_body = body.clone();
@@ -827,7 +863,7 @@ pub fn concurrent_schedule(
                     eprintln!("[schedule] Error: {}", e);
                 }
 
-                exec_executing.store(false, Ordering::Relaxed);
+                exec_executing.store(false, Ordering::Release);
             });
         }
     });
@@ -841,29 +877,44 @@ pub fn concurrent_schedule(
 
 /// Cancel all scheduled tasks (called on shutdown)
 pub fn cancel_all_schedules() {
-    if let Ok(registry) = SCHEDULE_REGISTRY.lock() {
-        for (_id, handle) in registry.iter() {
-            handle.cancelled.store(true, Ordering::SeqCst);
+    // Collect all cancelled flags first, then drop the registry lock
+    let flags: Vec<Arc<AtomicBool>> = {
+        if let Ok(registry) = SCHEDULE_REGISTRY.lock() {
+            registry
+                .iter()
+                .map(|(_id, handle)| Arc::clone(&handle.cancelled))
+                .collect()
+        } else {
+            return;
         }
+    };
+    for flag in flags {
+        flag.store(true, Ordering::Release);
     }
 }
 
 /// Cancel all spawned tasks (called on shutdown)
+/// Only sets cancellation flags — task threads transition their own state
+/// to Cancelled cooperatively when they check at yield points.
 pub fn cancel_all_tasks() {
-    if let Ok(registry) = TASK_REGISTRY.lock() {
-        for (_id, handle) in registry.iter() {
-            handle.cancelled.store(true, Ordering::SeqCst);
-            let (lock, cvar) = &*handle.state;
-            if let Ok(mut state) = lock.lock() {
-                match *state {
-                    TaskState::Pending | TaskState::Running => {
-                        *state = TaskState::Cancelled;
-                        cvar.notify_all();
-                    }
-                    _ => {}
-                }
-            }
+    // Collect all Arcs first, then drop the registry lock to avoid
+    // holding the registry lock while acquiring state locks.
+    let handles: Vec<(Arc<AtomicBool>, Arc<(Mutex<TaskState>, Condvar)>)> = {
+        if let Ok(registry) = TASK_REGISTRY.lock() {
+            registry
+                .iter()
+                .map(|(_id, handle)| (Arc::clone(&handle.cancelled), Arc::clone(&handle.state)))
+                .collect()
+        } else {
+            return;
         }
+    };
+
+    for (cancelled, state_arc) in handles {
+        cancelled.store(true, Ordering::Release);
+        // Notify condvar so await_task can re-evaluate
+        let (_lock, cvar) = &*state_arc;
+        cvar.notify_all();
     }
 }
 
@@ -871,7 +922,6 @@ pub fn cancel_all_tasks() {
 /// Lifecycle-aware: cancelled on shutdown.
 pub fn concurrent_after(
     delay_ms: i64,
-    params: Vec<Parameter>,
     body: Block,
     closure_bindings: HashMap<String, SerializedValue>,
 ) -> Result<Value> {
@@ -894,7 +944,6 @@ pub fn concurrent_after(
 
     let task_state = Arc::clone(&state);
     let task_cancelled = Arc::clone(&cancelled);
-    let _params = params;
 
     thread::spawn(move || {
         set_current_task_cancelled(Arc::clone(&task_cancelled));
@@ -902,7 +951,7 @@ pub fn concurrent_after(
         // Update state to Running
         {
             let (lock, cvar) = &*task_state;
-            let mut s = lock.lock().unwrap();
+            let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
             *s = TaskState::Running;
             cvar.notify_all();
         }
@@ -914,9 +963,9 @@ pub fn concurrent_after(
             let mut slept = 0u64;
             let increment = 50u64.min(total); // Check every 50ms
             while slept < total {
-                if task_cancelled.load(Ordering::Relaxed) {
+                if task_cancelled.load(Ordering::Acquire) {
                     let (lock, cvar) = &*task_state;
-                    let mut s = lock.lock().unwrap();
+                    let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
                     *s = TaskState::Cancelled;
                     cvar.notify_all();
                     return;
@@ -928,9 +977,9 @@ pub fn concurrent_after(
         }
 
         // Check cancellation again
-        if task_cancelled.load(Ordering::Relaxed) {
+        if task_cancelled.load(Ordering::Acquire) {
             let (lock, cvar) = &*task_state;
-            let mut s = lock.lock().unwrap();
+            let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
             *s = TaskState::Cancelled;
             cvar.notify_all();
             return;
@@ -946,8 +995,8 @@ pub fn concurrent_after(
         let result = interpreter.eval_block(&body);
 
         let (lock, cvar) = &*task_state;
-        let mut s = lock.lock().unwrap();
-        if task_cancelled.load(Ordering::Relaxed) {
+        let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if task_cancelled.load(Ordering::Acquire) {
             *s = TaskState::Cancelled;
         } else {
             match result {
@@ -970,6 +1019,67 @@ pub fn concurrent_after(
     });
 
     Ok(create_task_value(task_id))
+}
+
+// ============================================================
+// Cleanup and Maintenance
+// ============================================================
+
+/// Prune completed/failed/cancelled tasks from the registry to prevent leaks
+/// from fire-and-forget tasks. Called at the top of `concurrent_spawn` to bound
+/// the registry to at most O(active_tasks) + O(completed_since_last_spawn).
+fn prune_completed_tasks() {
+    if let Ok(mut registry) = TASK_REGISTRY.lock() {
+        registry.retain(|_id, handle| {
+            let (lock, _) = &*handle.state;
+            if let Ok(state) = lock.try_lock() {
+                !matches!(
+                    *state,
+                    TaskState::Completed(_) | TaskState::Failed(_) | TaskState::Cancelled
+                )
+            } else {
+                true // keep if we can't check (lock contended)
+            }
+        });
+    }
+}
+
+/// Get schedule ID from a schedule handle value
+fn get_schedule_id(schedule: &Value) -> Result<u64> {
+    match schedule {
+        Value::Map(map) => {
+            if let Some(Value::Int(id)) = map.get("_schedule_id") {
+                Ok(*id as u64)
+            } else {
+                Err(IntentError::type_error(
+                    "Expected a Schedule handle".to_string(),
+                ))
+            }
+        }
+        _ => Err(IntentError::type_error(
+            "Expected a Schedule handle".to_string(),
+        )),
+    }
+}
+
+/// cancel_schedule(schedule) -> Bool
+/// Cancels a scheduled task. Returns true if found, false otherwise.
+pub fn concurrent_cancel_schedule(schedule: &Value) -> Result<Value> {
+    let id = get_schedule_id(schedule)?;
+
+    let cancelled = {
+        let registry = SCHEDULE_REGISTRY.lock().map_err(|e| {
+            IntentError::runtime_error(format!("Failed to lock schedule registry: {}", e))
+        })?;
+        if let Some(handle) = registry.get(&id) {
+            Arc::clone(&handle.cancelled)
+        } else {
+            return Ok(Value::Bool(false));
+        }
+    }; // registry lock dropped here
+
+    cancelled.store(true, Ordering::Release);
+    Ok(Value::Bool(true))
 }
 
 // ============================================================
@@ -1219,6 +1329,26 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt cancel_schedule
+    // @module std/concurrent
+    // @signature cancel_schedule(schedule: Schedule) -> Bool
+    // Cancels a scheduled task. Returns true if the schedule was found and cancelled,
+    // false if the schedule handle was not found.
+    // @param schedule The Schedule handle from schedule()
+    // @returns true if cancellation flag was set
+    // @see_also schedule
+    // @since v0.5.0
+    // @example cancel_schedule(handle) ~ "Cancel a scheduled task"
+    module.insert(
+        "cancel_schedule".to_string(),
+        Value::NativeFunction {
+            name: "cancel_schedule".to_string(),
+            arity: 1,
+            max_arity: 1,
+            func: |args| concurrent_cancel_schedule(&args[0]),
+        },
+    );
+
     module
 }
 
@@ -1241,6 +1371,7 @@ mod tests {
         assert!(module.contains_key("await_task"));
         assert!(module.contains_key("try_await"));
         assert!(module.contains_key("cancel_task"));
+        assert!(module.contains_key("cancel_schedule"));
     }
 
     #[test]

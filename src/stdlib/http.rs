@@ -595,6 +595,9 @@ fn read_response_body_limited(
 
 /// Simple HTTP GET request
 fn http_get(url: &str) -> Result<Value> {
+    // Cooperative cancellation check for spawned tasks
+    crate::stdlib::concurrent::check_cancellation()?;
+
     // SSRF protection: validate URL before making request
     if let Err(reason) = validate_url_for_ssrf(url) {
         return Ok(Value::err(Value::String(format!(
