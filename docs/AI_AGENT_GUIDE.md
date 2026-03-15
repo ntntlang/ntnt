@@ -789,7 +789,7 @@ fn custom_handler(req) {
 
 ### HTTP Client (`std/http`)
 
-`fetch()` takes **ONE argument** — either a URL string (simple GET) or a single map with all options including the URL. Arity is 1.
+`fetch()` accepts one or two arguments:
 
 ```ntnt
 import { fetch, download } from "std/http"
@@ -797,9 +797,15 @@ import { fetch, download } from "std/http"
 // Simple GET (string argument)
 let resp = fetch("https://api.example.com/data")
 
-// POST with JSON body (single map — url goes INSIDE the map)
+// POST with options map (url inside the map)
 let resp = fetch(map {
     "url": "https://api.example.com/users",
+    "method": "POST",
+    "json": map { "name": "Alice", "age": 30 }
+})
+
+// Two-argument form: URL + options (v0.4.4+)
+let resp = fetch("https://api.example.com/users", map {
     "method": "POST",
     "json": map { "name": "Alice", "age": 30 }
 })
@@ -812,16 +818,61 @@ let resp = fetch(map {
 })
 
 // Custom headers
-let resp = fetch(map {
-    "url": "https://api.example.com/data",
+let resp = fetch("https://api.example.com/data", map {
     "headers": map { "Authorization": "Bearer {token}" }
 })
 ```
 
-**⚠️ WRONG:** `fetch(url, map { ... })` — this passes TWO arguments and will error: "expected 1 arguments, got 2"
-**✅ RIGHT:** `fetch(map { "url": url, ... })` — single map with `url` key inside
+Both `fetch(map { "url": url, ... })` and `fetch(url, map { ... })` work. The two-argument form is typically more natural.
 
 Use `"json": map{...}` for JSON POST or `"form": map{...}` for form POST — auto-encodes and sets Content-Type.
+
+### CORS (Cross-Origin Resource Sharing)
+
+Configure CORS with `enable_cors()` — works on both sync and async (production) server paths:
+
+```ntnt
+// Allow all origins (default)
+enable_cors()
+
+// Restrict to specific origins
+enable_cors(map {
+    "origins": ["https://example.com", "https://app.example.com"],
+    "methods": ["GET", "POST", "PUT", "DELETE"],
+    "headers": ["Content-Type", "Authorization"],
+    "credentials": true,
+    "max_age": 86400
+})
+```
+
+Also available as a directive in server blocks: `cors map { "origins": ["*"] }`.
+
+### Content Security Policy (CSP)
+
+Configure CSP with `enable_csp()` (v0.4.4+):
+
+```ntnt
+// Sensible defaults (restrictive but practical)
+enable_csp()
+
+// Custom directives
+enable_csp(map {
+    "default-src": "'self'",
+    "script-src": "'self' 'unsafe-inline'",
+    "style-src": "'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src": "'self' https://fonts.gstatic.com",
+    "img-src": "'self' data: https:",
+    "connect-src": "'self'",
+    "frame-ancestors": "'none'"
+})
+
+// Disable CSP
+enable_csp(false)
+```
+
+Default directives: `default-src 'self'`, `script-src 'self'`, `style-src 'self' 'unsafe-inline'`, `img-src 'self' data: https:`, `font-src 'self'`, `connect-src 'self'`, `frame-ancestors 'none'`, `base-uri 'self'`, `form-action 'self'`.
+
+CSP is applied independently of `NTNT_SECURITY_HEADERS` — disabling security headers does not affect CSP configured via `enable_csp()`.
 
 ---
 
@@ -1146,6 +1197,19 @@ let price = float(form["price"])
 
 // WRONG - String to integer column causes "db error"
 execute(db, "INSERT INTO users (age) VALUES ($1)", [form["age"]])
+```
+
+**JSONB and UUID bind parameters** (v0.4.4+): Strings are automatically coerced to the correct binary format when the target column is JSONB, JSON, or UUID. No manual casting needed:
+```ntnt
+// JSONB — string is parsed as JSON automatically
+let json_str = "{\"key\": \"value\"}"
+execute(db, "INSERT INTO settings (data) VALUES ($1)", [json_str])  // Just works
+
+// UUID — string is parsed as UUID automatically
+let id = uuid()
+execute(db, "INSERT INTO users (id) VALUES ($1)", [id])  // Just works
+
+// No need for ::text::jsonb or ::text::uuid double casts
 ```
 
 **NULL handling:** SQL NULL values are returned as `None` (not `Unit`) in query results. Use `None` when inserting NULL values:
