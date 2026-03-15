@@ -755,14 +755,23 @@ impl Interpreter {
     /// In practice, stdlib module names are unique, but if conflicts arise, spawned tasks
     /// should use explicit imports. A namespace-aware lookup would be the proper fix.
     pub fn define_all_stdlib_as_globals(&mut self) {
-        let modules: Vec<(String, HashMap<String, Value>)> = self
+        // Sort modules by name for deterministic resolution when names collide
+        // (e.g., both std/db/postgres and std/db/sqlite export connect/query/execute).
+        // Last module alphabetically wins. Spawned tasks should use explicit imports
+        // for disambiguation — this is a convenience for stdlib builtins.
+        let mut modules: Vec<(String, HashMap<String, Value>)> = self
             .loaded_modules
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        modules.sort_by(|a, b| a.0.cmp(&b.0));
         for (_module_name, funcs) in modules {
-            for (name, value) in funcs {
-                self.environment.borrow_mut().define(name, value);
+            let mut names: Vec<String> = funcs.keys().cloned().collect();
+            names.sort();
+            for name in names {
+                if let Some(value) = funcs.get(&name) {
+                    self.environment.borrow_mut().define(name, value.clone());
+                }
             }
         }
     }
@@ -4167,20 +4176,22 @@ impl Interpreter {
                                 }
                                 let bindings = closure.borrow().all_bindings();
                                 let mut serialized = HashMap::new();
-                                let mut skipped = Vec::new();
+                                let mut user_skipped = Vec::new();
                                 for (k, v) in &bindings {
                                     if let Ok(sv) =
                                         crate::stdlib::concurrent::SerializedValue::from_value(v)
                                     {
                                         serialized.insert(k.clone(), sv);
-                                    } else {
-                                        skipped.push(k.clone());
+                                    } else if !matches!(v, Value::NativeFunction { .. }) {
+                                        // Only warn for user-defined non-serializable values,
+                                        // not stdlib/native functions (available via builtins)
+                                        user_skipped.push(k.clone());
                                     }
                                 }
-                                if !skipped.is_empty() {
+                                if !user_skipped.is_empty() {
                                     eprintln!(
                                         "[schedule] Warning: cannot capture non-serializable values: {}",
-                                        skipped.join(", ")
+                                        user_skipped.join(", ")
                                     );
                                 }
                                 return crate::stdlib::concurrent::concurrent_schedule(
@@ -4234,20 +4245,20 @@ impl Interpreter {
                                 }
                                 let bindings = closure.borrow().all_bindings();
                                 let mut serialized = HashMap::new();
-                                let mut skipped = Vec::new();
+                                let mut user_skipped = Vec::new();
                                 for (k, v) in &bindings {
                                     if let Ok(sv) =
                                         crate::stdlib::concurrent::SerializedValue::from_value(v)
                                     {
                                         serialized.insert(k.clone(), sv);
-                                    } else {
-                                        skipped.push(k.clone());
+                                    } else if !matches!(v, Value::NativeFunction { .. }) {
+                                        user_skipped.push(k.clone());
                                     }
                                 }
-                                if !skipped.is_empty() {
+                                if !user_skipped.is_empty() {
                                     eprintln!(
                                         "[after] Warning: cannot capture non-serializable values: {}",
-                                        skipped.join(", ")
+                                        user_skipped.join(", ")
                                     );
                                 }
                                 return crate::stdlib::concurrent::concurrent_after(

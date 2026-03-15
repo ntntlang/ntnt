@@ -185,13 +185,11 @@ print("current:" + str(x))
 #[test]
 fn test_cancel_task() {
     let code = r#"
-import { spawn, await_task, cancel_task } from "std/concurrent"
-import { sleep } from "std/time"
+import { spawn, await_task, cancel_task, sleep_ms, recv, channel } from "std/concurrent"
 
 let task = spawn(fn() {
-    // Sleep long enough to guarantee cancellation happens first
-    import { sleep } from "std/time"
-    sleep(10000)
+    // Use sleep_ms (cancellation-aware) instead of std/time sleep
+    sleep_ms(10000)
     return "should not reach"
 })
 
@@ -216,11 +214,10 @@ match result {
 #[test]
 fn test_try_await_pending() {
     let code = r#"
-import { spawn, try_await } from "std/concurrent"
+import { spawn, try_await, sleep_ms } from "std/concurrent"
 
 let task = spawn(fn() {
-    import { sleep } from "std/time"
-    sleep(5000)
+    sleep_ms(5000)
     return 42
 })
 

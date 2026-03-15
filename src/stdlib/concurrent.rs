@@ -474,27 +474,31 @@ pub fn concurrent_spawn(func: &Value) -> Result<Value> {
             // Snapshot all variables from the closure environment chain
             let bindings = closure.borrow().all_bindings();
             // Serialize only the serializable bindings (skip functions, native fns, etc.)
+            // Only warn for user-defined non-serializable values, not stdlib functions
+            // which are expected to be non-serializable (they'll be available via
+            // define_all_stdlib_as_globals in the spawned interpreter).
             let mut serialized_bindings = HashMap::new();
-            let mut skipped_names = Vec::new();
+            let mut user_skipped = Vec::new();
             for (name, value) in &bindings {
                 match SerializedValue::from_value(value) {
                     Ok(sv) => {
                         serialized_bindings.insert(name.clone(), sv);
                     }
                     Err(_) => {
-                        // Track non-serializable captures — they may be available
-                        // through the spawned interpreter's stdlib, but user-defined
-                        // functions will NOT be available in the spawned task.
-                        skipped_names.push(name.clone());
+                        // Only warn for user-defined functions, not stdlib/native functions
+                        // which will be available through the spawned interpreter's builtins
+                        if !matches!(value, Value::NativeFunction { .. }) {
+                            user_skipped.push(name.clone());
+                        }
                     }
                 }
             }
-            if !skipped_names.is_empty() {
+            if !user_skipped.is_empty() {
                 eprintln!(
                     "[spawn] Warning: cannot capture non-serializable values across tasks: {}. \
                      These variables will not be available in the spawned task. \
                      Only primitive types (Int, Float, String, Bool, Array, Map) can cross task boundaries.",
-                    skipped_names.join(", ")
+                    user_skipped.join(", ")
                 );
             }
             (params.clone(), body.clone(), serialized_bindings)
@@ -859,8 +863,25 @@ pub fn concurrent_schedule(
                     interpreter.define_variable(name.clone(), sv.to_value());
                 }
 
-                if let Err(e) = interpreter.eval_block(&exec_body) {
-                    eprintln!("[schedule] Error: {}", e);
+                // Wrap in catch_unwind so a Rust-level panic doesn't permanently
+                // disable future ticks (exec_executing would never flip back)
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    interpreter.eval_block(&exec_body)
+                }));
+
+                match result {
+                    Ok(Err(e)) => eprintln!("[schedule] Error: {}", e),
+                    Err(panic) => {
+                        let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        eprintln!("[schedule] Panic: {}", msg);
+                    }
+                    Ok(Ok(_)) => {}
                 }
 
                 exec_executing.store(false, Ordering::Release);
@@ -985,14 +1006,16 @@ pub fn concurrent_after(
             return;
         }
 
-        // Execute the function
+        // Execute the function with catch_unwind for panic safety
         let mut interpreter = crate::interpreter::Interpreter::new();
         interpreter.define_all_stdlib_as_globals();
         for (name, sv) in &closure_bindings {
             interpreter.define_variable(name.clone(), sv.to_value());
         }
 
-        let result = interpreter.eval_block(&body);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            interpreter.eval_block(&body)
+        }));
 
         let (lock, cvar) = &*task_state;
         let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -1000,7 +1023,7 @@ pub fn concurrent_after(
             *s = TaskState::Cancelled;
         } else {
             match result {
-                Ok(value) => {
+                Ok(Ok(value)) => {
                     let final_value = match value {
                         Value::Return(inner) => *inner,
                         other => other,
@@ -1010,8 +1033,18 @@ pub fn concurrent_after(
                         Err(e) => *s = TaskState::Failed(format!("Cannot serialize result: {}", e)),
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     *s = TaskState::Failed(format!("{}", e));
+                }
+                Err(panic) => {
+                    let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = panic.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    *s = TaskState::Failed(format!("panic: {}", msg));
                 }
             }
         }

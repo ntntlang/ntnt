@@ -1594,7 +1594,7 @@ let msg = recv(ch)  // "hello from background"
 - Only serializable values (Int, Float, String, Bool, Array, Map) are captured
 - Functions/closures are not captured — use `import` inside the spawned function
 - Each spawned task gets its own Interpreter instance with all stdlib available
-- Cancellation is cooperative: checked during `recv()`, `sleep()`, and `fetch()`
+- Cancellation is cooperative: checked during `recv()`, `recv_timeout()`, `sleep_ms()` (from std/concurrent), and `fetch()`. Note: `sleep()` from std/time is NOT cancellation-aware
 
 ### Scheduling (server builtins)
 
