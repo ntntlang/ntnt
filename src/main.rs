@@ -6295,6 +6295,20 @@ fn migrate_interpolation(source: &str) -> String {
                         if !is_route_param {
                             result.push('#');
                         }
+                        // Copy the entire balanced interpolation block
+                        result.push(chars[i]); // {
+                        i += 1;
+                        let mut depth = 1;
+                        while i < len && depth > 0 {
+                            if chars[i] == '{' {
+                                depth += 1;
+                            } else if chars[i] == '}' {
+                                depth -= 1;
+                            }
+                            result.push(chars[i]);
+                            i += 1;
+                        }
+                        continue;
                     }
                     result.push(chars[i]);
                     i += 1;

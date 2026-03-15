@@ -593,9 +593,10 @@ fn auto_unwrap_index(inner_val: Value, idx: Value) -> Result<Value> {
 fn auto_unwrap_field(inner_val: Value, field: &str) -> Result<Value> {
     match inner_val {
         Value::Map(ref map) => Ok(map.get(field).cloned().unwrap_or_else(|| Value::none())),
-        Value::Struct { fields: ref f, .. } => {
-            Ok(f.get(field).cloned().unwrap_or_else(|| Value::none()))
-        }
+        Value::Struct { fields: ref f, .. } => f
+            .get(field)
+            .cloned()
+            .ok_or_else(|| IntentError::runtime_error(format!("Unknown field: {}", field))),
         _ => Ok(Value::none()),
     }
 }
