@@ -6150,7 +6150,7 @@ fn collect_tnt_files_recursive_migrate(
 ///   - Double-quoted strings: "hello {name}" → "hello #{name}"
 ///   - Skips template strings (""" ... """) — they use {{expr}}
 ///   - Skips raw strings (r"..." / r#"..."#)
-///   - Skips route patterns: get("/users/{id}") — these are params, not interpolation
+///   - Skips route patterns in route registration calls: get("/users/{id}") — these are params, not interpolation
 ///   - Skips already-migrated #{expr}
 ///   - Preserves escaped \{ (though no longer needed)
 fn migrate_interpolation(source: &str) -> String {
@@ -6238,6 +6238,7 @@ fn migrate_interpolation(source: &str) -> String {
 
         // Process regular strings: "..."
         if chars[i] == '"' {
+            let in_route_call = is_in_route_call(&chars, i);
             result.push(chars[i]);
             i += 1;
             while i < len && chars[i] != '"' {
@@ -6290,8 +6291,7 @@ fn migrate_interpolation(source: &str) -> String {
                         let expr: String = chars[i + 1..end].iter().collect();
                         // Skip route-pattern-like simple identifiers in paths
                         // (these are now naturally literal with #{} syntax)
-                        let is_route_param =
-                            is_simple_route_param(&expr) && i > 0 && chars[i - 1] == '/';
+                        let is_route_param = is_simple_route_param(&expr) && in_route_call;
                         if !is_route_param {
                             result.push('#');
                         }
@@ -6339,6 +6339,59 @@ fn is_interpolation_start(c: char) -> bool {
 /// These should NOT be migrated since {id} in routes is now naturally literal
 fn is_simple_route_param(expr: &str) -> bool {
     !expr.is_empty() && expr.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Check if the string starting at `quote_pos` is the first argument of a route registration
+/// function call: get("/...", handler), post("/...", handler), etc.
+///
+/// Looks backward from the opening `"` to find `<ident>(` where `<ident>` is one of
+/// `get`, `post`, `put`, `patch`, `delete`.
+fn is_in_route_call(chars: &[char], quote_pos: usize) -> bool {
+    if quote_pos == 0 {
+        return false;
+    }
+
+    let mut pos = quote_pos - 1;
+
+    // Skip whitespace before the quote
+    while pos > 0 && chars[pos].is_ascii_whitespace() {
+        pos -= 1;
+    }
+    // We need pos to still be valid and pointing at whitespace if that's all there was
+    if chars[pos].is_ascii_whitespace() {
+        return false;
+    }
+
+    // Expect '('
+    if chars[pos] != '(' {
+        return false;
+    }
+    if pos == 0 {
+        return false;
+    }
+    pos -= 1;
+
+    // Skip whitespace between identifier and '('
+    while pos > 0 && chars[pos].is_ascii_whitespace() {
+        pos -= 1;
+    }
+    if chars[pos].is_ascii_whitespace() {
+        return false;
+    }
+
+    // Collect identifier backwards
+    let end = pos;
+    while pos > 0 && (chars[pos - 1].is_ascii_alphanumeric() || chars[pos - 1] == '_') {
+        pos -= 1;
+    }
+    // pos now points to the first character of the identifier (or end if single char)
+    // But we need to handle the case where pos itself is part of the identifier
+    if !(chars[pos].is_ascii_alphanumeric() || chars[pos] == '_') {
+        return false;
+    }
+    let ident: String = chars[pos..=end].iter().collect();
+
+    matches!(ident.as_str(), "get" | "post" | "put" | "patch" | "delete")
 }
 
 fn count_migration_changes(old: &str, new: &str) -> usize {
