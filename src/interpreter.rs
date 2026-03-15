@@ -4154,12 +4154,21 @@ impl Interpreter {
                             } => {
                                 let bindings = closure.borrow().all_bindings();
                                 let mut serialized = HashMap::new();
+                                let mut skipped = Vec::new();
                                 for (k, v) in &bindings {
                                     if let Ok(sv) =
                                         crate::stdlib::concurrent::SerializedValue::from_value(v)
                                     {
                                         serialized.insert(k.clone(), sv);
+                                    } else {
+                                        skipped.push(k.clone());
                                     }
+                                }
+                                if !skipped.is_empty() {
+                                    eprintln!(
+                                        "[schedule] Warning: cannot capture non-serializable values: {}",
+                                        skipped.join(", ")
+                                    );
                                 }
                                 return crate::stdlib::concurrent::concurrent_schedule(
                                     &interval_str,
@@ -4201,12 +4210,21 @@ impl Interpreter {
                             } => {
                                 let bindings = closure.borrow().all_bindings();
                                 let mut serialized = HashMap::new();
+                                let mut skipped = Vec::new();
                                 for (k, v) in &bindings {
                                     if let Ok(sv) =
                                         crate::stdlib::concurrent::SerializedValue::from_value(v)
                                     {
                                         serialized.insert(k.clone(), sv);
+                                    } else {
+                                        skipped.push(k.clone());
                                     }
+                                }
+                                if !skipped.is_empty() {
+                                    eprintln!(
+                                        "[after] Warning: cannot capture non-serializable values: {}",
+                                        skipped.join(", ")
+                                    );
                                 }
                                 return crate::stdlib::concurrent::concurrent_after(
                                     delay_ms,

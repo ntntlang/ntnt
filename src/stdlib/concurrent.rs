@@ -207,20 +207,25 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
     let id = get_channel_id(ch)?;
     let serialized = SerializedValue::from_value(value)?;
 
-    let registry = CHANNEL_REGISTRY
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
+    // Extract sender and closed flag, then drop registry lock before sending.
+    // This prevents blocking all channel operations if send ever blocks.
+    let (sender, closed) = {
+        let registry = CHANNEL_REGISTRY
+            .lock()
+            .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
+        if let Some(pair) = registry.get(&id) {
+            (pair.sender.clone(), Arc::clone(&pair.closed))
+        } else {
+            return Err(IntentError::runtime_error("Invalid channel".to_string()));
+        }
+    }; // registry lock dropped here
 
-    if let Some(pair) = registry.get(&id) {
-        if *pair.closed.lock().unwrap() {
-            return Ok(Value::Bool(false));
-        }
-        match pair.sender.send(serialized) {
-            Ok(_) => Ok(Value::Bool(true)),
-            Err(_) => Ok(Value::Bool(false)),
-        }
-    } else {
-        Err(IntentError::runtime_error("Invalid channel".to_string()))
+    if *closed.lock().unwrap() {
+        return Ok(Value::Bool(false));
+    }
+    match sender.send(serialized) {
+        Ok(_) => Ok(Value::Bool(true)),
+        Err(_) => Ok(Value::Bool(false)),
     }
 }
 
@@ -309,13 +314,17 @@ fn concurrent_try_recv(ch: &Value) -> Result<Value> {
 fn concurrent_close(ch: &Value) -> Result<Value> {
     let id = get_channel_id(ch)?;
 
-    let registry = CHANNEL_REGISTRY
+    let mut registry = CHANNEL_REGISTRY
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
 
     if let Some(pair) = registry.get(&id) {
         let mut closed = pair.closed.lock().unwrap();
         *closed = true;
+        drop(closed);
+        // Remove from registry to free memory. Any pending recv() calls will
+        // get Disconnected on their next attempt since the sender is dropped.
+        registry.remove(&id);
         Ok(Value::Bool(true))
     } else {
         Ok(Value::Bool(false))
@@ -447,16 +456,27 @@ pub fn concurrent_spawn(func: &Value) -> Result<Value> {
             let bindings = closure.borrow().all_bindings();
             // Serialize only the serializable bindings (skip functions, native fns, etc.)
             let mut serialized_bindings = HashMap::new();
+            let mut skipped_names = Vec::new();
             for (name, value) in &bindings {
                 match SerializedValue::from_value(value) {
                     Ok(sv) => {
                         serialized_bindings.insert(name.clone(), sv);
                     }
                     Err(_) => {
-                        // Skip non-serializable values (functions, native functions, etc.)
-                        // They'll be available through the interpreter's builtins
+                        // Track non-serializable captures — they may be available
+                        // through the spawned interpreter's stdlib, but user-defined
+                        // functions will NOT be available in the spawned task.
+                        skipped_names.push(name.clone());
                     }
                 }
+            }
+            if !skipped_names.is_empty() {
+                eprintln!(
+                    "[spawn] Warning: cannot capture non-serializable values across tasks: {}. \
+                     These variables will not be available in the spawned task. \
+                     Only primitive types (Int, Float, String, Bool, Array, Map) can cross task boundaries.",
+                    skipped_names.join(", ")
+                );
             }
             (params.clone(), body.clone(), serialized_bindings)
         }
@@ -587,23 +607,31 @@ pub fn concurrent_await_task(task: &Value) -> Result<Value> {
     // Wait for task completion using condvar
     let (lock, cvar) = &*state_arc;
     let mut state = lock.lock().unwrap();
-    loop {
+    let result = loop {
         match &*state {
             TaskState::Completed(sv) => {
-                return Ok(Value::ok(sv.to_value()));
+                break Ok(Value::ok(sv.to_value()));
             }
             TaskState::Failed(msg) => {
-                return Ok(Value::err(Value::String(msg.clone())));
+                break Ok(Value::err(Value::String(msg.clone())));
             }
             TaskState::Cancelled => {
-                return Ok(Value::err(Value::String("Task cancelled".to_string())));
+                break Ok(Value::err(Value::String("Task cancelled".to_string())));
             }
             TaskState::Pending | TaskState::Running => {
                 // Wait for state change
                 state = cvar.wait(state).unwrap();
             }
         }
+    };
+
+    // Clean up: remove completed task from registry to prevent memory leaks
+    drop(state); // release the condvar lock first
+    if let Ok(mut registry) = TASK_REGISTRY.lock() {
+        registry.remove(&id);
     }
+
+    result
 }
 
 /// try_await(task) -> Option<Result>
@@ -628,14 +656,25 @@ pub fn concurrent_try_await(task: &Value) -> Result<Value> {
     let (lock, _cvar) = &*state_arc;
     let state = lock.lock().unwrap();
 
-    match &*state {
+    let is_done = !matches!(&*state, TaskState::Pending | TaskState::Running);
+    let result = match &*state {
         TaskState::Completed(sv) => Ok(Value::some(Value::ok(sv.to_value()))),
         TaskState::Failed(msg) => Ok(Value::some(Value::err(Value::String(msg.clone())))),
         TaskState::Cancelled => Ok(Value::some(Value::err(Value::String(
             "Task cancelled".to_string(),
         )))),
         TaskState::Pending | TaskState::Running => Ok(Value::none()),
+    };
+
+    // Clean up completed tasks from registry to prevent memory leaks
+    if is_done {
+        drop(state);
+        if let Ok(mut registry) = TASK_REGISTRY.lock() {
+            registry.remove(&id);
+        }
     }
+
+    result
 }
 
 /// cancel_task(task) -> Bool
