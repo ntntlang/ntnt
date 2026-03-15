@@ -1,7 +1,26 @@
 //! std/concurrent module - Concurrency primitives
 //!
-//! Provides channels for communication between the main program and background tasks,
-//! plus structured task spawning with spawn/await/cancel semantics.
+//! All mutable concurrency state lives in a single `ConcurrencyRuntime` struct,
+//! accessed through `static RUNTIME`. Public free functions are thin wrappers.
+//!
+//! ## Lock discipline (invariant)
+//!
+//! **No method on `ConcurrencyRuntime` ever holds two locks simultaneously.**
+//! Every method: acquire one registry lock → extract Arcs/clones → drop lock → operate.
+//! This eliminates deadlocks by construction.
+//!
+//! ## Cleanup model
+//!
+//! - **Tasks:** `await_task()` removes from map (consume semantics). `try_await()` peeks.
+//!   Fire-and-forget tasks are reaped by `reap_stale_tasks()` on each `spawn_task()`/`after()`.
+//!   Stale = terminal state + older than 5 minutes.
+//! - **Channels:** `close()` = `remove()`. Dropping the Sender causes recv → Disconnected.
+//!   The Receiver lives in an Arc held by any active recv() caller.
+//! - **Schedules:** `cancel_schedule()` sets the AtomicBool. Thread exits on next check.
+//!
+//! ## Atomic ordering
+//!
+//! ALL atomics: `Release` for stores, `Acquire` for loads. No SeqCst, no Relaxed.
 //!
 //! ```ntnt
 //! import { channel, send, recv, try_recv, close, spawn, await_task,
@@ -25,20 +44,15 @@ use crate::error::IntentError;
 use crate::interpreter::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, LazyLock, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, IntentError>;
 
 // ============================================================
 // Serialized Values (thread-safe value transport)
 // ============================================================
-
-/// Global registry for channels
-static CHANNEL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, ChannelPair>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-static CHANNEL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Serialized value for thread-safe transmission.
 /// Only primitive and composite types that can be cloned.
@@ -154,265 +168,27 @@ impl SerializedValue {
 }
 
 // ============================================================
-// Channel Implementation
+// Cooperative Cancellation (thread-local)
 // ============================================================
 
-/// A channel pair (sender + receiver) using serialized values
-struct ChannelPair {
-    sender: mpsc::Sender<SerializedValue>,
-    receiver: Arc<Mutex<mpsc::Receiver<SerializedValue>>>,
-    closed: Arc<Mutex<bool>>,
+thread_local! {
+    /// Thread-local cancellation flag for the current spawned task.
+    /// Set when a task thread starts, checked at yield points.
+    static CURRENT_TASK_CANCELLED: std::cell::RefCell<Option<Arc<AtomicBool>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Create a channel value handle
-fn create_channel_value(id: u64) -> Value {
-    let mut ch = HashMap::new();
-    ch.insert("_channel_id".to_string(), Value::Int(id as i64));
-    ch.insert("type".to_string(), Value::String("Channel".to_string()));
-    Value::Map(ch)
+/// Set the cancellation flag for the current thread (used when a task starts running).
+fn set_current_task_cancelled(flag: Arc<AtomicBool>) {
+    CURRENT_TASK_CANCELLED.with(|f| {
+        *f.borrow_mut() = Some(flag);
+    });
 }
-
-/// Get channel ID from a channel value
-fn get_channel_id(ch: &Value) -> Result<u64> {
-    match ch {
-        Value::Map(map) => {
-            if let Some(Value::Int(id)) = map.get("_channel_id") {
-                Ok(*id as u64)
-            } else {
-                Err(IntentError::type_error("Expected a Channel".to_string()))
-            }
-        }
-        _ => Err(IntentError::type_error("Expected a Channel".to_string())),
-    }
-}
-
-fn concurrent_channel() -> Result<Value> {
-    let (tx, rx) = mpsc::channel();
-    let id = CHANNEL_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-
-    let pair = ChannelPair {
-        sender: tx,
-        receiver: Arc::new(Mutex::new(rx)),
-        closed: Arc::new(Mutex::new(false)),
-    };
-
-    if let Ok(mut registry) = CHANNEL_REGISTRY.lock() {
-        registry.insert(id, pair);
-    }
-
-    Ok(create_channel_value(id))
-}
-
-fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
-    let id = get_channel_id(ch)?;
-    let serialized = SerializedValue::from_value(value)?;
-
-    // Extract sender and closed flag, then drop registry lock before sending.
-    // This prevents blocking all channel operations if send ever blocks.
-    let (sender, closed) = {
-        let registry = CHANNEL_REGISTRY
-            .lock()
-            .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
-        if let Some(pair) = registry.get(&id) {
-            (pair.sender.clone(), Arc::clone(&pair.closed))
-        } else {
-            // Channel was closed/removed — send fails gracefully
-            return Ok(Value::Bool(false));
-        }
-    }; // registry lock dropped here
-
-    if *closed.lock().unwrap() {
-        return Ok(Value::Bool(false));
-    }
-    match sender.send(serialized) {
-        Ok(_) => Ok(Value::Bool(true)),
-        Err(_) => Ok(Value::Bool(false)),
-    }
-}
-
-/// Receive a value from a channel, blocking until one is available.
-///
-/// Note: channels are single-consumer — the receiver mutex is held for the
-/// full blocking duration, so only one active `recv()` caller per channel
-/// at a time. This matches Go's channel semantics.
-fn concurrent_recv(ch: &Value) -> Result<Value> {
-    let id = get_channel_id(ch)?;
-
-    // Cooperative cancellation check
-    check_cancellation()?;
-
-    let receiver = {
-        let registry = CHANNEL_REGISTRY
-            .lock()
-            .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
-        if let Some(pair) = registry.get(&id) {
-            Arc::clone(&pair.receiver)
-        } else {
-            return Err(IntentError::runtime_error("Invalid channel".to_string()));
-        }
-    };
-
-    let rx = receiver
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock receiver: {}", e)))?;
-
-    // Use recv_timeout in a loop to allow cancellation checks for spawned tasks
-    loop {
-        check_cancellation()?;
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(serialized) => return Ok(serialized.to_value()),
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(Value::Unit),
-        }
-    }
-}
-
-fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
-    // Clamp negative timeouts to 0 (instant check, like try_recv)
-    let timeout_ms = timeout_ms.max(0) as u64;
-    let id = get_channel_id(ch)?;
-
-    // Cooperative cancellation check
-    check_cancellation()?;
-
-    let receiver = {
-        let registry = CHANNEL_REGISTRY
-            .lock()
-            .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
-        if let Some(pair) = registry.get(&id) {
-            Arc::clone(&pair.receiver)
-        } else {
-            return Err(IntentError::runtime_error("Invalid channel".to_string()));
-        }
-    };
-
-    let rx = receiver
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock receiver: {}", e)))?;
-
-    // Loop in slices to allow cancellation checks (like recv does)
-    let mut remaining = timeout_ms;
-    loop {
-        check_cancellation()?;
-        let slice = remaining.min(100);
-        match rx.recv_timeout(Duration::from_millis(slice)) {
-            Ok(serialized) => return Ok(Value::some(serialized.to_value())),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                remaining = remaining.saturating_sub(slice);
-                if remaining == 0 {
-                    return Ok(Value::none());
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(Value::none()),
-        }
-    }
-}
-
-fn concurrent_try_recv(ch: &Value) -> Result<Value> {
-    let id = get_channel_id(ch)?;
-
-    let receiver = {
-        let registry = CHANNEL_REGISTRY
-            .lock()
-            .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
-        if let Some(pair) = registry.get(&id) {
-            Arc::clone(&pair.receiver)
-        } else {
-            return Err(IntentError::runtime_error("Invalid channel".to_string()));
-        }
-    };
-
-    let rx = receiver
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock receiver: {}", e)))?;
-
-    match rx.try_recv() {
-        Ok(serialized) => Ok(Value::some(serialized.to_value())),
-        Err(mpsc::TryRecvError::Empty) => Ok(Value::none()),
-        Err(mpsc::TryRecvError::Disconnected) => Ok(Value::none()),
-    }
-}
-
-fn concurrent_close(ch: &Value) -> Result<Value> {
-    let id = get_channel_id(ch)?;
-
-    let mut registry = CHANNEL_REGISTRY
-        .lock()
-        .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
-
-    if registry.contains_key(&id) {
-        // Remove from registry. This drops the Sender, which causes any
-        // blocking recv() to get Disconnected and return Unit (as documented).
-        // Receivers holding an Arc<Mutex<Receiver>> can still drain buffered
-        // messages — the Receiver lives in their Arc, not in the registry.
-        registry.remove(&id);
-        Ok(Value::Bool(true))
-    } else {
-        Ok(Value::Bool(false))
-    }
-}
-
-fn concurrent_sleep_ms(ms: i64) -> Result<Value> {
-    if ms > 0 {
-        // Sleep in small increments to allow cooperative cancellation
-        let total = ms as u64;
-        let mut slept = 0u64;
-        let increment = 50u64.min(total);
-        while slept < total {
-            check_cancellation()?;
-            let sleep_for = increment.min(total - slept);
-            thread::sleep(Duration::from_millis(sleep_for));
-            slept += sleep_for;
-        }
-    }
-    Ok(Value::Unit)
-}
-
-fn concurrent_thread_count() -> Result<Value> {
-    Ok(Value::Int(
-        thread::available_parallelism()
-            .map(|n| n.get() as i64)
-            .unwrap_or(1),
-    ))
-}
-
-// ============================================================
-// Task System - Structured Concurrency
-// ============================================================
-
-/// Task state representing the lifecycle of a spawned task
-#[derive(Debug, Clone)]
-pub enum TaskState {
-    /// Task has been created but not yet started
-    Pending,
-    /// Task is actively running
-    Running,
-    /// Task completed successfully with a result
-    Completed(SerializedValue),
-    /// Task failed with an error message
-    Failed(String),
-    /// Task was cancelled
-    Cancelled,
-}
-
-/// Internal task handle shared between the task registry and spawned threads
-pub struct TaskHandle {
-    /// Current state of the task
-    pub state: Arc<(Mutex<TaskState>, Condvar)>,
-    /// Cancellation flag — checked cooperatively by long-running operations
-    pub cancelled: Arc<AtomicBool>,
-}
-
-/// Global task registry
-static TASK_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, TaskHandle>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-static TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Check if the current task context is cancelled.
 /// Called from cooperative cancellation points (recv, sleep_ms, fetch).
 /// Returns Err if cancelled, Ok(()) if not.
 pub fn check_cancellation() -> Result<()> {
-    // Use thread-local to store the current task's cancellation flag
     CURRENT_TASK_CANCELLED.with(|flag| {
         if let Some(ref cancelled) = *flag.borrow() {
             if cancelled.load(Ordering::Acquire) {
@@ -423,20 +199,736 @@ pub fn check_cancellation() -> Result<()> {
     })
 }
 
-thread_local! {
-    /// Thread-local cancellation flag for the current spawned task
-    static CURRENT_TASK_CANCELLED: std::cell::RefCell<Option<Arc<AtomicBool>>> =
-        const { std::cell::RefCell::new(None) };
+// ============================================================
+// ConcurrencyRuntime — single owner of all concurrency state
+// ============================================================
+
+/// Task lifecycle state.
+#[derive(Debug, Clone)]
+pub enum TaskState {
+    Pending,
+    Running,
+    Completed(SerializedValue),
+    Failed(String),
+    Cancelled,
 }
 
-/// Set the cancellation flag for the current thread (used when a task starts running)
-fn set_current_task_cancelled(flag: Arc<AtomicBool>) {
-    CURRENT_TASK_CANCELLED.with(|f| {
-        *f.borrow_mut() = Some(flag);
-    });
+/// One entry per spawned task (spawn + after).
+struct TaskEntry {
+    state: Arc<(Mutex<TaskState>, Condvar)>,
+    cancelled: Arc<AtomicBool>,
+    created_at: Instant,
 }
 
-/// Create a Task value handle (represented as a Map with _task_id)
+/// One entry per channel.
+struct ChannelEntry {
+    sender: mpsc::Sender<SerializedValue>,
+    receiver: Arc<Mutex<mpsc::Receiver<SerializedValue>>>,
+}
+
+/// One entry per schedule.
+struct ScheduleEntry {
+    cancelled: Arc<AtomicBool>,
+}
+
+/// Single owner of all concurrency state. RAII cleanup.
+///
+/// ## Lock discipline (invariant — enforced by code review)
+///
+/// No method on this struct ever holds two of {tasks, channels, schedules} simultaneously.
+/// Pattern: lock → extract Arcs → drop lock → operate on Arcs.
+pub struct ConcurrencyRuntime {
+    /// Single monotonic ID counter for tasks, channels, and schedules.
+    /// No collisions because they live in separate HashMaps.
+    next_id: AtomicU64,
+
+    /// All spawned tasks (spawn + after).
+    tasks: Mutex<HashMap<u64, TaskEntry>>,
+
+    /// All channels.
+    channels: Mutex<HashMap<u64, ChannelEntry>>,
+
+    /// All schedules.
+    schedules: Mutex<HashMap<u64, ScheduleEntry>>,
+
+    /// Global shutdown flag — set by `shutdown()`, checked by schedule loops.
+    shutdown: AtomicBool,
+}
+
+/// Max age for stale task reaping (fire-and-forget tasks in terminal state).
+const STALE_TASK_AGE: Duration = Duration::from_secs(300); // 5 minutes
+
+impl ConcurrencyRuntime {
+    fn new() -> Self {
+        Self {
+            next_id: AtomicU64::new(1),
+            tasks: Mutex::new(HashMap::new()),
+            channels: Mutex::new(HashMap::new()),
+            schedules: Mutex::new(HashMap::new()),
+            shutdown: AtomicBool::new(false),
+        }
+    }
+
+    /// Allocate a fresh ID (used for tasks, channels, and schedules).
+    fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Release)
+    }
+
+    // --------------------------------------------------------
+    // Task methods
+    // --------------------------------------------------------
+
+    /// Spawn a function as a background task.
+    /// The function's captured variables are serialized (snapshot at spawn time).
+    /// The task runs on a new thread with its own Interpreter instance.
+    pub fn spawn_task(&self, func: &Value) -> Result<Value> {
+        // Extract function components
+        let (params, body, closure_bindings) = extract_function_for_task(func, "spawn")?;
+
+        // Validate: spawned functions must take no arguments
+        if !params.is_empty() {
+            return Err(IntentError::runtime_error(
+                "spawn() function must take no arguments (use closure capture for data)"
+                    .to_string(),
+            ));
+        }
+
+        // Reap stale completed tasks before inserting new ones
+        self.reap_stale_tasks();
+
+        let task_id = self.next_id();
+        let state = Arc::new((Mutex::new(TaskState::Pending), Condvar::new()));
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        // Insert into registry — lock, insert, drop.
+        {
+            let mut tasks = self.tasks.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock task registry: {}", e))
+            })?;
+            tasks.insert(
+                task_id,
+                TaskEntry {
+                    state: Arc::clone(&state),
+                    cancelled: Arc::clone(&cancelled),
+                    created_at: Instant::now(),
+                },
+            );
+        } // lock dropped
+
+        // Spawn on a new thread
+        let task_state = Arc::clone(&state);
+        let task_cancelled = Arc::clone(&cancelled);
+
+        thread::spawn(move || {
+            run_task_thread(task_state, task_cancelled, body, closure_bindings);
+        });
+
+        Ok(create_task_value(task_id))
+    }
+
+    /// Block until task completes. Consumes the task from the registry.
+    /// Returns Ok(value) on success, Err(message) on failure/cancellation.
+    pub fn await_task(&self, task: &Value) -> Result<Value> {
+        let id = get_task_id(task)?;
+
+        // Extract the state Arc, then drop the registry lock.
+        let state_arc = {
+            let tasks = self.tasks.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock task registry: {}", e))
+            })?;
+            if let Some(entry) = tasks.get(&id) {
+                Arc::clone(&entry.state)
+            } else {
+                return Err(IntentError::runtime_error(format!(
+                    "Invalid task (id={})",
+                    id
+                )));
+            }
+        }; // lock dropped
+
+        // Wait for task completion using condvar
+        let (lock, cvar) = &*state_arc;
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let result = loop {
+            match &*state {
+                TaskState::Completed(sv) => {
+                    break Ok(Value::ok(sv.to_value()));
+                }
+                TaskState::Failed(msg) => {
+                    break Ok(Value::err(Value::String(msg.clone())));
+                }
+                TaskState::Cancelled => {
+                    break Ok(Value::err(Value::String("Task cancelled".to_string())));
+                }
+                TaskState::Pending | TaskState::Running => {
+                    state = cvar.wait(state).unwrap_or_else(|e| e.into_inner());
+                }
+            }
+        };
+
+        // Consume: remove completed task from registry
+        drop(state); // release condvar lock first
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.remove(&id);
+        }
+
+        result
+    }
+
+    /// Non-blocking peek at task status. Does NOT consume from registry.
+    /// Returns None if still running, Some(Result) if done.
+    pub fn try_await_task(&self, task: &Value) -> Result<Value> {
+        let id = get_task_id(task)?;
+
+        let state_arc = {
+            let tasks = self.tasks.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock task registry: {}", e))
+            })?;
+            if let Some(entry) = tasks.get(&id) {
+                Arc::clone(&entry.state)
+            } else {
+                return Err(IntentError::runtime_error(format!(
+                    "Invalid task (id={})",
+                    id
+                )));
+            }
+        }; // lock dropped
+
+        let (lock, _cvar) = &*state_arc;
+        let state = lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        match &*state {
+            TaskState::Completed(sv) => Ok(Value::some(Value::ok(sv.to_value()))),
+            TaskState::Failed(msg) => Ok(Value::some(Value::err(Value::String(msg.clone())))),
+            TaskState::Cancelled => Ok(Value::some(Value::err(Value::String(
+                "Task cancelled".to_string(),
+            )))),
+            TaskState::Pending | TaskState::Running => Ok(Value::none()),
+        }
+    }
+
+    /// Set the cancellation flag. Cooperative — task checks at yield points.
+    pub fn cancel_task(&self, task: &Value) -> Result<Value> {
+        let id = get_task_id(task)?;
+
+        // Extract Arcs, drop lock, then operate.
+        let (cancelled, state_arc) = {
+            let tasks = self.tasks.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock task registry: {}", e))
+            })?;
+            if let Some(entry) = tasks.get(&id) {
+                (Arc::clone(&entry.cancelled), Arc::clone(&entry.state))
+            } else {
+                return Ok(Value::Bool(false));
+            }
+        }; // lock dropped
+
+        cancelled.store(true, Ordering::Release);
+
+        // Notify condvar so await_task can re-evaluate
+        let (_lock, cvar) = &*state_arc;
+        cvar.notify_all();
+
+        Ok(Value::Bool(true))
+    }
+
+    /// Reap tasks in terminal state older than STALE_TASK_AGE.
+    /// Called internally by spawn_task() and after() to bound registry size.
+    fn reap_stale_tasks(&self) {
+        let now = Instant::now();
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.retain(|_id, entry| {
+                // Keep if not stale
+                if now.duration_since(entry.created_at) < STALE_TASK_AGE {
+                    return true;
+                }
+                // Keep if not in terminal state
+                let (lock, _) = &*entry.state;
+                if let Ok(state) = lock.try_lock() {
+                    !matches!(
+                        *state,
+                        TaskState::Completed(_) | TaskState::Failed(_) | TaskState::Cancelled
+                    )
+                } else {
+                    true // keep if we can't check (lock contended)
+                }
+            });
+        }
+    }
+
+    // --------------------------------------------------------
+    // Channel methods
+    // --------------------------------------------------------
+
+    /// Create a new unbounded channel.
+    pub fn create_channel(&self) -> Result<Value> {
+        let (tx, rx) = mpsc::channel();
+        let id = self.next_id();
+
+        {
+            let mut channels = self.channels.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock channel registry: {}", e))
+            })?;
+            channels.insert(
+                id,
+                ChannelEntry {
+                    sender: tx,
+                    receiver: Arc::new(Mutex::new(rx)),
+                },
+            );
+        } // lock dropped
+
+        Ok(create_channel_value(id))
+    }
+
+    /// Send a value through a channel. Returns false if channel is closed/removed.
+    pub fn send(&self, ch: &Value, value: &Value) -> Result<Value> {
+        let id = get_channel_id(ch)?;
+        let serialized = SerializedValue::from_value(value)?;
+
+        // Extract sender clone, drop registry lock, then send.
+        let sender = {
+            let channels = self.channels.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock channel registry: {}", e))
+            })?;
+            if let Some(entry) = channels.get(&id) {
+                entry.sender.clone()
+            } else {
+                // Channel was closed/removed — send fails gracefully
+                return Ok(Value::Bool(false));
+            }
+        }; // lock dropped
+
+        match sender.send(serialized) {
+            Ok(_) => Ok(Value::Bool(true)),
+            Err(_) => Ok(Value::Bool(false)),
+        }
+    }
+
+    /// Receive a value, blocking until available.
+    ///
+    /// Note: channels are single-consumer — the receiver mutex is held for the
+    /// full blocking duration, so only one active `recv()` caller per channel
+    /// at a time. This matches Go's channel semantics.
+    pub fn recv(&self, ch: &Value) -> Result<Value> {
+        let id = get_channel_id(ch)?;
+
+        check_cancellation()?;
+
+        // Extract receiver Arc, drop registry lock.
+        let receiver = {
+            let channels = self.channels.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock channel registry: {}", e))
+            })?;
+            if let Some(entry) = channels.get(&id) {
+                Arc::clone(&entry.receiver)
+            } else {
+                return Err(IntentError::runtime_error("Invalid channel".to_string()));
+            }
+        }; // lock dropped
+
+        let rx = receiver
+            .lock()
+            .map_err(|e| IntentError::runtime_error(format!("Failed to lock receiver: {}", e)))?;
+
+        // Loop with timeout slices to allow cooperative cancellation
+        loop {
+            check_cancellation()?;
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(serialized) => return Ok(serialized.to_value()),
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(Value::Unit),
+            }
+        }
+    }
+
+    /// Receive with timeout. Returns None on timeout or disconnect.
+    pub fn recv_timeout(&self, ch: &Value, timeout_ms: i64) -> Result<Value> {
+        let timeout_ms = timeout_ms.max(0) as u64;
+        let id = get_channel_id(ch)?;
+
+        check_cancellation()?;
+
+        let receiver = {
+            let channels = self.channels.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock channel registry: {}", e))
+            })?;
+            if let Some(entry) = channels.get(&id) {
+                Arc::clone(&entry.receiver)
+            } else {
+                return Err(IntentError::runtime_error("Invalid channel".to_string()));
+            }
+        }; // lock dropped
+
+        let rx = receiver
+            .lock()
+            .map_err(|e| IntentError::runtime_error(format!("Failed to lock receiver: {}", e)))?;
+
+        let mut remaining = timeout_ms;
+        loop {
+            check_cancellation()?;
+            let slice = remaining.min(100);
+            match rx.recv_timeout(Duration::from_millis(slice)) {
+                Ok(serialized) => return Ok(Value::some(serialized.to_value())),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    remaining = remaining.saturating_sub(slice);
+                    if remaining == 0 {
+                        return Ok(Value::none());
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(Value::none()),
+            }
+        }
+    }
+
+    /// Non-blocking receive. Returns None if empty.
+    pub fn try_recv(&self, ch: &Value) -> Result<Value> {
+        let id = get_channel_id(ch)?;
+
+        let receiver = {
+            let channels = self.channels.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock channel registry: {}", e))
+            })?;
+            if let Some(entry) = channels.get(&id) {
+                Arc::clone(&entry.receiver)
+            } else {
+                return Err(IntentError::runtime_error("Invalid channel".to_string()));
+            }
+        }; // lock dropped
+
+        let rx = receiver
+            .lock()
+            .map_err(|e| IntentError::runtime_error(format!("Failed to lock receiver: {}", e)))?;
+
+        match rx.try_recv() {
+            Ok(serialized) => Ok(Value::some(serialized.to_value())),
+            Err(mpsc::TryRecvError::Empty) => Ok(Value::none()),
+            Err(mpsc::TryRecvError::Disconnected) => Ok(Value::none()),
+        }
+    }
+
+    /// Close a channel by removing it from the map.
+    /// Dropping the Sender causes recv → Disconnected. The Receiver lives in
+    /// its Arc, so active recv() callers can still drain buffered messages.
+    pub fn close_channel(&self, ch: &Value) -> Result<Value> {
+        let id = get_channel_id(ch)?;
+
+        let mut channels = self.channels.lock().map_err(|e| {
+            IntentError::runtime_error(format!("Failed to lock channel registry: {}", e))
+        })?;
+
+        if channels.remove(&id).is_some() {
+            Ok(Value::Bool(true))
+        } else {
+            Ok(Value::Bool(false))
+        }
+    }
+
+    // --------------------------------------------------------
+    // Schedule methods
+    // --------------------------------------------------------
+
+    /// Schedule a function to run at a fixed interval.
+    /// Overlap prevention: skips tick if previous execution still running.
+    /// catch_unwind wraps every tick.
+    pub fn schedule(
+        &self,
+        interval_str: &str,
+        body: Block,
+        closure_bindings: HashMap<String, SerializedValue>,
+    ) -> Result<Value> {
+        let duration = parse_interval(interval_str)?;
+
+        if duration.is_zero() {
+            return Err(IntentError::runtime_error(
+                "schedule() interval must be greater than zero".to_string(),
+            ));
+        }
+
+        let schedule_id = self.next_id();
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        {
+            let mut schedules = self.schedules.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock schedule registry: {}", e))
+            })?;
+            schedules.insert(
+                schedule_id,
+                ScheduleEntry {
+                    cancelled: Arc::clone(&cancelled),
+                },
+            );
+        } // lock dropped
+
+        let schedule_cancelled = Arc::clone(&cancelled);
+
+        thread::spawn(move || {
+            let executing = Arc::new(AtomicBool::new(false));
+
+            loop {
+                // Sleep in 50ms slices for cancellation responsiveness
+                let total_ms = duration.as_millis() as u64;
+                let mut slept = 0u64;
+                while slept < total_ms {
+                    if schedule_cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let slice = 50u64.min(total_ms - slept);
+                    thread::sleep(Duration::from_millis(slice));
+                    slept += slice;
+                }
+
+                if schedule_cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+
+                // Overlap prevention
+                if executing.load(Ordering::Acquire) {
+                    eprintln!("[schedule] Skipping tick — previous execution still running");
+                    continue;
+                }
+
+                executing.store(true, Ordering::Release);
+                let exec_executing = Arc::clone(&executing);
+                let exec_bindings = closure_bindings.clone();
+                let exec_body = body.clone();
+                let exec_cancelled = Arc::clone(&schedule_cancelled);
+
+                thread::spawn(move || {
+                    set_current_task_cancelled(exec_cancelled);
+
+                    let mut interpreter = crate::interpreter::Interpreter::new();
+                    interpreter.define_all_stdlib_as_globals();
+                    for (name, sv) in &exec_bindings {
+                        interpreter.define_variable(name.clone(), sv.to_value());
+                    }
+
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        interpreter.eval_block(&exec_body)
+                    }));
+
+                    match result {
+                        Ok(Err(e)) => eprintln!("[schedule] Error: {}", e),
+                        Err(panic) => {
+                            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                                s.to_string()
+                            } else if let Some(s) = panic.downcast_ref::<String>() {
+                                s.clone()
+                            } else {
+                                "unknown panic".to_string()
+                            };
+                            eprintln!("[schedule] Panic: {}", msg);
+                        }
+                        Ok(Ok(_)) => {}
+                    }
+
+                    exec_executing.store(false, Ordering::Release);
+                });
+            }
+        });
+
+        let mut sched = HashMap::new();
+        sched.insert("_schedule_id".to_string(), Value::Int(schedule_id as i64));
+        sched.insert("type".to_string(), Value::String("Schedule".to_string()));
+        Ok(Value::Map(sched))
+    }
+
+    /// Cancel a schedule. Returns true if found.
+    pub fn cancel_schedule(&self, schedule: &Value) -> Result<Value> {
+        let id = get_schedule_id(schedule)?;
+
+        let cancelled = {
+            let schedules = self.schedules.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock schedule registry: {}", e))
+            })?;
+            if let Some(entry) = schedules.get(&id) {
+                Arc::clone(&entry.cancelled)
+            } else {
+                return Ok(Value::Bool(false));
+            }
+        }; // lock dropped
+
+        cancelled.store(true, Ordering::Release);
+        Ok(Value::Bool(true))
+    }
+
+    // --------------------------------------------------------
+    // After (delayed one-shot task)
+    // --------------------------------------------------------
+
+    /// Execute a function once after a delay (ms).
+    /// Uses the task system — it's spawn + sleep.
+    pub fn after(
+        &self,
+        delay_ms: i64,
+        body: Block,
+        closure_bindings: HashMap<String, SerializedValue>,
+    ) -> Result<Value> {
+        self.reap_stale_tasks();
+
+        let task_id = self.next_id();
+        let state = Arc::new((Mutex::new(TaskState::Pending), Condvar::new()));
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        {
+            let mut tasks = self.tasks.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock task registry: {}", e))
+            })?;
+            tasks.insert(
+                task_id,
+                TaskEntry {
+                    state: Arc::clone(&state),
+                    cancelled: Arc::clone(&cancelled),
+                    created_at: Instant::now(),
+                },
+            );
+        } // lock dropped
+
+        let task_state = Arc::clone(&state);
+        let task_cancelled = Arc::clone(&cancelled);
+
+        thread::spawn(move || {
+            set_current_task_cancelled(Arc::clone(&task_cancelled));
+
+            // Update state to Running
+            {
+                let (lock, cvar) = &*task_state;
+                let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+                *s = TaskState::Running;
+                cvar.notify_all();
+            }
+
+            // Sleep for the delay in 50ms cancellation-aware slices
+            if delay_ms > 0 {
+                let total = delay_ms as u64;
+                let mut slept = 0u64;
+                let increment = 50u64.min(total);
+                while slept < total {
+                    if task_cancelled.load(Ordering::Acquire) {
+                        let (lock, cvar) = &*task_state;
+                        let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        *s = TaskState::Cancelled;
+                        cvar.notify_all();
+                        return;
+                    }
+                    let sleep_for = increment.min(total - slept);
+                    thread::sleep(Duration::from_millis(sleep_for));
+                    slept += sleep_for;
+                }
+            }
+
+            // Check cancellation after sleep
+            if task_cancelled.load(Ordering::Acquire) {
+                let (lock, cvar) = &*task_state;
+                let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+                *s = TaskState::Cancelled;
+                cvar.notify_all();
+                return;
+            }
+
+            // Execute with catch_unwind
+            let mut interpreter = crate::interpreter::Interpreter::new();
+            interpreter.define_all_stdlib_as_globals();
+            for (name, sv) in &closure_bindings {
+                interpreter.define_variable(name.clone(), sv.to_value());
+            }
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                interpreter.eval_block(&body)
+            }));
+
+            let (lock, cvar) = &*task_state;
+            let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if task_cancelled.load(Ordering::Acquire) {
+                *s = TaskState::Cancelled;
+            } else {
+                match result {
+                    Ok(Ok(value)) => {
+                        let final_value = match value {
+                            Value::Return(inner) => *inner,
+                            other => other,
+                        };
+                        match SerializedValue::from_value(&final_value) {
+                            Ok(sv) => *s = TaskState::Completed(sv),
+                            Err(e) => {
+                                *s = TaskState::Failed(format!("Cannot serialize result: {}", e))
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        *s = TaskState::Failed(format!("{}", e));
+                    }
+                    Err(panic) => {
+                        let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        *s = TaskState::Failed(format!("panic: {}", msg));
+                    }
+                }
+            }
+            cvar.notify_all();
+        });
+
+        Ok(create_task_value(task_id))
+    }
+
+    // --------------------------------------------------------
+    // Shutdown
+    // --------------------------------------------------------
+
+    /// Cancel everything: all tasks, all schedules. Called from interpreter shutdown.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+
+        // Cancel all tasks — extract Arcs first, drop lock, then operate.
+        let task_handles: Vec<(Arc<AtomicBool>, Arc<(Mutex<TaskState>, Condvar)>)> = {
+            if let Ok(tasks) = self.tasks.lock() {
+                tasks
+                    .iter()
+                    .map(|(_id, entry)| (Arc::clone(&entry.cancelled), Arc::clone(&entry.state)))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        };
+        for (cancelled, state_arc) in task_handles {
+            cancelled.store(true, Ordering::Release);
+            let (_lock, cvar) = &*state_arc;
+            cvar.notify_all();
+        }
+
+        // Cancel all schedules — extract flags first, drop lock, then operate.
+        let schedule_flags: Vec<Arc<AtomicBool>> = {
+            if let Ok(schedules) = self.schedules.lock() {
+                schedules
+                    .iter()
+                    .map(|(_id, entry)| Arc::clone(&entry.cancelled))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        };
+        for flag in schedule_flags {
+            flag.store(true, Ordering::Release);
+        }
+    }
+}
+
+// ============================================================
+// Static runtime instance
+// ============================================================
+
+static RUNTIME: LazyLock<ConcurrencyRuntime> = LazyLock::new(ConcurrencyRuntime::new);
+
+// ============================================================
+// Helper functions (pure, no state)
+// ============================================================
+
+/// Create a Task value handle (represented as a Map with _task_id).
 fn create_task_value(id: u64) -> Value {
     let mut task = HashMap::new();
     task.insert("_task_id".to_string(), Value::Int(id as i64));
@@ -444,7 +936,7 @@ fn create_task_value(id: u64) -> Value {
     Value::Map(task)
 }
 
-/// Get task ID from a Task value
+/// Get task ID from a Task value.
 fn get_task_id(task: &Value) -> Result<u64> {
     match task {
         Value::Map(map) => {
@@ -458,27 +950,64 @@ fn get_task_id(task: &Value) -> Result<u64> {
     }
 }
 
-/// Spawn a function as a background task.
-/// The function's captured variables are serialized (snapshot at spawn time).
-/// The task runs on a new thread with its own Interpreter instance.
-///
-/// Arguments: the function Value (must be Value::Function)
-/// Returns: Task handle value
-pub fn concurrent_spawn(func: &Value) -> Result<Value> {
-    // Extract function components
-    let (params, body, closure_bindings) = match func {
+/// Create a Channel value handle.
+fn create_channel_value(id: u64) -> Value {
+    let mut ch = HashMap::new();
+    ch.insert("_channel_id".to_string(), Value::Int(id as i64));
+    ch.insert("type".to_string(), Value::String("Channel".to_string()));
+    Value::Map(ch)
+}
+
+/// Get channel ID from a channel value.
+fn get_channel_id(ch: &Value) -> Result<u64> {
+    match ch {
+        Value::Map(map) => {
+            if let Some(Value::Int(id)) = map.get("_channel_id") {
+                Ok(*id as u64)
+            } else {
+                Err(IntentError::type_error("Expected a Channel".to_string()))
+            }
+        }
+        _ => Err(IntentError::type_error("Expected a Channel".to_string())),
+    }
+}
+
+/// Get schedule ID from a schedule handle value.
+fn get_schedule_id(schedule: &Value) -> Result<u64> {
+    match schedule {
+        Value::Map(map) => {
+            if let Some(Value::Int(id)) = map.get("_schedule_id") {
+                Ok(*id as u64)
+            } else {
+                Err(IntentError::type_error(
+                    "Expected a Schedule handle".to_string(),
+                ))
+            }
+        }
+        _ => Err(IntentError::type_error(
+            "Expected a Schedule handle".to_string(),
+        )),
+    }
+}
+
+/// Extract function params, body, and serialized closure bindings for task spawning.
+/// Used by `spawn_task`. Shared logic for extracting and serializing a function value.
+fn extract_function_for_task(
+    func: &Value,
+    caller: &str,
+) -> Result<(
+    Vec<crate::ast::Parameter>,
+    Block,
+    HashMap<String, SerializedValue>,
+)> {
+    match func {
         Value::Function {
             params,
             body,
             closure,
             ..
         } => {
-            // Snapshot all variables from the closure environment chain
             let bindings = closure.borrow().all_bindings();
-            // Serialize only the serializable bindings (skip functions, native fns, etc.)
-            // Only warn for user-defined non-serializable values, not stdlib functions
-            // which are expected to be non-serializable (they'll be available via
-            // define_all_stdlib_as_globals in the spawned interpreter).
             let mut serialized_bindings = HashMap::new();
             let mut user_skipped = Vec::new();
             for (name, value) in &bindings {
@@ -487,8 +1016,8 @@ pub fn concurrent_spawn(func: &Value) -> Result<Value> {
                         serialized_bindings.insert(name.clone(), sv);
                     }
                     Err(_) => {
-                        // Only warn for user-defined functions, not stdlib/native functions
-                        // which will be available through the spawned interpreter's builtins
+                        // Only warn for user-defined non-serializable values,
+                        // not stdlib/native functions (available via builtins).
                         if !matches!(value, Value::NativeFunction { .. }) {
                             user_skipped.push(name.clone());
                         }
@@ -497,263 +1026,216 @@ pub fn concurrent_spawn(func: &Value) -> Result<Value> {
             }
             if !user_skipped.is_empty() {
                 eprintln!(
-                    "[spawn] Warning: cannot capture non-serializable values across tasks: {}. \
+                    "[{}] Warning: cannot capture non-serializable values across tasks: {}. \
                      These variables will not be available in the spawned task. \
                      Only primitive types (Int, Float, String, Bool, Array, Map) can cross task boundaries.",
+                    caller,
                     user_skipped.join(", ")
                 );
             }
-            (params.clone(), body.clone(), serialized_bindings)
+            Ok((params.clone(), body.clone(), serialized_bindings))
         }
-        _ => {
-            return Err(IntentError::type_error(
-                "spawn() requires a function argument".to_string(),
-            ));
-        }
-    };
-
-    // Validate: spawned functions must take no arguments (including default params)
-    if !params.is_empty() {
-        return Err(IntentError::runtime_error(
-            "spawn() function must take no arguments (use closure capture for data)".to_string(),
-        ));
+        _ => Err(IntentError::type_error(format!(
+            "{}() requires a function argument",
+            caller
+        ))),
     }
+}
 
-    // Prune completed/failed/cancelled tasks to prevent registry leaks from fire-and-forget tasks
-    prune_completed_tasks();
+/// Common task thread body: set cancellation context, transition Running → terminal.
+/// Wraps eval_block in catch_unwind.
+fn run_task_thread(
+    task_state: Arc<(Mutex<TaskState>, Condvar)>,
+    task_cancelled: Arc<AtomicBool>,
+    body: Block,
+    closure_bindings: HashMap<String, SerializedValue>,
+) {
+    set_current_task_cancelled(Arc::clone(&task_cancelled));
 
-    // Create task handle
-    let task_id = TASK_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let state = Arc::new((Mutex::new(TaskState::Pending), Condvar::new()));
-    let cancelled = Arc::new(AtomicBool::new(false));
-
-    let handle = TaskHandle {
-        state: Arc::clone(&state),
-        cancelled: Arc::clone(&cancelled),
-    };
-
-    // Register in global task registry
+    // Transition to Running
     {
-        let mut registry = TASK_REGISTRY.lock().map_err(|e| {
-            IntentError::runtime_error(format!("Failed to lock task registry: {}", e))
-        })?;
-        registry.insert(task_id, handle);
-    }
-
-    // Spawn the task on a new thread
-    let task_state = Arc::clone(&state);
-    let task_cancelled = Arc::clone(&cancelled);
-
-    thread::spawn(move || {
-        // Set up cancellation context for this thread
-        set_current_task_cancelled(Arc::clone(&task_cancelled));
-
-        // Update state to Running
-        {
-            let (lock, cvar) = &*task_state;
-            let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-            *state = TaskState::Running;
-            cvar.notify_all();
-        }
-
-        // Check cancellation before starting
-        if task_cancelled.load(Ordering::Acquire) {
-            let (lock, cvar) = &*task_state;
-            let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-            *state = TaskState::Cancelled;
-            cvar.notify_all();
-            return;
-        }
-
-        // Create a new Interpreter for this task with all stdlib available
-        let mut interpreter = crate::interpreter::Interpreter::new();
-        interpreter.define_all_stdlib_as_globals();
-
-        // Inject captured variables into the interpreter's environment
-        // (these override any stdlib names that conflict, which is correct
-        // since the user's captures take precedence)
-        for (name, sv) in &closure_bindings {
-            interpreter.define_variable(name.clone(), sv.to_value());
-        }
-
-        // Execute the function body, catching panics to prevent mutex poisoning
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            interpreter.eval_block(&body)
-        }));
-
-        // Update task state with result
         let (lock, cvar) = &*task_state;
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-
-        if task_cancelled.load(Ordering::Acquire) {
-            *state = TaskState::Cancelled;
-        } else {
-            match result {
-                Ok(Ok(value)) => {
-                    // Handle Return values (unwrap the inner value)
-                    let final_value = match value {
-                        Value::Return(inner) => *inner,
-                        other => other,
-                    };
-                    match SerializedValue::from_value(&final_value) {
-                        Ok(sv) => *state = TaskState::Completed(sv),
-                        Err(e) => {
-                            *state = TaskState::Failed(format!("Cannot serialize result: {}", e))
-                        }
-                    }
-                }
-                Ok(Err(e)) => {
-                    *state = TaskState::Failed(format!("{}", e));
-                }
-                Err(panic_info) => {
-                    let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                        format!("Task panicked: {}", s)
-                    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        format!("Task panicked: {}", s)
-                    } else {
-                        "Task panicked (unknown cause)".to_string()
-                    };
-                    *state = TaskState::Failed(msg);
-                }
-            }
-        }
-
+        *state = TaskState::Running;
         cvar.notify_all();
-    });
+    }
 
-    Ok(create_task_value(task_id))
-}
+    // Check cancellation before starting
+    if task_cancelled.load(Ordering::Acquire) {
+        let (lock, cvar) = &*task_state;
+        let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+        *state = TaskState::Cancelled;
+        cvar.notify_all();
+        return;
+    }
 
-/// await_task(task) -> Result
-/// Blocks until the task completes. Returns Ok(value) or Err(error_string).
-pub fn concurrent_await_task(task: &Value) -> Result<Value> {
-    let id = get_task_id(task)?;
+    // Create interpreter with all stdlib
+    let mut interpreter = crate::interpreter::Interpreter::new();
+    interpreter.define_all_stdlib_as_globals();
+    for (name, sv) in &closure_bindings {
+        interpreter.define_variable(name.clone(), sv.to_value());
+    }
 
-    let state_arc = {
-        let registry = TASK_REGISTRY.lock().map_err(|e| {
-            IntentError::runtime_error(format!("Failed to lock task registry: {}", e))
-        })?;
-        if let Some(handle) = registry.get(&id) {
-            Arc::clone(&handle.state)
-        } else {
-            return Err(IntentError::runtime_error(format!(
-                "Invalid task (id={})",
-                id
-            )));
-        }
-    };
+    // Execute with catch_unwind — panics don't poison shared state
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        interpreter.eval_block(&body)
+    }));
 
-    // Wait for task completion using condvar
-    // Handle PoisonError gracefully — if the mutex was poisoned (e.g., a thread panicked
-    // while holding it), recover the inner data rather than propagating the panic.
-    let (lock, cvar) = &*state_arc;
+    // Transition to terminal state
+    let (lock, cvar) = &*task_state;
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let result = loop {
-        match &*state {
-            TaskState::Completed(sv) => {
-                break Ok(Value::ok(sv.to_value()));
+
+    if task_cancelled.load(Ordering::Acquire) {
+        *state = TaskState::Cancelled;
+    } else {
+        match result {
+            Ok(Ok(value)) => {
+                let final_value = match value {
+                    Value::Return(inner) => *inner,
+                    other => other,
+                };
+                match SerializedValue::from_value(&final_value) {
+                    Ok(sv) => *state = TaskState::Completed(sv),
+                    Err(e) => *state = TaskState::Failed(format!("Cannot serialize result: {}", e)),
+                }
             }
-            TaskState::Failed(msg) => {
-                break Ok(Value::err(Value::String(msg.clone())));
+            Ok(Err(e)) => {
+                *state = TaskState::Failed(format!("{}", e));
             }
-            TaskState::Cancelled => {
-                break Ok(Value::err(Value::String("Task cancelled".to_string())));
-            }
-            TaskState::Pending | TaskState::Running => {
-                // Wait for state change, handling poisoned mutex
-                state = cvar.wait(state).unwrap_or_else(|e| e.into_inner());
+            Err(panic_info) => {
+                let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                    format!("Task panicked: {}", s)
+                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    format!("Task panicked: {}", s)
+                } else {
+                    "Task panicked (unknown cause)".to_string()
+                };
+                *state = TaskState::Failed(msg);
             }
         }
-    };
-
-    // Clean up: remove completed task from registry to prevent memory leaks
-    drop(state); // release the condvar lock first
-    if let Ok(mut registry) = TASK_REGISTRY.lock() {
-        registry.remove(&id);
     }
 
-    result
-}
-
-/// try_await(task) -> Option<Result>
-/// Non-blocking peek at task status. Returns None if still running, Some(Result) if done.
-/// Unlike `await_task`, this does NOT consume the task from the registry — it's a peek,
-/// not a "I'm done with this task" call. Only `await_task` removes from the registry.
-pub fn concurrent_try_await(task: &Value) -> Result<Value> {
-    let id = get_task_id(task)?;
-
-    let state_arc = {
-        let registry = TASK_REGISTRY.lock().map_err(|e| {
-            IntentError::runtime_error(format!("Failed to lock task registry: {}", e))
-        })?;
-        if let Some(handle) = registry.get(&id) {
-            Arc::clone(&handle.state)
-        } else {
-            return Err(IntentError::runtime_error(format!(
-                "Invalid task (id={})",
-                id
-            )));
-        }
-    };
-
-    let (lock, _cvar) = &*state_arc;
-    let state = lock.lock().unwrap_or_else(|e| e.into_inner());
-
-    match &*state {
-        TaskState::Completed(sv) => Ok(Value::some(Value::ok(sv.to_value()))),
-        TaskState::Failed(msg) => Ok(Value::some(Value::err(Value::String(msg.clone())))),
-        TaskState::Cancelled => Ok(Value::some(Value::err(Value::String(
-            "Task cancelled".to_string(),
-        )))),
-        TaskState::Pending | TaskState::Running => Ok(Value::none()),
-    }
-}
-
-/// cancel_task(task) -> Bool
-/// Sets the cancellation flag on a task. Cancellation is cooperative — the task
-/// thread itself transitions the state to Cancelled when it checks the flag at a
-/// yield point. This is true cooperative cancellation: await_task blocks until the
-/// task actually stops.
-pub fn concurrent_cancel_task(task: &Value) -> Result<Value> {
-    let id = get_task_id(task)?;
-
-    // Extract the Arcs from the registry, then drop the registry lock before
-    // acquiring the state lock. This prevents potential deadlock from nested locks.
-    let (cancelled, state_arc) = {
-        let registry = TASK_REGISTRY.lock().map_err(|e| {
-            IntentError::runtime_error(format!("Failed to lock task registry: {}", e))
-        })?;
-        if let Some(handle) = registry.get(&id) {
-            (Arc::clone(&handle.cancelled), Arc::clone(&handle.state))
-        } else {
-            return Ok(Value::Bool(false));
-        }
-    }; // registry lock dropped here
-
-    // Set the cancellation flag — the task thread will check this at its next yield point
-    cancelled.store(true, Ordering::Release);
-
-    // Notify the condvar so await_task can re-evaluate
-    let (_lock, cvar) = &*state_arc;
     cvar.notify_all();
-
-    Ok(Value::Bool(true))
 }
 
 // ============================================================
-// Schedule System - Periodic Task Execution
+// Public free functions — thin wrappers around RUNTIME
 // ============================================================
 
-/// Global schedule registry
-static SCHEDULE_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, ScheduleHandle>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
-static SCHEDULE_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-/// Handle for a scheduled task
-struct ScheduleHandle {
-    /// Cancellation flag
-    cancelled: Arc<AtomicBool>,
+/// Create a new channel.
+pub fn concurrent_channel() -> Result<Value> {
+    RUNTIME.create_channel()
 }
+
+/// Send a value through a channel.
+pub fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
+    RUNTIME.send(ch, value)
+}
+
+/// Receive a value, blocking.
+pub fn concurrent_recv(ch: &Value) -> Result<Value> {
+    RUNTIME.recv(ch)
+}
+
+/// Receive with timeout.
+pub fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
+    RUNTIME.recv_timeout(ch, timeout_ms)
+}
+
+/// Non-blocking receive.
+pub fn concurrent_try_recv(ch: &Value) -> Result<Value> {
+    RUNTIME.try_recv(ch)
+}
+
+/// Close a channel.
+pub fn concurrent_close(ch: &Value) -> Result<Value> {
+    RUNTIME.close_channel(ch)
+}
+
+/// Sleep with cooperative cancellation.
+fn concurrent_sleep_ms(ms: i64) -> Result<Value> {
+    if ms > 0 {
+        let total = ms as u64;
+        let mut slept = 0u64;
+        let increment = 50u64.min(total);
+        while slept < total {
+            check_cancellation()?;
+            let sleep_for = increment.min(total - slept);
+            thread::sleep(Duration::from_millis(sleep_for));
+            slept += sleep_for;
+        }
+    }
+    Ok(Value::Unit)
+}
+
+/// Get available thread count.
+fn concurrent_thread_count() -> Result<Value> {
+    Ok(Value::Int(
+        thread::available_parallelism()
+            .map(|n| n.get() as i64)
+            .unwrap_or(1),
+    ))
+}
+
+/// Spawn a background task.
+pub fn concurrent_spawn(func: &Value) -> Result<Value> {
+    RUNTIME.spawn_task(func)
+}
+
+/// Block until task completes (consume semantics).
+pub fn concurrent_await_task(task: &Value) -> Result<Value> {
+    RUNTIME.await_task(task)
+}
+
+/// Non-blocking peek at task status.
+pub fn concurrent_try_await(task: &Value) -> Result<Value> {
+    RUNTIME.try_await_task(task)
+}
+
+/// Cancel a task cooperatively.
+pub fn concurrent_cancel_task(task: &Value) -> Result<Value> {
+    RUNTIME.cancel_task(task)
+}
+
+/// Schedule a periodic function.
+pub fn concurrent_schedule(
+    interval_str: &str,
+    body: Block,
+    closure_bindings: HashMap<String, SerializedValue>,
+) -> Result<Value> {
+    RUNTIME.schedule(interval_str, body, closure_bindings)
+}
+
+/// Execute a function once after a delay.
+pub fn concurrent_after(
+    delay_ms: i64,
+    body: Block,
+    closure_bindings: HashMap<String, SerializedValue>,
+) -> Result<Value> {
+    RUNTIME.after(delay_ms, body, closure_bindings)
+}
+
+/// Cancel a schedule.
+pub fn concurrent_cancel_schedule(schedule: &Value) -> Result<Value> {
+    RUNTIME.cancel_schedule(schedule)
+}
+
+/// Cancel all tasks (called from interpreter shutdown).
+pub fn cancel_all_tasks() {
+    RUNTIME.shutdown();
+}
+
+/// Cancel all schedules (called from interpreter shutdown).
+/// Now a no-op since `shutdown()` cancels everything. Kept for API compatibility.
+pub fn cancel_all_schedules() {
+    // shutdown() already cancelled all schedules. This is kept so callers
+    // don't need to change. The first call to cancel_all_tasks() via
+    // RUNTIME.shutdown() handles everything.
+}
+
+// ============================================================
+// Pure functions — interval parsing
+// ============================================================
 
 /// Parse an interval string like "every 5s", "every 2m", "every 1h"
 pub fn parse_interval(interval: &str) -> Result<Duration> {
@@ -761,7 +1243,6 @@ pub fn parse_interval(interval: &str) -> Result<Duration> {
     let s = s.strip_prefix("every ").unwrap_or(&s);
     let s = s.trim();
 
-    // Try to parse as "Nms", "Ns", "Nm", "Nh" (check "ms" before "s")
     if let Some(num_str) = s.strip_suffix("ms") {
         let n: u64 = num_str
             .trim()
@@ -792,339 +1273,6 @@ pub fn parse_interval(interval: &str) -> Result<Duration> {
             interval
         )))
     }
-}
-
-/// Schedule a function to run at a fixed interval.
-/// Returns a schedule ID. Overlap prevention: skips tick if previous execution still running.
-pub fn concurrent_schedule(
-    interval_str: &str,
-    body: Block,
-    closure_bindings: HashMap<String, SerializedValue>,
-) -> Result<Value> {
-    let duration = parse_interval(interval_str)?;
-
-    // Reject zero-duration intervals — would cause CPU spin + thread storm
-    if duration.is_zero() {
-        return Err(IntentError::runtime_error(
-            "schedule() interval must be greater than zero".to_string(),
-        ));
-    }
-
-    let schedule_id = SCHEDULE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let cancelled = Arc::new(AtomicBool::new(false));
-
-    let handle = ScheduleHandle {
-        cancelled: Arc::clone(&cancelled),
-    };
-
-    {
-        let mut registry = SCHEDULE_REGISTRY.lock().map_err(|e| {
-            IntentError::runtime_error(format!("Failed to lock schedule registry: {}", e))
-        })?;
-        registry.insert(schedule_id, handle);
-    }
-
-    // Spawn a thread that periodically executes the function
-    let schedule_cancelled = Arc::clone(&cancelled);
-
-    thread::spawn(move || {
-        // Flag for overlap prevention
-        let executing = Arc::new(AtomicBool::new(false));
-
-        loop {
-            // Sleep for the interval in small slices to allow cancellation
-            let total_ms = duration.as_millis() as u64;
-            let mut slept = 0u64;
-            while slept < total_ms {
-                if schedule_cancelled.load(Ordering::Acquire) {
-                    break;
-                }
-                let slice = 50u64.min(total_ms - slept);
-                thread::sleep(Duration::from_millis(slice));
-                slept += slice;
-            }
-
-            // Check cancellation after sleep
-            if schedule_cancelled.load(Ordering::Acquire) {
-                break;
-            }
-
-            // Overlap prevention: skip if previous execution still running
-            if executing.load(Ordering::Acquire) {
-                eprintln!("[schedule] Skipping tick — previous execution still running");
-                continue;
-            }
-
-            // Execute the function
-            executing.store(true, Ordering::Release);
-            let exec_executing = Arc::clone(&executing);
-            let exec_bindings = closure_bindings.clone();
-            let exec_body = body.clone();
-            let exec_cancelled = Arc::clone(&schedule_cancelled);
-
-            thread::spawn(move || {
-                // Set up cancellation context
-                set_current_task_cancelled(exec_cancelled);
-
-                let mut interpreter = crate::interpreter::Interpreter::new();
-                interpreter.define_all_stdlib_as_globals();
-                for (name, sv) in &exec_bindings {
-                    interpreter.define_variable(name.clone(), sv.to_value());
-                }
-
-                // Wrap in catch_unwind so a Rust-level panic doesn't permanently
-                // disable future ticks (exec_executing would never flip back)
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    interpreter.eval_block(&exec_body)
-                }));
-
-                match result {
-                    Ok(Err(e)) => eprintln!("[schedule] Error: {}", e),
-                    Err(panic) => {
-                        let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else if let Some(s) = panic.downcast_ref::<String>() {
-                            s.clone()
-                        } else {
-                            "unknown panic".to_string()
-                        };
-                        eprintln!("[schedule] Panic: {}", msg);
-                    }
-                    Ok(Ok(_)) => {}
-                }
-
-                exec_executing.store(false, Ordering::Release);
-            });
-        }
-    });
-
-    // Return a schedule handle value
-    let mut sched = HashMap::new();
-    sched.insert("_schedule_id".to_string(), Value::Int(schedule_id as i64));
-    sched.insert("type".to_string(), Value::String("Schedule".to_string()));
-    Ok(Value::Map(sched))
-}
-
-/// Cancel all scheduled tasks (called on shutdown)
-pub fn cancel_all_schedules() {
-    // Collect all cancelled flags first, then drop the registry lock
-    let flags: Vec<Arc<AtomicBool>> = {
-        if let Ok(registry) = SCHEDULE_REGISTRY.lock() {
-            registry
-                .iter()
-                .map(|(_id, handle)| Arc::clone(&handle.cancelled))
-                .collect()
-        } else {
-            return;
-        }
-    };
-    for flag in flags {
-        flag.store(true, Ordering::Release);
-    }
-}
-
-/// Cancel all spawned tasks (called on shutdown)
-/// Only sets cancellation flags — task threads transition their own state
-/// to Cancelled cooperatively when they check at yield points.
-pub fn cancel_all_tasks() {
-    // Collect all Arcs first, then drop the registry lock to avoid
-    // holding the registry lock while acquiring state locks.
-    let handles: Vec<(Arc<AtomicBool>, Arc<(Mutex<TaskState>, Condvar)>)> = {
-        if let Ok(registry) = TASK_REGISTRY.lock() {
-            registry
-                .iter()
-                .map(|(_id, handle)| (Arc::clone(&handle.cancelled), Arc::clone(&handle.state)))
-                .collect()
-        } else {
-            return;
-        }
-    };
-
-    for (cancelled, state_arc) in handles {
-        cancelled.store(true, Ordering::Release);
-        // Notify condvar so await_task can re-evaluate
-        let (_lock, cvar) = &*state_arc;
-        cvar.notify_all();
-    }
-}
-
-/// Execute a function once after a delay (ms).
-/// Lifecycle-aware: cancelled on shutdown.
-pub fn concurrent_after(
-    delay_ms: i64,
-    body: Block,
-    closure_bindings: HashMap<String, SerializedValue>,
-) -> Result<Value> {
-    // GC completed tasks to prevent unbounded registry growth
-    prune_completed_tasks();
-
-    // Use the task system for after() — it's basically spawn + sleep
-    let task_id = TASK_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let state = Arc::new((Mutex::new(TaskState::Pending), Condvar::new()));
-    let cancelled = Arc::new(AtomicBool::new(false));
-
-    let handle = TaskHandle {
-        state: Arc::clone(&state),
-        cancelled: Arc::clone(&cancelled),
-    };
-
-    {
-        let mut registry = TASK_REGISTRY.lock().map_err(|e| {
-            IntentError::runtime_error(format!("Failed to lock task registry: {}", e))
-        })?;
-        registry.insert(task_id, handle);
-    }
-
-    let task_state = Arc::clone(&state);
-    let task_cancelled = Arc::clone(&cancelled);
-
-    thread::spawn(move || {
-        set_current_task_cancelled(Arc::clone(&task_cancelled));
-
-        // Update state to Running
-        {
-            let (lock, cvar) = &*task_state;
-            let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
-            *s = TaskState::Running;
-            cvar.notify_all();
-        }
-
-        // Sleep for the delay
-        if delay_ms > 0 {
-            // Sleep in small increments to check cancellation
-            let total = delay_ms as u64;
-            let mut slept = 0u64;
-            let increment = 50u64.min(total); // Check every 50ms
-            while slept < total {
-                if task_cancelled.load(Ordering::Acquire) {
-                    let (lock, cvar) = &*task_state;
-                    let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    *s = TaskState::Cancelled;
-                    cvar.notify_all();
-                    return;
-                }
-                let sleep_for = increment.min(total - slept);
-                thread::sleep(Duration::from_millis(sleep_for));
-                slept += sleep_for;
-            }
-        }
-
-        // Check cancellation again
-        if task_cancelled.load(Ordering::Acquire) {
-            let (lock, cvar) = &*task_state;
-            let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
-            *s = TaskState::Cancelled;
-            cvar.notify_all();
-            return;
-        }
-
-        // Execute the function with catch_unwind for panic safety
-        let mut interpreter = crate::interpreter::Interpreter::new();
-        interpreter.define_all_stdlib_as_globals();
-        for (name, sv) in &closure_bindings {
-            interpreter.define_variable(name.clone(), sv.to_value());
-        }
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            interpreter.eval_block(&body)
-        }));
-
-        let (lock, cvar) = &*task_state;
-        let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
-        if task_cancelled.load(Ordering::Acquire) {
-            *s = TaskState::Cancelled;
-        } else {
-            match result {
-                Ok(Ok(value)) => {
-                    let final_value = match value {
-                        Value::Return(inner) => *inner,
-                        other => other,
-                    };
-                    match SerializedValue::from_value(&final_value) {
-                        Ok(sv) => *s = TaskState::Completed(sv),
-                        Err(e) => *s = TaskState::Failed(format!("Cannot serialize result: {}", e)),
-                    }
-                }
-                Ok(Err(e)) => {
-                    *s = TaskState::Failed(format!("{}", e));
-                }
-                Err(panic) => {
-                    let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-                    *s = TaskState::Failed(format!("panic: {}", msg));
-                }
-            }
-        }
-        cvar.notify_all();
-    });
-
-    Ok(create_task_value(task_id))
-}
-
-// ============================================================
-// Cleanup and Maintenance
-// ============================================================
-
-/// Prune completed/failed/cancelled tasks from the registry to prevent leaks
-/// from fire-and-forget tasks. Called at the top of `concurrent_spawn` to bound
-/// the registry to at most O(active_tasks) + O(completed_since_last_spawn).
-fn prune_completed_tasks() {
-    if let Ok(mut registry) = TASK_REGISTRY.lock() {
-        registry.retain(|_id, handle| {
-            let (lock, _) = &*handle.state;
-            if let Ok(state) = lock.try_lock() {
-                !matches!(
-                    *state,
-                    TaskState::Completed(_) | TaskState::Failed(_) | TaskState::Cancelled
-                )
-            } else {
-                true // keep if we can't check (lock contended)
-            }
-        });
-    }
-}
-
-/// Get schedule ID from a schedule handle value
-fn get_schedule_id(schedule: &Value) -> Result<u64> {
-    match schedule {
-        Value::Map(map) => {
-            if let Some(Value::Int(id)) = map.get("_schedule_id") {
-                Ok(*id as u64)
-            } else {
-                Err(IntentError::type_error(
-                    "Expected a Schedule handle".to_string(),
-                ))
-            }
-        }
-        _ => Err(IntentError::type_error(
-            "Expected a Schedule handle".to_string(),
-        )),
-    }
-}
-
-/// cancel_schedule(schedule) -> Bool
-/// Cancels a scheduled task. Returns true if found, false otherwise.
-pub fn concurrent_cancel_schedule(schedule: &Value) -> Result<Value> {
-    let id = get_schedule_id(schedule)?;
-
-    let cancelled = {
-        let registry = SCHEDULE_REGISTRY.lock().map_err(|e| {
-            IntentError::runtime_error(format!("Failed to lock schedule registry: {}", e))
-        })?;
-        if let Some(handle) = registry.get(&id) {
-            Arc::clone(&handle.cancelled)
-        } else {
-            return Ok(Value::Bool(false));
-        }
-    }; // registry lock dropped here
-
-    cancelled.store(true, Ordering::Release);
-    Ok(Value::Bool(true))
 }
 
 // ============================================================
