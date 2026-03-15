@@ -4601,6 +4601,115 @@ impl Interpreter {
                             IntentError::runtime_error(format!("Unknown field: {}", key))
                         })
                     }
+                    // Result type indexing: helpful error instead of silent None
+                    // Prevents the #1 DX friction point: forgetting unwrap() on fetch() etc.
+                    (
+                        Value::EnumValue {
+                            enum_name,
+                            variant,
+                            values,
+                        },
+                        idx,
+                    ) if enum_name == "Result" || enum_name == "Option" => {
+                        if variant == "Ok" || variant == "Some" {
+                            let inner_val = values.into_iter().next().unwrap_or(Value::Unit);
+                            match get_type_mode() {
+                                TypeMode::Strict => Err(IntentError::runtime_error_with_context(
+                                    format!(
+                                        "Indexing {}({}) with {} — did you forget unwrap()?",
+                                        enum_name,
+                                        variant,
+                                        idx.type_name()
+                                    ),
+                                    TypeContext::new(
+                                        "unwrap(value) before indexing",
+                                        format!("{}({})[{}]", enum_name, variant, idx.type_name()),
+                                    )
+                                    .with_hint("Use unwrap(result)[\"key\"] to extract the inner value first"),
+                                )),
+                                TypeMode::Warn => {
+                                    let msg = format!(
+                                        "Indexing {}({}) with {} — auto-unwrapping. \
+                                         Use unwrap() explicitly for clarity.",
+                                        enum_name,
+                                        variant,
+                                        idx.type_name()
+                                    );
+                                    crate::config::type_warn_dedup(
+                                        &format!("index:{}({}):{}", enum_name, variant, idx.type_name()),
+                                        &msg,
+                                    );
+                                    // Auto-unwrap and delegate to inner value
+                                    match (inner_val, idx) {
+                                        (Value::Map(map), Value::String(key)) => {
+                                            Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
+                                        }
+                                        (Value::Array(arr), Value::Int(i)) => {
+                                            let index = if i < 0 {
+                                                match (arr.len() as i64).checked_add(i) {
+                                                    Some(pos) if pos >= 0 => pos as usize,
+                                                    _ => return Ok(Value::none()),
+                                                }
+                                            } else {
+                                                i as usize
+                                            };
+                                            Ok(arr.get(index).cloned().unwrap_or_else(|| Value::none()))
+                                        }
+                                        _ => Ok(Value::none()),
+                                    }
+                                }
+                                TypeMode::Forgiving => {
+                                    // Auto-unwrap silently
+                                    match (inner_val, idx) {
+                                        (Value::Map(map), Value::String(key)) => {
+                                            Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
+                                        }
+                                        (Value::Array(arr), Value::Int(i)) => {
+                                            let index = if i < 0 {
+                                                match (arr.len() as i64).checked_add(i) {
+                                                    Some(pos) if pos >= 0 => pos as usize,
+                                                    _ => return Ok(Value::none()),
+                                                }
+                                            } else {
+                                                i as usize
+                                            };
+                                            Ok(arr.get(index).cloned().unwrap_or_else(|| Value::none()))
+                                        }
+                                        _ => Ok(Value::none()),
+                                    }
+                                }
+                            }
+                        } else {
+                            // Err or None variant
+                            let err_val = values.into_iter().next().unwrap_or(Value::Unit);
+                            match get_type_mode() {
+                                TypeMode::Strict => Err(IntentError::runtime_error_with_context(
+                                    format!(
+                                        "Indexing {}({}: {}) — the operation failed",
+                                        enum_name, variant, err_val
+                                    ),
+                                    TypeContext::new(
+                                        "Check for errors with is_err() or use unwrap()",
+                                        format!("{}({})", enum_name, variant),
+                                    )
+                                    .with_hint("Use: if is_err(result) { handle_error } else { unwrap(result)[\"key\"] }"),
+                                )),
+                                TypeMode::Warn => {
+                                    let msg = format!(
+                                        "Indexing {}({}: {}) — returning None. \
+                                         Did you forget to check for errors?",
+                                        enum_name, variant, err_val
+                                    );
+                                    crate::config::type_warn_dedup(
+                                        &format!("index:{}({})", enum_name, variant),
+                                        &msg,
+                                    );
+                                    Ok(Value::none())
+                                }
+                                TypeMode::Forgiving => Ok(Value::none()),
+                            }
+                        }
+                    }
                     // Type mismatch on index: behaviour depends on NTNT_TYPE_MODE.
                     //   strict    → RuntimeError
                     //   warn      → [WARN] to stderr, return None  (default)
@@ -4640,6 +4749,90 @@ impl Interpreter {
                         IntentError::runtime_error(format!("Unknown field: {}", field))
                     }),
                     Value::Map(map) => Ok(map.get(field).cloned().unwrap_or_else(|| Value::none())),
+                    // Result/Option field access: helpful error instead of silent None
+                    Value::EnumValue {
+                        enum_name,
+                        variant,
+                        values,
+                    } if enum_name == "Result" || enum_name == "Option" => {
+                        if variant == "Ok" || variant == "Some" {
+                            let inner_val = values.into_iter().next().unwrap_or(Value::Unit);
+                            match get_type_mode() {
+                                TypeMode::Strict => Err(IntentError::runtime_error_with_context(
+                                    format!(
+                                        "Field access .{} on {}({}) — did you forget unwrap()?",
+                                        field, enum_name, variant
+                                    ),
+                                    TypeContext::new(
+                                        "unwrap(value).field",
+                                        format!("{}({}).{}", enum_name, variant, field),
+                                    )
+                                    .with_hint(
+                                        "Use unwrap(result).field to extract the inner value first",
+                                    ),
+                                )),
+                                TypeMode::Warn => {
+                                    let msg = format!(
+                                        "Field access .{} on {}({}) — auto-unwrapping. \
+                                         Use unwrap() explicitly for clarity.",
+                                        field, enum_name, variant
+                                    );
+                                    crate::config::type_warn_dedup(
+                                        &format!("field:{}({}):{}", enum_name, variant, field),
+                                        &msg,
+                                    );
+                                    match inner_val {
+                                        Value::Map(ref map) => Ok(map
+                                            .get(field)
+                                            .cloned()
+                                            .unwrap_or_else(|| Value::none())),
+                                        Value::Struct { fields: ref f, .. } => Ok(f
+                                            .get(field)
+                                            .cloned()
+                                            .unwrap_or_else(|| Value::none())),
+                                        _ => Ok(Value::none()),
+                                    }
+                                }
+                                TypeMode::Forgiving => match inner_val {
+                                    Value::Map(ref map) => {
+                                        Ok(map.get(field).cloned().unwrap_or_else(|| Value::none()))
+                                    }
+                                    Value::Struct { fields: ref f, .. } => {
+                                        Ok(f.get(field).cloned().unwrap_or_else(|| Value::none()))
+                                    }
+                                    _ => Ok(Value::none()),
+                                },
+                            }
+                        } else {
+                            let err_val = values.into_iter().next().unwrap_or(Value::Unit);
+                            match get_type_mode() {
+                                TypeMode::Strict => Err(IntentError::runtime_error_with_context(
+                                    format!(
+                                        "Field access .{} on {}({}: {}) — the operation failed",
+                                        field, enum_name, variant, err_val
+                                    ),
+                                    TypeContext::new(
+                                        "Check for errors before accessing fields",
+                                        format!("{}({})", enum_name, variant),
+                                    )
+                                    .with_hint("Use: if is_err(result) { handle_error } else { unwrap(result).field }"),
+                                )),
+                                TypeMode::Warn => {
+                                    let msg = format!(
+                                        "Field access .{} on {}({}: {}) — returning None. \
+                                         Did you forget to check for errors?",
+                                        field, enum_name, variant, err_val
+                                    );
+                                    crate::config::type_warn_dedup(
+                                        &format!("field:{}({})", enum_name, variant),
+                                        &msg,
+                                    );
+                                    Ok(Value::none())
+                                }
+                                TypeMode::Forgiving => Ok(Value::none()),
+                            }
+                        }
+                    }
                     // Field access on non-struct/map: behaviour depends on TypeMode.
                     // Real-world scenario: JSON from DB decoded as wrong type.
                     _ => match get_type_mode() {
