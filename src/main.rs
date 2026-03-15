@@ -922,6 +922,10 @@ fn run_file(path: &PathBuf, timeout: u64) -> anyhow::Result<()> {
     }
 
     interpreter.eval(&ast)?;
+
+    // Shutdown concurrency runtime — cancel all tasks and schedules (rule 28)
+    ntnt::stdlib::concurrent::RUNTIME.shutdown();
+
     Ok(())
 }
 

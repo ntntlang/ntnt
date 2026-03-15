@@ -3454,9 +3454,20 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
         }
         "std/concurrent" => {
             sig!("channel", [], Type::Any);
-            sig!("send", ["ch" => Type::Any, "value" => Type::Any], Type::Unit);
+            sig!("send", ["ch" => Type::Any, "value" => Type::Any], Type::Bool);
             sig!("recv", ["ch" => Type::Any], Type::Any);
+            sig!("recv_timeout", ["ch" => Type::Any, "millis" => Type::Int], Type::Any);
+            sig!("try_recv", ["ch" => Type::Any], Type::Any);
+            sig!("close", ["ch" => Type::Any], Type::Bool);
+            sig!("spawn", ["handler" => Type::Any], Type::Any);
+            sig!("await_task", ["task" => Type::Any], Type::Any);
+            sig!("try_await", ["task" => Type::Any], Type::Any);
+            sig!("cancel_task", ["task" => Type::Any], Type::Bool);
+            sig!("after", ["delay" => Type::Any, "handler" => Type::Any], Type::Any);
+            sig!("schedule", ["interval" => Type::Any, "handler" => Type::Any], Type::Any);
+            sig!("cancel_schedule", ["schedule" => Type::Any], Type::Bool);
             sig!("sleep_ms", ["ms" => Type::Int], Type::Unit);
+            sig!("thread_count", [], Type::Int);
         }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));

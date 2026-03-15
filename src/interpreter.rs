@@ -709,6 +709,34 @@ impl Interpreter {
         self.current_file = Some(path.to_string());
     }
 
+    /// Replace the interpreter's environment (used by concurrency runtime to inject captured bindings).
+    pub fn set_environment(&mut self, env: Rc<RefCell<Environment>>) {
+        self.environment = env;
+    }
+
+    /// Define a variable in the current (global) environment.
+    /// Used by the concurrency runtime to inject captured bindings into a fresh interpreter.
+    pub fn define_global(&mut self, name: String, value: Value) {
+        self.environment.borrow_mut().define(name, value);
+    }
+
+    /// Search all loaded stdlib modules for a function by name.
+    /// Used by the concurrency runtime to re-inject NativeFunction bindings
+    /// into spawned task interpreters.
+    pub fn find_in_loaded_modules(&self, fn_name: &str) -> Option<Value> {
+        // Sort module names for deterministic search order
+        let mut module_names: Vec<&String> = self.loaded_modules.keys().collect();
+        module_names.sort();
+        for module_name in module_names {
+            if let Some(module) = self.loaded_modules.get(module_name.as_str()) {
+                if let Some(value) = module.get(fn_name) {
+                    return Some(value.clone());
+                }
+            }
+        }
+        None
+    }
+
     /// Resolve a path relative to the current script's directory
     /// If the path is absolute, return it as-is
     /// If relative, resolve it relative to the .tnt file's directory (not cwd)
@@ -2519,13 +2547,18 @@ impl Interpreter {
         );
     }
 
-    /// Define standard library functions that are always available
+    /// Define standard library functions that are always available.
+    /// Modules and function names are sorted for deterministic resolution (rule 26).
     fn define_stdlib(&mut self) {
-        // Initialize standard library modules from the stdlib module
         use crate::stdlib;
         let modules = stdlib::init_all_modules();
-        for (name, module) in modules {
-            self.loaded_modules.insert(name, module);
+        // Sort module names for deterministic insertion order
+        let mut module_names: Vec<String> = modules.keys().cloned().collect();
+        module_names.sort();
+        for name in module_names {
+            if let Some(module) = modules.get(&name) {
+                self.loaded_modules.insert(name, module.clone());
+            }
         }
     }
 
@@ -3715,7 +3748,7 @@ impl Interpreter {
         }
     }
 
-    fn eval_block(&mut self, block: &Block) -> Result<Value> {
+    pub fn eval_block(&mut self, block: &Block) -> Result<Value> {
         let previous = Rc::clone(&self.environment);
         self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
 
@@ -6494,6 +6527,23 @@ impl Interpreter {
                 max_arity,
                 func,
             } => {
+                // Eval-path guard: skip concurrency functions in non-Normal modes (rule 24/25).
+                // spawn() skipped in Worker and HotReload modes.
+                // schedule(), after() skipped in Worker, HotReload, and UnitTest modes.
+                match self.execution_mode {
+                    ExecutionMode::Worker | ExecutionMode::HotReload => {
+                        if matches!(fn_name.as_str(), "spawn" | "schedule" | "after") {
+                            return Ok(Value::Unit);
+                        }
+                    }
+                    ExecutionMode::UnitTest => {
+                        if matches!(fn_name.as_str(), "schedule" | "after") {
+                            return Ok(Value::Unit);
+                        }
+                    }
+                    ExecutionMode::Normal => {}
+                }
+
                 if arity == max_arity {
                     // Exact arity (most functions)
                     if args.len() != arity && arity != 0 {

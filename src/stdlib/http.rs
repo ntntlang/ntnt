@@ -595,6 +595,11 @@ fn read_response_body_limited(
 
 /// Simple HTTP GET request
 fn http_get(url: &str) -> Result<Value> {
+    // Cancellation yield point (rule 19): check before making the network request
+    if crate::stdlib::concurrent::is_current_task_cancelled() {
+        return Err(IntentError::runtime_error("Task cancelled".to_string()));
+    }
+
     // SSRF protection: validate URL before making request
     if let Err(reason) = validate_url_for_ssrf(url) {
         return Ok(Value::err(Value::String(format!(
@@ -621,6 +626,11 @@ fn http_get(url: &str) -> Result<Value> {
 
 /// Full HTTP request with all options
 fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
+    // Cancellation yield point (rule 19): check before making the network request
+    if crate::stdlib::concurrent::is_current_task_cancelled() {
+        return Err(IntentError::runtime_error("Task cancelled".to_string()));
+    }
+
     let url = match opts.get("url") {
         Some(Value::String(u)) => u.clone(),
         _ => {
