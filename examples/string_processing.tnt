@@ -96,7 +96,7 @@ let groups = capture_pattern(date_str, r"(\d{4})-(\d{2})-(\d{2})")
 match groups {
     Some(g) => {
         let [_, year, month, day] = g
-        print("Date: {year}/{month}/{day}")
+        print("Date: #{year}/#{month}/#{day}")
     },
     None => print("No date found")
 }
@@ -105,7 +105,7 @@ match groups {
 let prices = "Items: $12.99, $5.50, and $24.00"
 let all = capture_all_pattern(prices, r"\$(\d+\.\d{2})")
 for groups in all {
-    print("Price: {groups[1]}")
+    print("Price: #{groups[1]}")
 }
 
 // Named capture groups for structured extraction

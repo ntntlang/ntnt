@@ -1,5 +1,7 @@
 # High-Concurrency HTTP Server Migration Plan
 
+**Status:** ✅ COMPLETE — Async Axum server shipped in v0.4.0. Production path is fully async with multi-worker Tokio runtime, CORS, CSP, compression, and security headers.
+
 ## Executive Summary
 
 This plan outlines the migration from `tiny_http` (thread-per-connection blocking model) to an async runtime for handling high-concurrency production workloads. The goal is to support 10,000+ concurrent connections efficiently.

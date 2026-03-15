@@ -544,6 +544,63 @@ fn is_production_mode() -> bool {
 /// - Calling a non-function value
 /// - Pattern match exhaustiveness failures
 /// - `break`/`continue` outside a loop
+
+/// Auto-unwrap a Result/Option inner value for bracket indexing.
+/// Used by both Warn and Forgiving TypeModes to avoid code duplication.
+/// Mirrors all supported indexing cases from Expression::Index so behavior
+/// matches `unwrap(result)[idx]` exactly.
+fn auto_unwrap_index(inner_val: Value, idx: Value) -> Result<Value> {
+    match (inner_val, idx) {
+        (Value::Array(arr), Value::Int(i)) => {
+            let index = if i < 0 {
+                match (arr.len() as i64).checked_add(i) {
+                    Some(pos) if pos >= 0 => pos as usize,
+                    _ => return Ok(Value::none()),
+                }
+            } else {
+                i as usize
+            };
+            Ok(arr.get(index).cloned().unwrap_or_else(|| Value::none()))
+        }
+        (Value::String(s), Value::Int(i)) => {
+            let index = if i < 0 {
+                let char_count = s.chars().count();
+                match (char_count as i64).checked_add(i) {
+                    Some(pos) if pos >= 0 => pos as usize,
+                    _ => return Ok(Value::none()),
+                }
+            } else {
+                i as usize
+            };
+            Ok(s.chars()
+                .nth(index)
+                .map(|c| Value::String(c.to_string()))
+                .unwrap_or_else(|| Value::none()))
+        }
+        (Value::Map(map), Value::String(key)) => {
+            Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
+        }
+        (Value::Struct { fields, .. }, Value::String(key)) => fields
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| IntentError::runtime_error(format!("Unknown field: {}", key))),
+        _ => Ok(Value::none()),
+    }
+}
+
+/// Auto-unwrap a Result/Option inner value for field access.
+/// Used by both Warn and Forgiving TypeModes to avoid code duplication.
+fn auto_unwrap_field(inner_val: Value, field: &str) -> Result<Value> {
+    match inner_val {
+        Value::Map(ref map) => Ok(map.get(field).cloned().unwrap_or_else(|| Value::none())),
+        Value::Struct { fields: ref f, .. } => f
+            .get(field)
+            .cloned()
+            .ok_or_else(|| IntentError::runtime_error(format!("Unknown field: {}", field))),
+        _ => Ok(Value::none()),
+    }
+}
+
 impl Interpreter {
     pub fn new() -> Self {
         let env = Rc::new(RefCell::new(Environment::new()));
@@ -4601,6 +4658,79 @@ impl Interpreter {
                             IntentError::runtime_error(format!("Unknown field: {}", key))
                         })
                     }
+                    // Result type indexing: helpful error instead of silent None
+                    // Prevents the #1 DX friction point: forgetting unwrap() on fetch() etc.
+                    (
+                        Value::EnumValue {
+                            enum_name,
+                            variant,
+                            values,
+                        },
+                        idx,
+                    ) if enum_name == "Result" || enum_name == "Option" => {
+                        if variant == "Ok" || variant == "Some" {
+                            let inner_val = values.into_iter().next().unwrap_or(Value::Unit);
+                            match get_type_mode() {
+                                TypeMode::Strict => Err(IntentError::runtime_error_with_context(
+                                    format!(
+                                        "Indexing {}({}) with {} — did you forget unwrap()?",
+                                        enum_name,
+                                        variant,
+                                        idx.type_name()
+                                    ),
+                                    TypeContext::new(
+                                        "unwrap(value) before indexing",
+                                        format!("{}({})[{}]", enum_name, variant, idx.type_name()),
+                                    )
+                                    .with_hint("Use unwrap(result)[\"key\"] to extract the inner value first"),
+                                )),
+                                TypeMode::Warn => {
+                                    let msg = format!(
+                                        "Indexing {}({}) with {} — auto-unwrapping. \
+                                         Use unwrap() explicitly for clarity.",
+                                        enum_name,
+                                        variant,
+                                        idx.type_name()
+                                    );
+                                    crate::config::type_warn_dedup(
+                                        &format!("index:{}({}):{}", enum_name, variant, idx.type_name()),
+                                        &msg,
+                                    );
+                                    auto_unwrap_index(inner_val, idx)
+                                }
+                                TypeMode::Forgiving => auto_unwrap_index(inner_val, idx),
+                            }
+                        } else {
+                            // Err or None variant
+                            let err_val = values.into_iter().next().unwrap_or(Value::Unit);
+                            match get_type_mode() {
+                                TypeMode::Strict => Err(IntentError::runtime_error_with_context(
+                                    format!(
+                                        "Indexing {}({}: {}) — the operation failed",
+                                        enum_name, variant, err_val
+                                    ),
+                                    TypeContext::new(
+                                        "Check for errors with is_err() or use unwrap()",
+                                        format!("{}({})", enum_name, variant),
+                                    )
+                                    .with_hint("Use: if is_err(result) { handle_error } else { unwrap(result)[\"key\"] }"),
+                                )),
+                                TypeMode::Warn => {
+                                    let msg = format!(
+                                        "Indexing {}({}: {}) — returning None. \
+                                         Did you forget to check for errors?",
+                                        enum_name, variant, err_val
+                                    );
+                                    crate::config::type_warn_dedup(
+                                        &format!("index:{}({})", enum_name, variant),
+                                        &msg,
+                                    );
+                                    Ok(Value::none())
+                                }
+                                TypeMode::Forgiving => Ok(Value::none()),
+                            }
+                        }
+                    }
                     // Type mismatch on index: behaviour depends on NTNT_TYPE_MODE.
                     //   strict    → RuntimeError
                     //   warn      → [WARN] to stderr, return None  (default)
@@ -4640,6 +4770,72 @@ impl Interpreter {
                         IntentError::runtime_error(format!("Unknown field: {}", field))
                     }),
                     Value::Map(map) => Ok(map.get(field).cloned().unwrap_or_else(|| Value::none())),
+                    // Result/Option field access: helpful error instead of silent None
+                    Value::EnumValue {
+                        enum_name,
+                        variant,
+                        values,
+                    } if enum_name == "Result" || enum_name == "Option" => {
+                        if variant == "Ok" || variant == "Some" {
+                            let inner_val = values.into_iter().next().unwrap_or(Value::Unit);
+                            match get_type_mode() {
+                                TypeMode::Strict => Err(IntentError::runtime_error_with_context(
+                                    format!(
+                                        "Field access .{} on {}({}) — did you forget unwrap()?",
+                                        field, enum_name, variant
+                                    ),
+                                    TypeContext::new(
+                                        "unwrap(value).field",
+                                        format!("{}({}).{}", enum_name, variant, field),
+                                    )
+                                    .with_hint(
+                                        "Use unwrap(result).field to extract the inner value first",
+                                    ),
+                                )),
+                                TypeMode::Warn => {
+                                    let msg = format!(
+                                        "Field access .{} on {}({}) — auto-unwrapping. \
+                                         Use unwrap() explicitly for clarity.",
+                                        field, enum_name, variant
+                                    );
+                                    crate::config::type_warn_dedup(
+                                        &format!("field:{}({}):{}", enum_name, variant, field),
+                                        &msg,
+                                    );
+                                    auto_unwrap_field(inner_val, field)
+                                }
+                                TypeMode::Forgiving => auto_unwrap_field(inner_val, field),
+                            }
+                        } else {
+                            let err_val = values.into_iter().next().unwrap_or(Value::Unit);
+                            match get_type_mode() {
+                                TypeMode::Strict => Err(IntentError::runtime_error_with_context(
+                                    format!(
+                                        "Field access .{} on {}({}: {}) — the operation failed",
+                                        field, enum_name, variant, err_val
+                                    ),
+                                    TypeContext::new(
+                                        "Check for errors before accessing fields",
+                                        format!("{}({})", enum_name, variant),
+                                    )
+                                    .with_hint("Use: if is_err(result) { handle_error } else { unwrap(result).field }"),
+                                )),
+                                TypeMode::Warn => {
+                                    let msg = format!(
+                                        "Field access .{} on {}({}: {}) — returning None. \
+                                         Did you forget to check for errors?",
+                                        field, enum_name, variant, err_val
+                                    );
+                                    crate::config::type_warn_dedup(
+                                        &format!("field:{}({})", enum_name, variant),
+                                        &msg,
+                                    );
+                                    Ok(Value::none())
+                                }
+                                TypeMode::Forgiving => Ok(Value::none()),
+                            }
+                        }
+                    }
                     // Field access on non-struct/map: behaviour depends on TypeMode.
                     // Real-world scenario: JSON from DB decoded as wrong type.
                     _ => match get_type_mode() {
@@ -5200,39 +5396,14 @@ impl Interpreter {
     /// Evaluate an expression as a route pattern.
     ///
     /// Route builtins (get, post, put, delete, patch) call this instead of
-    /// eval_expression() for their path argument. It preserves `{name}` as
-    /// literal route parameter placeholders instead of interpolating them.
+    /// eval_expression() for their path argument.
     ///
-    /// - InterpolatedString with simple identifiers: `"/users/{id}"` → `/users/{id}`
-    /// - InterpolatedString with complex expressions: evaluated normally
-    /// - All other expressions (String, variable, concatenation): evaluated normally
+    /// With `#{expr}` interpolation syntax, bare `{id}` in route patterns like
+    /// `"/users/{id}"` are naturally literal strings — no special handling needed.
+    /// This function now just delegates to eval_expression(), but is kept as a
+    /// named entry point for clarity and in case route-specific logic is needed later.
     fn eval_route_pattern(&mut self, expr: &Expression) -> Result<Value> {
-        match expr {
-            Expression::InterpolatedString(parts) => {
-                use crate::ast::StringPart;
-                let mut result = String::new();
-                for part in parts {
-                    match part {
-                        StringPart::Literal(s) => result.push_str(s),
-                        StringPart::Expr(inner) => {
-                            if let Expression::Identifier(name) = inner {
-                                // Route parameter: preserve {name} as literal
-                                result.push('{');
-                                result.push_str(name);
-                                result.push('}');
-                            } else {
-                                // Complex expression: evaluate it (intentional interpolation)
-                                let value = self.eval_expression(inner)?;
-                                result.push_str(&value.to_string());
-                            }
-                        }
-                    }
-                }
-                Ok(Value::String(result))
-            }
-            // For non-interpolated strings, variables, etc. — evaluate normally
-            _ => self.eval_expression(expr),
-        }
+        self.eval_expression(expr)
     }
 
     /// Parse auth configuration from enable_auth() argument
@@ -10206,11 +10377,11 @@ c")
     #[test]
     fn test_interpolated_string() {
         let result = eval(
-            r#"
+            r##"
             let name = "World"
-            let greeting = "Hello, {name}!"
+            let greeting = "Hello, #{name}!"
             greeting
-        "#,
+        "##,
         )
         .unwrap();
         if let Value::String(s) = result {
@@ -10223,11 +10394,11 @@ c")
     #[test]
     fn test_interpolated_string_with_expression() {
         let result = eval(
-            r#"
+            r##"
             let a = 5
             let b = 3
-            "Sum: {a + b}"
-        "#,
+            "Sum: #{a + b}"
+        "##,
         )
         .unwrap();
         if let Value::String(s) = result {

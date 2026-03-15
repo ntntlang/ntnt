@@ -2,7 +2,7 @@
 
 > **Auto-generated from [syntax.toml](syntax.toml)** - Do not edit directly.
 >
-> Last updated: v0.4.4
+> Last updated: v0.4.5
 
 ## Table of Contents
 
@@ -104,7 +104,7 @@ Value literal syntax
 |------|--------|-------------|
 | integers | `42, -17, 0` | Integer literals (arbitrary precision) |
 | floats | `3.14, 1.0e-10, -0.5` | Floating-point literals (IEEE 754) |
-| strings | `"hello", "with {interpolation}"` | Double-quoted strings with escape sequences and interpolation |
+| strings | `"hello", "with #{interpolation}"` | Double-quoted strings with escape sequences and interpolation |
 | raw_strings | `r"no escapes", r#"with "quotes""#` | Raw strings - no escape processing, useful for regex patterns |
 | template_strings | `"""...{{expr}}..."""` | Triple-quoted template strings with {{}} interpolation, loops, conditionals |
 | booleans | `true, false` | Boolean literals |
@@ -123,13 +123,14 @@ Escape sequences in regular strings (not raw strings)
 | Escape | Result |
 |--------|--------|
 | `\"` | Double quote |
+| `\#` | Literal # (prevents #{expr} interpolation) |
 | `\'` | Single quote |
 | `\\` | Backslash |
 | `\n` | Newline |
 | `\r` | Carriage return |
 | `\t` | Tab |
-| `\{` | Literal { (prevents interpolation) |
-| `\}` | Literal } |
+| `\{` | Literal { (legacy, no longer needed since bare { is always literal) |
+| `\}` | Literal } (legacy) |
 
 ---
 
@@ -139,9 +140,9 @@ String interpolation syntax
 
 ### Regular Strings
 
-Syntax: `{expr}`
+Syntax: `#{expr}`
 
-In regular strings, {expr} interpolates the expression
+In regular strings, #{expr} interpolates the expression. Bare { is always literal.
 
 ### Template Strings
 

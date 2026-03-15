@@ -241,7 +241,7 @@ print("Hometown: " + hometown)
 // Destructure in match
 fn describe(data) {
     match data {
-        { name, age } => "name={name}, age={age}",
+        { name, age } => "name=#{name}, age=#{age}",
         _ => "unknown"
     }
 }

@@ -25,7 +25,7 @@
 //!
 //! fn dashboard(req) {
 //!     let user = get_user(req) otherwise return redirect("/login")
-//!     return html("<h1>Hello, {user.name}!</h1>")
+//!     return html("<h1>Hello, #{user.name}!</h1>")
 //! }
 //! ```
 

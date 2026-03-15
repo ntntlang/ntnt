@@ -11,27 +11,27 @@ print("")
 
 // Test with a URL that redirects
 let original_url = "https://httpbin.org/redirect/2"
-print("Requesting: {original_url}")
+print("Requesting: #{original_url}")
 print("")
 
 match fetch(original_url) {
     Ok(response) => {
         print("Response Properties:")
-        print("  status: {response.status}")
-        print("  ok: {response.ok}")
-        print("  url: {response.url}")
-        print("  redirected: {response.redirected}")
+        print("  status: #{response.status}")
+        print("  ok: #{response.ok}")
+        print("  url: #{response.url}")
+        print("  redirected: #{response.redirected}")
         print("")
-        
+
         if response.redirected {
             print("✓ Request was redirected!")
-            print("  Original: {original_url}")
-            print("  Final: {response.url}")
+            print("  Original: #{original_url}")
+            print("  Final: #{response.url}")
         } else {
             print("✓ No redirect occurred")
         }
     },
-    Err(e) => print("Error: {e}")
+    Err(e) => print("Error: #{e}")
 }
 
 print("")
@@ -40,16 +40,16 @@ print("")
 
 // Test with a URL that doesn't redirect
 let direct_url = "https://httpbin.org/get"
-print("Requesting: {direct_url}")
+print("Requesting: #{direct_url}")
 print("")
 
 match fetch(direct_url) {
     Ok(response) => {
         print("Response Properties:")
-        print("  status: {response.status}")
-        print("  ok: {response.ok}")  
-        print("  url: {response.url}")
-        print("  redirected: {response.redirected}")
+        print("  status: #{response.status}")
+        print("  ok: #{response.ok}")
+        print("  url: #{response.url}")
+        print("  redirected: #{response.redirected}")
         print("")
         
         if response.redirected {
@@ -58,5 +58,5 @@ match fetch(direct_url) {
             print("✓ No redirect - URL stayed the same")
         }
     },
-    Err(e) => print("Error: {e}")
+    Err(e) => print("Error: #{e}")
 }

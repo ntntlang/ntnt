@@ -336,38 +336,51 @@ impl<'a> Lexer<'a> {
                     Some('\'') => value.push('\''),
                     Some('{') => value.push('{'), // Escape {
                     Some('}') => value.push('}'), // Escape }
+                    Some('#') => value.push('#'), // Escape # (prevents #{} interpolation)
                     Some(c) => value.push(c),
                     None => break,
                 }
-            } else if ch == '{' {
-                // Start of interpolation
-                has_interpolation = true;
-                if !value.is_empty() {
-                    parts.push(StringPart::Literal(value.clone()));
-                    value.clear();
-                }
-                self.advance(); // consume '{'
-
-                // Read until matching '}'
-                let mut expr_str = String::new();
-                let mut brace_count = 1;
-                while let Some(&c) = self.peek() {
-                    if c == '{' {
-                        brace_count += 1;
-                        expr_str.push(c);
-                    } else if c == '}' {
-                        brace_count -= 1;
-                        if brace_count == 0 {
-                            break;
+            } else if ch == '#' {
+                // Check for #{expr} interpolation
+                self.advance(); // consume '#'
+                if let Some(&next) = self.peek() {
+                    if next == '{' {
+                        // Start of interpolation: #{expr}
+                        has_interpolation = true;
+                        if !value.is_empty() {
+                            parts.push(StringPart::Literal(value.clone()));
+                            value.clear();
                         }
-                        expr_str.push(c);
+                        self.advance(); // consume '{'
+
+                        // Read until matching '}'
+                        let mut expr_str = String::new();
+                        let mut brace_count = 1;
+                        while let Some(&c) = self.peek() {
+                            if c == '{' {
+                                brace_count += 1;
+                                expr_str.push(c);
+                            } else if c == '}' {
+                                brace_count -= 1;
+                                if brace_count == 0 {
+                                    break;
+                                }
+                                expr_str.push(c);
+                            } else {
+                                expr_str.push(c);
+                            }
+                            self.advance();
+                        }
+                        self.advance(); // consume '}'
+                        parts.push(StringPart::Interpolation(expr_str));
                     } else {
-                        expr_str.push(c);
+                        // Just a literal '#', not followed by '{'
+                        value.push('#');
                     }
-                    self.advance();
+                } else {
+                    // '#' at end of string
+                    value.push('#');
                 }
-                self.advance(); // consume '}'
-                parts.push(StringPart::Interpolation(expr_str));
             } else {
                 value.push(ch);
                 self.advance();

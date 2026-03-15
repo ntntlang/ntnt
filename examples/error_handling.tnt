@@ -12,7 +12,7 @@ fn parse_number(s) {
     if s == "99" {
         return Ok(99)
     }
-    return Err("not a recognized number: {s}")
+    return Err("not a recognized number: #{s}")
 }
 
 fn add_parsed(a, b) {
@@ -23,10 +23,10 @@ fn add_parsed(a, b) {
 
 print("--- ? operator ---")
 let result1 = add_parsed("42", "99")
-print("42 + 99 = {result1}")
+print("42 + 99 = #{result1}")
 
 let result2 = add_parsed("42", "bad")
-print("42 + bad = {result2}")
+print("42 + bad = #{result2}")
 
 // =============================================================================
 // otherwise keyword: unwrap or run a diverging block
@@ -45,14 +45,14 @@ fn safe_divide(a, b) {
 fn compute() {
     // Block form with err bound
     let result = safe_divide(10, 0) otherwise {
-        print("  caught error: {err}")
+        print("  caught error: #{err}")
         return -1
     }
     return result
 }
 
 let val = compute()
-print("compute() returned: {val}")
+print("compute() returned: #{val}")
 
 // Single-expression form
 fn compute2() {
@@ -60,7 +60,7 @@ fn compute2() {
     return result
 }
 
-print("compute2() returned: {compute2()}")
+print("compute2() returned: #{compute2()}")
 
 // =============================================================================
 // otherwise with continue/break in loops
@@ -79,18 +79,18 @@ for item in data {
     }
     total = total + val
 }
-print("Sum (skipping errors): {total}")
+print("Sum (skipping errors): #{total}")
 
 // Stop on first error with break
 let mut partial = 0
 for item in data {
     let val = item otherwise {
-        print("  stopping at error: {err}")
+        print("  stopping at error: #{err}")
         break
     }
     partial = partial + val
 }
-print("Partial sum (stopped on error): {partial}")
+print("Partial sum (stopped on error): #{partial}")
 
 // =============================================================================
 // Option handling
@@ -110,7 +110,7 @@ fn greet_user(id) {
     let name = find_user(id) otherwise {
         return "User not found"
     }
-    return "Hello, {name}!"
+    return "Hello, #{name}!"
 }
 
 print(greet_user(1))

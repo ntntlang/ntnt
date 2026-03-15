@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.4.4
+> Last updated: v0.4.5
 
 ## Table of Contents
 
@@ -5348,7 +5348,7 @@ Note: Binary file data passes through String conversion and may be lossy. For bi
 let fields = parse_multipart(req)?
 let name = fields["name"]
 let file = fields["document"]
-print("Uploaded: {file[\"filename\"]}, {file[\"size\"]} bytes")
+print("Uploaded: #{file[\"filename\"]}, #{file[\"size\"]} bytes")
 ```
 
 **Errors:**

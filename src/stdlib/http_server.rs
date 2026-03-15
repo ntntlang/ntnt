@@ -2337,7 +2337,7 @@ pub fn init() -> HashMap<String, Value> {
     //   let fields = parse_multipart(req)?
     //   let name = fields["name"]
     //   let file = fields["document"]
-    //   print("Uploaded: {file[\"filename\"]}, {file[\"size\"]} bytes")
+    //   print("Uploaded: #{file[\"filename\"]}, #{file[\"size\"]} bytes")
     // @error TypeError ~ "parse_multipart() requires a request map" fix: "Pass a Request map"
     // @error ParseError ~ "Invalid multipart boundary" fix: "Ensure Content-Type header includes boundary"
     module.insert(

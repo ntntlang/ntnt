@@ -1,9 +1,10 @@
 # DD-040: fetch() & SQL Stdlib Friction Points
 
-**Status:** Draft  
+**Status:** 5/6 Resolved (v0.4.4–v0.4.5)  
 **Author:** Larri  
 **Date:** 2026-03-12  
-**Context:** Building Larri Design domain management feature (DD-010)
+**Context:** Building Larri Design domain management feature (DD-010)  
+**Updated:** 2026-03-15 — Issues 1, 2, 3, 4 fixed. Issue 5 (SQL interpolation) open. Issue 6 deferred.
 
 ## Summary
 
@@ -36,9 +37,11 @@ let body = resp["body"]   // → works
 
 ---
 
-## Issue 2: `fetch()` Takes 1 Argument, Not 2
+## Issue 2: `fetch()` Takes 1 Argument, Not 2 — ✅ RESOLVED (v0.4.4)
 
 **Problem:** The function signature is `fetch(url_or_options)` — a single argument that's either a URL string or an options map. But the natural pattern is `fetch(url, options)` like JavaScript.
+
+> **Resolution:** `fetch()` now accepts 1 or 2 arguments. Both `fetch(url)`, `fetch(opts)`, and `fetch(url, opts)` work. Implemented in PR #27.
 
 **Current (broken):**
 ```
@@ -60,9 +63,11 @@ let resp = fetch(map { "url": url, "headers": map { "Accept": "application/json"
 
 ---
 
-## Issue 3: JSONB Bind Parameters Don't Work
+## Issue 3: JSONB Bind Parameters Don't Work — ✅ RESOLVED (v0.4.4)
 
 **Problem:** Passing a JSON string as a bind parameter with `::jsonb` cast fails with `unsupported jsonb version number 123`. PG's binary protocol can't handle text→jsonb conversion via bind params in ntnt's driver.
+
+> **Resolution:** Strings are now auto-coerced to `serde_json::Value` when the target column is JSONB/JSON. No double-cast needed. Implemented in PR #27.
 
 **Current (broken):**
 ```
@@ -84,9 +89,11 @@ execute(db, r#"INSERT INTO t (data) VALUES ('{"key": "value"}'::jsonb)"#, [])
 
 ---
 
-## Issue 4: UUID Bind Parameters Need `::text::uuid` Double Cast
+## Issue 4: UUID Bind Parameters Need `::text::uuid` Double Cast — ✅ RESOLVED (v0.4.4)
 
 **Problem:** `$1::uuid` fails with `incorrect binary data format in bind parameter 1` because ntnt sends all params as text, but PG expects binary UUID format when `::uuid` is specified.
+
+> **Resolution:** Strings are now auto-coerced to `uuid::Uuid` when the target column is UUID. No double-cast needed. Implemented in PR #27.
 
 **Current (broken):**
 ```
@@ -144,13 +151,13 @@ execute(db, r#"UPDATE t SET data = jsonb_set(data, '{my_key}', 'true')"#, [])
 
 ## Priority
 
-| Issue | Severity | Fix Complexity |
-|-------|----------|---------------|
-| 1. fetch() Result unwrap | 🔴 High | Medium (behavior change) |
-| 2. fetch() arg count | 🟡 Medium | Low (overload) |
-| 3. JSONB bind params | 🔴 High | Medium (driver change) |
-| 4. UUID double cast | 🟡 Medium | Low (driver config) |
-| 5. SQL string interpolation | 🟡 Medium | Medium (context-aware interp) |
-| 6. IPv6 in Docker | 🟢 Low | N/A (deployment) |
+| Issue | Severity | Status |
+|-------|----------|--------|
+| 1. fetch() Result unwrap | 🔴 High | ✅ **Done** (v0.4.5) — Warn mode auto-unwraps with message |
+| 2. fetch() arg count | 🟡 Medium | ✅ **Done** (v0.4.4, PR #27) |
+| 3. JSONB bind params | 🔴 High | ✅ **Done** (v0.4.4, PR #27) |
+| 4. UUID double cast | 🟡 Medium | ✅ **Done** (v0.4.4, PR #27) |
+| 5. SQL string interpolation | 🟡 Medium | **Open** — Lint warning is the right approach |
+| 6. IPv6 in Docker | 🟢 Low | **Deferred** — Deployment note, not a language fix |
 
-Issues 1 and 3 cause the most pain — silent failures with no useful error messages.
+Remaining: Issue 5 (SQL interpolation gotcha — lint warning approach recommended).
