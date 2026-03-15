@@ -225,6 +225,96 @@ pub struct RouteSource {
     pub imported_files: HashMap<String, SystemTime>, // Tracked imports for this route
 }
 
+/// Content-Security-Policy configuration
+#[derive(Debug, Clone)]
+pub struct CspConfig {
+    pub directives: HashMap<String, String>,
+    pub report_only: bool,
+}
+
+impl Default for CspConfig {
+    fn default() -> Self {
+        let mut directives = HashMap::new();
+        directives.insert("default-src".to_string(), "'self'".to_string());
+        directives.insert("script-src".to_string(), "'self'".to_string());
+        directives.insert(
+            "style-src".to_string(),
+            "'self' 'unsafe-inline'".to_string(),
+        );
+        directives.insert("img-src".to_string(), "'self' data: https:".to_string());
+        directives.insert("font-src".to_string(), "'self'".to_string());
+        directives.insert("connect-src".to_string(), "'self'".to_string());
+        directives.insert("frame-ancestors".to_string(), "'none'".to_string());
+        directives.insert("base-uri".to_string(), "'self'".to_string());
+        directives.insert("form-action".to_string(), "'self'".to_string());
+        CspConfig {
+            directives,
+            report_only: false,
+        }
+    }
+}
+
+impl CspConfig {
+    /// Create CSP config from an options map
+    pub fn from_value(options: &HashMap<String, Value>) -> Self {
+        let mut config = CspConfig::default();
+
+        // Parse report_only flag
+        if let Some(Value::Bool(ro)) = options.get("report_only") {
+            config.report_only = *ro;
+        }
+
+        // All other string keys are CSP directives
+        for (key, value) in options {
+            if key == "report_only" {
+                continue;
+            }
+            if let Value::String(s) = value {
+                config.directives.insert(key.clone(), s.clone());
+            }
+        }
+
+        config
+    }
+
+    /// Build the CSP header value string
+    pub fn to_header_value(&self) -> String {
+        let mut parts: Vec<String> = self
+            .directives
+            .iter()
+            .map(|(k, v)| format!("{} {}", k, v))
+            .collect();
+        parts.sort(); // deterministic output
+        parts.join("; ")
+    }
+
+    /// Get the header name (report-only or enforcing)
+    pub fn header_name(&self) -> &'static str {
+        if self.report_only {
+            "content-security-policy-report-only"
+        } else {
+            "content-security-policy"
+        }
+    }
+
+    /// Apply CSP header to a response map (sync path)
+    pub fn apply_to_response(&self, response: &mut HashMap<String, Value>) {
+        // Create headers map if missing (mirrors apply_security_headers behavior)
+        if !response.contains_key("headers") {
+            response.insert("headers".to_string(), Value::Map(HashMap::new()));
+        }
+        let headers = match response.get_mut("headers") {
+            Some(Value::Map(h)) => h,
+            _ => return,
+        };
+        let key = self.header_name().to_string();
+        let already_set = headers.keys().any(|k| k.eq_ignore_ascii_case(&key));
+        if !already_set {
+            headers.insert(key, Value::String(self.to_header_value()));
+        }
+    }
+}
+
 /// CORS (Cross-Origin Resource Sharing) configuration
 #[derive(Debug, Clone)]
 pub struct CorsConfig {
@@ -474,6 +564,7 @@ pub struct ServerState {
     pub hot_reload: bool,                   // Whether hot-reload is enabled
     pub shutdown_handlers: Vec<Value>,      // Functions to call on server shutdown
     pub cors_config: Option<CorsConfig>,    // Optional CORS configuration
+    pub csp_config: Option<CspConfig>,      // Optional CSP configuration
     pub error_handler: Option<Value>,       // Global error handler callback
 }
 
@@ -487,6 +578,7 @@ impl ServerState {
             hot_reload: true, // Enable hot-reload by default in dev
             shutdown_handlers: Vec::new(),
             cors_config: None,
+            csp_config: None,
             error_handler: None,
         }
     }
@@ -524,6 +616,21 @@ impl ServerState {
     /// Get the CORS configuration if enabled
     pub fn get_cors_config(&self) -> Option<&CorsConfig> {
         self.cors_config.as_ref()
+    }
+
+    /// Enable CSP with the given configuration
+    pub fn enable_csp(&mut self, config: CspConfig) {
+        self.csp_config = Some(config);
+    }
+
+    /// Disable CSP entirely
+    pub fn disable_csp(&mut self) {
+        self.csp_config = None;
+    }
+
+    /// Get the CSP configuration if enabled
+    pub fn get_csp_config(&self) -> Option<&CspConfig> {
+        self.csp_config.as_ref()
     }
 
     pub fn add_shutdown_handler(&mut self, handler: Value) {
@@ -1236,11 +1343,6 @@ pub fn init() -> HashMap<String, Value> {
                     Value::String("no-cache, no-store, must-revalidate".to_string()),
                 );
                 headers.insert("pragma".to_string(), Value::String("no-cache".to_string()));
-                // Content Security Policy for HTML responses
-                headers.insert(
-                    "content-security-policy".to_string(),
-                    Value::String("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self'".to_string()),
-                );
 
                 // Merge custom headers (3rd argument) if provided
                 if args.len() == 3 {
@@ -4274,6 +4376,120 @@ mod tests {
         assert!(
             headers.get("cache-control").is_none(),
             "Should not add duplicate lowercase cache-control"
+        );
+    }
+
+    // ===========================================
+    // CSP Config Tests
+    // ===========================================
+
+    #[test]
+    fn test_csp_config_default() {
+        let csp = CspConfig::default();
+        assert!(!csp.report_only);
+        assert_eq!(csp.directives.get("default-src").unwrap(), "'self'");
+        assert_eq!(csp.directives.get("script-src").unwrap(), "'self'");
+        assert_eq!(csp.directives.get("frame-ancestors").unwrap(), "'none'");
+    }
+
+    #[test]
+    fn test_csp_config_to_header_value() {
+        let mut csp = CspConfig {
+            directives: HashMap::new(),
+            report_only: false,
+        };
+        csp.directives
+            .insert("default-src".to_string(), "'self'".to_string());
+        csp.directives.insert(
+            "script-src".to_string(),
+            "'self' 'unsafe-inline'".to_string(),
+        );
+
+        let header = csp.to_header_value();
+        // Sorted alphabetically
+        assert_eq!(
+            header,
+            "default-src 'self'; script-src 'self' 'unsafe-inline'"
+        );
+    }
+
+    #[test]
+    fn test_csp_config_header_name() {
+        let mut csp = CspConfig::default();
+        assert_eq!(csp.header_name(), "content-security-policy");
+
+        csp.report_only = true;
+        assert_eq!(csp.header_name(), "content-security-policy-report-only");
+    }
+
+    #[test]
+    fn test_csp_config_from_value() {
+        let mut options = HashMap::new();
+        options.insert(
+            "script-src".to_string(),
+            Value::String("'self' 'unsafe-inline' https://cdn.example.com".to_string()),
+        );
+        options.insert("report_only".to_string(), Value::Bool(true));
+
+        let csp = CspConfig::from_value(&options);
+        assert!(csp.report_only);
+        // Custom directive overrides default
+        assert_eq!(
+            csp.directives.get("script-src").unwrap(),
+            "'self' 'unsafe-inline' https://cdn.example.com"
+        );
+        // Default directives preserved
+        assert_eq!(csp.directives.get("default-src").unwrap(), "'self'");
+    }
+
+    #[test]
+    fn test_csp_config_apply_to_response() {
+        let csp = CspConfig {
+            directives: {
+                let mut d = HashMap::new();
+                d.insert("default-src".to_string(), "'self'".to_string());
+                d
+            },
+            report_only: false,
+        };
+
+        let mut response = HashMap::new();
+        response.insert("headers".to_string(), Value::Map(HashMap::new()));
+        csp.apply_to_response(&mut response);
+
+        let headers = match response.get("headers") {
+            Some(Value::Map(h)) => h,
+            _ => panic!("Expected headers map"),
+        };
+        assert_value_string(
+            headers
+                .get("content-security-policy")
+                .expect("CSP header should be set"),
+            "default-src 'self'",
+        );
+    }
+
+    #[test]
+    fn test_csp_config_does_not_override_app_csp() {
+        let csp = CspConfig::default();
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "content-security-policy".to_string(),
+            Value::String("default-src 'none'".to_string()),
+        );
+        let mut response = HashMap::new();
+        response.insert("headers".to_string(), Value::Map(headers));
+        csp.apply_to_response(&mut response);
+
+        let headers = match response.get("headers") {
+            Some(Value::Map(h)) => h,
+            _ => panic!("Expected headers map"),
+        };
+        // App's CSP should be preserved, not overridden
+        assert_value_string(
+            headers.get("content-security-policy").unwrap(),
+            "default-src 'none'",
         );
     }
 }

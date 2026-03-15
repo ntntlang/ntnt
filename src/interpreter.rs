@@ -635,6 +635,7 @@ impl Interpreter {
                         | "on_shutdown"
                         | "on_error"
                         | "enable_cors"
+                        | "enable_csp"
                         | "enable_auth"
                 )
             }
@@ -2419,6 +2420,46 @@ impl Interpreter {
                 },
             },
         );
+
+        // @ntnt enable_csp
+        // @signature enable_csp(options?: Map | Bool) -> Unit
+        // Enable Content-Security-Policy headers for the HTTP server.
+        //
+        // Configures the server to include CSP headers on all responses.
+        // Call with no arguments for sensible defaults, a map of directives
+        // to customize, or `false` to disable CSP entirely. Must be called
+        // before `listen()`.
+        //
+        // Default directives: `default-src 'self'`, `script-src 'self'`,
+        // `style-src 'self' 'unsafe-inline'`, `img-src 'self' data: https:`,
+        // `font-src 'self'`, `connect-src 'self'`, `frame-ancestors 'none'`,
+        // `base-uri 'self'`, `form-action 'self'`.
+        //
+        // Options map keys are CSP directive names with string values.
+        // Use `report_only: true` to use the Report-Only header instead.
+        // @param options Optional CSP configuration map or `false` to disable
+        // @returns Unit
+        // @tags #server, #security, #http
+        // @see_also enable_cors, listen
+        // @since v0.4.4
+        // @example enable_csp() ~ "Enable CSP with sensible defaults"
+        // @example enable_csp(map { "script-src": "'self' 'unsafe-inline'", "style-src": "'self' 'unsafe-inline' https://fonts.googleapis.com" }) ~ "Custom CSP directives"
+        // @example enable_csp(false) ~ "Disable CSP entirely"
+        self.environment.borrow_mut().define(
+            "enable_csp".to_string(),
+            Value::NativeFunction {
+                name: "enable_csp".to_string(),
+                arity: 0, // Variadic: 0-1 args
+                max_arity: 0,
+                func: |_args| {
+                    // Placeholder - actual implementation is in eval_call
+                    Err(IntentError::runtime_error(
+                        "enable_csp() must be called directly, not stored in a variable"
+                            .to_string(),
+                    ))
+                },
+            },
+        );
     }
 
     /// Define standard library functions that are always available
@@ -3950,6 +3991,42 @@ impl Interpreter {
                         }
                         let handler = self.eval_expression(&arguments[0])?;
                         self.server_state.add_middleware(handler);
+                        return Ok(Value::Unit);
+                    }
+
+                    // Special handling for enable_csp(options?)
+                    if name == "enable_csp" && arguments.len() <= 1 {
+                        if self.should_skip_server_call("enable_csp") {
+                            return Ok(Value::Unit);
+                        }
+                        if arguments.is_empty() {
+                            // Default CSP
+                            self.server_state
+                                .enable_csp(crate::stdlib::http_server::CspConfig::default());
+                        } else {
+                            match self.eval_expression(&arguments[0])? {
+                                Value::Bool(false) => {
+                                    // Disable CSP
+                                    self.server_state.disable_csp();
+                                }
+                                Value::Bool(true) => {
+                                    // enable_csp(true) = default CSP
+                                    self.server_state.enable_csp(
+                                        crate::stdlib::http_server::CspConfig::default(),
+                                    );
+                                }
+                                Value::Map(m) => {
+                                    let csp_config =
+                                        crate::stdlib::http_server::CspConfig::from_value(&m);
+                                    self.server_state.enable_csp(csp_config);
+                                }
+                                _ => {
+                                    return Err(IntentError::type_error(
+                                        "enable_csp() argument must be a map of directives, true (defaults), or false (disable)".to_string(),
+                                    ))
+                                }
+                            }
+                        }
                         return Ok(Value::Unit);
                     }
 
@@ -6836,6 +6913,17 @@ impl Interpreter {
                     } else {
                         not_found
                     };
+                    // Apply CSP headers if enabled
+                    let not_found = if let Some(csp_config) = self.server_state.get_csp_config() {
+                        if let Value::Map(mut resp_map) = not_found {
+                            csp_config.apply_to_response(&mut resp_map);
+                            Value::Map(resp_map)
+                        } else {
+                            not_found
+                        }
+                    } else {
+                        not_found
+                    };
                     let _ = http_server::send_response(http_request, &not_found);
                 }
                 Err(_) => {}
@@ -6950,6 +7038,8 @@ impl Interpreter {
             request_timeout_secs: self.request_timeout_secs,
             max_connections: 10_000,
             num_workers,
+            cors_config: self.server_state.get_cors_config().cloned(),
+            csp_config: self.server_state.get_csp_config().cloned(),
         };
 
         // Spawn async server in a separate thread
@@ -7077,6 +7167,12 @@ impl Interpreter {
             if let Some(cors_config) = self.server_state.get_cors_config() {
                 if let Value::Map(ref mut resp_map) = bad_request {
                     cors_config.apply_to_response(resp_map, request_origin.as_deref());
+                }
+            }
+            // Apply CSP headers if enabled
+            if let Some(csp_config) = self.server_state.get_csp_config() {
+                if let Value::Map(ref mut resp_map) = bad_request {
+                    csp_config.apply_to_response(resp_map);
                 }
             }
             return BridgeResponse::from_value(&bad_request);
@@ -7215,6 +7311,18 @@ impl Interpreter {
                 final_response
             };
 
+            // Apply CSP headers if enabled
+            let final_response = if let Some(csp_config) = self.server_state.get_csp_config() {
+                if let Value::Map(mut resp_map) = final_response {
+                    csp_config.apply_to_response(&mut resp_map);
+                    Value::Map(resp_map)
+                } else {
+                    final_response
+                }
+            } else {
+                final_response
+            };
+
             // Convert to BridgeResponse and send back
             BridgeResponse::from_value(&final_response)
         } else {
@@ -7247,6 +7355,17 @@ impl Interpreter {
                     404,
                     &format!("Not Found: {} {}", method, path),
                 )
+            };
+            // Apply CSP headers if enabled
+            let not_found_response = if let Some(csp_config) = self.server_state.get_csp_config() {
+                if let Value::Map(mut resp_map) = not_found_response {
+                    csp_config.apply_to_response(&mut resp_map);
+                    Value::Map(resp_map)
+                } else {
+                    not_found_response
+                }
+            } else {
+                not_found_response
             };
             BridgeResponse::from_value(&not_found_response)
         }

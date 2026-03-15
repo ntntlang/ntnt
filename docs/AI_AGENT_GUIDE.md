@@ -789,7 +789,7 @@ fn custom_handler(req) {
 
 ### HTTP Client (`std/http`)
 
-`fetch()` takes **ONE argument** — either a URL string (simple GET) or a single map with all options including the URL. Arity is 1.
+`fetch()` accepts one or two arguments:
 
 ```ntnt
 import { fetch, download } from "std/http"
@@ -797,9 +797,15 @@ import { fetch, download } from "std/http"
 // Simple GET (string argument)
 let resp = fetch("https://api.example.com/data")
 
-// POST with JSON body (single map — url goes INSIDE the map)
+// POST with options map (url inside the map)
 let resp = fetch(map {
     "url": "https://api.example.com/users",
+    "method": "POST",
+    "json": map { "name": "Alice", "age": 30 }
+})
+
+// Two-argument form: URL + options (v0.4.4+)
+let resp = fetch("https://api.example.com/users", map {
     "method": "POST",
     "json": map { "name": "Alice", "age": 30 }
 })
@@ -812,16 +818,61 @@ let resp = fetch(map {
 })
 
 // Custom headers
-let resp = fetch(map {
-    "url": "https://api.example.com/data",
+let resp = fetch("https://api.example.com/data", map {
     "headers": map { "Authorization": "Bearer {token}" }
 })
 ```
 
-**⚠️ WRONG:** `fetch(url, map { ... })` — this passes TWO arguments and will error: "expected 1 arguments, got 2"
-**✅ RIGHT:** `fetch(map { "url": url, ... })` — single map with `url` key inside
+Both `fetch(map { "url": url, ... })` and `fetch(url, map { ... })` work. The two-argument form is typically more natural.
 
 Use `"json": map{...}` for JSON POST or `"form": map{...}` for form POST — auto-encodes and sets Content-Type.
+
+### CORS (Cross-Origin Resource Sharing)
+
+Configure CORS with `enable_cors()` — works on both sync and async (production) server paths:
+
+```ntnt
+// Allow all origins (default)
+enable_cors()
+
+// Restrict to specific origins
+enable_cors(map {
+    "origins": ["https://example.com", "https://app.example.com"],
+    "methods": ["GET", "POST", "PUT", "DELETE"],
+    "headers": ["Content-Type", "Authorization"],
+    "credentials": true,
+    "max_age": 86400
+})
+```
+
+Also available as a directive in server blocks: `cors map { "origins": ["*"] }`.
+
+### Content Security Policy (CSP)
+
+Configure CSP with `enable_csp()` (v0.4.4+):
+
+```ntnt
+// Sensible defaults (restrictive but practical)
+enable_csp()
+
+// Custom directives
+enable_csp(map {
+    "default-src": "'self'",
+    "script-src": "'self' 'unsafe-inline'",
+    "style-src": "'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src": "'self' https://fonts.gstatic.com",
+    "img-src": "'self' data: https:",
+    "connect-src": "'self'",
+    "frame-ancestors": "'none'"
+})
+
+// Disable CSP
+enable_csp(false)
+```
+
+Default directives: `default-src 'self'`, `script-src 'self'`, `style-src 'self' 'unsafe-inline'`, `img-src 'self' data: https:`, `font-src 'self'`, `connect-src 'self'`, `frame-ancestors 'none'`, `base-uri 'self'`, `form-action 'self'`.
+
+CSP is applied independently of `NTNT_SECURITY_HEADERS` — disabling security headers does not affect CSP configured via `enable_csp()`.
 
 ---
 
@@ -1148,6 +1199,19 @@ let price = float(form["price"])
 execute(db, "INSERT INTO users (age) VALUES ($1)", [form["age"]])
 ```
 
+**JSONB and UUID bind parameters** (v0.4.4+): Strings are automatically coerced to the correct binary format when the target column is JSONB, JSON, or UUID. No manual casting needed:
+```ntnt
+// JSONB — string is parsed as JSON automatically
+let json_str = "{\"key\": \"value\"}"
+execute(db, "INSERT INTO settings (data) VALUES ($1)", [json_str])  // Just works
+
+// UUID — string is parsed as UUID automatically
+let id = uuid()
+execute(db, "INSERT INTO users (id) VALUES ($1)", [id])  // Just works
+
+// No need for ::text::jsonb or ::text::uuid double casts
+```
+
 **NULL handling:** SQL NULL values are returned as `None` (not `Unit`) in query results. Use `None` when inserting NULL values:
 ```ntnt
 // Reading NULL from database
@@ -1327,38 +1391,328 @@ fn get(req) {
 
 ---
 
+## Authentication (`std/auth`)
+
+Full OAuth, session management, CSRF, JWT, and TOTP support — 34 functions.
+
+### Basic OAuth Setup
+
+```ntnt
+import { oauth, enable_auth, get_user, logout_user } from "std/auth"
+import { json, html, redirect } from "std/http/server"
+import { get_env } from "std/env"
+
+let google = oauth("google", get_env("GOOGLE_CLIENT_ID"), get_env("GOOGLE_CLIENT_SECRET"))
+
+enable_auth([google], map {
+    "session_secret": get_env("SESSION_SECRET"),
+    "session_store": "redis://localhost:6379",     // or "sqlite:./sessions.db"
+    "session_ttl": 86400 * 7,                      // 7 days
+    "login_url": "/auth/login",
+    "logout_url": "/",
+    "callback_url": "/auth/callback"
+})
+```
+
+### Protecting Routes
+
+```ntnt
+import { get_user, validate_csrf } from "std/auth"
+
+fn dashboard(req) {
+    let user = get_user(req) otherwise return redirect("/auth/login")
+    return html(template("dashboard.html", map { "user": user }))
+}
+
+fn update_settings(req) {
+    let user = get_user(req) otherwise return redirect("/auth/login")
+    let csrf_ok = validate_csrf(req)
+    if typeof(csrf_ok) == "Map" { return csrf_ok }  // Returns 403 if invalid
+    // ... handle form
+}
+```
+
+### Session Data
+
+```ntnt
+import { get_user, get_session, set_session, session_data } from "std/auth"
+
+// Store custom data in session
+set_session(req, map { "theme": "dark", "role": "admin" })
+
+// Retrieve session data
+let data = session_data(req)  // Returns the custom data map
+
+// get_user(req) returns Option<User> with: name, email, picture, provider, raw, csrf_token
+// get_session(req) returns Option<Session> with full session including tokens and timestamps
+```
+
+### CSRF Protection in Forms
+
+```html
+<form method="POST" action="/settings">
+    <input type="hidden" name="_csrf_token" value="{{user.csrf_token}}">
+    <!-- form fields -->
+</form>
+```
+
+### JWT (Stateless Tokens)
+
+```ntnt
+import { jwt_sign, jwt_verify } from "std/auth"
+
+let token = unwrap(jwt_sign(map { "user_id": 42, "role": "admin" }, "secret", map { "exp": 3600 }))
+let claims = unwrap(jwt_verify(token, "secret"))
+// claims = { "user_id": 42, "role": "admin", "exp": ..., "iat": ... }
+```
+
+### Built-in Auth Routes
+
+`enable_auth()` automatically registers these routes:
+- `GET /auth/login` — Redirect to OAuth provider
+- `GET /auth/callback` — Handle OAuth callback
+- `GET /auth/logout` — Clear session and redirect
+- `GET /auth/me` — JSON user info (for SPAs)
+
+---
+
+## Key-Value Store (`std/kv`)
+
+Redis/Valkey or SQLite-backed key-value store with TTL support.
+
+```ntnt
+import { open, get, set, del, has, list, expire, ttl } from "std/kv"
+
+// Connect (Redis or SQLite)
+let kv = unwrap(open("redis://localhost:6379"))
+let kv = unwrap(open("sqlite:./cache.db"))
+
+// Basic operations
+set(kv, "user:1", map { "name": "Alice", "role": "admin" })
+let user = unwrap(get(kv, "user:1"))    // Option<Any> — returns None if missing
+
+// TTL (time-to-live)
+set(kv, "session:abc", data, map { "ttl": 3600 })  // Expires in 1 hour
+expire(kv, "user:1", 86400)                         // Set TTL on existing key
+let remaining = unwrap(ttl(kv, "session:abc"))       // Seconds remaining
+
+// Check and list
+let exists = unwrap(has(kv, "user:1"))               // Bool
+let keys = unwrap(list(kv, "user:"))                  // All keys with prefix "user:"
+
+// Delete
+del(kv, "session:abc")
+```
+
+Values are automatically serialized — maps and arrays are stored as JSON.
+
+---
+
+## Logging (`std/log`)
+
+Structured logging with configurable levels.
+
+```ntnt
+import { log_info, log_warn, log_error, log_debug, set_log_level, request_logger } from "std/log"
+
+set_log_level("info")  // "debug", "info", "warn", "error"
+
+log_info("Server started", map { "port": 8080 })
+log_warn("Rate limit approaching", map { "current": 95, "max": 100 })
+log_error("Database connection failed", map { "host": "localhost", "error": err })
+log_debug("Cache hit", map { "key": "user:42" })
+
+// Request logging middleware
+use_middleware(request_logger())  // Logs method, path, status, duration for every request
+```
+
+---
+
+## Concurrency (`std/concurrent`)
+
+Channels for inter-task communication and timing utilities.
+
+```ntnt
+import { channel, send, recv, recv_timeout, try_recv, close, sleep_ms } from "std/concurrent"
+
+let ch = channel()
+send(ch, "hello")
+let msg = recv(ch)          // Blocks until value available
+
+let msg = recv_timeout(ch, 5000)  // Option — None if timeout
+let msg = try_recv(ch)             // Option — None if no message waiting
+
+close(ch)
+sleep_ms(1000)  // Sleep for 1 second
+```
+
+---
+
+## CSV (`std/csv`)
+
+```ntnt
+import { parse_csv, parse_with_headers, stringify, stringify_with_headers } from "std/csv"
+
+let rows = parse_csv("a,b\n1,2\n3,4")
+// [["a", "b"], ["1", "2"], ["3", "4"]]
+
+let maps = parse_with_headers("name,age\nAlice,30\nBob,25")
+// [{"name": "Alice", "age": "30"}, {"name": "Bob", "age": "25"}]
+
+let csv_str = stringify([["a", "b"], [1, 2]])
+let csv_str = stringify_with_headers(maps, ["name", "age"])
+```
+
+---
+
+## URL Handling (`std/url`)
+
+```ntnt
+import { parse_url, encode, encode_component, decode, build_query, parse_query } from "std/url"
+
+let parts = unwrap(parse_url("https://example.com/path?q=hello"))
+// { "scheme": "https", "host": "example.com", "path": "/path", "query": "q=hello", ... }
+
+let encoded = encode_component("hello world & more")  // "hello%20world%20%26%20more"
+let decoded = unwrap(decode("hello%20world"))          // "hello world"
+
+let qs = build_query(map { "q": "search", "page": "1" })  // "page=1&q=search"
+let params = parse_query("q=search&page=1")                // { "q": "search", "page": "1" }
+```
+
+---
+
+## Path Manipulation (`std/path`)
+
+```ntnt
+import { join_path, dirname, basename, extension, stem, resolve, is_absolute } from "std/path"
+
+join_path(["src", "lib", "utils.tnt"])  // "src/lib/utils.tnt"
+dirname("src/lib/utils.tnt")            // Some("src/lib")
+basename("src/lib/utils.tnt")           // Some("utils.tnt")
+extension("utils.tnt")                  // Some("tnt")
+stem("utils.tnt")                       // Some("utils")
+is_absolute("/usr/bin")                 // true
+```
+
+---
+
+## Markdown (`std/markdown`)
+
+```ntnt
+import { to_html, to_html_safe } from "std/markdown"
+
+let html_str = to_html("# Hello\n\nThis is **bold**")
+// "<h1>Hello</h1>\n<p>This is <strong>bold</strong></p>\n"
+
+let safe_html = to_html_safe("<script>alert('xss')</script> **bold**")
+// Script tags stripped, only safe HTML output
+```
+
+---
+
+## Testing with `ntnt test`
+
+Test HTTP servers directly from the command line — starts the server, makes requests, prints responses, then shuts down:
+
+```bash
+# Simple GET
+ntnt test server.tnt --get /api/status
+
+# POST with body
+ntnt test server.tnt --post /users --body '{"name":"Alice"}'
+
+# Multiple requests in one run
+ntnt test server.tnt --get /health --get /api/users --post /api/users --body '{"name":"Bob"}'
+
+# Verbose (show headers)
+ntnt test server.tnt -v --get /api/status
+
+# Custom port
+ntnt test server.tnt --port 9090 --get /
+```
+
 ---
 
 ## Quick Reference Tables
 
 ### Global Builtins (No Import)
 
+**Conversion & Output:**
+
 | Function | Description |
 |----------|-------------|
 | `print(x)` | Output to stdout |
-| `len(x)` | Length of string/array |
 | `str(x)` | Convert to string |
 | `int(x)` | Convert to integer |
 | `float(x)` | Convert to float |
-| `type(x)` | Get type name |
+| `type(x)` | Get type name as string |
+| `typeof(x)` | Get type name (alias for `type`) |
+
+**Collections:**
+
+| Function | Description |
+|----------|-------------|
+| `len(x)` | Length of string, array, or map |
 | `push(arr, item)` | Add to array |
 | `filter(arr, fn)` | Filter array with predicate |
-| `transform(arr, fn)` | Transform array elements |
-| `assert(cond)` | Assert condition |
-| `abs(n)`, `min(a,b)`, `max(a,b)` | Math functions |
-| `round(n)`, `round(n, decimals)`, `floor(n)` | Rounding |
+| `transform(arr, fn)` | Transform (map) array elements |
+| `find(arr, fn)` | First element matching predicate → `Option` |
+| `sort(arr)`, `sort(arr, key)` | Sort array (key: string field name or function) |
+| `sort_desc(arr)`, `sort_desc(arr, key)` | Sort descending |
+| `any(arr, fn)` | True if any element matches |
+| `all(arr, fn)` | True if all elements match |
+| `reduce(arr, init, fn)` | Reduce array to single value |
+| `flat_map(arr, fn)` | Map + flatten results |
+
+**Math:**
+
+| Function | Description |
+|----------|-------------|
+| `abs(n)`, `min(a,b)`, `max(a,b)` | Basic math |
+| `round(n)`, `round(n, decimals)` | Round to integer or decimal places |
+| `floor(n)`, `ceil(n)`, `trunc(n)` | Floor, ceiling, truncate |
+| `clamp(n, min, max)` | Clamp value to range |
+| `pow(base, exp)`, `sqrt(n)`, `sign(n)` | Power, square root, sign |
+
+**Error Handling:**
+
+| Function | Description |
+|----------|-------------|
+| `Ok(value)`, `Err(value)` | Construct Result values |
+| `Some(value)` | Construct Option value |
+| `unwrap(result)` | Extract value or panic on error |
+| `unwrap_or(result, default)` | Extract value or use default |
+| `assert(cond)` | Assert condition (panics on false) |
+
+**Type Checks:**
+
+| Function | Description |
+|----------|-------------|
+| `is_string(x)`, `is_int(x)`, `is_float(x)`, `is_bool(x)` | Type checks |
+| `is_array(x)`, `is_map(x)` | Collection type checks |
+| `is_some(x)`, `is_none(x)` | Option checks |
+| `is_ok(x)`, `is_err(x)` | Result checks |
+
+**HTTP Server:**
+
+| Function | Description |
+|----------|-------------|
 | `get/post/put/patch/delete(pattern, handler)` | HTTP routes |
 | `listen(port)` | Start server |
 | `serve_static(prefix, dir)` | Static files |
 | `routes(dir)` | File-based routing |
 | `template(path, vars)` | Load template |
 | `use_middleware(fn)` | Add middleware |
-| `on_shutdown(fn)` | Cleanup handler |
+| `enable_cors(options?)` | Configure CORS |
+| `enable_csp(options?)` | Configure Content Security Policy |
+| `on_shutdown(fn)` | Cleanup handler on server stop |
+| `on_error(fn)` | Custom error handler |
 
 ### Common Imports
 
 ```ntnt
-import { split, join, trim, replace, contains, capture_pattern, capture_all_pattern, capture_named_pattern } from "std/string"
+import { split, join, trim, replace, contains, chars, capture_pattern } from "std/string"
 import { json, html, text, redirect, status, not_found, error, response, parse_form, parse_json } from "std/http/server"
 import { connect, query, query_one, execute, begin, commit, rollback, close } from "std/db/postgres"
 import { connect, query, query_one, execute, begin, commit, rollback, close } from "std/db/sqlite"
@@ -1369,24 +1723,36 @@ import { get_env, load_env } from "std/env"
 import { now, format } from "std/time"
 import { sha256, uuid } from "std/crypto"
 import { first, last, keys, values, entries, has_key, get_key, get_index } from "std/collections"
+import { oauth, enable_auth, get_user, get_session, validate_csrf } from "std/auth"
+import { open, get, set, del, list } from "std/kv"
+import { log_info, log_warn, log_error, set_log_level, request_logger } from "std/log"
+import { parse_url, encode_component, build_query, parse_query } from "std/url"
+import { parse_csv, parse_with_headers } from "std/csv"
+import { to_html } from "std/markdown"
+import { join_path, dirname, basename, extension } from "std/path"
+import { channel, send, recv, sleep_ms } from "std/concurrent"
 ```
 
 ### CLI Commands
 
 ```bash
-ntnt run <file>              # Run a .tnt file
-ntnt lint <file>             # Check for errors
-ntnt lint --strict <file>    # Check with strict type warnings
+ntnt run <file>              # Run a .tnt file (hot-reload in dev mode)
+ntnt repl                    # Interactive REPL
+ntnt lint <file>             # Check for errors and style issues
+ntnt lint --strict <file>    # Strict type warnings
+ntnt check <file>            # Quick syntax check
+ntnt validate <file>         # Validate with JSON output (for tools)
+ntnt inspect <file>          # Project structure as JSON
+ntnt test <file> --get /     # Test HTTP server (start, request, shutdown)
+ntnt test <file> --post /api --body '{"key":"val"}'  # POST with body
 ntnt intent check <file>     # Verify code matches intent
 ntnt intent studio <intent>  # Visual studio with live tests
 ntnt intent coverage <file>  # Show feature coverage
-ntnt intent init <intent>    # Generate scaffolding
-ntnt inspect <file>          # Project structure as JSON
-ntnt validate <file>         # Validate with JSON output
+ntnt intent init <intent>    # Generate scaffolding from intent
 ntnt docs [query]            # Search stdlib documentation
-ntnt docs --generate         # Regenerate STDLIB_REFERENCE.md
+ntnt docs --generate         # Regenerate reference docs from source
 ntnt docs --validate         # Check documentation coverage
-ntnt test <file> --get /     # Quick HTTP endpoint testing
+ntnt completions bash|zsh|fish  # Shell completions
 ```
 
 ---

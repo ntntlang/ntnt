@@ -42,13 +42,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tower_http::{compression::CompressionLayer, timeout::TimeoutLayer, trace::TraceLayer};
+use tower_http::{
+    compression::CompressionLayer, cors::CorsLayer, timeout::TimeoutLayer, trace::TraceLayer,
+};
 
-use super::http_server::get_default_security_headers;
+use super::http_server::{get_default_security_headers, CorsConfig, CspConfig};
 
 /// Apply security headers to a built Response<Body>.
 /// Only adds headers not already set by the application (app can override).
-fn apply_async_security_headers(response: &mut Response<Body>) {
+fn apply_async_security_headers(response: &mut Response<Body>, csp_header: Option<(&str, &str)>) {
     let disabled = std::env::var("NTNT_SECURITY_HEADERS")
         .map(|v| v == "0" || v.to_lowercase() == "false")
         .unwrap_or(false);
@@ -64,6 +66,19 @@ fn apply_async_security_headers(response: &mut Response<Body>) {
                             headers.insert(name, hv);
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Apply CSP header independently of NTNT_SECURITY_HEADERS toggle —
+    // CSP is explicitly configured by the user via enable_csp(), not a default header.
+    if let Some((csp_name, csp_value)) = csp_header {
+        let headers = response.headers_mut();
+        if let Ok(name) = header::HeaderName::try_from(csp_name) {
+            if !headers.contains_key(&name) {
+                if let Ok(hv) = header::HeaderValue::from_str(csp_value) {
+                    headers.insert(name, hv);
                 }
             }
         }
@@ -341,6 +356,8 @@ pub struct AppState {
     pub routes: Arc<AsyncServerState>,
     /// Whether running in production mode (controls error page detail)
     pub is_production: bool,
+    /// Pre-computed CSP header (header_name, header_value) if configured
+    pub csp_header: Option<(String, String)>,
 }
 
 /// Convert Axum request to BridgeRequest
@@ -403,7 +420,10 @@ async fn axum_to_bridge_request(
 }
 
 /// Convert BridgeResponse to Axum response
-fn bridge_to_axum_response(resp: BridgeResponse) -> Response<Body> {
+fn bridge_to_axum_response(
+    resp: BridgeResponse,
+    csp_header: Option<(&str, &str)>,
+) -> Response<Body> {
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
 
     let mut response = Response::builder().status(status);
@@ -425,12 +445,16 @@ fn bridge_to_axum_response(resp: BridgeResponse) -> Response<Body> {
             .body(Body::from("Failed to build response"))
             .unwrap()
     });
-    apply_async_security_headers(&mut resp);
+    apply_async_security_headers(&mut resp, csp_header);
     resp
 }
 
 /// Serve a static file with proper headers
-async fn serve_static_file(file_path: &str, if_none_match: Option<&str>) -> Response<Body> {
+async fn serve_static_file(
+    file_path: &str,
+    if_none_match: Option<&str>,
+    csp_header: Option<(&str, &str)>,
+) -> Response<Body> {
     use tokio_util::io::ReaderStream;
 
     let path = std::path::Path::new(file_path);
@@ -470,7 +494,7 @@ async fn serve_static_file(file_path: &str, if_none_match: Option<&str>) -> Resp
                 .header("server", "ntnt-async")
                 .body(Body::empty())
                 .unwrap();
-            apply_async_security_headers(&mut resp);
+            apply_async_security_headers(&mut resp, csp_header);
             return resp;
         }
     }
@@ -505,7 +529,7 @@ async fn serve_static_file(file_path: &str, if_none_match: Option<&str>) -> Resp
             .body(Body::from("File not found"))
             .unwrap(),
     };
-    apply_async_security_headers(&mut resp);
+    apply_async_security_headers(&mut resp, csp_header);
     resp
 }
 
@@ -551,6 +575,12 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
+    // Pre-compute CSP header ref for this request
+    let csp_ref = state
+        .csp_header
+        .as_ref()
+        .map(|(n, v)| (n.as_str(), v.as_str()));
+
     // Extract If-None-Match header for ETag/conditional request support (static files)
     let if_none_match = req
         .headers()
@@ -566,7 +596,7 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
             // Convert request and send to interpreter
             let mut response = match axum_to_bridge_request(req, params).await {
                 Ok(bridge_req) => match state.interpreter.call(bridge_req).await {
-                    Ok(response) => bridge_to_axum_response(response),
+                    Ok(response) => bridge_to_axum_response(response, csp_ref),
                     Err(e) => {
                         let error_msg = format!("{}", e);
                         // Structured error log — always printed regardless of mode
@@ -581,6 +611,7 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
                             &path,
                             &handler_name,
                             state.is_production,
+                            csp_ref,
                         )
                     }
                 },
@@ -597,6 +628,7 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
                         &path,
                         "",
                         state.is_production,
+                        csp_ref,
                     )
                 }
             };
@@ -613,7 +645,7 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
             if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
                 if let Some((file_path, _prefix)) = state.routes.find_static_file(&path).await {
                     let mut response =
-                        serve_static_file(&file_path, if_none_match.as_deref()).await;
+                        serve_static_file(&file_path, if_none_match.as_deref(), csp_ref).await;
 
                     // HEAD responses: preserve status + headers, strip body (RFC 9110 §9.3.2)
                     if method == axum::http::Method::HEAD {
@@ -632,6 +664,7 @@ async fn handle_request(State(state): State<AppState>, req: Request<Body>) -> im
                 &path,
                 "",
                 state.is_production,
+                csp_ref,
             )
         }
     }
@@ -648,6 +681,7 @@ fn error_response(
     path: &str,
     handler: &str,
     is_production: bool,
+    csp_header: Option<(&str, &str)>,
 ) -> Response<Body> {
     let status_text = match status {
         400 => "Bad Request",
@@ -753,7 +787,7 @@ Set <code>NTNT_ENV=production</code> to show a clean error page to users.
                 .body(Body::from("Internal Server Error"))
                 .unwrap()
         });
-    apply_async_security_headers(&mut resp);
+    apply_async_security_headers(&mut resp, csp_header);
     resp
 }
 
@@ -774,6 +808,8 @@ pub struct AsyncServerConfig {
     pub request_timeout_secs: u64,
     pub max_connections: usize,
     pub num_workers: usize,
+    pub cors_config: Option<CorsConfig>,
+    pub csp_config: Option<CspConfig>,
 }
 
 impl Default for AsyncServerConfig {
@@ -785,8 +821,59 @@ impl Default for AsyncServerConfig {
             request_timeout_secs: 30,
             max_connections: 10_000,
             num_workers: 1,
+            cors_config: None,
+            csp_config: None,
         }
     }
+}
+
+/// Build a tower-http CorsLayer from CorsConfig
+fn cors_layer_from_config(config: &CorsConfig) -> CorsLayer {
+    use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, Any};
+
+    let mut layer = CorsLayer::new();
+
+    // Origins
+    let has_wildcard = config.origins.iter().any(|o| o == "*");
+    if has_wildcard && !config.credentials {
+        layer = layer.allow_origin(Any);
+    } else if has_wildcard && config.credentials {
+        // CORS spec: credentials + wildcard = mirror the request origin
+        layer = layer.allow_origin(AllowOrigin::mirror_request());
+    } else {
+        let origins: Vec<header::HeaderValue> = config
+            .origins
+            .iter()
+            .filter_map(|o| header::HeaderValue::from_str(o).ok())
+            .collect();
+        layer = layer.allow_origin(AllowOrigin::list(origins));
+    }
+
+    // Methods
+    let methods: Vec<axum::http::Method> = config
+        .methods
+        .iter()
+        .filter_map(|m| axum::http::Method::from_bytes(m.as_bytes()).ok())
+        .collect();
+    layer = layer.allow_methods(AllowMethods::list(methods));
+
+    // Headers
+    let headers: Vec<header::HeaderName> = config
+        .headers
+        .iter()
+        .filter_map(|h| header::HeaderName::from_bytes(h.as_bytes()).ok())
+        .collect();
+    layer = layer.allow_headers(AllowHeaders::list(headers));
+
+    // Credentials
+    if config.credentials {
+        layer = layer.allow_credentials(true);
+    }
+
+    // Max age
+    layer = layer.max_age(Duration::from_secs(config.max_age.max(0) as u64));
+
+    layer
 }
 
 /// Start the async HTTP server with interpreter bridge
@@ -808,16 +895,23 @@ pub async fn start_server_with_bridge(
         .map(|v| v == "production" || v == "prod")
         .unwrap_or(false);
 
+    // Pre-compute CSP header value for AppState
+    let csp_header = config
+        .csp_config
+        .as_ref()
+        .map(|csp| (csp.header_name().to_string(), csp.to_header_value()));
+
     let state = AppState {
         interpreter: interpreter_handle,
         routes,
         is_production,
+        csp_header,
     };
 
     // Build the router with catch-all handler
     let mut app = Router::new().fallback(handle_request).with_state(state);
 
-    // Add middleware layers (order matters - applied bottom to top)
+    // Add middleware layers (last .layer() becomes outermost wrapper)
     // 1. Request timeout
     app = app.layer(TimeoutLayer::new(Duration::from_secs(
         config.request_timeout_secs,
@@ -830,6 +924,11 @@ pub async fn start_server_with_bridge(
 
     // 3. Tracing
     app = app.layer(TraceLayer::new_for_http());
+
+    // 4. CORS (added last = outermost, handles preflight OPTIONS before other layers)
+    if let Some(ref cors) = config.cors_config {
+        app = app.layer(cors_layer_from_config(cors));
+    }
 
     // Show user-friendly URL (0.0.0.0 means all interfaces, so use localhost for display)
     let display_url = if addr.ip().is_unspecified() {
@@ -1115,5 +1214,39 @@ mod tests {
             found.is_none(),
             "HEAD to non-existent path should return None"
         );
+    }
+
+    #[test]
+    fn test_cors_layer_from_config_wildcard() {
+        let config = CorsConfig::default();
+        // Should not panic with wildcard origins
+        let _layer = cors_layer_from_config(&config);
+    }
+
+    #[test]
+    fn test_cors_layer_from_config_specific_origins() {
+        let config = CorsConfig {
+            origins: vec![
+                "https://example.com".to_string(),
+                "https://app.example.com".to_string(),
+            ],
+            methods: vec!["GET".to_string(), "POST".to_string()],
+            headers: vec!["Content-Type".to_string(), "Authorization".to_string()],
+            credentials: true,
+            max_age: 3600,
+        };
+        let _layer = cors_layer_from_config(&config);
+    }
+
+    #[test]
+    fn test_cors_layer_from_config_credentials_no_wildcard() {
+        // With credentials=true and wildcard origin, uses AllowOrigin::mirror_request()
+        // to reflect the request's Origin header (wildcard + credentials is forbidden by spec)
+        let config = CorsConfig {
+            origins: vec!["*".to_string()],
+            credentials: true,
+            ..CorsConfig::default()
+        };
+        let _layer = cors_layer_from_config(&config);
     }
 }
