@@ -464,7 +464,7 @@ let mut tick_num = 0
 schedule("every 100ms", fn() {
     // Send tick first, then error on odd ticks to test resilience
     send(ch, "tick")
-    // Force a runtime error every other tick — schedule should keep running
+    // Force a runtime error every tick — schedule should keep running
     let x = 1 / 0
 })
 

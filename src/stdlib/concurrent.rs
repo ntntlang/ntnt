@@ -216,7 +216,8 @@ fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
         if let Some(pair) = registry.get(&id) {
             (pair.sender.clone(), Arc::clone(&pair.closed))
         } else {
-            return Err(IntentError::runtime_error("Invalid channel".to_string()));
+            // Channel was closed/removed — send fails gracefully
+            return Ok(Value::Bool(false));
         }
     }; // registry lock dropped here
 
@@ -335,15 +336,16 @@ fn concurrent_try_recv(ch: &Value) -> Result<Value> {
 fn concurrent_close(ch: &Value) -> Result<Value> {
     let id = get_channel_id(ch)?;
 
-    let registry = CHANNEL_REGISTRY
+    let mut registry = CHANNEL_REGISTRY
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
 
-    if let Some(pair) = registry.get(&id) {
-        let mut closed = pair.closed.lock().unwrap();
-        *closed = true;
-        // Keep the channel in the registry so receivers can drain remaining
-        // messages. The channel will be cleaned up when all references are dropped.
+    if registry.contains_key(&id) {
+        // Remove from registry. This drops the Sender, which causes any
+        // blocking recv() to get Disconnected and return Unit (as documented).
+        // Receivers holding an Arc<Mutex<Receiver>> can still drain buffered
+        // messages — the Receiver lives in their Arc, not in the registry.
+        registry.remove(&id);
         Ok(Value::Bool(true))
     } else {
         Ok(Value::Bool(false))
@@ -801,6 +803,13 @@ pub fn concurrent_schedule(
 ) -> Result<Value> {
     let duration = parse_interval(interval_str)?;
 
+    // Reject zero-duration intervals — would cause CPU spin + thread storm
+    if duration.is_zero() {
+        return Err(IntentError::runtime_error(
+            "schedule() interval must be greater than zero".to_string(),
+        ));
+    }
+
     let schedule_id = SCHEDULE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
     let cancelled = Arc::new(AtomicBool::new(false));
 
@@ -946,6 +955,9 @@ pub fn concurrent_after(
     body: Block,
     closure_bindings: HashMap<String, SerializedValue>,
 ) -> Result<Value> {
+    // GC completed tasks to prevent unbounded registry growth
+    prune_completed_tasks();
+
     // Use the task system for after() — it's basically spawn + sleep
     let task_id = TASK_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
     let state = Arc::new((Mutex::new(TaskState::Pending), Condvar::new()));

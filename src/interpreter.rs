@@ -4146,6 +4146,14 @@ impl Interpreter {
                         return Ok(Value::Unit);
                     }
 
+                    // Skip top-level spawn() in Worker/HotReload modes to prevent
+                    // duplicating background tasks across all N worker threads
+                    if name == "spawn" && arguments.len() == 1 {
+                        if self.should_skip_server_call("spawn") {
+                            return Ok(Value::Unit);
+                        }
+                    }
+
                     // Special handling for schedule(interval, fn)
                     if name == "schedule" && arguments.len() == 2 {
                         if self.should_skip_server_call("schedule") {
