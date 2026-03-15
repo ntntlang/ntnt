@@ -68,6 +68,42 @@ fn run_ntnt_code(code: &str) -> (String, String, i32) {
     (stdout, stderr, exit_code)
 }
 
+/// Helper to run ntnt with environment variables set
+fn run_ntnt_code_with_env(code: &str, env_vars: &[(&str, &str)]) -> (String, String, i32) {
+    let test_file = unique_test_file("feature_test");
+
+    let mut file = fs::File::create(&test_file).expect("Failed to create test file");
+    writeln!(file, "{}", code).expect("Failed to write test file");
+    drop(file);
+
+    let exe = std::env::consts::EXE_SUFFIX;
+    let debug_path = format!("./target/debug/ntnt{}", exe);
+    let release_path = format!("./target/release/ntnt{}", exe);
+
+    let binary = if std::path::Path::new(&debug_path).exists() {
+        debug_path
+    } else if std::path::Path::new(&release_path).exists() {
+        release_path
+    } else {
+        panic!("No ntnt binary found. Run 'cargo build' first.");
+    };
+
+    let mut cmd = Command::new(binary);
+    cmd.args(&["run", &test_file])
+        .current_dir(env!("CARGO_MANIFEST_DIR"));
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let output = cmd.output().expect("Failed to execute ntnt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    fs::remove_file(&test_file).ok();
+    (stdout, stderr, exit_code)
+}
+
 /// Helper to run ntnt parse on code
 fn run_ntnt_parse(code: &str) -> (String, String, i32) {
     let test_file = unique_test_file("parse_test");
@@ -4631,6 +4667,194 @@ let result = "hello" - 42
     assert!(
         stderr.contains("Cannot apply") || stderr.contains("String") || stderr.contains("Int"),
         "Error should mention types involved, got: {}",
+        stderr
+    );
+}
+
+// =============================================================================
+// Result/Option auto-unwrap on indexing (DD-040 Issue 1)
+// =============================================================================
+
+#[test]
+fn test_result_ok_bracket_index_warn_mode() {
+    // In warn mode (default), indexing Result(Ok(map)) should auto-unwrap
+    let (stdout, stderr, _exit) = run_ntnt_code(
+        r##"
+let result = Ok(map { "name": "Alice", "age": 30 })
+print(result["name"])
+"##,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "Alice",
+        "Should auto-unwrap Ok and index into inner map"
+    );
+    assert!(
+        stderr.contains("auto-unwrapping") || stderr.contains("unwrap"),
+        "Should emit warning about auto-unwrapping, got stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_result_ok_field_access_warn_mode() {
+    let (stdout, stderr, _exit) = run_ntnt_code(
+        r##"
+let result = Ok(map { "name": "Bob" })
+print(result.name)
+"##,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "Bob",
+        "Should auto-unwrap Ok and access field"
+    );
+    assert!(
+        stderr.contains("auto-unwrapping") || stderr.contains("unwrap"),
+        "Should emit warning about auto-unwrapping, got stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_result_err_bracket_index_warn_mode() {
+    // In warn mode, indexing Result(Err) should return None with warning
+    let (stdout, stderr, _exit) = run_ntnt_code(
+        r##"
+let result = Err("connection failed")
+let val = result["key"] ?? "fallback"
+print(val)
+"##,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "fallback",
+        "Err indexing should return None, falling back"
+    );
+    assert!(
+        stderr.contains("Result(Err") || stderr.contains("forget to check"),
+        "Should warn about indexing Err, got stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_result_err_field_access_warn_mode() {
+    let (stdout, stderr, _exit) = run_ntnt_code(
+        r##"
+let result = Err("timeout")
+let val = result.name ?? "default"
+print(val)
+"##,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "default",
+        "Err field access should return None"
+    );
+    assert!(
+        stderr.contains("Result(Err") || stderr.contains("forget to check"),
+        "Should warn about field access on Err, got stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_option_some_bracket_index_warn_mode() {
+    let (stdout, stderr, _exit) = run_ntnt_code(
+        r##"
+let opt = Some(map { "x": 42 })
+print(opt["x"])
+"##,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "42",
+        "Should auto-unwrap Some and index into inner map"
+    );
+    assert!(
+        stderr.contains("auto-unwrapping") || stderr.contains("unwrap"),
+        "Should emit warning about auto-unwrapping Option, got stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_option_none_bracket_index_warn_mode() {
+    let (stdout, stderr, _exit) = run_ntnt_code(
+        r##"
+let opt = None
+let val = opt["key"] ?? "nothing"
+print(val)
+"##,
+    );
+    assert_eq!(stdout.trim(), "nothing", "None indexing should return None");
+    assert!(
+        stderr.contains("Option(None") || stderr.contains("forget to check"),
+        "Should warn about indexing None, got stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_result_ok_array_index_warn_mode() {
+    let (stdout, stderr, _exit) = run_ntnt_code(
+        r##"
+let result = Ok([10, 20, 30])
+print(result[1])
+"##,
+    );
+    assert_eq!(
+        stdout.trim(),
+        "20",
+        "Should auto-unwrap Ok and index into inner array"
+    );
+    assert!(
+        stderr.contains("auto-unwrapping") || stderr.contains("unwrap"),
+        "Should emit warning, got stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_result_ok_strict_mode_errors() {
+    // In strict mode, indexing Result should be an error
+    let (stdout, stderr, _exit) = run_ntnt_code_with_env(
+        r##"
+let result = Ok(map { "key": "val" })
+print(result["key"])
+"##,
+        &[("NTNT_TYPE_MODE", "strict")],
+    );
+    // Should error, not produce output
+    assert!(
+        stderr.contains("unwrap")
+            || stderr.contains("RuntimeError")
+            || stderr.contains("did you forget"),
+        "Strict mode should error on Result indexing, got stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_result_ok_forgiving_mode_silent() {
+    // In forgiving mode, should auto-unwrap silently (no warning)
+    let (stdout, stderr, _exit) = run_ntnt_code_with_env(
+        r##"
+let result = Ok(map { "name": "Silent" })
+print(result["name"])
+"##,
+        &[("NTNT_TYPE_MODE", "forgiving")],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "Silent",
+        "Should auto-unwrap silently in forgiving mode"
+    );
+    // Forgiving mode should NOT emit warnings
+    assert!(
+        !stderr.contains("auto-unwrapping"),
+        "Forgiving mode should not warn, got stderr: {}",
         stderr
     );
 }

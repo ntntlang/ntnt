@@ -125,9 +125,9 @@ description = "Floating-point literals (IEEE 754)"
 examples = ["let pi = 3.14", "let tiny = 1.0e-10"]
 
 [literals.strings]
-syntax = "\"hello\", \"with {interpolation}\""
+syntax = "\"hello\", \"with #{interpolation}\""
 description = "Double-quoted strings with escape sequences and interpolation"
-examples = ["let msg = \"Hello, {name}!\"", "let escaped = \"line1\\nline2\""]
+examples = ["let msg = \"Hello, #{name}!\"", "let escaped = \"line1\\nline2\""]
 
 [literals.raw_strings]
 syntax = "r\"no escapes\", r#\"with \"quotes\"\"#"
@@ -193,8 +193,9 @@ description = "Escape sequences in regular strings (not raw strings)"
 "\\\\" = "Backslash"
 "\\\"" = "Double quote"
 "\\'" = "Single quote"
-"\\{" = "Literal { (prevents interpolation)"
-"\\}" = "Literal }"
+"\\{" = "Literal { (legacy, no longer needed since bare { is always literal)"
+"\\}" = "Literal } (legacy)"
+"\\#" = "Literal # (prevents #{expr} interpolation)"
 
 # =============================================================================
 # STRING INTERPOLATION
@@ -204,10 +205,10 @@ description = "Escape sequences in regular strings (not raw strings)"
 description = "String interpolation syntax"
 
 [interpolation.regular]
-syntax = "{expr}"
-description = "In regular strings, {expr} interpolates the expression"
-examples = ["\"Hello, {name}!\"", "\"Result: {a + b}\""]
-note = "Use \\{ to escape literal braces"
+syntax = "#{expr}"
+description = "In regular strings, #{expr} interpolates the expression. Bare { is always literal."
+examples = ["\"Hello, #{name}!\"", "\"Result: #{a + b}\""]
+note = "Use \\# to escape literal # before { if needed"
 
 [interpolation.template]
 syntax = "{{expr}}"
@@ -475,7 +476,7 @@ example = "let { name, ...other } = map { \"name\": \"A\", \"age\": 30 }"
 [destructuring.for_loop]
 syntax = "for [a, b] in expr { }"
 description = "Destructure each element during iteration"
-example = "for [k, v] in entries(data) { print(\"{k}={v}\") }"
+example = "for [k, v] in entries(data) { print(\"#{k}=#{v}\") }"
 
 [destructuring.spread_token]
 syntax = "..."
@@ -497,7 +498,7 @@ example = "fn add(a, b) { return a + b }"
 [function_parameters.typed]
 syntax = "fn name(a: Int, b: String) -> Bool { }"
 description = "Parameters with type annotations and return type"
-example = "fn greet(name: String) -> String { return \"Hello, {name}!\" }"
+example = "fn greet(name: String) -> String { return \"Hello, #{name}!\" }"
 
 [function_parameters.default_values]
 syntax = "fn name(a, b = expr) { }"

@@ -541,6 +541,40 @@ fn is_production_mode() -> bool {
 ///
 /// ## Hard Errors — Control Flow / Internal (always crash)
 /// Interpreter-internal errors that shouldn't reach user code:
+/// Auto-unwrap a Result/Option inner value for bracket indexing.
+/// Used by both Warn and Forgiving TypeModes to avoid code duplication.
+fn auto_unwrap_index(inner_val: Value, idx: Value) -> Result<Value> {
+    match (inner_val, idx) {
+        (Value::Map(map), Value::String(key)) => {
+            Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
+        }
+        (Value::Array(arr), Value::Int(i)) => {
+            let index = if i < 0 {
+                match (arr.len() as i64).checked_add(i) {
+                    Some(pos) if pos >= 0 => pos as usize,
+                    _ => return Ok(Value::none()),
+                }
+            } else {
+                i as usize
+            };
+            Ok(arr.get(index).cloned().unwrap_or_else(|| Value::none()))
+        }
+        _ => Ok(Value::none()),
+    }
+}
+
+/// Auto-unwrap a Result/Option inner value for field access.
+/// Used by both Warn and Forgiving TypeModes to avoid code duplication.
+fn auto_unwrap_field(inner_val: Value, field: &str) -> Result<Value> {
+    match inner_val {
+        Value::Map(ref map) => Ok(map.get(field).cloned().unwrap_or_else(|| Value::none())),
+        Value::Struct { fields: ref f, .. } => {
+            Ok(f.get(field).cloned().unwrap_or_else(|| Value::none()))
+        }
+        _ => Ok(Value::none()),
+    }
+}
+
 /// - Calling a non-function value
 /// - Pattern match exhaustiveness failures
 /// - `break`/`continue` outside a loop
@@ -4639,45 +4673,9 @@ impl Interpreter {
                                         &format!("index:{}({}):{}", enum_name, variant, idx.type_name()),
                                         &msg,
                                     );
-                                    // Auto-unwrap and delegate to inner value
-                                    match (inner_val, idx) {
-                                        (Value::Map(map), Value::String(key)) => {
-                                            Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
-                                        }
-                                        (Value::Array(arr), Value::Int(i)) => {
-                                            let index = if i < 0 {
-                                                match (arr.len() as i64).checked_add(i) {
-                                                    Some(pos) if pos >= 0 => pos as usize,
-                                                    _ => return Ok(Value::none()),
-                                                }
-                                            } else {
-                                                i as usize
-                                            };
-                                            Ok(arr.get(index).cloned().unwrap_or_else(|| Value::none()))
-                                        }
-                                        _ => Ok(Value::none()),
-                                    }
+                                    auto_unwrap_index(inner_val, idx)
                                 }
-                                TypeMode::Forgiving => {
-                                    // Auto-unwrap silently
-                                    match (inner_val, idx) {
-                                        (Value::Map(map), Value::String(key)) => {
-                                            Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
-                                        }
-                                        (Value::Array(arr), Value::Int(i)) => {
-                                            let index = if i < 0 {
-                                                match (arr.len() as i64).checked_add(i) {
-                                                    Some(pos) if pos >= 0 => pos as usize,
-                                                    _ => return Ok(Value::none()),
-                                                }
-                                            } else {
-                                                i as usize
-                                            };
-                                            Ok(arr.get(index).cloned().unwrap_or_else(|| Value::none()))
-                                        }
-                                        _ => Ok(Value::none()),
-                                    }
-                                }
+                                TypeMode::Forgiving => auto_unwrap_index(inner_val, idx),
                             }
                         } else {
                             // Err or None variant
@@ -4781,27 +4779,9 @@ impl Interpreter {
                                         &format!("field:{}({}):{}", enum_name, variant, field),
                                         &msg,
                                     );
-                                    match inner_val {
-                                        Value::Map(ref map) => Ok(map
-                                            .get(field)
-                                            .cloned()
-                                            .unwrap_or_else(|| Value::none())),
-                                        Value::Struct { fields: ref f, .. } => Ok(f
-                                            .get(field)
-                                            .cloned()
-                                            .unwrap_or_else(|| Value::none())),
-                                        _ => Ok(Value::none()),
-                                    }
+                                    auto_unwrap_field(inner_val, field)
                                 }
-                                TypeMode::Forgiving => match inner_val {
-                                    Value::Map(ref map) => {
-                                        Ok(map.get(field).cloned().unwrap_or_else(|| Value::none()))
-                                    }
-                                    Value::Struct { fields: ref f, .. } => {
-                                        Ok(f.get(field).cloned().unwrap_or_else(|| Value::none()))
-                                    }
-                                    _ => Ok(Value::none()),
-                                },
+                                TypeMode::Forgiving => auto_unwrap_field(inner_val, field),
                             }
                         } else {
                             let err_val = values.into_iter().next().unwrap_or(Value::Unit);
