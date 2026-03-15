@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.4.3
+> Last updated: v0.4.4
 
 ## Table of Contents
 
@@ -4878,16 +4878,17 @@ download("https://example.com/file.zip", "./file.zip")  // => Ok({status: 200, p
 #### `fetch`
 
 ```ntnt
-fetch(url_or_options: String | Map) -> Result<Response, String>
+fetch(url_or_options: String | Map, options?: Map) -> Result<Response, String>
 ```
 
 Make an HTTP request to a URL.
 
-Accepts either a URL string for a simple GET request, or an options map for full control over method, headers, body, authentication, cookies, and timeout. Options map keys: url (required), method, headers, body, json, form, auth, cookies, timeout.
+Accepts one or two arguments: - One argument: a URL string for a simple GET request, or an options map   with full control over method, headers, body, authentication, cookies, and timeout. - Two arguments: a URL string and an options map. The URL is merged into   the options map automatically. Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout.
 
 **Parameters:**
 
 - `url_or_options` — A URL string for GET, or a Map with request options
+- `options` — (optional) A Map with request options when first argument is a URL string
 
 **Returns:** Result<Response, String> where Response is a Map with status, status_text, headers, body, ok, url, redirected, and cookies fields
 
@@ -4895,13 +4896,19 @@ Accepts either a URL string for a simple GET request, or an options map for full
 
 ```ntnt
 fetch("https://api.example.com/data")  // => Ok({status: 200, body: "...", ...})  // Simple GET request
-// POST with JSON body
+// POST with JSON body (1-arg form)
 let opts = map {
   "url": "https://api.example.com",
   "method": "POST",
   "json": map { "key": "value" }
 }
 fetch(opts)
+// => Ok({status: 201, ...})
+// POST with JSON body (2-arg form)
+fetch("https://api.example.com", map {
+  "method": "POST",
+  "json": map { "key": "value" }
+})
 // => Ok({status: 201, ...})
 ```
 

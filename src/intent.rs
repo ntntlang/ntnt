@@ -1718,11 +1718,7 @@ impl Glossary {
                         .iter()
                         .take(2) // Just first 2 columns for brevity
                         .map(|(k, v)| {
-                            let v_short = if v.len() > 20 {
-                                format!("{}...", &v[..17])
-                            } else {
-                                v.clone()
-                            };
+                            let v_short = safe_truncate(v, 17);
                             format!("{}={}", k, v_short)
                         })
                         .collect();
@@ -2414,13 +2410,7 @@ pub fn run_assertions_ial(
                         assertion: assertion.clone(),
                         passed: all_passed,
                         actual: ctx.get("response.body").map(|v| match v {
-                            ial::Value::String(s) => {
-                                if s.len() > 100 {
-                                    format!("{}...", &s[..100])
-                                } else {
-                                    s.clone()
-                                }
-                            }
+                            ial::Value::String(s) => safe_truncate(s, 100),
                             _ => v.to_string(),
                         }),
                         message,
@@ -2608,13 +2598,21 @@ fn run_assertion_legacy(
     })
 }
 
+/// Safely truncate a string to at most `max_chars` characters,
+/// appending "..." if truncated. Never panics on multi-byte UTF-8.
+fn safe_truncate(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count > max_chars {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{}...", truncated)
+    } else {
+        s.to_string()
+    }
+}
+
 /// Truncate body for display
 fn truncate_body(body: &str) -> String {
-    if body.len() > 100 {
-        format!("{}...", &body[..100])
-    } else {
-        body.to_string()
-    }
+    safe_truncate(body, 100)
 }
 
 /// A single test case (HTTP request + assertions)
@@ -4756,11 +4754,7 @@ fn run_assertions(
                 AssertionResult {
                     assertion: assertion.clone(),
                     passed,
-                    actual: Some(if body.len() > 100 {
-                        format!("{}...", &body[..100])
-                    } else {
-                        body.to_string()
-                    }),
+                    actual: Some(safe_truncate(body, 100)),
                     message: if passed {
                         None
                     } else {
@@ -4773,11 +4767,7 @@ fn run_assertions(
                 AssertionResult {
                     assertion: assertion.clone(),
                     passed,
-                    actual: Some(if body.len() > 100 {
-                        format!("{}...", &body[..100])
-                    } else {
-                        body.to_string()
-                    }),
+                    actual: Some(safe_truncate(body, 100)),
                     message: if passed {
                         None
                     } else {
@@ -4793,11 +4783,7 @@ fn run_assertions(
                 AssertionResult {
                     assertion: assertion.clone(),
                     passed,
-                    actual: Some(if body.len() > 100 {
-                        format!("{}...", &body[..100])
-                    } else {
-                        body.to_string()
-                    }),
+                    actual: Some(safe_truncate(body, 100)),
                     message: if passed {
                         None
                     } else {
@@ -4827,11 +4813,7 @@ fn run_assertions(
                 AssertionResult {
                     assertion: assertion.clone(),
                     passed,
-                    actual: Some(if body.len() > 100 {
-                        format!("{}...", &body[..100])
-                    } else {
-                        body.to_string()
-                    }),
+                    actual: Some(safe_truncate(body, 100)),
                     message: if passed {
                         None
                     } else {
@@ -7132,5 +7114,36 @@ Feature: Test
             Glossary::normalize_for_cycle("a \"quoted\" {param} test"),
             "a <p> <p> test"
         );
+    }
+
+    #[test]
+    fn test_safe_truncate_ascii() {
+        assert_eq!(safe_truncate("hello", 10), "hello");
+        assert_eq!(safe_truncate("hello", 5), "hello");
+        assert_eq!(safe_truncate("hello world", 5), "hello...");
+        assert_eq!(safe_truncate("", 5), "");
+    }
+
+    #[test]
+    fn test_safe_truncate_emoji() {
+        // Each emoji is 4 bytes — byte slicing at position 3 would panic
+        let emoji = "😀😁😂🤣😃";
+        assert_eq!(safe_truncate(emoji, 3), "😀😁😂...");
+        assert_eq!(safe_truncate(emoji, 5), emoji);
+        assert_eq!(safe_truncate(emoji, 10), emoji);
+    }
+
+    #[test]
+    fn test_safe_truncate_cjk() {
+        // CJK characters are 3 bytes each — byte slicing at 17 would panic
+        let cjk = "你好世界这是一个测试字符串";
+        assert_eq!(safe_truncate(cjk, 4), "你好世界...");
+        assert_eq!(safe_truncate(cjk, 100), cjk);
+    }
+
+    #[test]
+    fn test_safe_truncate_mixed() {
+        let mixed = "Hello 🌍 世界!";
+        assert_eq!(safe_truncate(mixed, 8), "Hello 🌍 ...");
     }
 }

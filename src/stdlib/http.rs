@@ -863,25 +863,35 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt fetch
     // @module std/http
     // @module_description HTTP client for making requests to external services
-    // @signature fetch(url_or_options: String | Map) -> Result<Response, String>
+    // @signature fetch(url_or_options: String | Map, options?: Map) -> Result<Response, String>
     // Make an HTTP request to a URL.
     //
-    // Accepts either a URL string for a simple GET request, or an options map
-    // for full control over method, headers, body, authentication, cookies, and timeout.
-    // Options map keys: url (required), method, headers, body, json, form, auth, cookies, timeout.
+    // Accepts one or two arguments:
+    // - One argument: a URL string for a simple GET request, or an options map
+    //   with full control over method, headers, body, authentication, cookies, and timeout.
+    // - Two arguments: a URL string and an options map. The URL is merged into
+    //   the options map automatically.
+    // Options map keys: url (set automatically in 2-arg form), method, headers, body, json, form, auth, cookies, timeout.
     // @param url_or_options A URL string for GET, or a Map with request options
+    // @param options (optional) A Map with request options when first argument is a URL string
     // @returns Result<Response, String> where Response is a Map with status, status_text, headers, body, ok, url, redirected, and cookies fields
     // @see_also download, cache_fetch
     // @since v0.1.0
     // @tags #network
     // @example fetch("https://api.example.com/data") => Ok({status: 200, body: "...", ...}) ~ "Simple GET request"
-    // @example ~ "POST with JSON body"
+    // @example ~ "POST with JSON body (1-arg form)"
     //   let opts = map {
     //     "url": "https://api.example.com",
     //     "method": "POST",
     //     "json": map { "key": "value" }
     //   }
     //   fetch(opts)
+    // @expected Ok({status: 201, ...})
+    // @example ~ "POST with JSON body (2-arg form)"
+    //   fetch("https://api.example.com", map {
+    //     "method": "POST",
+    //     "json": map { "key": "value" }
+    //   })
     // @expected Ok({status: 201, ...})
     // @error TypeError ~ "fetch() requires a URL string or options map" fix: "Pass a String URL or a Map with request options"
     // @error TypeError ~ "fetch() requires 'url' option" fix: "Include 'url' key in the options map"
@@ -891,13 +901,31 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "fetch".to_string(),
             arity: 1,
-            max_arity: 1,
-            func: |args| match &args[0] {
-                Value::String(url) => http_get(url),
-                Value::Map(opts) => http_fetch(opts),
-                _ => Err(IntentError::type_error(
-                    "fetch() requires a URL string or options map".to_string(),
-                )),
+            max_arity: 2,
+            func: |args| {
+                if args.len() == 2 {
+                    // Two-arg form: fetch(url, options)
+                    match (&args[0], &args[1]) {
+                        (Value::String(url), Value::Map(opts)) => {
+                            let mut merged = opts.clone();
+                            merged.insert("url".to_string(), Value::String(url.clone()));
+                            http_fetch(&merged)
+                        }
+                        _ => Err(IntentError::type_error(
+                            "fetch(url, options) requires a String URL and an options Map"
+                                .to_string(),
+                        )),
+                    }
+                } else {
+                    // One-arg form: fetch(url) or fetch(options)
+                    match &args[0] {
+                        Value::String(url) => http_get(url),
+                        Value::Map(opts) => http_fetch(opts),
+                        _ => Err(IntentError::type_error(
+                            "fetch() requires a URL string or options map".to_string(),
+                        )),
+                    }
+                }
             },
         },
     );
