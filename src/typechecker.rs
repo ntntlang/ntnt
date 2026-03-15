@@ -3187,6 +3187,8 @@ impl TypeContext {
         sig!("serve_static", ["prefix" => Type::String, "dir" => Type::String], Type::Unit);
         sig!("use_middleware", ["handler" => Type::Any], Type::Unit);
         sig!("on_shutdown", ["handler" => Type::Any], Type::Unit);
+        sig!("schedule", ["interval" => Type::String, "handler" => Type::Any], Type::Unit);
+        sig!("after", ["ms" => Type::Int, "handler" => Type::Any], Type::Unit);
         sig!("routes", ["dir" => Type::String], Type::Unit);
         sig!("template", ["path" => Type::String, "vars" => Type::Any], Type::String);
 
@@ -3454,9 +3456,17 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
         }
         "std/concurrent" => {
             sig!("channel", [], Type::Any);
-            sig!("send", ["ch" => Type::Any, "value" => Type::Any], Type::Unit);
+            sig!("send", ["ch" => Type::Any, "value" => Type::Any], Type::Bool);
             sig!("recv", ["ch" => Type::Any], Type::Any);
+            sig!("recv_timeout", ["ch" => Type::Any, "millis" => Type::Int], Type::Any);
+            sig!("try_recv", ["ch" => Type::Any], Type::Any);
+            sig!("close", ["ch" => Type::Any], Type::Bool);
             sig!("sleep_ms", ["ms" => Type::Int], Type::Unit);
+            sig!("thread_count", [], Type::Int);
+            sig!("spawn", ["fn" => Type::Any], Type::Any);
+            sig!("await_task", ["task" => Type::Any], Type::Any);
+            sig!("try_await", ["task" => Type::Any], Type::Any);
+            sig!("cancel_task", ["task" => Type::Any], Type::Bool);
         }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));

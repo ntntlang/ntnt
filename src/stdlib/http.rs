@@ -621,6 +621,9 @@ fn http_get(url: &str) -> Result<Value> {
 
 /// Full HTTP request with all options
 fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
+    // Cooperative cancellation check for spawned tasks
+    crate::stdlib::concurrent::check_cancellation()?;
+
     let url = match opts.get("url") {
         Some(Value::String(u)) => u.clone(),
         _ => {

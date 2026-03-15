@@ -3095,7 +3095,7 @@ values(map { "a": 1, "b": 2 })  // => [1, 2]  // Get map values
 
 ## std/concurrent
 
-Concurrent execution with parallel and background tasks
+Concurrent execution with channels, tasks, and scheduling
 
 ```ntnt
 import { channel, send, recv } from "std/concurrent"
@@ -3105,14 +3105,70 @@ import { channel, send, recv } from "std/concurrent"
 
 | Function | Description |
 |----------|-------------|
+| [`await_task`](#awaittask) | Blocks until the task completes. Returns Ok(value) on success, Err(message) on failure. Integrates with `otherwise` for error handling. |
+| [`cancel_task`](#canceltask) | Requests cancellation of a task. Cancellation is cooperative — checked at yield points (recv, sleep, fetch). Returns true if the cancellation was set, false if task not found. |
 | [`channel`](#channel) | Creates a new unbounded channel for inter-task communication. |
 | [`close`](#close) | Closes a channel. Senders will fail, receivers get remaining messages then Unit. |
 | [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if channel is closed and empty. |
 | [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or channel disconnected. |
 | [`send`](#send) | Sends a value through a channel. Returns false if channel is closed. |
 | [`sleep_ms`](#sleepms) | Pauses execution for specified milliseconds. |
+| [`spawn`](#spawn) | Spawns a function as a background task on a new thread. The function's captured variables are serialized (snapshot at spawn time) — mutations after spawn are not visible. Returns a Task handle for await_task/try_await/cancel_task. |
 | [`thread_count`](#threadcount) | Returns the number of available CPU threads. Useful for sizing parallel work. |
+| [`try_await`](#tryawait) | Non-blocking check on a task. Returns None if still running, Some(Result) if done. |
 | [`try_recv`](#tryrecv) | Non-blocking receive. Returns None if no value is available. |
+
+#### `await_task`
+
+```ntnt
+await_task(task: Task) -> Result<Any, String>
+```
+
+Blocks until the task completes. Returns Ok(value) on success, Err(message) on failure. Integrates with `otherwise` for error handling.
+
+**Parameters:**
+
+- `task` — The Task handle from spawn()
+
+**Returns:** Result with the task's return value or error message
+
+**Examples:**
+
+```ntnt
+await_task(task)  // Wait for task to complete and get result
+```
+
+**See also:** `spawn`, `try_await`, `cancel_task`
+
+*Since v0.5.0*
+
+---
+
+#### `cancel_task`
+
+```ntnt
+cancel_task(task: Task) -> Bool
+```
+
+Requests cancellation of a task. Cancellation is cooperative — checked at yield points (recv, sleep, fetch). Returns true if the cancellation was set, false if task not found.
+
+**Parameters:**
+
+- `task` — The Task handle from spawn()
+
+**Returns:** true if cancellation flag was set
+
+**Examples:**
+
+```ntnt
+cancel_task(task)  // Request task cancellation
+```
+
+**See also:** `spawn`, `await_task`
+
+*Since v0.5.0*
+
+---
 
 #### `channel`
 
@@ -3256,6 +3312,32 @@ sleep_ms(1000)  // Sleep for 1 second
 
 ---
 
+#### `spawn`
+
+```ntnt
+spawn(fn: Function) -> Task
+```
+
+Spawns a function as a background task on a new thread. The function's captured variables are serialized (snapshot at spawn time) — mutations after spawn are not visible. Returns a Task handle for await_task/try_await/cancel_task.
+
+**Parameters:**
+
+- `fn` — A zero-argument function to execute in the background
+
+**Returns:** Task handle (Map with _task_id)
+
+**Examples:**
+
+```ntnt
+spawn(fn() { return 42 })  // Spawn a background task that returns 42
+```
+
+**See also:** `await_task`, `try_await`, `cancel_task`
+
+*Since v0.5.0*
+
+---
+
 #### `thread_count`
 
 ```ntnt
@@ -3271,6 +3353,32 @@ thread_count()  // => 8  // Number of CPU threads
 ```
 
 *Since v0.2.0*
+
+---
+
+#### `try_await`
+
+```ntnt
+try_await(task: Task) -> Option<Result<Any, String>>
+```
+
+Non-blocking check on a task. Returns None if still running, Some(Result) if done.
+
+**Parameters:**
+
+- `task` — The Task handle from spawn()
+
+**Returns:** None if pending/running, Some(Ok(value)) or Some(Err(msg)) if completed
+
+**Examples:**
+
+```ntnt
+try_await(task)  // Check if task is done without blocking
+```
+
+**See also:** `spawn`, `await_task`, `cancel_task`
+
+*Since v0.5.0*
 
 ---
 

@@ -674,12 +674,18 @@ impl Interpreter {
         match self.execution_mode {
             ExecutionMode::Normal => false,
             ExecutionMode::HotReload => {
-                // In hot-reload, only skip listen(), on_shutdown(), and on_error()
-                matches!(name, "listen" | "on_shutdown" | "on_error")
+                // In hot-reload, only skip listen(), on_shutdown(), on_error(), schedule(), after()
+                matches!(
+                    name,
+                    "listen" | "on_shutdown" | "on_error" | "schedule" | "after"
+                )
             }
             ExecutionMode::Worker => {
-                // Workers skip listen(), on_shutdown(), on_error() but keep route registrations
-                matches!(name, "listen" | "on_shutdown" | "on_error")
+                // Workers skip listen(), on_shutdown(), on_error(), schedule(), after() but keep route registrations
+                matches!(
+                    name,
+                    "listen" | "on_shutdown" | "on_error" | "schedule" | "after"
+                )
             }
             ExecutionMode::UnitTest => {
                 // In unit test mode, skip all server-related functions
@@ -694,6 +700,8 @@ impl Interpreter {
                         | "enable_cors"
                         | "enable_csp"
                         | "enable_auth"
+                        | "schedule"
+                        | "after"
                 )
             }
         }
@@ -735,6 +743,21 @@ impl Interpreter {
     /// Define a variable in the current environment
     pub fn define_variable(&mut self, name: String, value: Value) {
         self.environment.borrow_mut().define(name, value);
+    }
+
+    /// Define all stdlib module functions as globals in the current environment.
+    /// Used by spawned tasks so they can call stdlib functions without explicit imports.
+    pub fn define_all_stdlib_as_globals(&mut self) {
+        let modules: Vec<(String, HashMap<String, Value>)> = self
+            .loaded_modules
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (_module_name, funcs) in modules {
+            for (name, value) in funcs {
+                self.environment.borrow_mut().define(name, value);
+            }
+        }
     }
 
     /// Call a function by name with the given arguments
@@ -3715,7 +3738,7 @@ impl Interpreter {
         }
     }
 
-    fn eval_block(&mut self, block: &Block) -> Result<Value> {
+    pub fn eval_block(&mut self, block: &Block) -> Result<Value> {
         let previous = Rc::clone(&self.environment);
         self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
 
@@ -4105,6 +4128,99 @@ impl Interpreter {
                         let handler = self.eval_expression(&arguments[0])?;
                         self.server_state.set_error_handler(handler);
                         return Ok(Value::Unit);
+                    }
+
+                    // Special handling for schedule(interval, fn)
+                    if name == "schedule" && arguments.len() == 2 {
+                        if self.should_skip_server_call("schedule") {
+                            return Ok(Value::Unit);
+                        }
+                        let interval = self.eval_expression(&arguments[0])?;
+                        let handler = self.eval_expression(&arguments[1])?;
+                        let interval_str =
+                            match &interval {
+                                Value::String(s) => s.clone(),
+                                _ => return Err(IntentError::type_error(
+                                    "schedule() first argument must be a string like \"every 5s\""
+                                        .to_string(),
+                                )),
+                            };
+                        match &handler {
+                            Value::Function {
+                                params,
+                                body,
+                                closure,
+                                ..
+                            } => {
+                                let bindings = closure.borrow().all_bindings();
+                                let mut serialized = HashMap::new();
+                                for (k, v) in &bindings {
+                                    if let Ok(sv) =
+                                        crate::stdlib::concurrent::SerializedValue::from_value(v)
+                                    {
+                                        serialized.insert(k.clone(), sv);
+                                    }
+                                }
+                                return crate::stdlib::concurrent::concurrent_schedule(
+                                    &interval_str,
+                                    params.clone(),
+                                    body.clone(),
+                                    serialized,
+                                );
+                            }
+                            _ => {
+                                return Err(IntentError::type_error(
+                                    "schedule() second argument must be a function".to_string(),
+                                ))
+                            }
+                        }
+                    }
+
+                    // Special handling for after(ms, fn)
+                    if name == "after" && arguments.len() == 2 {
+                        if self.should_skip_server_call("after") {
+                            return Ok(Value::Unit);
+                        }
+                        let delay = self.eval_expression(&arguments[0])?;
+                        let handler = self.eval_expression(&arguments[1])?;
+                        let delay_ms = match &delay {
+                            Value::Int(ms) => *ms,
+                            _ => {
+                                return Err(IntentError::type_error(
+                                    "after() first argument must be an integer (milliseconds)"
+                                        .to_string(),
+                                ))
+                            }
+                        };
+                        match &handler {
+                            Value::Function {
+                                params,
+                                body,
+                                closure,
+                                ..
+                            } => {
+                                let bindings = closure.borrow().all_bindings();
+                                let mut serialized = HashMap::new();
+                                for (k, v) in &bindings {
+                                    if let Ok(sv) =
+                                        crate::stdlib::concurrent::SerializedValue::from_value(v)
+                                    {
+                                        serialized.insert(k.clone(), sv);
+                                    }
+                                }
+                                return crate::stdlib::concurrent::concurrent_after(
+                                    delay_ms,
+                                    params.clone(),
+                                    body.clone(),
+                                    serialized,
+                                );
+                            }
+                            _ => {
+                                return Err(IntentError::type_error(
+                                    "after() second argument must be a function".to_string(),
+                                ))
+                            }
+                        }
                     }
 
                     // Special handling for enable_cors(options?)
@@ -7101,7 +7217,11 @@ impl Interpreter {
             }
         }
 
-        // Server is shutting down - call shutdown handlers
+        // Server is shutting down - cancel all tasks and schedules
+        crate::stdlib::concurrent::cancel_all_tasks();
+        crate::stdlib::concurrent::cancel_all_schedules();
+
+        // Call shutdown handlers
         let shutdown_handlers: Vec<Value> = self.server_state.get_shutdown_handlers().to_vec();
         if !shutdown_handlers.is_empty() {
             println!("\nRunning shutdown handlers...");
@@ -7280,6 +7400,21 @@ impl Interpreter {
                     // Channel closed, server shutting down
                     println!("\n🛑 Server shutting down...");
                     break;
+                }
+            }
+        }
+
+        // Cancel all tasks and schedules on shutdown
+        crate::stdlib::concurrent::cancel_all_tasks();
+        crate::stdlib::concurrent::cancel_all_schedules();
+
+        // Call shutdown handlers
+        let shutdown_handlers: Vec<Value> = self.server_state.get_shutdown_handlers().to_vec();
+        if !shutdown_handlers.is_empty() {
+            println!("Running shutdown handlers...");
+            for handler in shutdown_handlers {
+                if let Err(e) = self.call_function(handler, vec![]) {
+                    eprintln!("Shutdown handler error: {}", e);
                 }
             }
         }

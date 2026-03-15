@@ -1538,10 +1538,12 @@ use_middleware(request_logger())  // Logs method, path, status, duration for eve
 
 ## Concurrency (`std/concurrent`)
 
-Channels for inter-task communication and timing utilities.
+Channels for inter-task communication, structured task spawning, and timing utilities.
+
+### Channels
 
 ```ntnt
-import { channel, send, recv, recv_timeout, try_recv, close, sleep_ms } from "std/concurrent"
+import { channel, send, recv, recv_timeout, try_recv, close } from "std/concurrent"
 
 let ch = channel()
 send(ch, "hello")
@@ -1551,8 +1553,82 @@ let msg = recv_timeout(ch, 5000)  // Option — None if timeout
 let msg = try_recv(ch)             // Option — None if no message waiting
 
 close(ch)
-sleep_ms(1000)  // Sleep for 1 second
 ```
+
+### Tasks (spawn / await / cancel)
+
+```ntnt
+import { spawn, await_task, try_await, cancel_task, channel, send, recv } from "std/concurrent"
+
+// Spawn a background task — runs on its own thread with its own interpreter
+let task = spawn(fn() {
+    return 42
+})
+
+// Block until task completes — returns Result (Ok/Err)
+let result = await_task(task)
+match result {
+    Ok(val) => print("Got: " + str(val)),    // "Got: 42"
+    Err(e) => print("Error: " + str(e))
+}
+
+// Non-blocking check
+let status = try_await(task)
+match status {
+    Some(result) => print("Done"),
+    None => print("Still running")
+}
+
+// Cancel a long-running task (cooperative — checked at yield points)
+let long_task = spawn(fn() {
+    import { sleep } from "std/time"
+    sleep(60000)  // 60 seconds
+    return "done"
+})
+cancel_task(long_task)
+
+// Channel communication between tasks
+let ch = channel()
+spawn(fn() {
+    send(ch, "hello from background")
+})
+let msg = recv(ch)  // "hello from background"
+```
+
+**Important notes about spawn:**
+- Captured variables are **serialized at spawn time** (snapshot semantics)
+- Mutations after spawn are NOT visible to the spawned task
+- Only serializable values (Int, Float, String, Bool, Array, Map) are captured
+- Functions/closures are not captured — use `import` inside the spawned function
+- Each spawned task gets its own Interpreter instance with all stdlib available
+- Cancellation is cooperative: checked during `recv()`, `sleep()`, and `fetch()`
+
+### Scheduling (server builtins)
+
+```ntnt
+// Run a function every N seconds/minutes/hours
+schedule("every 5s", fn() {
+    print("tick!")
+})
+
+// Interval formats: "every Ns", "every Nm", "every Nh", "every Nms"
+schedule("every 30m", fn() {
+    // Cleanup expired sessions
+    import { query } from "std/sqlite"
+    query("DELETE FROM sessions WHERE expires_at < datetime('now')")
+})
+
+// Run once after a delay (milliseconds)
+after(5000, fn() {
+    print("5 seconds elapsed!")
+})
+```
+
+**Schedule behavior:**
+- Overlap prevention: skips tick if previous execution still running
+- Error resilience: errors are logged to stderr, schedule continues
+- Lifecycle: all schedules/tasks cancelled on server shutdown
+- `schedule()` and `after()` are server builtins (like `listen`, `on_shutdown`)
 
 ---
 
