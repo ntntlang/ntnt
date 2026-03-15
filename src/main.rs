@@ -432,7 +432,11 @@ enum IntentCommands {
 #[derive(Subcommand)]
 enum JobsCommands {
     /// Show queue statistics (pending, active, completed, dead counts)
-    Status,
+    Status {
+        /// PostgreSQL connection URL (or set DATABASE_URL env var)
+        #[arg(long)]
+        postgres_url: Option<String>,
+    },
     /// List recent jobs
     List {
         /// Show only dead letter jobs
@@ -444,18 +448,27 @@ enum JobsCommands {
         /// Show only active jobs
         #[arg(long)]
         active: bool,
+        /// PostgreSQL connection URL (or set DATABASE_URL env var)
+        #[arg(long)]
+        postgres_url: Option<String>,
     },
     /// Retry a dead job (move back to pending)
     Retry {
         /// Job ID to retry
         #[arg(value_name = "ID")]
         id: String,
+        /// PostgreSQL connection URL (or set DATABASE_URL env var)
+        #[arg(long)]
+        postgres_url: Option<String>,
     },
     /// Cancel a pending or active job
     Cancel {
         /// Job ID to cancel
         #[arg(value_name = "ID")]
         id: String,
+        /// PostgreSQL connection URL (or set DATABASE_URL env var)
+        #[arg(long)]
+        postgres_url: Option<String>,
     },
 }
 
@@ -2496,12 +2509,36 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
 
 /// Run intent-driven development commands
 fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
-    match cmd {
-        JobsCommands::Status => {
-            let counts =
-                ntnt::stdlib::jobs::queue_status().map_err(|e| anyhow::anyhow!("{}", e))?;
+    /// Resolve a postgres URL from the flag or DATABASE_URL env var
+    fn resolve_pg_url(flag: &Option<String>) -> Option<String> {
+        flag.clone().or_else(|| std::env::var("DATABASE_URL").ok())
+    }
 
-            println!("Job Queue Status:");
+    /// Initialize postgres backend if a URL is available
+    fn maybe_init_pg(url: &Option<String>) -> anyhow::Result<bool> {
+        if let Some(ref pg_url) = resolve_pg_url(url) {
+            ntnt::stdlib::jobs::pg_init_pool_from_url(pg_url)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    match cmd {
+        JobsCommands::Status { postgres_url } => {
+            let is_pg = maybe_init_pg(&postgres_url)?;
+
+            let counts = if is_pg {
+                ntnt::stdlib::jobs::pg_queue_status().map_err(|e| anyhow::anyhow!("{}", e))?
+            } else {
+                ntnt::stdlib::jobs::queue_status().map_err(|e| anyhow::anyhow!("{}", e))?
+            };
+
+            println!(
+                "Job Queue Status{}:",
+                if is_pg { " (postgres)" } else { "" }
+            );
             println!("  Pending:   {}", counts.get("pending").unwrap_or(&0));
             println!("  Active:    {}", counts.get("active").unwrap_or(&0));
             println!("  Completed: {}", counts.get("completed").unwrap_or(&0));
@@ -2514,7 +2551,10 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
             dead,
             pending,
             active,
+            postgres_url,
         } => {
+            let is_pg = maybe_init_pg(&postgres_url)?;
+
             let filter = if dead {
                 Some("dead")
             } else if pending {
@@ -2525,19 +2565,29 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
                 None
             };
 
-            let jobs =
-                ntnt::stdlib::jobs::list_jobs(filter).map_err(|e| anyhow::anyhow!("{}", e))?;
+            let jobs = if is_pg {
+                ntnt::stdlib::jobs::pg_list_jobs(filter).map_err(|e| anyhow::anyhow!("{}", e))?
+            } else {
+                ntnt::stdlib::jobs::list_jobs(filter).map_err(|e| anyhow::anyhow!("{}", e))?
+            };
 
             if jobs.is_empty() {
                 println!("No jobs found.");
                 return Ok(());
             }
 
+            // UUID IDs are 36 chars — widen the ID column for postgres
+            let id_width = if is_pg { 38 } else { 12 };
             println!(
-                "{:<12} {:<20} {:<12} {:<10} {:<8}",
-                "ID", "Type", "Queue", "Status", "Attempt"
+                "{:<width$} {:<20} {:<12} {:<10} {:<8}",
+                "ID",
+                "Type",
+                "Queue",
+                "Status",
+                "Attempt",
+                width = id_width
             );
-            println!("{}", "-".repeat(62));
+            println!("{}", "-".repeat(id_width + 50));
 
             for job in &jobs {
                 let id = match job.get("id") {
@@ -2562,16 +2612,27 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
                 };
 
                 println!(
-                    "{:<12} {:<20} {:<12} {:<10} {:<8}",
-                    id, job_type, queue, status, attempt
+                    "{:<width$} {:<20} {:<12} {:<10} {:<8}",
+                    id,
+                    job_type,
+                    queue,
+                    status,
+                    attempt,
+                    width = id_width
                 );
             }
 
             Ok(())
         }
-        JobsCommands::Retry { id } => {
-            let retried =
-                ntnt::stdlib::jobs::retry_dead_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?;
+        JobsCommands::Retry { id, postgres_url } => {
+            let is_pg = maybe_init_pg(&postgres_url)?;
+
+            let retried = if is_pg {
+                ntnt::stdlib::jobs::pg_retry_dead_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?
+            } else {
+                ntnt::stdlib::jobs::retry_dead_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?
+            };
+
             if retried {
                 println!("Job {} moved back to pending.", id);
             } else {
@@ -2579,9 +2640,15 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        JobsCommands::Cancel { id } => {
-            let cancelled =
-                ntnt::stdlib::jobs::cancel_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?;
+        JobsCommands::Cancel { id, postgres_url } => {
+            let is_pg = maybe_init_pg(&postgres_url)?;
+
+            let cancelled = if is_pg {
+                ntnt::stdlib::jobs::pg_cancel_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?
+            } else {
+                ntnt::stdlib::jobs::cancel_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?
+            };
+
             if cancelled {
                 println!("Job {} cancelled.", id);
             } else {

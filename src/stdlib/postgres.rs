@@ -24,13 +24,15 @@ type Result<T> = std::result::Result<T, IntentError>;
 
 /// Dedicated Tokio runtime for all database operations.
 /// The interpreter thread is not inside a Tokio runtime, so we need our own.
-static DB_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .expect("Failed to create DB runtime")
-});
+/// Public so other modules (e.g. jobs postgres backend) can reuse it.
+pub static DB_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> =
+    std::sync::LazyLock::new(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("Failed to create DB runtime")
+    });
 
 /// Pool registry — maps connection IDs to deadpool-postgres pools
 static POOL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Pool>>> =

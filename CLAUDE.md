@@ -1691,24 +1691,77 @@ SendEmail.enqueue_at(1700000000000, map {
     "body": "Sent at a specific time"
 })
 
-// Configure queue behavior
+// Configure queue behavior (in-memory backend, default)
 Queue.configure(map {
     "shutdown_timeout": 30000,          // ms to wait for in-flight jobs on shutdown
     "prune_completed_after": 3600000    // ms before pruning completed jobs (1 hour)
 })
 
+// Or configure with PostgreSQL backend for persistent, distributed jobs
+Queue.configure(map {
+    "backend": "postgres",
+    "url": "postgres://user:pass@localhost/mydb",  // or set DATABASE_URL env var
+    "heartbeat_interval": 30,           // seconds between heartbeats (default: 30)
+    "visibility_timeout": 300           // seconds before stale jobs are re-queued (default: 300)
+})
+
 // Start background worker (non-blocking)
 Queue.work_async()
 
-// Check queue status
-let status = Queue.status()
+// Or start blocking worker (for dedicated worker processes like worker.tnt)
+// Queue.work(map { "queues": ["default", "emails"], "concurrency": 4 })
+
+// Check queue status (works with both backends)
+let status = Queue.stats()
 print("Pending: #{status.pending}, Active: #{status.active}, Dead: #{status.dead}")
+
+// Observability queries (especially useful with postgres backend)
+let recent = Queue.recent(10)        // Last 10 jobs
+let dead = Queue.dead(5)             // Last 5 dead jobs
+Queue.retry(job_id)                  // Retry a dead job
 
 // Cancel a job
 Queue.cancel(job_id)
 
 // Start your server — jobs process in the background
 listen(8080)
+```
+
+**PostgreSQL backend deployment** (server.tnt + worker.tnt):
+```ntnt
+// server.tnt — enqueues jobs
+import { Queue } from "std/jobs"
+
+Queue.configure(map { "backend": "postgres", "url": env("DATABASE_URL") })
+
+Job SendEmail on emails (retry: 3) {
+    perform(to: String, subject: String) {
+        // ... send email
+    }
+}
+
+// API endpoint that enqueues a job
+get "/send-email" (req) {
+    SendEmail.enqueue(map { "to": req.query.to, "subject": "Welcome" })
+    return map { "status": 200, "body": "Queued" }
+}
+
+listen(8080)
+```
+```ntnt
+// worker.tnt — processes jobs (run separately)
+import { Queue } from "std/jobs"
+
+Queue.configure(map { "backend": "postgres", "url": env("DATABASE_URL") })
+
+Job SendEmail on emails (retry: 3) {
+    perform(to: String, subject: String) {
+        // ... send email
+    }
+}
+
+// Blocks and processes jobs from multiple queues
+Queue.work(map { "queues": ["emails", "default"], "concurrency": 4 })
 ```
 
 **Job DSL syntax:**
@@ -1728,18 +1781,39 @@ Job <Name> on <queue_name> [(<option>: <value>, ...)] {
 - `timeout: N` — timeout in seconds (default: none)
 - `backoff: N` — base backoff in milliseconds for exponential retry (default: 1000)
 
+**Backends:**
+- `memory` (default) — in-process, no persistence, great for development
+- `postgres` — persistent jobs with `SELECT FOR UPDATE SKIP LOCKED`, heartbeats, stale job recovery. Auto-creates `ntnt_jobs` table with indexes.
+
 **Job lifecycle:** Pending → Active → Completed | Retry → Dead
 - Failed jobs retry with exponential backoff: `backoff * 2^(attempt-1)`
 - Jobs that exhaust all retries move to the Dead letter queue
 - `on_failure` hook fires on each failure with error message and attempt count
+- Postgres backend: stale jobs (no heartbeat within `visibility_timeout`) auto-release back to pending
+
+**Queue methods:**
+- `Queue.work_async()` — start background worker (non-blocking)
+- `Queue.work(opts)` — start blocking worker with concurrency control
+- `Queue.stats()` / `Queue.status()` — job counts by state
+- `Queue.recent(n)` — last N jobs (postgres: ordered by created_at)
+- `Queue.dead(n)` — last N dead jobs
+- `Queue.retry(id)` — retry a dead job
+- `Queue.cancel(id)` — cancel a pending/active job
+- `Queue.configure(opts)` — configure backend and settings
 
 **CLI management:**
 ```bash
-ntnt jobs status                # Queue statistics
-ntnt jobs list                  # List all recent jobs
-ntnt jobs list --dead           # List dead letter jobs
-ntnt jobs retry <job_id>        # Retry a dead job
-ntnt jobs cancel <job_id>       # Cancel a pending job
+ntnt jobs status                                # In-memory queue statistics
+ntnt jobs status --postgres-url postgres://...   # PostgreSQL queue statistics
+ntnt jobs list --postgres-url postgres://...     # List jobs from postgres
+ntnt jobs list --dead --postgres-url postgres://...  # List dead jobs
+ntnt jobs retry <job_id> --postgres-url postgres://... # Retry a dead job
+ntnt jobs cancel <job_id> --postgres-url postgres://... # Cancel a job
+
+# Or use DATABASE_URL env var instead of --postgres-url flag
+export DATABASE_URL=postgres://user:pass@localhost/mydb
+ntnt jobs status
+ntnt jobs list --dead
 ```
 
 ---

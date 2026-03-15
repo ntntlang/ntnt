@@ -5510,7 +5510,21 @@ impl Interpreter {
                                 crate::stdlib::jobs::start_worker()?;
                                 return Ok(Value::Unit);
                             }
-                            "status" => {
+                            "work" => {
+                                // Queue.work(opts) — blocking mode for dedicated workers
+                                let opts = if args.is_empty() {
+                                    HashMap::new()
+                                } else if let Value::Map(ref m) = args[0] {
+                                    m.clone()
+                                } else {
+                                    return Err(IntentError::type_error(
+                                        "Queue.work() accepts an optional Map argument".to_string(),
+                                    ));
+                                };
+                                crate::stdlib::jobs::start_worker_blocking(&opts)?;
+                                return Ok(Value::Unit);
+                            }
+                            "status" | "stats" => {
                                 let counts = crate::stdlib::jobs::queue_status()?;
                                 let mut result = HashMap::new();
                                 for (k, v) in counts {
@@ -5548,9 +5562,48 @@ impl Interpreter {
                                     ));
                                 }
                             }
+                            "recent" => {
+                                let limit = if args.is_empty() {
+                                    20
+                                } else if let Value::Int(n) = &args[0] {
+                                    *n
+                                } else {
+                                    20
+                                };
+                                let jobs = crate::stdlib::jobs::recent_jobs(limit)?;
+                                let result: Vec<Value> = jobs.into_iter().map(Value::Map).collect();
+                                return Ok(Value::Array(result));
+                            }
+                            "dead" => {
+                                let limit = if args.is_empty() {
+                                    20
+                                } else if let Value::Int(n) = &args[0] {
+                                    *n
+                                } else {
+                                    20
+                                };
+                                let jobs = crate::stdlib::jobs::dead_jobs(limit)?;
+                                let result: Vec<Value> = jobs.into_iter().map(Value::Map).collect();
+                                return Ok(Value::Array(result));
+                            }
+                            "retry" => {
+                                if args.is_empty() {
+                                    return Err(IntentError::runtime_error(
+                                        "Queue.retry() requires a job ID argument".to_string(),
+                                    ));
+                                }
+                                if let Value::String(ref id) = args[0] {
+                                    let retried = crate::stdlib::jobs::retry_dead_job(id)?;
+                                    return Ok(Value::Bool(retried));
+                                } else {
+                                    return Err(IntentError::type_error(
+                                        "Queue.retry() requires a string job ID".to_string(),
+                                    ));
+                                }
+                            }
                             _ => {
                                 return Err(IntentError::runtime_error(format!(
-                                    "Unknown method '{}' on Queue. Available: work_async, status, cancel, configure",
+                                    "Unknown method '{}' on Queue. Available: work_async, work, status, stats, cancel, configure, recent, dead, retry",
                                     method
                                 )));
                             }

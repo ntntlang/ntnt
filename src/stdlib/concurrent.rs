@@ -151,6 +151,55 @@ impl SerializedValue {
             }
         }
     }
+
+    /// Convert to serde_json::Value for storage in JSONB columns
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            SerializedValue::Unit => serde_json::Value::Null,
+            SerializedValue::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
+            SerializedValue::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            SerializedValue::Bool(b) => serde_json::Value::Bool(*b),
+            SerializedValue::String(s) => serde_json::Value::String(s.clone()),
+            SerializedValue::Array(arr) => {
+                serde_json::Value::Array(arr.iter().map(|v| v.to_json()).collect())
+            }
+            SerializedValue::Map(map) => {
+                let obj: serde_json::Map<std::string::String, serde_json::Value> =
+                    map.iter().map(|(k, v)| (k.clone(), v.to_json())).collect();
+                serde_json::Value::Object(obj)
+            }
+        }
+    }
+
+    /// Convert from serde_json::Value back to SerializedValue
+    pub fn from_json(json: &serde_json::Value) -> Self {
+        match json {
+            serde_json::Value::Null => SerializedValue::Unit,
+            serde_json::Value::Bool(b) => SerializedValue::Bool(*b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    SerializedValue::Int(i)
+                } else if let Some(f) = n.as_f64() {
+                    SerializedValue::Float(f)
+                } else {
+                    SerializedValue::Unit
+                }
+            }
+            serde_json::Value::String(s) => SerializedValue::String(s.clone()),
+            serde_json::Value::Array(arr) => {
+                SerializedValue::Array(arr.iter().map(Self::from_json).collect())
+            }
+            serde_json::Value::Object(obj) => {
+                let mut map = HashMap::new();
+                for (k, v) in obj {
+                    map.insert(k.clone(), Self::from_json(v));
+                }
+                SerializedValue::Map(map)
+            }
+        }
+    }
 }
 
 // ============================================================
