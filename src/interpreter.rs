@@ -670,6 +670,88 @@ impl Interpreter {
     }
 
     /// Check if a server-related function should be skipped entirely
+    /// Evaluate a Job declaration — extracted to reduce eval_statement's stack frame.
+    #[inline(never)]
+    fn eval_job_declaration(
+        &mut self,
+        name: &str,
+        queue: &str,
+        options: &[(String, Expression)],
+        perform_params: &[Parameter],
+        perform_body: &Block,
+        on_failure: &Option<(Vec<Parameter>, Block)>,
+    ) -> Result<Value> {
+        let mut max_retries: i64 = 3;
+        let mut timeout_ms: Option<u64> = None;
+        let mut backoff_base_ms: u64 = 1000;
+
+        for (key, expr) in options {
+            let val = self.eval_expression(expr)?;
+            match key.as_str() {
+                "retry" => {
+                    if let Value::Int(n) = val {
+                        max_retries = n;
+                    }
+                }
+                "timeout" => match val {
+                    Value::Int(n) => timeout_ms = Some(n as u64 * 1000),
+                    Value::String(s) => {
+                        if let Ok(dur) = crate::stdlib::concurrent::parse_interval(&s) {
+                            timeout_ms = Some(dur.as_millis() as u64);
+                        } else {
+                            return Err(IntentError::runtime_error(format!(
+                                "Invalid timeout value: {}",
+                                s
+                            )));
+                        }
+                    }
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "Job timeout must be an integer (seconds) or string duration"
+                                .to_string(),
+                        ))
+                    }
+                },
+                "backoff" => {
+                    if let Value::Int(n) = val {
+                        backoff_base_ms = n as u64;
+                    }
+                }
+                "priority" => {}
+                _ => {
+                    return Err(IntentError::runtime_error(format!(
+                        "Unknown job option: {}",
+                        key
+                    )));
+                }
+            }
+        }
+
+        let def = crate::stdlib::jobs::JobDefinition {
+            name: name.to_string(),
+            queue: queue.to_string(),
+            max_retries,
+            timeout_ms,
+            backoff_base_ms,
+            perform_params: perform_params.to_vec(),
+            perform_body: perform_body.clone(),
+            on_failure: on_failure.clone(),
+        };
+
+        crate::stdlib::jobs::register_job(def)?;
+
+        let mut job_map = HashMap::new();
+        job_map.insert("type".to_string(), Value::String("Job".to_string()));
+        job_map.insert("_job_name".to_string(), Value::String(name.to_string()));
+        job_map.insert("name".to_string(), Value::String(name.to_string()));
+        job_map.insert("queue".to_string(), Value::String(queue.to_string()));
+        self.environment
+            .borrow_mut()
+            .define(name.to_string(), Value::Map(job_map));
+
+        Ok(Value::Unit)
+    }
+
     fn should_skip_server_call(&self, name: &str) -> bool {
         match self.execution_mode {
             ExecutionMode::Normal => false,
@@ -3566,6 +3648,22 @@ impl Interpreter {
                 Ok(Value::Unit)
             }
 
+            Statement::Job {
+                name,
+                queue,
+                options,
+                perform_params,
+                perform_body,
+                on_failure,
+            } => self.eval_job_declaration(
+                name,
+                queue,
+                options,
+                perform_params,
+                perform_body,
+                on_failure,
+            ),
+
             Statement::Intent {
                 description: _,
                 target,
@@ -5284,6 +5382,181 @@ impl Interpreter {
                     .map(|arg| self.eval_expression(arg))
                     .collect();
                 let mut args = args?;
+
+                // Special handling for Job.enqueue/enqueue_in/enqueue_at
+                if let Value::Map(ref map) = obj {
+                    if matches!(map.get("type"), Some(Value::String(s)) if s == "Job") {
+                        if let Some(Value::String(job_name)) = map.get("_job_name") {
+                            let job_name = job_name.clone();
+                            match method.as_str() {
+                                "enqueue" => {
+                                    // JobName.enqueue(args_map)
+                                    let job_args = if args.is_empty() {
+                                        HashMap::new()
+                                    } else if let Value::Map(ref m) = args[0] {
+                                        let mut serialized = HashMap::new();
+                                        for (k, v) in m {
+                                            serialized.insert(
+                                                k.clone(),
+                                                crate::stdlib::concurrent::SerializedValue::from_value(v)?,
+                                            );
+                                        }
+                                        serialized
+                                    } else {
+                                        return Err(IntentError::type_error(
+                                            "enqueue() requires a Map argument".to_string(),
+                                        ));
+                                    };
+                                    let job_id =
+                                        crate::stdlib::jobs::enqueue_job(&job_name, job_args)?;
+                                    return Ok(Value::String(job_id));
+                                }
+                                "enqueue_in" => {
+                                    // JobName.enqueue_in(delay_ms, args_map)
+                                    if args.len() < 1 {
+                                        return Err(IntentError::runtime_error(
+                                            "enqueue_in() requires at least a delay argument"
+                                                .to_string(),
+                                        ));
+                                    }
+                                    let delay_ms = match &args[0] {
+                                        Value::Int(ms) => *ms as u64,
+                                        _ => {
+                                            return Err(IntentError::type_error(
+                                                "enqueue_in() first argument must be delay in milliseconds".to_string(),
+                                            ))
+                                        }
+                                    };
+                                    let job_args = if args.len() > 1 {
+                                        if let Value::Map(ref m) = args[1] {
+                                            let mut serialized = HashMap::new();
+                                            for (k, v) in m {
+                                                serialized.insert(
+                                                    k.clone(),
+                                                    crate::stdlib::concurrent::SerializedValue::from_value(v)?,
+                                                );
+                                            }
+                                            serialized
+                                        } else {
+                                            return Err(IntentError::type_error(
+                                                "enqueue_in() second argument must be a Map"
+                                                    .to_string(),
+                                            ));
+                                        }
+                                    } else {
+                                        HashMap::new()
+                                    };
+                                    let job_id = crate::stdlib::jobs::enqueue_job_in(
+                                        &job_name, job_args, delay_ms,
+                                    )?;
+                                    return Ok(Value::String(job_id));
+                                }
+                                "enqueue_at" => {
+                                    // JobName.enqueue_at(timestamp_ms, args_map)
+                                    if args.is_empty() {
+                                        return Err(IntentError::runtime_error(
+                                            "enqueue_at() requires at least a timestamp argument"
+                                                .to_string(),
+                                        ));
+                                    }
+                                    let timestamp_ms = match &args[0] {
+                                        Value::Int(ts) => *ts as u64,
+                                        _ => {
+                                            return Err(IntentError::type_error(
+                                                "enqueue_at() first argument must be a timestamp in milliseconds".to_string(),
+                                            ))
+                                        }
+                                    };
+                                    let job_args = if args.len() > 1 {
+                                        if let Value::Map(ref m) = args[1] {
+                                            let mut serialized = HashMap::new();
+                                            for (k, v) in m {
+                                                serialized.insert(
+                                                    k.clone(),
+                                                    crate::stdlib::concurrent::SerializedValue::from_value(v)?,
+                                                );
+                                            }
+                                            serialized
+                                        } else {
+                                            return Err(IntentError::type_error(
+                                                "enqueue_at() second argument must be a Map"
+                                                    .to_string(),
+                                            ));
+                                        }
+                                    } else {
+                                        HashMap::new()
+                                    };
+                                    let job_id = crate::stdlib::jobs::enqueue_job_at_timestamp(
+                                        &job_name,
+                                        job_args,
+                                        timestamp_ms,
+                                    )?;
+                                    return Ok(Value::String(job_id));
+                                }
+                                _ => {
+                                    return Err(IntentError::runtime_error(format!(
+                                        "Unknown method '{}' on Job type. Available: enqueue, enqueue_in, enqueue_at",
+                                        method
+                                    )));
+                                }
+                            }
+                        }
+                    }
+
+                    // Special handling for Queue.method()
+                    if matches!(map.get("type"), Some(Value::String(s)) if s == "Queue") {
+                        match method.as_str() {
+                            "work_async" => {
+                                crate::stdlib::jobs::start_worker()?;
+                                return Ok(Value::Unit);
+                            }
+                            "status" => {
+                                let counts = crate::stdlib::jobs::queue_status()?;
+                                let mut result = HashMap::new();
+                                for (k, v) in counts {
+                                    result.insert(k, Value::Int(v));
+                                }
+                                return Ok(Value::Map(result));
+                            }
+                            "cancel" => {
+                                if args.is_empty() {
+                                    return Err(IntentError::runtime_error(
+                                        "Queue.cancel() requires a job ID argument".to_string(),
+                                    ));
+                                }
+                                if let Value::String(ref id) = args[0] {
+                                    let cancelled = crate::stdlib::jobs::cancel_job(id)?;
+                                    return Ok(Value::Bool(cancelled));
+                                } else {
+                                    return Err(IntentError::type_error(
+                                        "Queue.cancel() requires a string job ID".to_string(),
+                                    ));
+                                }
+                            }
+                            "configure" => {
+                                if args.is_empty() {
+                                    return Err(IntentError::runtime_error(
+                                        "Queue.configure() requires a Map argument".to_string(),
+                                    ));
+                                }
+                                if let Value::Map(ref config) = args[0] {
+                                    crate::stdlib::jobs::configure_queue(config)?;
+                                    return Ok(Value::Unit);
+                                } else {
+                                    return Err(IntentError::type_error(
+                                        "Queue.configure() requires a Map argument".to_string(),
+                                    ));
+                                }
+                            }
+                            _ => {
+                                return Err(IntentError::runtime_error(format!(
+                                    "Unknown method '{}' on Queue. Available: work_async, status, cancel, configure",
+                                    method
+                                )));
+                            }
+                        }
+                    }
+                }
 
                 // Keep track of struct name for invariant checking
                 let struct_name = if let Value::Struct { name, .. } = &obj {
@@ -7220,6 +7493,7 @@ impl Interpreter {
         // Server is shutting down - cancel all tasks and schedules
         crate::stdlib::concurrent::cancel_all_tasks();
         crate::stdlib::concurrent::cancel_all_schedules();
+        crate::stdlib::jobs::graceful_shutdown();
 
         // Call shutdown handlers
         let shutdown_handlers: Vec<Value> = self.server_state.get_shutdown_handlers().to_vec();
@@ -7407,6 +7681,7 @@ impl Interpreter {
         // Cancel all tasks and schedules on shutdown
         crate::stdlib::concurrent::cancel_all_tasks();
         crate::stdlib::concurrent::cancel_all_schedules();
+        crate::stdlib::jobs::graceful_shutdown();
 
         // Call shutdown handlers
         let shutdown_handlers: Vec<Value> = self.server_state.get_shutdown_handlers().to_vec();
@@ -11999,13 +12274,21 @@ page
 
     #[test]
     fn test_recursion_limit_normal() {
-        // Normal recursion within limit should succeed (small depth for debug stack)
-        let result = eval_with_recursion_limit(
-            "fn fact(n) { if n <= 1 { return 1 } return n * fact(n - 1) } fact(5)",
-            20,
-        );
-        assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), Value::Int(120)));
+        // Normal recursion within limit should succeed (small depth for debug stack).
+        // Uses a separate thread with 16 MB stack to avoid platform-specific stack limits
+        // in debug builds where the eval_statement frame is large due to Statement enum size.
+        let handle = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let result = eval_with_recursion_limit(
+                    "fn fact(n) { if n <= 1 { return 1 } return n * fact(n - 1) } fact(5)",
+                    20,
+                );
+                assert!(result.is_ok());
+                assert!(matches!(result.unwrap(), Value::Int(120)));
+            })
+            .unwrap();
+        handle.join().unwrap();
     }
 
     #[test]

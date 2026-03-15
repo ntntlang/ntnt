@@ -1630,6 +1630,98 @@ after(5000, fn() {
 - Lifecycle: all schedules/tasks cancelled on server shutdown
 - `schedule()` and `after()` are server builtins (like `listen`, `on_shutdown`)
 
+### Background Jobs (Job DSL)
+
+```ntnt
+import { Queue } from "std/jobs"
+import { sleep_ms } from "std/concurrent"
+
+// Define a job type with queue name and options
+Job SendEmail on emails (retry: 3, timeout: 60, backoff: 1000) {
+    perform(to: String, subject: String, body: String) {
+        import { fetch } from "std/http"
+        fetch("https://api.email.com/send", map {
+            "method": "POST",
+            "json": map { "to": to, "subject": subject, "body": body }
+        })
+    }
+    on_failure(error, attempt) {
+        print("Email send failed: #{error} (attempt #{attempt})")
+    }
+}
+
+// Enqueue jobs (returns job ID string)
+let job_id = SendEmail.enqueue(map {
+    "to": "user@example.com",
+    "subject": "Welcome",
+    "body": "Hello!"
+})
+
+// Delayed enqueue (milliseconds)
+SendEmail.enqueue_in(5000, map {
+    "to": "admin@example.com",
+    "subject": "Delayed",
+    "body": "This was delayed by 5 seconds"
+})
+
+// Enqueue at specific timestamp (unix milliseconds)
+SendEmail.enqueue_at(1700000000000, map {
+    "to": "scheduled@example.com",
+    "subject": "Scheduled",
+    "body": "Sent at a specific time"
+})
+
+// Configure queue behavior
+Queue.configure(map {
+    "shutdown_timeout": 30000,          // ms to wait for in-flight jobs on shutdown
+    "prune_completed_after": 3600000    // ms before pruning completed jobs (1 hour)
+})
+
+// Start background worker (non-blocking)
+Queue.work_async()
+
+// Check queue status
+let status = Queue.status()
+print("Pending: #{status.pending}, Active: #{status.active}, Dead: #{status.dead}")
+
+// Cancel a job
+Queue.cancel(job_id)
+
+// Start your server — jobs process in the background
+listen(8080)
+```
+
+**Job DSL syntax:**
+```
+Job <Name> on <queue_name> [(<option>: <value>, ...)] {
+    perform(<params>) {
+        <body>
+    }
+    [on_failure(<error>, <attempt>) {
+        <body>
+    }]
+}
+```
+
+**Options:**
+- `retry: N` — max retry attempts (default: 3)
+- `timeout: N` — timeout in seconds (default: none)
+- `backoff: N` — base backoff in milliseconds for exponential retry (default: 1000)
+
+**Job lifecycle:** Pending → Active → Completed | Retry → Dead
+- Failed jobs retry with exponential backoff: `backoff * 2^(attempt-1)`
+- Jobs that exhaust all retries move to the Dead letter queue
+- `on_failure` hook fires on each failure with error message and attempt count
+
+**CLI management:**
+```bash
+ntnt jobs status                # Queue statistics
+ntnt jobs list                  # List all recent jobs
+ntnt jobs list --dead           # List dead letter jobs
+ntnt jobs retry <job_id>        # Retry a dead job
+ntnt jobs cancel <job_id>       # Cancel a pending job
+```
+
 ---
 
 ## CSV (`std/csv`)

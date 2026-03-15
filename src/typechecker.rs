@@ -748,6 +748,10 @@ impl TypeContext {
                     self.collect_declaration(method);
                 }
             }
+            Statement::Job { name, .. } => {
+                // Register the job name as a variable of type Map (with enqueue methods)
+                self.bind(name, Type::Any);
+            }
             Statement::Located { stmt, .. } => self.collect_declaration(stmt),
             _ => {}
         }
@@ -1165,6 +1169,46 @@ impl TypeContext {
             | Statement::Enum { .. }
             | Statement::TypeAlias { .. }
             | Statement::Trait { .. } => {}
+
+            Statement::Job {
+                name: _,
+                perform_params,
+                perform_body,
+                on_failure,
+                ..
+            } => {
+                // Check perform body in a new scope with params
+                self.push_scope();
+                for param in perform_params {
+                    let param_type = param
+                        .type_annotation
+                        .as_ref()
+                        .map(|t| self.resolve_type_expr(t))
+                        .unwrap_or(Type::Any);
+                    self.bind(&param.name, param_type);
+                }
+                for stmt in &perform_body.statements {
+                    self.check_statement(stmt);
+                }
+                self.pop_scope();
+
+                // Check on_failure body if present
+                if let Some((params, body)) = on_failure {
+                    self.push_scope();
+                    for param in params {
+                        let param_type = param
+                            .type_annotation
+                            .as_ref()
+                            .map(|t| self.resolve_type_expr(t))
+                            .unwrap_or(Type::Any);
+                        self.bind(&param.name, param_type);
+                    }
+                    for stmt in &body.statements {
+                        self.check_statement(stmt);
+                    }
+                    self.pop_scope();
+                }
+            }
 
             Statement::Impl {
                 type_name,
@@ -3453,6 +3497,9 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 name: "Result".to_string(),
                 args: vec![Type::Int, Type::String],
             });
+        }
+        "std/jobs" => {
+            sig!("Queue", [], Type::Any);
         }
         "std/concurrent" => {
             sig!("channel", [], Type::Any);

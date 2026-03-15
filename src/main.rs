@@ -214,6 +214,20 @@ enum Commands {
     #[command(subcommand)]
     Intent(IntentCommands),
 
+    /// Manage background jobs
+    ///
+    /// View status, list, retry, or cancel background jobs.
+    /// Connects to the running server's job queue state.
+    ///
+    /// Examples:
+    ///   ntnt jobs status                 # Show queue statistics
+    ///   ntnt jobs list                   # List all recent jobs
+    ///   ntnt jobs list --dead            # List dead letter jobs
+    ///   ntnt jobs retry <job_id>         # Retry a dead job
+    ///   ntnt jobs cancel <job_id>        # Cancel a pending job
+    #[command(subcommand)]
+    Jobs(JobsCommands),
+
     /// Browse and validate stdlib documentation
     ///
     /// Documentation is auto-generated from source code // @ntnt comments.
@@ -414,6 +428,37 @@ enum IntentCommands {
     },
 }
 
+/// Background job management subcommands
+#[derive(Subcommand)]
+enum JobsCommands {
+    /// Show queue statistics (pending, active, completed, dead counts)
+    Status,
+    /// List recent jobs
+    List {
+        /// Show only dead letter jobs
+        #[arg(long)]
+        dead: bool,
+        /// Show only pending jobs
+        #[arg(long)]
+        pending: bool,
+        /// Show only active jobs
+        #[arg(long)]
+        active: bool,
+    },
+    /// Retry a dead job (move back to pending)
+    Retry {
+        /// Job ID to retry
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Cancel a pending or active job
+    Cancel {
+        /// Job ID to cancel
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+}
+
 /// Format and display an error with rich context (error codes, source snippets, suggestions).
 fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
     // Try to downcast to IntentError for rich formatting
@@ -561,6 +606,7 @@ fn main() {
             warn_untyped,
         }) => lint_project(&path, quiet, fix, strict, warn_untyped),
         Some(Commands::Intent(intent_cmd)) => run_intent_command(intent_cmd),
+        Some(Commands::Jobs(jobs_cmd)) => run_jobs_command(jobs_cmd),
         Some(Commands::Docs {
             query,
             validate,
@@ -2268,6 +2314,20 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
                     check_stmt_for_issues(s, source_lines, issues, http_route_functions);
                 }
             }
+            Statement::Job {
+                perform_body,
+                on_failure,
+                ..
+            } => {
+                for s in &perform_body.statements {
+                    check_stmt_for_issues(s, source_lines, issues, http_route_functions);
+                }
+                if let Some((_, body)) = on_failure {
+                    for s in &body.statements {
+                        check_stmt_for_issues(s, source_lines, issues, http_route_functions);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -2435,6 +2495,103 @@ fn lint_ast(ast: &ntnt::ast::Program, source: &str, _filename: &str) -> Vec<serd
 }
 
 /// Run intent-driven development commands
+fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
+    match cmd {
+        JobsCommands::Status => {
+            let counts =
+                ntnt::stdlib::jobs::queue_status().map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            println!("Job Queue Status:");
+            println!("  Pending:   {}", counts.get("pending").unwrap_or(&0));
+            println!("  Active:    {}", counts.get("active").unwrap_or(&0));
+            println!("  Completed: {}", counts.get("completed").unwrap_or(&0));
+            println!("  Retry:     {}", counts.get("retry").unwrap_or(&0));
+            println!("  Dead:      {}", counts.get("dead").unwrap_or(&0));
+            println!("  Cancelled: {}", counts.get("cancelled").unwrap_or(&0));
+            Ok(())
+        }
+        JobsCommands::List {
+            dead,
+            pending,
+            active,
+        } => {
+            let filter = if dead {
+                Some("dead")
+            } else if pending {
+                Some("pending")
+            } else if active {
+                Some("active")
+            } else {
+                None
+            };
+
+            let jobs =
+                ntnt::stdlib::jobs::list_jobs(filter).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            if jobs.is_empty() {
+                println!("No jobs found.");
+                return Ok(());
+            }
+
+            println!(
+                "{:<12} {:<20} {:<12} {:<10} {:<8}",
+                "ID", "Type", "Queue", "Status", "Attempt"
+            );
+            println!("{}", "-".repeat(62));
+
+            for job in &jobs {
+                let id = match job.get("id") {
+                    Some(ntnt::interpreter::Value::String(s)) => s.as_str(),
+                    _ => "?",
+                };
+                let job_type = match job.get("type") {
+                    Some(ntnt::interpreter::Value::String(s)) => s.as_str(),
+                    _ => "?",
+                };
+                let queue = match job.get("queue") {
+                    Some(ntnt::interpreter::Value::String(s)) => s.as_str(),
+                    _ => "?",
+                };
+                let status = match job.get("status") {
+                    Some(ntnt::interpreter::Value::String(s)) => s.as_str(),
+                    _ => "?",
+                };
+                let attempt = match job.get("attempt") {
+                    Some(ntnt::interpreter::Value::Int(n)) => format!("{}", n),
+                    _ => "?".to_string(),
+                };
+
+                println!(
+                    "{:<12} {:<20} {:<12} {:<10} {:<8}",
+                    id, job_type, queue, status, attempt
+                );
+            }
+
+            Ok(())
+        }
+        JobsCommands::Retry { id } => {
+            let retried =
+                ntnt::stdlib::jobs::retry_dead_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?;
+            if retried {
+                println!("Job {} moved back to pending.", id);
+            } else {
+                println!("Job {} not found or not in dead state.", id);
+            }
+            Ok(())
+        }
+        JobsCommands::Cancel { id } => {
+            let cancelled =
+                ntnt::stdlib::jobs::cancel_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?;
+            if cancelled {
+                println!("Job {} cancelled.", id);
+            } else {
+                println!("Job {} not found or already completed.", id);
+            }
+            Ok(())
+        }
+    }
+}
+
 fn run_intent_command(cmd: IntentCommands) -> anyhow::Result<()> {
     match cmd {
         IntentCommands::Check {
@@ -3799,6 +3956,24 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
         }
         Statement::Intent { target, .. } => {
             collect_used_names(target, names);
+        }
+        Statement::Job {
+            options,
+            perform_body,
+            on_failure,
+            ..
+        } => {
+            for (_key, expr) in options {
+                collect_from_expr(expr, names);
+            }
+            for s in &perform_body.statements {
+                collect_used_names(s, names);
+            }
+            if let Some((_, body)) = on_failure {
+                for s in &body.statements {
+                    collect_used_names(s, names);
+                }
+            }
         }
         // These don't contain expressions to analyze
         Statement::Return(None)

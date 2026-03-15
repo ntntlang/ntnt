@@ -173,6 +173,33 @@ pub enum Statement {
         target: Box<Statement>,
     },
 
+    /// Job declaration: background job type with perform body and optional failure handler.
+    ///
+    /// ```ntnt
+    /// Job SendEmail on emails (retry: 5, timeout: 120s) {
+    ///     perform(to: String, subject: String) {
+    ///         // send the email
+    ///     }
+    ///     on_failure(error, attempt) {
+    ///         print("Failed: #{error}, attempt #{attempt}")
+    ///     }
+    /// }
+    /// ```
+    Job {
+        /// Job type name (e.g., "SendEmail")
+        name: String,
+        /// Queue name (e.g., "emails")
+        queue: String,
+        /// Options like retry, timeout, backoff
+        options: Vec<(String, Expression)>,
+        /// Parameters for the perform function
+        perform_params: Vec<Parameter>,
+        /// Body of the perform function
+        perform_body: Box<Block>,
+        /// Optional on_failure handler (params: error, attempt)
+        on_failure: Option<(Vec<Parameter>, Block)>,
+    },
+
     /// Server block: declarative route definitions
     ///
     /// ```ntnt

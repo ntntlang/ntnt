@@ -148,6 +148,8 @@ impl Parser {
             self.pub_declaration(attributes)
         } else if self.match_token(&[TokenKind::Server]) {
             self.server_declaration()
+        } else if self.match_token(&[TokenKind::Job]) {
+            self.job_declaration()
         } else {
             // statement() already wraps with Located, so return directly
             return self.statement();
@@ -462,6 +464,102 @@ impl Parser {
             variants,
             attributes,
             type_params,
+        })
+    }
+
+    /// Parse a Job declaration:
+    ///   Job Name on queue_name [(retry: 5, timeout: 120s)] {
+    ///       perform(param: Type, ...) { body }
+    ///       [on_failure(error, attempt) { body }]
+    ///   }
+    fn job_declaration(&mut self) -> Result<Statement> {
+        let name = self.consume_identifier("Expected job name after 'Job'")?;
+
+        // Expect 'on' keyword (parsed as identifier)
+        let on_kw = self.consume_identifier("Expected 'on' after job name")?;
+        if on_kw != "on" {
+            return Err(IntentError::ParserError {
+                line: self.current_line(),
+                column: self.current_column(),
+                message: format!("Expected 'on' after job name, got '{}'", on_kw),
+            });
+        }
+
+        // Queue name
+        let queue = self.consume_identifier("Expected queue name after 'on'")?;
+
+        // Optional options: (retry: 5, timeout: 120s)
+        let mut options = Vec::new();
+        if self.match_token(&[TokenKind::LeftParen]) {
+            while !self.check(&TokenKind::RightParen) && !self.is_at_end() {
+                let key = self.consume_identifier("Expected option name")?;
+                self.consume(&TokenKind::Colon, "Expected ':' after option name")?;
+                let value = self.expression()?;
+                options.push((key, value));
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+            self.consume(&TokenKind::RightParen, "Expected ')' after job options")?;
+        }
+
+        // Main body block
+        self.consume(&TokenKind::LeftBrace, "Expected '{' after job declaration")?;
+
+        // Parse 'perform' section (required)
+        let perform_kw = self.consume_identifier("Expected 'perform' inside job body")?;
+        if perform_kw != "perform" {
+            return Err(IntentError::ParserError {
+                line: self.current_line(),
+                column: self.current_column(),
+                message: format!("Expected 'perform' inside job body, got '{}'", perform_kw),
+            });
+        }
+
+        // Parse perform parameters
+        self.consume(&TokenKind::LeftParen, "Expected '(' after 'perform'")?;
+        let perform_params = self.parse_parameters()?;
+        self.consume(
+            &TokenKind::RightParen,
+            "Expected ')' after perform parameters",
+        )?;
+
+        // Parse perform body
+        self.consume(
+            &TokenKind::LeftBrace,
+            "Expected '{' after perform parameters",
+        )?;
+        let perform_body = self.block()?;
+
+        // Optional on_failure section
+        let on_failure = if self.check_identifier_name("on_failure") {
+            self.advance(); // consume 'on_failure'
+            self.consume(&TokenKind::LeftParen, "Expected '(' after 'on_failure'")?;
+            let failure_params = self.parse_parameters()?;
+            self.consume(
+                &TokenKind::RightParen,
+                "Expected ')' after on_failure parameters",
+            )?;
+            self.consume(
+                &TokenKind::LeftBrace,
+                "Expected '{' after on_failure parameters",
+            )?;
+            let failure_body = self.block()?;
+            Some((failure_params, failure_body))
+        } else {
+            None
+        };
+
+        // Close job body
+        self.consume(&TokenKind::RightBrace, "Expected '}' after job body")?;
+
+        Ok(Statement::Job {
+            name,
+            queue,
+            options,
+            perform_params,
+            perform_body: Box::new(perform_body),
+            on_failure,
         })
     }
 
