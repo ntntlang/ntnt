@@ -5348,7 +5348,7 @@ Note: Binary file data passes through String conversion and may be lossy. For bi
 let fields = parse_multipart(req)?
 let name = fields["name"]
 let file = fields["document"]
-print("Uploaded: {file[\"filename\"]}, {file[\"size\"]} bytes")
+print("Uploaded: #{file[\"filename\"]}, #{file[\"size\"]} bytes")
 ```
 
 **Errors:**
