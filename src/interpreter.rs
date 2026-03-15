@@ -4152,6 +4152,14 @@ impl Interpreter {
                                 closure,
                                 ..
                             } => {
+                                // Validate: scheduled functions must take no arguments
+                                let required =
+                                    params.iter().filter(|p| p.default.is_none()).count();
+                                if required > 0 {
+                                    return Err(IntentError::runtime_error(
+                                        "schedule() handler must take no arguments".to_string(),
+                                    ));
+                                }
                                 let bindings = closure.borrow().all_bindings();
                                 let mut serialized = HashMap::new();
                                 let mut skipped = Vec::new();
@@ -4193,7 +4201,13 @@ impl Interpreter {
                         let delay = self.eval_expression(&arguments[0])?;
                         let handler = self.eval_expression(&arguments[1])?;
                         let delay_ms = match &delay {
-                            Value::Int(ms) => *ms,
+                            Value::Int(ms) if *ms >= 0 => *ms,
+                            Value::Int(ms) => {
+                                return Err(IntentError::runtime_error(format!(
+                                    "after() delay must be non-negative, got {}",
+                                    ms
+                                )))
+                            }
                             _ => {
                                 return Err(IntentError::type_error(
                                     "after() first argument must be an integer (milliseconds)"
@@ -4208,6 +4222,14 @@ impl Interpreter {
                                 closure,
                                 ..
                             } => {
+                                // Validate: after() handler must take no arguments
+                                let required =
+                                    params.iter().filter(|p| p.default.is_none()).count();
+                                if required > 0 {
+                                    return Err(IntentError::runtime_error(
+                                        "after() handler must take no arguments".to_string(),
+                                    ));
+                                }
                                 let bindings = closure.borrow().all_bindings();
                                 let mut serialized = HashMap::new();
                                 let mut skipped = Vec::new();

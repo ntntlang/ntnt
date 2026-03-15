@@ -262,6 +262,8 @@ fn concurrent_recv(ch: &Value) -> Result<Value> {
 }
 
 fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
+    // Clamp negative timeouts to 0 (instant check, like try_recv)
+    let timeout_ms = timeout_ms.max(0) as u64;
     let id = get_channel_id(ch)?;
 
     let receiver = {
@@ -279,7 +281,7 @@ fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Failed to lock receiver: {}", e)))?;
 
-    match rx.recv_timeout(Duration::from_millis(timeout_ms as u64)) {
+    match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
         Ok(serialized) => Ok(Value::some(serialized.to_value())),
         Err(mpsc::RecvTimeoutError::Timeout) => Ok(Value::none()),
         Err(mpsc::RecvTimeoutError::Disconnected) => Ok(Value::none()),
@@ -314,17 +316,15 @@ fn concurrent_try_recv(ch: &Value) -> Result<Value> {
 fn concurrent_close(ch: &Value) -> Result<Value> {
     let id = get_channel_id(ch)?;
 
-    let mut registry = CHANNEL_REGISTRY
+    let registry = CHANNEL_REGISTRY
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Failed to lock registry: {}", e)))?;
 
     if let Some(pair) = registry.get(&id) {
         let mut closed = pair.closed.lock().unwrap();
         *closed = true;
-        drop(closed);
-        // Remove from registry to free memory. Any pending recv() calls will
-        // get Disconnected on their next attempt since the sender is dropped.
-        registry.remove(&id);
+        // Keep the channel in the registry so receivers can drain remaining
+        // messages. The channel will be cleaned up when all references are dropped.
         Ok(Value::Bool(true))
     } else {
         Ok(Value::Bool(false))

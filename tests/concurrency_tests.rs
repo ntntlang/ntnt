@@ -189,9 +189,9 @@ import { spawn, await_task, cancel_task } from "std/concurrent"
 import { sleep } from "std/time"
 
 let task = spawn(fn() {
-    // This will sleep for a long time
+    // Sleep long enough to guarantee cancellation happens first
     import { sleep } from "std/time"
-    sleep(10)
+    sleep(10000)
     return "should not reach"
 })
 
@@ -455,15 +455,18 @@ print("ticks:" + str(count))
 
 #[test]
 fn test_schedule_error_resilience() {
-    // Schedule that errors should continue running
+    // Schedule that errors should continue running after failures
     let code = r#"
 import { channel, recv_timeout, send } from "std/concurrent"
 
 let ch = channel()
 let mut count = 0
+let mut tick_num = 0
 schedule("every 100ms", fn() {
-    // Always send a tick, even if something errors
+    // Send tick first, then error on odd ticks to test resilience
     send(ch, "tick")
+    // Force a runtime error every other tick — schedule should keep running
+    let x = 1 / 0
 })
 
 // Wait for 2 ticks

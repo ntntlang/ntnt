@@ -3187,8 +3187,8 @@ impl TypeContext {
         sig!("serve_static", ["prefix" => Type::String, "dir" => Type::String], Type::Unit);
         sig!("use_middleware", ["handler" => Type::Any], Type::Unit);
         sig!("on_shutdown", ["handler" => Type::Any], Type::Unit);
-        sig!("schedule", ["interval" => Type::String, "handler" => Type::Any], Type::Unit);
-        sig!("after", ["ms" => Type::Int, "handler" => Type::Any], Type::Unit);
+        sig!("schedule", ["interval" => Type::String, "handler" => Type::Any], Type::Any);
+        sig!("after", ["ms" => Type::Int, "handler" => Type::Any], Type::Any);
         sig!("routes", ["dir" => Type::String], Type::Unit);
         sig!("template", ["path" => Type::String, "vars" => Type::Any], Type::String);
 
