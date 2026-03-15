@@ -270,6 +270,26 @@ enum Commands {
         update: bool,
     },
 
+    /// Migrate .tnt files from old {expr} string interpolation to new #{expr} syntax
+    ///
+    /// Scans .tnt files and rewrites string interpolation from the old `{expr}` syntax
+    /// to the new Ruby-style `#{expr}` syntax. Only modifies strings that contain
+    /// interpolation expressions (identifiers, expressions, map/array access).
+    ///
+    /// Examples:
+    ///   ntnt migrate .                   # Migrate all .tnt files in current directory
+    ///   ntnt migrate server.tnt          # Migrate a single file
+    ///   ntnt migrate . --dry-run         # Preview changes without writing
+    Migrate {
+        /// File or directory to migrate (defaults to current directory)
+        #[arg(value_name = "PATH", default_value = ".")]
+        path: String,
+
+        /// Preview changes without modifying files
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Generate shell completion scripts
     ///
     /// Output completion scripts for your shell. Add the output to your
@@ -552,6 +572,7 @@ fn main() {
             check,
             update,
         }) => run_learn_command(platform, check, update),
+        Some(Commands::Migrate { path, dry_run }) => run_migrate_command(&path, dry_run),
         Some(Commands::Completions { shell }) => {
             generate_completions(shell);
             Ok(())
@@ -6005,6 +6026,312 @@ fn learn_version_header(platform: &str) -> String {
          # Regenerate: ntnt learn {platform}\n\
          # Check for updates: ntnt learn --check\n"
     )
+}
+
+// ---------------------------------------------------------------------------
+// ntnt migrate — convert old {expr} interpolation to #{expr}
+// ---------------------------------------------------------------------------
+
+fn run_migrate_command(path: &str, dry_run: bool) -> anyhow::Result<()> {
+    let p = std::path::Path::new(path);
+    let files: Vec<std::path::PathBuf> = if p.is_file() {
+        vec![p.to_path_buf()]
+    } else if p.is_dir() {
+        collect_tnt_files_for_migrate(p)?
+    } else {
+        anyhow::bail!("Path not found: {}", path);
+    };
+
+    if files.is_empty() {
+        println!("No .tnt files found in {}", path);
+        return Ok(());
+    }
+
+    println!(
+        "\n{}",
+        format!(
+            "Migrating {} file{} to #{{}}-style interpolation{}...",
+            files.len(),
+            if files.len() == 1 { "" } else { "s" },
+            if dry_run { " (dry run)" } else { "" }
+        )
+        .cyan()
+        .bold()
+    );
+    println!();
+
+    let mut total_changes = 0;
+    let mut files_changed = 0;
+
+    for file in &files {
+        let content = std::fs::read_to_string(file)?;
+        let migrated = migrate_interpolation(&content);
+        if migrated != content {
+            let changes = count_migration_changes(&content, &migrated);
+            total_changes += changes;
+            files_changed += 1;
+            let rel = file.strip_prefix(std::env::current_dir()?).unwrap_or(file);
+            if dry_run {
+                println!(
+                    "  {} {} ({} interpolation{})",
+                    "~".yellow(),
+                    rel.display(),
+                    changes,
+                    if changes == 1 { "" } else { "s" }
+                );
+            } else {
+                std::fs::write(file, &migrated)?;
+                println!(
+                    "  {} {} ({} interpolation{})",
+                    "✓".green(),
+                    rel.display(),
+                    changes,
+                    if changes == 1 { "" } else { "s" }
+                );
+            }
+        }
+    }
+
+    println!();
+    if total_changes == 0 {
+        println!("No old-style {{expr}} interpolation found. Files are already migrated.");
+    } else if dry_run {
+        println!(
+            "{} change{} in {} file{}. Run without --dry-run to apply.",
+            total_changes,
+            if total_changes == 1 { "" } else { "s" },
+            files_changed,
+            if files_changed == 1 { "" } else { "s" },
+        );
+    } else {
+        println!(
+            "Migrated {} interpolation{} in {} file{}.",
+            total_changes,
+            if total_changes == 1 { "" } else { "s" },
+            files_changed,
+            if files_changed == 1 { "" } else { "s" },
+        );
+    }
+    println!();
+    Ok(())
+}
+
+fn collect_tnt_files_for_migrate(dir: &std::path::Path) -> anyhow::Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    collect_tnt_files_recursive_migrate(dir, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_tnt_files_recursive_migrate(
+    dir: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Skip hidden dirs and common non-source dirs
+        if name_str.starts_with('.') || name_str == "node_modules" || name_str == "target" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_tnt_files_recursive_migrate(&path, files)?;
+        } else if path.extension().map_or(false, |ext| ext == "tnt") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Migrate old {expr} interpolation to #{expr} inside string literals.
+/// Handles:
+///   - Double-quoted strings: "hello {name}" → "hello #{name}"
+///   - Skips template strings (""" ... """) — they use {{expr}}
+///   - Skips raw strings (r"..." / r#"..."#)
+///   - Skips route patterns: get("/users/{id}") — these are params, not interpolation
+///   - Skips already-migrated #{expr}
+///   - Preserves escaped \{ (though no longer needed)
+fn migrate_interpolation(source: &str) -> String {
+    let mut result = String::with_capacity(source.len());
+    let chars: Vec<char> = source.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // Skip single-line comments
+        if chars[i] == '/' && i + 1 < len && chars[i + 1] == '/' {
+            while i < len && chars[i] != '\n' {
+                result.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Skip raw strings: r"..." or r#"..."#
+        if chars[i] == 'r' && i + 1 < len && (chars[i + 1] == '"' || chars[i + 1] == '#') {
+            result.push(chars[i]);
+            i += 1;
+            // Count hashes
+            let mut hashes = 0;
+            while i < len && chars[i] == '#' {
+                result.push(chars[i]);
+                hashes += 1;
+                i += 1;
+            }
+            if i < len && chars[i] == '"' {
+                result.push(chars[i]);
+                i += 1;
+                // Read until closing "###
+                loop {
+                    if i >= len {
+                        break;
+                    }
+                    result.push(chars[i]);
+                    if chars[i] == '"' {
+                        let mut closing_hashes = 0;
+                        while i + 1 + closing_hashes < len
+                            && chars[i + 1 + closing_hashes] == '#'
+                            && closing_hashes < hashes
+                        {
+                            closing_hashes += 1;
+                        }
+                        if closing_hashes == hashes {
+                            for _ in 0..hashes {
+                                i += 1;
+                                result.push(chars[i]);
+                            }
+                            i += 1;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            continue;
+        }
+
+        // Skip template strings: """..."""
+        if chars[i] == '"' && i + 2 < len && chars[i + 1] == '"' && chars[i + 2] == '"' {
+            result.push(chars[i]);
+            result.push(chars[i + 1]);
+            result.push(chars[i + 2]);
+            i += 3;
+            // Read until closing """
+            loop {
+                if i >= len {
+                    break;
+                }
+                if chars[i] == '"' && i + 2 < len && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                    result.push(chars[i]);
+                    result.push(chars[i + 1]);
+                    result.push(chars[i + 2]);
+                    i += 3;
+                    break;
+                }
+                result.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Process regular strings: "..."
+        if chars[i] == '"' {
+            result.push(chars[i]);
+            i += 1;
+            while i < len && chars[i] != '"' {
+                // Preserve escape sequences
+                if chars[i] == '\\' {
+                    result.push(chars[i]);
+                    i += 1;
+                    if i < len {
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                    continue;
+                }
+                // Already migrated: #{expr} — skip the whole interpolation block
+                if chars[i] == '#' && i + 1 < len && chars[i + 1] == '{' {
+                    result.push(chars[i]); // #
+                    i += 1;
+                    result.push(chars[i]); // {
+                    i += 1;
+                    let mut depth = 1;
+                    while i < len && depth > 0 {
+                        if chars[i] == '{' {
+                            depth += 1;
+                        } else if chars[i] == '}' {
+                            depth -= 1;
+                        }
+                        result.push(chars[i]);
+                        i += 1;
+                    }
+                    continue;
+                }
+                // Old-style interpolation: { followed by identifier/expression start
+                // Only migrate if it looks like a real interpolation expression,
+                // not a route param or JSON/SQL path
+                if chars[i] == '{' && i + 1 < len && is_interpolation_start(chars[i + 1]) {
+                    // Look ahead to find matching } and check the content
+                    let mut end = i + 1;
+                    let mut depth = 1;
+                    while end < len && depth > 0 {
+                        if chars[end] == '{' {
+                            depth += 1;
+                        } else if chars[end] == '}' {
+                            depth -= 1;
+                        }
+                        if depth > 0 {
+                            end += 1;
+                        }
+                    }
+                    if end < len && depth == 0 {
+                        let expr: String = chars[i + 1..end].iter().collect();
+                        // Skip route-pattern-like simple identifiers in paths
+                        // (these are now naturally literal with #{} syntax)
+                        let is_route_param =
+                            is_simple_route_param(&expr) && i > 0 && chars[i - 1] == '/';
+                        if !is_route_param {
+                            result.push('#');
+                        }
+                    }
+                    result.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                result.push(chars[i]);
+                i += 1;
+            }
+            if i < len {
+                result.push(chars[i]); // closing "
+                i += 1;
+            }
+            continue;
+        }
+
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
+}
+
+/// Check if a character could start an interpolation expression
+fn is_interpolation_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_' || c == '(' || c == '!' || c == '"'
+}
+
+/// Check if an expression is a simple route parameter (just an identifier like "id" or "slug")
+/// These should NOT be migrated since {id} in routes is now naturally literal
+fn is_simple_route_param(expr: &str) -> bool {
+    !expr.is_empty() && expr.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn count_migration_changes(old: &str, new: &str) -> usize {
+    // Count how many #{ are in new that aren't in old
+    let old_count = old.matches("#{").count();
+    let new_count = new.matches("#{").count();
+    new_count.saturating_sub(old_count)
 }
 
 fn run_learn_command(platform: Option<String>, check: bool, update: bool) -> anyhow::Result<()> {

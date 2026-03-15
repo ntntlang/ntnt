@@ -4678,11 +4678,12 @@ let result = "hello" - 42
 #[test]
 fn test_result_ok_bracket_index_warn_mode() {
     // In warn mode (default), indexing Result(Ok(map)) should auto-unwrap
-    let (stdout, stderr, _exit) = run_ntnt_code(
+    let (stdout, stderr, _exit) = run_ntnt_code_with_env(
         r##"
 let result = Ok(map { "name": "Alice", "age": 30 })
 print(result["name"])
 "##,
+        &[("NTNT_TYPE_MODE", "warn")],
     );
     assert_eq!(
         stdout.trim(),
@@ -4698,11 +4699,12 @@ print(result["name"])
 
 #[test]
 fn test_result_ok_field_access_warn_mode() {
-    let (stdout, stderr, _exit) = run_ntnt_code(
+    let (stdout, stderr, _exit) = run_ntnt_code_with_env(
         r##"
 let result = Ok(map { "name": "Bob" })
 print(result.name)
 "##,
+        &[("NTNT_TYPE_MODE", "warn")],
     );
     assert_eq!(
         stdout.trim(),
@@ -4719,12 +4721,13 @@ print(result.name)
 #[test]
 fn test_result_err_bracket_index_warn_mode() {
     // In warn mode, indexing Result(Err) should return None with warning
-    let (stdout, stderr, _exit) = run_ntnt_code(
+    let (stdout, stderr, _exit) = run_ntnt_code_with_env(
         r##"
 let result = Err("connection failed")
 let val = result["key"] ?? "fallback"
 print(val)
 "##,
+        &[("NTNT_TYPE_MODE", "warn")],
     );
     assert_eq!(
         stdout.trim(),
@@ -4740,12 +4743,13 @@ print(val)
 
 #[test]
 fn test_result_err_field_access_warn_mode() {
-    let (stdout, stderr, _exit) = run_ntnt_code(
+    let (stdout, stderr, _exit) = run_ntnt_code_with_env(
         r##"
 let result = Err("timeout")
 let val = result.name ?? "default"
 print(val)
 "##,
+        &[("NTNT_TYPE_MODE", "warn")],
     );
     assert_eq!(
         stdout.trim(),
@@ -4761,11 +4765,12 @@ print(val)
 
 #[test]
 fn test_option_some_bracket_index_warn_mode() {
-    let (stdout, stderr, _exit) = run_ntnt_code(
+    let (stdout, stderr, _exit) = run_ntnt_code_with_env(
         r##"
 let opt = Some(map { "x": 42 })
 print(opt["x"])
 "##,
+        &[("NTNT_TYPE_MODE", "warn")],
     );
     assert_eq!(
         stdout.trim(),
@@ -4781,12 +4786,13 @@ print(opt["x"])
 
 #[test]
 fn test_option_none_bracket_index_warn_mode() {
-    let (stdout, stderr, _exit) = run_ntnt_code(
+    let (stdout, stderr, _exit) = run_ntnt_code_with_env(
         r##"
 let opt = None
 let val = opt["key"] ?? "nothing"
 print(val)
 "##,
+        &[("NTNT_TYPE_MODE", "warn")],
     );
     assert_eq!(stdout.trim(), "nothing", "None indexing should return None");
     assert!(
@@ -4798,11 +4804,12 @@ print(val)
 
 #[test]
 fn test_result_ok_array_index_warn_mode() {
-    let (stdout, stderr, _exit) = run_ntnt_code(
+    let (stdout, stderr, _exit) = run_ntnt_code_with_env(
         r##"
 let result = Ok([10, 20, 30])
 print(result[1])
 "##,
+        &[("NTNT_TYPE_MODE", "warn")],
     );
     assert_eq!(
         stdout.trim(),
@@ -4818,8 +4825,8 @@ print(result[1])
 
 #[test]
 fn test_result_ok_strict_mode_errors() {
-    // In strict mode, indexing Result should be an error
-    let (stdout, stderr, _exit) = run_ntnt_code_with_env(
+    // In strict mode, indexing Result should be a hard error
+    let (stdout, stderr, exit_code) = run_ntnt_code_with_env(
         r##"
 let result = Ok(map { "key": "val" })
 print(result["key"])
@@ -4827,6 +4834,15 @@ print(result["key"])
         &[("NTNT_TYPE_MODE", "strict")],
     );
     // Should error, not produce output
+    assert_ne!(
+        exit_code, 0,
+        "Strict mode should exit non-zero on Result indexing"
+    );
+    assert!(
+        stdout.trim().is_empty(),
+        "Strict mode should not produce output, got: {}",
+        stdout
+    );
     assert!(
         stderr.contains("unwrap")
             || stderr.contains("RuntimeError")

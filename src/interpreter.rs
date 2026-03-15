@@ -543,11 +543,10 @@ fn is_production_mode() -> bool {
 /// Interpreter-internal errors that shouldn't reach user code:
 /// Auto-unwrap a Result/Option inner value for bracket indexing.
 /// Used by both Warn and Forgiving TypeModes to avoid code duplication.
+/// Mirrors all supported indexing cases from Expression::Index so behavior
+/// matches `unwrap(result)[idx]` exactly.
 fn auto_unwrap_index(inner_val: Value, idx: Value) -> Result<Value> {
     match (inner_val, idx) {
-        (Value::Map(map), Value::String(key)) => {
-            Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
-        }
         (Value::Array(arr), Value::Int(i)) => {
             let index = if i < 0 {
                 match (arr.len() as i64).checked_add(i) {
@@ -559,6 +558,28 @@ fn auto_unwrap_index(inner_val: Value, idx: Value) -> Result<Value> {
             };
             Ok(arr.get(index).cloned().unwrap_or_else(|| Value::none()))
         }
+        (Value::String(s), Value::Int(i)) => {
+            let index = if i < 0 {
+                let char_count = s.chars().count();
+                match (char_count as i64).checked_add(i) {
+                    Some(pos) if pos >= 0 => pos as usize,
+                    _ => return Ok(Value::none()),
+                }
+            } else {
+                i as usize
+            };
+            Ok(s.chars()
+                .nth(index)
+                .map(|c| Value::String(c.to_string()))
+                .unwrap_or_else(|| Value::none()))
+        }
+        (Value::Map(map), Value::String(key)) => {
+            Ok(map.get(&key).cloned().unwrap_or_else(|| Value::none()))
+        }
+        (Value::Struct { fields, .. }, Value::String(key)) => fields
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| IntentError::runtime_error(format!("Unknown field: {}", key))),
         _ => Ok(Value::none()),
     }
 }
