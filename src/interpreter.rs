@@ -5525,6 +5525,54 @@ impl Interpreter {
                                 return Ok(Value::Unit);
                             }
                             "status" | "stats" => {
+                                if !args.is_empty() {
+                                    // Queue.stats(queue_name) — per-queue stats
+                                    let queue_filter = if let Value::String(ref s) = args[0] {
+                                        Some(s.as_str())
+                                    } else {
+                                        None
+                                    };
+                                    let per_queue =
+                                        crate::stdlib::jobs::queue_status_per_queue(queue_filter)?;
+
+                                    if let Some(filter) = queue_filter {
+                                        // Return just the stats for that one queue
+                                        if let Some(counts) = per_queue.get(filter) {
+                                            let mut result = HashMap::new();
+                                            for (k, v) in counts {
+                                                result.insert(k.clone(), Value::Int(*v));
+                                            }
+                                            return Ok(Value::Map(result));
+                                        } else {
+                                            // No jobs for this queue — return zeroes
+                                            let mut result = HashMap::new();
+                                            for s in &[
+                                                "pending",
+                                                "active",
+                                                "completed",
+                                                "retry",
+                                                "dead",
+                                                "cancelled",
+                                            ] {
+                                                result.insert(s.to_string(), Value::Int(0));
+                                            }
+                                            return Ok(Value::Map(result));
+                                        }
+                                    } else {
+                                        // Nested per-queue map
+                                        let mut result = HashMap::new();
+                                        for (queue_name, counts) in &per_queue {
+                                            let mut inner = HashMap::new();
+                                            for (k, v) in counts {
+                                                inner.insert(k.clone(), Value::Int(*v));
+                                            }
+                                            result.insert(queue_name.clone(), Value::Map(inner));
+                                        }
+                                        return Ok(Value::Map(result));
+                                    }
+                                }
+
+                                // Queue.stats() with no args — global totals
                                 let counts = crate::stdlib::jobs::queue_status()?;
                                 let mut result = HashMap::new();
                                 for (k, v) in counts {

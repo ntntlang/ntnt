@@ -1678,15 +1678,28 @@ Queue.configure(map {
     "visibility_timeout": 300           // seconds before stale jobs are re-queued (default: 300)
 })
 
+// Or configure with Redis Streams backend for high-throughput persistent jobs
+Queue.configure(map {
+    "backend": "redis",
+    "redis_url": env("REDIS_URL"),      // e.g. "redis://localhost:6379"
+    "visibility_timeout": 300,          // seconds before stale jobs are re-claimed (default: 300)
+    "consumer_group": "ntnt_workers",   // Redis consumer group name (default: "ntnt_workers")
+    "prune_completed_after": 3600       // seconds to auto-expire completed job hashes (default: 3600)
+})
+
 // Start background worker (non-blocking)
 Queue.work_async()
 
 // Or start blocking worker (for dedicated worker processes like worker.tnt)
 // Queue.work(map { "queues": ["default", "emails"], "concurrency": 4 })
 
-// Check queue status (works with both backends)
+// Check queue status (works with all backends: memory, postgres, redis)
 let status = Queue.stats()
 print("Pending: #{status.pending}, Active: #{status.active}, Dead: #{status.dead}")
+
+// Per-queue stats: pass a queue name for single-queue stats
+let email_status = Queue.stats("emails")
+print("Email pending: #{email_status.pending}")
 
 // Observability queries (especially useful with postgres backend)
 let recent = Queue.recent(10)        // Last 10 jobs
@@ -1735,6 +1748,58 @@ Job SendEmail on emails (retry: 3) {
 
 // Blocks and processes jobs from multiple queues
 Queue.work(map { "queues": ["emails", "default"], "concurrency": 4 })
+```
+
+**Redis backend deployment** (same pattern, uses Redis Streams):
+```ntnt
+// server.tnt — enqueues jobs
+import { Queue } from "std/jobs"
+
+Queue.configure(map { "backend": "redis", "redis_url": env("REDIS_URL") })
+
+Job SendEmail on emails (retry: 3) {
+    perform(to: String, subject: String) {
+        // ... send email
+    }
+}
+
+get "/send-email" (req) {
+    SendEmail.enqueue(map { "to": req.query.to, "subject": "Welcome" })
+    return map { "status": 200, "body": "Queued" }
+}
+
+listen(8080)
+```
+```ntnt
+// worker.tnt — processes jobs via Redis consumer groups
+import { Queue } from "std/jobs"
+
+Queue.configure(map { "backend": "redis", "redis_url": env("REDIS_URL") })
+
+Job SendEmail on emails (retry: 3) {
+    perform(to: String, subject: String) {
+        // ... send email
+    }
+}
+
+// Blocks and processes jobs — multiple workers can run simultaneously (consumer groups)
+Queue.work(map { "queues": ["emails", "default"], "concurrency": 4 })
+```
+
+**Redis data model:**
+- Job queue: Redis Streams (`ntnt:queue:{name}`) — one stream per queue
+- Job details: Redis Hash (`ntnt:job:{id}`) — id, type, queue, payload, status, attempts, timestamps
+- Scheduled jobs: Sorted Set (`ntnt:scheduled`) — score = scheduled_at timestamp
+- Consumer groups: atomic claiming via `XREADGROUP` — no double-processing
+- Auto-expiry: completed job hashes expire after `prune_completed_after` seconds
+
+**CLI with Redis:**
+```bash
+ntnt jobs status --redis-url redis://localhost:6379
+ntnt jobs list --redis-url redis://localhost:6379
+ntnt jobs retry <job_id> --redis-url redis://localhost:6379
+# Or set REDIS_URL env var:
+REDIS_URL=redis://localhost:6379 ntnt jobs status
 ```
 
 **Job DSL syntax:**

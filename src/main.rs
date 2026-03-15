@@ -436,6 +436,9 @@ enum JobsCommands {
         /// PostgreSQL connection URL (or set DATABASE_URL env var)
         #[arg(long)]
         postgres_url: Option<String>,
+        /// Redis connection URL (or set REDIS_URL env var)
+        #[arg(long)]
+        redis_url: Option<String>,
     },
     /// List recent jobs
     List {
@@ -451,6 +454,9 @@ enum JobsCommands {
         /// PostgreSQL connection URL (or set DATABASE_URL env var)
         #[arg(long)]
         postgres_url: Option<String>,
+        /// Redis connection URL (or set REDIS_URL env var)
+        #[arg(long)]
+        redis_url: Option<String>,
     },
     /// Retry a dead job (move back to pending)
     Retry {
@@ -460,6 +466,9 @@ enum JobsCommands {
         /// PostgreSQL connection URL (or set DATABASE_URL env var)
         #[arg(long)]
         postgres_url: Option<String>,
+        /// Redis connection URL (or set REDIS_URL env var)
+        #[arg(long)]
+        redis_url: Option<String>,
     },
     /// Cancel a pending or active job
     Cancel {
@@ -469,6 +478,9 @@ enum JobsCommands {
         /// PostgreSQL connection URL (or set DATABASE_URL env var)
         #[arg(long)]
         postgres_url: Option<String>,
+        /// Redis connection URL (or set REDIS_URL env var)
+        #[arg(long)]
+        redis_url: Option<String>,
     },
 }
 
@@ -2514,31 +2526,59 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
         flag.clone().or_else(|| std::env::var("DATABASE_URL").ok())
     }
 
-    /// Initialize postgres backend if a URL is available
-    fn maybe_init_pg(url: &Option<String>) -> anyhow::Result<bool> {
-        if let Some(ref pg_url) = resolve_pg_url(url) {
+    /// Resolve a Redis URL from the flag or REDIS_URL env var
+    fn resolve_redis_url(flag: &Option<String>) -> Option<String> {
+        flag.clone().or_else(|| std::env::var("REDIS_URL").ok())
+    }
+
+    /// Backend label for display
+    enum CliBackend {
+        Memory,
+        Postgres,
+        Redis,
+    }
+
+    /// Initialize backend: Redis takes priority if both are provided
+    fn init_backend(
+        postgres_url: &Option<String>,
+        redis_url: &Option<String>,
+    ) -> anyhow::Result<CliBackend> {
+        if let Some(ref url) = resolve_redis_url(redis_url) {
+            ntnt::stdlib::jobs::redis_init_from_url(url).map_err(|e| anyhow::anyhow!("{}", e))?;
+            Ok(CliBackend::Redis)
+        } else if let Some(ref pg_url) = resolve_pg_url(postgres_url) {
             ntnt::stdlib::jobs::pg_init_pool_from_url(pg_url)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
-            Ok(true)
+            Ok(CliBackend::Postgres)
         } else {
-            Ok(false)
+            Ok(CliBackend::Memory)
         }
     }
 
     match cmd {
-        JobsCommands::Status { postgres_url } => {
-            let is_pg = maybe_init_pg(&postgres_url)?;
+        JobsCommands::Status {
+            postgres_url,
+            redis_url,
+        } => {
+            let backend = init_backend(&postgres_url, &redis_url)?;
 
-            let counts = if is_pg {
-                ntnt::stdlib::jobs::pg_queue_status().map_err(|e| anyhow::anyhow!("{}", e))?
-            } else {
-                ntnt::stdlib::jobs::queue_status().map_err(|e| anyhow::anyhow!("{}", e))?
+            let counts = match &backend {
+                CliBackend::Redis => ntnt::stdlib::jobs::redis_queue_status()
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
+                CliBackend::Postgres => {
+                    ntnt::stdlib::jobs::pg_queue_status().map_err(|e| anyhow::anyhow!("{}", e))?
+                }
+                CliBackend::Memory => {
+                    ntnt::stdlib::jobs::queue_status().map_err(|e| anyhow::anyhow!("{}", e))?
+                }
             };
 
-            println!(
-                "Job Queue Status{}:",
-                if is_pg { " (postgres)" } else { "" }
-            );
+            let label = match backend {
+                CliBackend::Redis => " (redis)",
+                CliBackend::Postgres => " (postgres)",
+                CliBackend::Memory => "",
+            };
+            println!("Job Queue Status{}:", label);
             println!("  Pending:   {}", counts.get("pending").unwrap_or(&0));
             println!("  Active:    {}", counts.get("active").unwrap_or(&0));
             println!("  Completed: {}", counts.get("completed").unwrap_or(&0));
@@ -2552,8 +2592,9 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
             pending,
             active,
             postgres_url,
+            redis_url,
         } => {
-            let is_pg = maybe_init_pg(&postgres_url)?;
+            let backend = init_backend(&postgres_url, &redis_url)?;
 
             let filter = if dead {
                 Some("dead")
@@ -2565,10 +2606,14 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
                 None
             };
 
-            let jobs = if is_pg {
-                ntnt::stdlib::jobs::pg_list_jobs(filter).map_err(|e| anyhow::anyhow!("{}", e))?
-            } else {
-                ntnt::stdlib::jobs::list_jobs(filter).map_err(|e| anyhow::anyhow!("{}", e))?
+            let jobs = match &backend {
+                CliBackend::Redis => ntnt::stdlib::jobs::redis_list_jobs(filter)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
+                CliBackend::Postgres => ntnt::stdlib::jobs::pg_list_jobs(filter)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
+                CliBackend::Memory => {
+                    ntnt::stdlib::jobs::list_jobs(filter).map_err(|e| anyhow::anyhow!("{}", e))?
+                }
             };
 
             if jobs.is_empty() {
@@ -2576,8 +2621,11 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            // UUID IDs are 36 chars — widen the ID column for postgres
-            let id_width = if is_pg { 38 } else { 12 };
+            // UUID IDs are 36 chars — widen the ID column for postgres/redis
+            let id_width = match backend {
+                CliBackend::Memory => 12,
+                _ => 38,
+            };
             println!(
                 "{:<width$} {:<20} {:<12} {:<10} {:<8}",
                 "ID",
@@ -2624,13 +2672,21 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
 
             Ok(())
         }
-        JobsCommands::Retry { id, postgres_url } => {
-            let is_pg = maybe_init_pg(&postgres_url)?;
+        JobsCommands::Retry {
+            id,
+            postgres_url,
+            redis_url,
+        } => {
+            let backend = init_backend(&postgres_url, &redis_url)?;
 
-            let retried = if is_pg {
-                ntnt::stdlib::jobs::pg_retry_dead_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?
-            } else {
-                ntnt::stdlib::jobs::retry_dead_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?
+            let retried = match backend {
+                CliBackend::Redis => ntnt::stdlib::jobs::redis_retry_dead_job(&id)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
+                CliBackend::Postgres => ntnt::stdlib::jobs::pg_retry_dead_job(&id)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
+                CliBackend::Memory => {
+                    ntnt::stdlib::jobs::retry_dead_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?
+                }
             };
 
             if retried {
@@ -2640,13 +2696,22 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        JobsCommands::Cancel { id, postgres_url } => {
-            let is_pg = maybe_init_pg(&postgres_url)?;
+        JobsCommands::Cancel {
+            id,
+            postgres_url,
+            redis_url,
+        } => {
+            let backend = init_backend(&postgres_url, &redis_url)?;
 
-            let cancelled = if is_pg {
-                ntnt::stdlib::jobs::pg_cancel_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?
-            } else {
-                ntnt::stdlib::jobs::cancel_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?
+            let cancelled = match backend {
+                CliBackend::Redis => ntnt::stdlib::jobs::redis_cancel_job(&id)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
+                CliBackend::Postgres => {
+                    ntnt::stdlib::jobs::pg_cancel_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?
+                }
+                CliBackend::Memory => {
+                    ntnt::stdlib::jobs::cancel_job(&id).map_err(|e| anyhow::anyhow!("{}", e))?
+                }
             };
 
             if cancelled {
