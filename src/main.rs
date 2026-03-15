@@ -921,10 +921,13 @@ fn run_file(path: &PathBuf, timeout: u64) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    interpreter.eval(&ast)?;
+    let result = interpreter.eval(&ast);
 
-    // Shutdown concurrency runtime — cancel all tasks and schedules (rule 28)
+    // Shutdown concurrency runtime unconditionally — cancel all tasks and schedules
+    // even on eval error, so schedules/tasks don't outlive the program (rule 28)
     ntnt::stdlib::concurrent::RUNTIME.shutdown();
+
+    result?;
 
     Ok(())
 }

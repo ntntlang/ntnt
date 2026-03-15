@@ -843,35 +843,56 @@ fn parse_interval(s: &str) -> Result<Duration> {
 struct CapturedBindings {
     /// Serializable values (Int, Float, Bool, String, Array, Map, Struct, Enum)
     values: HashMap<String, SerializedValue>,
-    /// Names of NativeFunction bindings — these are re-looked-up in the child
-    /// interpreter's loaded modules (since fn pointers can't be sent across threads
-    /// but can be reconstructed from the stdlib registry).
-    native_fn_names: Vec<(String, String, String)>, // (binding_name, fn_name, module_hint)
+    /// NativeFunction bindings — stored with arity for disambiguation when
+    /// multiple modules export the same function name.
+    native_fn_names: Vec<CapturedNativeFn>,
+}
+
+#[derive(Clone)]
+struct CapturedNativeFn {
+    binding_name: String, // the variable name in user code (may be an alias)
+    fn_name: String,      // the canonical function name
+    arity: usize,         // for disambiguation when names collide
+    max_arity: usize,
 }
 
 /// Capture all bindings from an environment for cross-thread use.
 /// Suppresses warnings for NativeFunction (expected, not user error).
 /// Only warns for user-defined non-serializable values (closures).
-fn capture_bindings(bindings: &HashMap<String, Value>) -> CapturedBindings {
+fn capture_bindings(
+    bindings: &HashMap<String, Value>,
+) -> std::result::Result<CapturedBindings, Vec<String>> {
     let mut values = HashMap::new();
     let mut native_fn_names = Vec::new();
+    let mut non_serializable_closures = Vec::new();
 
     for (key, value) in bindings {
         match value {
-            Value::NativeFunction { name, .. } => {
-                // Record the native function name for re-lookup in child interpreter.
-                // We don't know which module it came from, so we store the fn name
-                // and will search all loaded modules.
-                native_fn_names.push((key.clone(), name.clone(), String::new()));
+            Value::NativeFunction {
+                name,
+                arity,
+                max_arity,
+                ..
+            } => {
+                // Record function name + arity for re-lookup in child interpreter.
+                // Arity disambiguates when modules share names (e.g., connect, query).
+                native_fn_names.push(CapturedNativeFn {
+                    binding_name: key.clone(),
+                    fn_name: name.clone(),
+                    arity: *arity,
+                    max_arity: *max_arity,
+                });
             }
             _ => match SerializedValue::from_value(value) {
                 Ok(serialized) => {
                     values.insert(key.clone(), serialized);
                 }
                 Err(_) => {
-                    // Suppress warnings for Function values (closures from user code)
-                    // that can't be serialized. Only warn for truly unexpected types.
-                    if !matches!(value, Value::Function { .. }) {
+                    // User-defined closures (Value::Function) cannot cross task boundaries.
+                    // Track them so we can fail with a clear error listing all problematic captures.
+                    if matches!(value, Value::Function { .. }) {
+                        non_serializable_closures.push(key.clone());
+                    } else {
                         eprintln!(
                             "[WARN] Cannot capture '{}' for concurrent task: value type '{}' is not serializable",
                             key,
@@ -883,29 +904,53 @@ fn capture_bindings(bindings: &HashMap<String, Value>) -> CapturedBindings {
         }
     }
 
-    CapturedBindings {
+    if !non_serializable_closures.is_empty() {
+        return Err(non_serializable_closures);
+    }
+
+    Ok(CapturedBindings {
         values,
         native_fn_names,
-    }
+    })
 }
 
 /// Inject captured bindings into a fresh interpreter.
 /// - Serializable values are defined directly.
-/// - NativeFunction names are looked up from the interpreter's loaded stdlib modules.
+/// - NativeFunction names are looked up from stdlib modules AND builtins,
+///   with arity used for disambiguation when multiple modules share a name.
 fn inject_captured(interp: &mut crate::interpreter::Interpreter, captured: &CapturedBindings) {
     // Inject serializable values
     for (key, val) in &captured.values {
         interp.define_global(key.clone(), val.to_value());
     }
 
-    // Re-inject native functions by looking them up in loaded modules
-    for (binding_name, fn_name, _module_hint) in &captured.native_fn_names {
-        // Search all loaded modules for this function
-        if let Some(value) = interp.find_in_loaded_modules(fn_name) {
-            interp.define_global(binding_name.clone(), value);
+    // Re-inject native functions
+    for cap in &captured.native_fn_names {
+        // First: search loaded modules for this function name
+        if let Some(value) = interp.find_in_loaded_modules(&cap.fn_name) {
+            // Verify arity matches to disambiguate (e.g., postgres::connect vs sqlite::connect)
+            if let Value::NativeFunction {
+                arity, max_arity, ..
+            } = &value
+            {
+                if *arity == cap.arity && *max_arity == cap.max_arity {
+                    interp.define_global(cap.binding_name.clone(), value);
+                    continue;
+                }
+            }
         }
-        // If not found in modules, check if it's a builtin already in scope
-        // (builtins are defined by Interpreter::new() in the global environment)
+        // Fallback: check if it's a builtin already in the global environment
+        // (builtins like len, print, str are defined by Interpreter::new())
+        if let Some(value) = interp.get_global(&cap.fn_name) {
+            if let Value::NativeFunction {
+                arity, max_arity, ..
+            } = &value
+            {
+                if *arity == cap.arity && *max_arity == cap.max_arity {
+                    interp.define_global(cap.binding_name.clone(), value);
+                }
+            }
+        }
     }
 }
 
@@ -971,7 +1016,15 @@ fn concurrent_spawn(handler: &Value) -> Result<Value> {
 
             // Capture environment bindings
             let bindings = closure.borrow().all_bindings();
-            let captured = capture_bindings(&bindings);
+            let captured = match capture_bindings(&bindings) {
+                Ok(c) => c,
+                Err(names) => {
+                    return Err(IntentError::runtime_error(format!(
+                        "Cannot capture user-defined function(s) across task boundaries: {}.                          Use closure capture for data, not function references.",
+                        names.join(", ")
+                    )));
+                }
+            };
             let body_clone = body.clone();
 
             // Create cancellation flag and register task
@@ -1127,7 +1180,15 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
             }
 
             let bindings = closure.borrow().all_bindings();
-            let captured = capture_bindings(&bindings);
+            let captured = match capture_bindings(&bindings) {
+                Ok(c) => c,
+                Err(names) => {
+                    return Err(IntentError::runtime_error(format!(
+                        "Cannot capture user-defined function(s) across task boundaries: {}.                          Use closure capture for data, not function references.",
+                        names.join(", ")
+                    )));
+                }
+            };
             let body_clone = body.clone();
 
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -1259,7 +1320,15 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
             }
 
             let bindings = closure.borrow().all_bindings();
-            let captured = capture_bindings(&bindings);
+            let captured = match capture_bindings(&bindings) {
+                Ok(c) => c,
+                Err(names) => {
+                    return Err(IntentError::runtime_error(format!(
+                        "Cannot capture user-defined function(s) across task boundaries: {}.                          Use closure capture for data, not function references.",
+                        names.join(", ")
+                    )));
+                }
+            };
             let body_clone = body.clone();
 
             let (schedule_id, cancelled, tick_running) = RUNTIME.register_schedule();
@@ -1956,14 +2025,14 @@ mod tests {
             },
         );
 
-        let captured = capture_bindings(&bindings);
+        let captured = capture_bindings(&bindings).expect("should succeed with no closures");
         // Serializable values captured
         assert!(captured.values.contains_key("x"));
         assert!(!captured.values.contains_key("native_fn"));
-        // Native function recorded for re-lookup
+        // Native function recorded for re-lookup with arity
         assert!(captured
             .native_fn_names
             .iter()
-            .any(|(name, _, _)| name == "native_fn"));
+            .any(|cap| cap.binding_name == "native_fn" && cap.fn_name == "test"));
     }
 }

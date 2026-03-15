@@ -737,6 +737,11 @@ impl Interpreter {
         None
     }
 
+    /// Look up a variable in the global environment (for builtins like len, print, str).
+    pub fn get_global(&self, name: &str) -> Option<Value> {
+        self.environment.borrow().get(name)
+    }
+
     /// Resolve a path relative to the current script's directory
     /// If the path is absolute, return it as-is
     /// If relative, resolve it relative to the .tnt file's directory (not cwd)
