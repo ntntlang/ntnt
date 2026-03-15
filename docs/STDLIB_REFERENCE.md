@@ -45,6 +45,7 @@ These functions are available everywhere without importing.
 | [`clamp(x: Int \| Float, min_val: Int \| Float, max_val: Int \| Float)`](#clamp) | Constrains a value between a minimum and maximum. |
 | [`delete(pattern: String, handler: Function)`](#delete) | Registers a DELETE route handler. |
 | [`enable_cors(options?: Map)`](#enablecors) | Enable CORS (Cross-Origin Resource Sharing) for the HTTP server. |
+| [`enable_csp(options?: Map \| Bool)`](#enablecsp) | Enable Content-Security-Policy headers for the HTTP server. |
 | [`float(x: Int \| Float \| String)`](#float) | Converts a value to float. |
 | [`floor(x: Int \| Float)`](#floor) | Rounds down to the nearest integer. |
 | [`get(pattern: String, handler: Function)`](#get) | Registers a GET route handler. |
@@ -350,6 +351,40 @@ enable_cors(map { "origins": ["https://example.com"], "credentials": true })  //
 **See also:** `listen`, `get`, `post`
 
 *Since v0.3.11*
+
+---
+
+#### `enable_csp`
+
+```ntnt
+enable_csp(options?: Map | Bool) -> Unit
+```
+
+Enable Content-Security-Policy headers for the HTTP server.
+
+Configures the server to include CSP headers on all responses. Call with no arguments for sensible defaults, a map of directives to customize, or `false` to disable CSP entirely. Must be called before `listen()`.
+
+Default directives: `default-src 'self'`, `script-src 'self'`, `style-src 'self' 'unsafe-inline'`, `img-src 'self' data: https:`, `font-src 'self'`, `connect-src 'self'`, `frame-ancestors 'none'`, `base-uri 'self'`, `form-action 'self'`.
+
+Options map keys are CSP directive names with string values. Use `report_only: true` to use the Report-Only header instead.
+
+**Parameters:**
+
+- `options` — Optional CSP configuration map or `false` to disable
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+enable_csp()  // Enable CSP with sensible defaults
+enable_csp(map { "script-src": "'self' 'unsafe-inline'", "style-src": "'self' 'unsafe-inline' https://fonts.googleapis.com" })  // Custom CSP directives
+enable_csp(false)  // Disable CSP entirely
+```
+
+**See also:** `enable_cors`, `listen`
+
+*Since v0.4.4*
 
 ---
 
