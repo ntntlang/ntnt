@@ -152,15 +152,15 @@ print(sum)
 #[test]
 fn test_entries_function() {
     // entries() now returns [{key, value}] maps so callers can use entry["key"] / entry["value"]
-    let code = r#"
+    let code = r##"
 import { entries } from "std/collections"
 let data = map { "name": "Alice", "age": 30 }
 let e = entries(data)
 print(len(e))
 for entry in e {
-    print("{entry["key"]}: {entry["value"]}")
+    print("#{entry["key"]}: #{entry["value"]}")
 }
-"#;
+"##;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "entries() should work");
     assert!(stdout.contains("2"), "Should have 2 entries");
@@ -1492,11 +1492,11 @@ match result {
 
 #[test]
 fn test_map_destructuring_basic() {
-    let code = r#"
+    let code = r##"
 let data = map { "name": "Alice", "age": 30 }
 let { name, age } = data
-print("{name} is {age}")
-"#;
+print("#{name} is #{age}")
+"##;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Map destructuring should work");
     assert!(stdout.contains("Alice is 30"));
@@ -1557,13 +1557,13 @@ let { missing } = data
 
 #[test]
 fn test_map_destructuring_in_match() {
-    let code = r#"
+    let code = r##"
 let data = map { "x": 1, "y": 2 }
 match data {
-    { x, y } => print("{x},{y}"),
+    { x, y } => print("#{x},#{y}"),
     _ => print("no match")
 }
-"#;
+"##;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0);
     assert!(stdout.contains("1,2"));
@@ -1651,15 +1651,15 @@ print(rest[0])
 #[test]
 fn test_for_loop_entries_iteration() {
     // entries() returns [{key, value}] maps; iterate and read key/value fields
-    let code = r#"
+    let code = r##"
 import { entries } from "std/collections"
 let data = map { "a": 1, "b": 2 }
 for entry in entries(data) {
     let k = entry["key"]
     let v = entry["value"]
-    print("{k}={v}")
+    print("#{k}=#{v}")
 }
-"#;
+"##;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "For-loop entries iteration should work");
     // Map order is not guaranteed, so check both are present
@@ -1684,12 +1684,12 @@ for { name } in users {
 
 #[test]
 fn test_for_loop_tuple_destructuring() {
-    let code = r#"
+    let code = r##"
 let pairs = [[1, "one"], [2, "two"], [3, "three"]]
 for [num, word] in pairs {
-    print("{num}: {word}")
+    print("#{num}: #{word}")
 }
-"#;
+"##;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0);
     let lines: Vec<&str> = stdout.trim().lines().collect();
@@ -2257,12 +2257,12 @@ print("plain routes registered")
 
 #[test]
 fn test_route_auto_detect_no_false_positive_outside_route() {
-    // {name} outside a route call should still be interpolation
-    let code = r#"
+    // #{name} outside a route call should still be interpolation
+    let code = r##"
 let name = "world"
-let greeting = "hello {name}"
+let greeting = "hello #{name}"
 print(greeting)
-"#;
+"##;
     let (stdout, _, exit_code) = run_ntnt_code(code);
     assert_eq!(
         exit_code, 0,
@@ -2724,18 +2724,18 @@ main()
 
 #[test]
 fn test_otherwise_executes_on_err() {
-    let code = r#"
+    let code = r##"
 fn main() {
     let x = Err("fail") otherwise {
-        print("error handled: {err}")
+        print("error handled: #{err}")
         return "default"
     }
     print("should not reach here")
 }
 
 let result = main()
-print("result: {result}")
-"#;
+print("result: #{result}")
+"##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
     assert!(
@@ -2784,16 +2784,16 @@ print(result)
 
 #[test]
 fn test_otherwise_err_is_bound() {
-    let code = r#"
+    let code = r##"
 fn main() {
     let x = Err("db connection failed") otherwise {
-        print("caught: {err}")
+        print("caught: #{err}")
         return -1
     }
 }
 
 main()
-"#;
+"##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
     assert!(
@@ -2850,20 +2850,20 @@ print(result)
 
 #[test]
 fn test_otherwise_with_break_in_loop() {
-    let code = r#"
+    let code = r##"
 let items = [Ok(1), Ok(2), Err("bad"), Ok(4)]
 let mut sum = 0
 
 for item in items {
     let val = item otherwise {
-        print("breaking on error: {err}")
+        print("breaking on error: #{err}")
         break
     }
     sum = sum + val
 }
 
-print("sum: {sum}")
-"#;
+print("sum: #{sum}")
+"##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
     assert!(
@@ -2880,7 +2880,7 @@ print("sum: {sum}")
 
 #[test]
 fn test_otherwise_with_continue_in_loop() {
-    let code = r#"
+    let code = r##"
 let items = [Ok(1), Err("skip"), Ok(3), Err("skip2"), Ok(5)]
 let mut sum = 0
 
@@ -2891,8 +2891,8 @@ for item in items {
     sum = sum + val
 }
 
-print("sum: {sum}")
-"#;
+print("sum: #{sum}")
+"##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
     assert!(
@@ -3192,19 +3192,19 @@ print(get_index(arr, -5))
 
 #[test]
 fn test_get_index_with_otherwise() {
-    let code = r#"
+    let code = r##"
 import { get_index } from "std/collections"
 
 fn extract(arr) {
     let a = get_index(arr, 0) otherwise return "empty"
-    let b = get_index(arr, 1) otherwise return "only one: {a}"
-    return "{a} and {b}"
+    let b = get_index(arr, 1) otherwise return "only one: #{a}"
+    return "#{a} and #{b}"
 }
 
 print(extract([]))
 print(extract(["hello"]))
 print(extract(["hello", "world"]))
-"#;
+"##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
     assert!(stdout.contains("empty"), "Empty array: stdout={}", stdout);
@@ -3540,7 +3540,7 @@ print(stringify(arr))
 
 #[test]
 fn test_parse_json_null_is_none() {
-    let code = r#"
+    let code = r##"
 import { parse_json } from "std/json"
 let result = parse_json("null")
 match result {
@@ -3550,9 +3550,9 @@ match result {
             _ => print("NOT_NONE")
         }
     },
-    Err(e) => print("ERROR: {e}")
+    Err(e) => print("ERROR: #{e}")
 }
-"#;
+"##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(
         exit_code, 0,
@@ -3568,7 +3568,7 @@ match result {
 
 #[test]
 fn test_parse_json_object_with_null() {
-    let code = r#"
+    let code = r##"
 import { parse_json, stringify } from "std/json"
 // Build a JSON string with null value via stringify, then re-parse
 let json_str = stringify(map { "key": None, "val": 42 })
@@ -3580,9 +3580,9 @@ match result {
             _ => print("KEY_NOT_NONE")
         }
     },
-    Err(e) => print("ERROR: {e}")
+    Err(e) => print("ERROR: #{e}")
 }
-"#;
+"##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(
         exit_code, 0,
@@ -3598,7 +3598,7 @@ match result {
 
 #[test]
 fn test_json_null_roundtrip() {
-    let code = r#"
+    let code = r##"
 import { parse_json, stringify } from "std/json"
 let original = map { "x": None, "y": 42 }
 let json_str = stringify(original)
@@ -3610,9 +3610,9 @@ match parsed {
             _ => print("ROUNDTRIP_FAIL")
         }
     },
-    Err(e) => print("ERROR: {e}")
+    Err(e) => print("ERROR: #{e}")
 }
-"#;
+"##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(
         exit_code, 0,
@@ -3630,13 +3630,13 @@ match parsed {
 
 #[test]
 fn test_default_param_basic() {
-    let code = r#"
+    let code = r##"
 fn greet(name = "World") {
-    return "Hello, {name}!"
+    return "Hello, #{name}!"
 }
 print(greet())
 print(greet("Alice"))
-"#;
+"##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(exit_code, 0, "default param should work: stderr={}", stderr);
     let lines: Vec<&str> = stdout.trim().lines().collect();
@@ -3646,14 +3646,14 @@ print(greet("Alice"))
 
 #[test]
 fn test_default_param_multiple() {
-    let code = r#"
+    let code = r##"
 fn paginate(items, page = 1, per_page = 25) {
-    return "items={items} page={page} per_page={per_page}"
+    return "items=#{items} page=#{page} per_page=#{per_page}"
 }
 print(paginate("users"))
 print(paginate("users", 2))
 print(paginate("users", 3, 10))
-"#;
+"##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(
         exit_code, 0,
@@ -3668,14 +3668,14 @@ print(paginate("users", 3, 10))
 
 #[test]
 fn test_default_param_prior_param_reference() {
-    let code = r#"
+    let code = r##"
 fn foo(a = 1, b = a + 1) {
-    return "{a},{b}"
+    return "#{a},#{b}"
 }
 print(foo())
 print(foo(10))
 print(foo(10, 20))
-"#;
+"##;
     let (stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_eq!(
         exit_code, 0,
@@ -3706,12 +3706,12 @@ fn bad(a = 1, b) {
 
 #[test]
 fn test_default_param_too_many_args() {
-    let code = r#"
+    let code = r##"
 fn greet(name = "World") {
-    return "Hello, {name}!"
+    return "Hello, #{name}!"
 }
 greet("a", "b")
-"#;
+"##;
     let (_stdout, stderr, exit_code) = run_ntnt_code(code);
     assert_ne!(exit_code, 0, "too many args should fail");
     assert!(

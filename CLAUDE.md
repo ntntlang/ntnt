@@ -55,7 +55,7 @@ import { html } from "std/http/server"
 
 fn home(req) {
     let name = req.query_params["name"] ?? "World"
-    return html("<h1>Hello, {name}!</h1>")
+    return html("<h1>Hello, #{name}!</h1>")
 }
 
 get("/", home)
@@ -106,7 +106,7 @@ After trying NTNT, set up persistent agent knowledge so every future session wri
 
 ## Critical Syntax (memorize these — every rule prevents a real mistake)
 - Maps REQUIRE `map` keyword: `map { "key": "val" }` — bare `{}` is a code block
-- String interpolation: `{expr}` — NO dollar sign, never `${expr}`
+- String interpolation: `#{expr}` — hash-brace, never `${expr}` or bare `{expr}`
 - Template strings: `"""..{{expr}}.."""` — double braces inside triple quotes
 - No semicolons — use newlines to separate statements. `;` silently corrupts the parser.
 - Free functions, not methods: `len(s)` not `s.len()`, `trim(s)` not `s.trim()`
@@ -273,13 +273,14 @@ let config = map {
 let user = { "name": "Alice" }
 ```
 
-### 2. String Interpolation Uses `{expr}` NOT `${expr}`
+### 2. String Interpolation Uses `#{expr}` NOT `${expr}` or `{expr}`
 
 ```ntnt
 // CORRECT
-let msg = "Hello, {name}!"
+let msg = "Hello, #{name}!"
 
 // WRONG
+let msg = "Hello, {name}!"
 let msg = "Hello, ${name}!"
 let msg = `Hello, ${name}!`
 ```
@@ -445,7 +446,7 @@ The `otherwise` block must use `return`, `break`, or `continue` — it cannot yi
 ```ntnt
 // CORRECT — block diverges with return
 let data = parse_json(req) otherwise {
-    return status(400, "Bad JSON: {err}")
+    return status(400, "Bad JSON: #{err}")
 }
 
 // CORRECT — single-expression form with return
@@ -499,7 +500,7 @@ Functions and lambdas support default values for parameters. Parameters with def
 ```ntnt
 // Basic default
 fn greet(name = "World") {
-    return "Hello, {name}!"
+    return "Hello, #{name}!"
 }
 greet()        // "Hello, World!"
 greet("Alice") // "Hello, Alice!"
@@ -519,7 +520,7 @@ fn add(a: Int, b: Int = 10) -> Int {
 
 // Defaults can reference earlier parameters
 fn make_range(start = 0, end = start + 10) {
-    return "{start}..{end}"
+    return "#{start}..#{end}"
 }
 make_range()     // "0..10"
 make_range(5)    // "5..15"
@@ -590,7 +591,7 @@ let { name, ...other } = map { "name": "A", "age": 30 }  // other={"age": 30}
 // For-loop destructuring
 import { entries } from "std/collections"
 for [k, v] in entries(data) {
-    print("{k}={v}")
+    print("#{k}=#{v}")
 }
 for { name } in users {
     print(name)
@@ -598,22 +599,22 @@ for { name } in users {
 
 // Map destructuring in match
 match data {
-    { name, age } => print("{name} is {age}"),
+    { name, age } => print("#{name} is #{age}"),
     _ => print("no match")
 }
 
 // Function parameter destructuring
 fn greet({ name, email }) {
-    print("Hello {name} ({email})")
+    print("Hello #{name} (#{email})")
 }
 
 fn first_two([a, b, ...rest]) {
-    print("{a}, {b}")
+    print("#{a}, #{b}")
 }
 
 // With type annotation
 fn process({ name, email }: Map) {
-    print("{name}: {email}")
+    print("#{name}: #{email}")
 }
 ```
 
@@ -715,7 +716,7 @@ fn home(req) { return html("<h1>Welcome</h1>") }
 fn get_user(req) { return json(map { "id": req.params.id }) }
 fn create_user(req) { return json(map { "created": true }, 201) }
 fn admin_dashboard(req) { return html("<h1>Admin</h1>") }
-fn logger(req) { print("Request: {req.method} {req.path}") }
+fn logger(req) { print("Request: #{req.method} #{req.path}") }
 
 server 8080 {
     static "/assets" from "./public"
@@ -846,7 +847,7 @@ let resp = fetch(map {
 
 // Custom headers
 let resp = fetch("https://api.example.com/data", map {
-    "headers": map { "Authorization": "Bearer {token}" }
+    "headers": map { "Authorization": "Bearer #{token}" }
 })
 ```
 
@@ -1001,11 +1002,11 @@ fn get_user(id) {
 // Block form — err is automatically bound to the error value
 fn create_user(req) {
     let data = parse_json(req) otherwise {
-        return status(400, "Invalid JSON: {err}")
+        return status(400, "Invalid JSON: #{err}")
     }
 
     let saved = execute(db, "INSERT INTO users (name) VALUES ($1)", [data["name"]]) otherwise {
-        return status(500, "Database error: {err}")
+        return status(500, "Database error: #{err}")
     }
 
     return json(map { "created": true }, 201)
@@ -1020,7 +1021,7 @@ fn get_user(req) {
 // Catches runtime errors too — no more unhandled crashes
 fn safe_compute(req) {
     let result = (some_value * 33) otherwise {
-        return json(map { "error": "Computation failed: {err}" }, 400)
+        return json(map { "error": "Computation failed: #{err}" }, 400)
     }
     return json(map { "result": result })
 }
@@ -1028,7 +1029,7 @@ fn safe_compute(req) {
 // In loops — use continue to skip, break to stop
 for line in lines {
     let value = parse_line(line) otherwise {
-        print("Skipping bad line: {err}")
+        print("Skipping bad line: #{err}")
         continue
     }
     process(value)
@@ -1064,11 +1065,11 @@ match result {
         // Use the connection
         let users = query(db, "SELECT * FROM users", [])
         match users {
-            Ok(rows) => print("Found {len(rows)} users"),
-            Err(e) => print("Query failed: {e}")
+            Ok(rows) => print("Found #{len(rows)} users"),
+            Err(e) => print("Query failed: #{e}")
         }
     },
-    Err(e) => print("Connection failed: {e}")
+    Err(e) => print("Connection failed: #{e}")
 }
 
 // Using unwrap for quick prototyping (panics on error)
@@ -1092,12 +1093,12 @@ let scores: Array<Float> = [9.5, 8.2, 7.8]
 
 // Function parameter and return types
 fn greet(name: String) -> String {
-    return "Hello, {name}!"
+    return "Hello, #{name}!"
 }
 
 // Default parameter values (with or without type annotations)
 fn connect(host: String = "localhost", port: Int = 5432) -> String {
-    return "{host}:{port}"
+    return "#{host}:#{port}"
 }
 
 // No annotations required — these work fine
@@ -1154,7 +1155,7 @@ The type checker runs during `ntnt lint` and `ntnt validate`, and reports:
 
 ```ntnt
 fn greet(name: String) -> String {
-    return "Hello, {name}!"
+    return "Hello, #{name}!"
 }
 
 greet(42)  // Type error: expected String, got Int
@@ -1190,7 +1191,7 @@ execute(db, "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT
 execute(db, "INSERT INTO users (name, age) VALUES (?, ?)", ["Alice", 30])
 let users = unwrap(query(db, "SELECT * FROM users WHERE age > ?", [18]))
 for user in users {
-    print("Name: {user[\"name\"]}")
+    print("Name: #{user[\"name\"]}")
 }
 
 close(db)
@@ -1208,7 +1209,7 @@ let db = unwrap(connect("postgres://user:pass@localhost/mydb"))
 // Parameterized queries ($1, $2 placeholders)
 let users = unwrap(query(db, "SELECT * FROM users WHERE active = $1", [true]))
 for user in users {
-    print("Name: {user[\"name\"]}")
+    print("Name: #{user[\"name\"]}")
 }
 
 execute(db, "INSERT INTO users (name, age) VALUES ($1, $2)", [name, int(age_str)])
@@ -1255,9 +1256,9 @@ execute(db, "INSERT INTO users (name, age) VALUES (?, ?)", ["Alice", None])
 // query_one returns Ok(None) when no row matches
 let result = query_one(db, "SELECT * FROM users WHERE id = ?", [999])
 match result {
-    Ok(Some(row)) => print("Found: {row}"),
+    Ok(Some(row)) => print("Found: #{row}"),
     Ok(None) => print("No row found"),
-    Err(e) => print("Query error: {e}")
+    Err(e) => print("Query error: #{e}")
 }
 ```
 
@@ -1365,7 +1366,7 @@ Route files export `get`, `post`, etc. functions.
 ```ntnt
 // Global middleware applied to all routes
 use_middleware(fn(req) {
-    print("Request: {req.method} {req.path}")
+    print("Request: #{req.method} #{req.path}")
     // Return nothing to continue, return response to short-circuit
 })
 
@@ -1793,7 +1794,7 @@ NTNT error messages include error codes (E001-E012), source snippets, line numbe
 | Error | Cause | Fix |
 |-------|-------|-----|
 | `unexpected token '{'` | Using `{}` for map literal | Add `map` keyword: `map { "key": "value" }` |
-| `unexpected token '$'` | Using `${expr}` interpolation | Use `{expr}` without the `$` |
+| `unexpected token '$'` | Using `${expr}` interpolation | Use `#{expr}` — hash-brace syntax |
 | `expected identifier` | Inline lambda in route | Use named function: `fn handler(req) { ... }` |
 | `unexpected token '.'` | Method-style call on stdlib function | Use function style: `len(s)` not `s.len()`. Dot notation is for reading properties, not calling stdlib functions. |
 | `Required parameter 'x' cannot follow a parameter with a default value` | Non-default param after default | Move all required params before defaulted ones: `fn f(a, b = 1)` not `fn f(a = 1, b)` |
@@ -1835,7 +1836,7 @@ When using `ntnt lint` or `NTNT_STRICT=1`, you may see type diagnostics:
 ### Debugging Tips
 
 1. `ntnt lint file.tnt` — catches 90% of issues
-2. `print("Debug: {variable}")` / `print("Type: {type(variable)}")`
+2. `print("Debug: #{variable}")` / `print("Type: #{type(variable)}")`
 3. Add type annotations and contracts for precise error locations
 4. Use Intent Studio for live feedback
 
@@ -1928,8 +1929,8 @@ has_key(m, "b")   // false
 ```ntnt
 import { entries, values } from "std/collections"
 
-for name in users { print("{name}: {users[name]}") }         // keys
-for entry in entries(users) { print("{entry[\"key\"]}") }    // key-value
+for name in users { print("#{name}: #{users[name]}") }         // keys
+for entry in entries(users) { print("#{entry[\"key\"]}") }    // key-value
 for age in values(users) { print(age) }                      // values only
 ```
 <!-- END NTNT CODING GUIDE -->

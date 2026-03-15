@@ -10,7 +10,7 @@ import { response } from "std/http/server"
 fn cached_html(body, max_age) {
     return response(200, map {
         "content-type": "text/html; charset=utf-8",
-        "cache-control": "public, s-maxage={max_age}, stale-while-revalidate=3600"
+        "cache-control": "public, s-maxage=#{max_age}, stale-while-revalidate=3600"
     }, body)
 }
 

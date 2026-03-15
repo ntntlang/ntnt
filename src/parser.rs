@@ -2018,8 +2018,8 @@ impl Parser {
                                 line,
                                 column: 0,
                                 message: format!(
-                                    "Error in string interpolation '{{{}}}': {}. \
-                                    (Hint: if you meant literal braces, escape them with \\{{ and \\}})",
+                                    "Error in string interpolation '#{{{}}}': {}. \
+                                    (Hint: if you meant a literal #{{, escape the # with \\#)",
                                     preview, original_msg
                                 ),
                             });

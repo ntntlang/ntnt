@@ -18,11 +18,13 @@ ntnt test server.tnt --get /health  # Test HTTP endpoints
    let user = { "name": "Alice" }                  # WRONG — block, not map
    ```
 
-2. **String interpolation: `{expr}` — NO dollar sign**
+2. **String interpolation: `#{expr}` — hash + braces**
    ```ntnt
-   let msg = "Hello, {name}!"   # CORRECT
-   let msg = "Hello, ${name}!"  # WRONG
+   let msg = "Hello, #{name}!"   # CORRECT
+   let msg = "Hello, ${name}!"   # WRONG — no dollar sign
+   let msg = "Hello, {name}!"    # WRONG — bare braces don't interpolate
    ```
+   Escape with `\#` to prevent interpolation: `"Price: \#100"` prints literally.
 
 3. **No semicolons** — use newlines. `;` silently corrupts the parser.
 
@@ -60,7 +62,7 @@ ntnt test server.tnt --get /health  # Test HTTP endpoints
 
 10. **`otherwise` blocks MUST diverge** — use `return`, `break`, or `continue`
     ```ntnt
-    let data = parse_json(req) otherwise { return status(400, "Bad JSON: {err}") }
+    let data = parse_json(req) otherwise { return status(400, "Bad JSON: #{err}") }
     ```
 
 11. **Ranges: `0..10`** — `range()` doesn't exist

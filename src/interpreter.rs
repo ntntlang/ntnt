@@ -5393,39 +5393,14 @@ impl Interpreter {
     /// Evaluate an expression as a route pattern.
     ///
     /// Route builtins (get, post, put, delete, patch) call this instead of
-    /// eval_expression() for their path argument. It preserves `{name}` as
-    /// literal route parameter placeholders instead of interpolating them.
+    /// eval_expression() for their path argument.
     ///
-    /// - InterpolatedString with simple identifiers: `"/users/{id}"` → `/users/{id}`
-    /// - InterpolatedString with complex expressions: evaluated normally
-    /// - All other expressions (String, variable, concatenation): evaluated normally
+    /// With `#{expr}` interpolation syntax, bare `{id}` in route patterns like
+    /// `"/users/{id}"` are naturally literal strings — no special handling needed.
+    /// This function now just delegates to eval_expression(), but is kept as a
+    /// named entry point for clarity and in case route-specific logic is needed later.
     fn eval_route_pattern(&mut self, expr: &Expression) -> Result<Value> {
-        match expr {
-            Expression::InterpolatedString(parts) => {
-                use crate::ast::StringPart;
-                let mut result = String::new();
-                for part in parts {
-                    match part {
-                        StringPart::Literal(s) => result.push_str(s),
-                        StringPart::Expr(inner) => {
-                            if let Expression::Identifier(name) = inner {
-                                // Route parameter: preserve {name} as literal
-                                result.push('{');
-                                result.push_str(name);
-                                result.push('}');
-                            } else {
-                                // Complex expression: evaluate it (intentional interpolation)
-                                let value = self.eval_expression(inner)?;
-                                result.push_str(&value.to_string());
-                            }
-                        }
-                    }
-                }
-                Ok(Value::String(result))
-            }
-            // For non-interpolated strings, variables, etc. — evaluate normally
-            _ => self.eval_expression(expr),
-        }
+        self.eval_expression(expr)
     }
 
     /// Parse auth configuration from enable_auth() argument
@@ -10399,11 +10374,11 @@ c")
     #[test]
     fn test_interpolated_string() {
         let result = eval(
-            r#"
+            r##"
             let name = "World"
-            let greeting = "Hello, {name}!"
+            let greeting = "Hello, #{name}!"
             greeting
-        "#,
+        "##,
         )
         .unwrap();
         if let Value::String(s) = result {
@@ -10416,11 +10391,11 @@ c")
     #[test]
     fn test_interpolated_string_with_expression() {
         let result = eval(
-            r#"
+            r##"
             let a = 5
             let b = 3
-            "Sum: {a + b}"
-        "#,
+            "Sum: #{a + b}"
+        "##,
         )
         .unwrap();
         if let Value::String(s) = result {

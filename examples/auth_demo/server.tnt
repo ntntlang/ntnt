@@ -193,8 +193,8 @@ fn home(req) {
         None => {
             let error = get_key(req.query_params, "error")
             let success = get_key(req.query_params, "success")
-            let error_html = match error { Some(e) => "<div class=\"error\">{e}</div>", None => "" }
-            let success_html = match success { Some(s) => "<div class=\"success\">{s}</div>", None => "" }
+            let error_html = match error { Some(e) => "<div class=\"error\">#{e}</div>", None => "" }
+            let success_html = match success { Some(s) => "<div class=\"success\">#{s}</div>", None => "" }
 
             html("""
 <!DOCTYPE html>
@@ -248,9 +248,9 @@ fn dashboard(req) {
             let initial = if name { str(name)[0] } else { "?" }
 
             let avatar_html = if picture {
-                "<div class=\"avatar\"><img src=\"{picture}\" alt=\"Avatar\"></div>"
+                "<div class=\"avatar\"><img src=\"#{picture}\" alt=\"Avatar\"></div>"
             } else {
-                "<div class=\"avatar\">{initial}</div>"
+                "<div class=\"avatar\">#{initial}</div>"
             }
 
             html("""
@@ -331,9 +331,9 @@ fn sessions_page(req) {
                         </li>
                         """
                     }
-                    "<ul class=\"session-list\">{items}</ul>"
+                    "<ul class=\"session-list\">#{items}</ul>"
                 },
-                Err(e) => "<div class=\"error\">{e}</div>"
+                Err(e) => "<div class=\"error\">#{e}</div>"
             }
 
             let session = get_session(req)
@@ -341,8 +341,8 @@ fn sessions_page(req) {
 
             let error = get_key(req.query_params, "error")
             let success = get_key(req.query_params, "success")
-            let error_html = match error { Some(e) => "<div class=\"error\">{e}</div>", None => "" }
-            let success_html = match success { Some(s) => "<div class=\"success\">{s}</div>", None => "" }
+            let error_html = match error { Some(e) => "<div class=\"error\">#{e}</div>", None => "" }
+            let success_html = match success { Some(s) => "<div class=\"success\">#{s}</div>", None => "" }
 
             html("""
 <!DOCTYPE html>
@@ -409,12 +409,12 @@ fn handle_logout_all(req) {
     match result {
         Ok(count) => {
             if keep_current {
-                redirect("/sessions?success=Signed out of {count} other sessions")
+                redirect("/sessions?success=Signed out of #{count} other sessions")
             } else {
                 redirect("/?success=Signed out of all sessions")
             }
         },
-        Err(e) => redirect("/sessions?error={e}")
+        Err(e) => redirect("/sessions?error=#{e}")
     }
 }
 
@@ -475,7 +475,7 @@ print("===========================================")
 print("  NTNT OAuth Authentication Demo")
 print("===========================================")
 print("")
-print("Visit: http://localhost:{port}")
+print("Visit: http://localhost:#{port}")
 print("")
 print("Features:")
 print("  - OAuth login with GitHub")

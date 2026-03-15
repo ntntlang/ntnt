@@ -5996,11 +5996,11 @@ let n: Int = double(5)"#;
     #[test]
     fn test_strict_no_warning_interpolate_int_string() {
         let warnings = check_strict_warnings(
-            r#"
+            r##"
             let x: Int = 42
             let s: String = "hello"
-            let msg = "x is {x} and s is {s}"
-            "#,
+            let msg = "x is #{x} and s is #{s}"
+            "##,
         );
         let interp_warnings: Vec<_> = warnings
             .iter()
@@ -6016,10 +6016,10 @@ let n: Int = double(5)"#;
     #[test]
     fn test_strict_warns_interpolate_array() {
         let warnings = check_strict_warnings(
-            r#"
+            r##"
             let arr = [1, 2, 3]
-            let msg = "arr is {arr}"
-            "#,
+            let msg = "arr is #{arr}"
+            "##,
         );
         let interp_warnings: Vec<_> = warnings
             .iter()
