@@ -1,10 +1,10 @@
 # DD-040: fetch() & SQL Stdlib Friction Points
 
-**Status:** Partially Complete (4/6 resolved in v0.4.4)  
+**Status:** 5/6 Resolved (v0.4.4–v0.4.5)  
 **Author:** Larri  
 **Date:** 2026-03-12  
 **Context:** Building Larri Design domain management feature (DD-010)  
-**Updated:** 2026-03-15 — Issues 2, 3, 4 fixed in PR #27 (v0.4.4). Issue 1 deferred.
+**Updated:** 2026-03-15 — Issues 1, 2, 3, 4 fixed. Issue 5 (SQL interpolation) open. Issue 6 deferred.
 
 ## Summary
 
@@ -153,11 +153,11 @@ execute(db, r#"UPDATE t SET data = jsonb_set(data, '{my_key}', 'true')"#, [])
 
 | Issue | Severity | Status |
 |-------|----------|--------|
-| 1. fetch() Result unwrap | 🔴 High | **Open** — Option C (error on Result index) is best next step |
+| 1. fetch() Result unwrap | 🔴 High | ✅ **Done** (v0.4.5) — Warn mode auto-unwraps with message |
 | 2. fetch() arg count | 🟡 Medium | ✅ **Done** (v0.4.4, PR #27) |
 | 3. JSONB bind params | 🔴 High | ✅ **Done** (v0.4.4, PR #27) |
 | 4. UUID double cast | 🟡 Medium | ✅ **Done** (v0.4.4, PR #27) |
 | 5. SQL string interpolation | 🟡 Medium | **Open** — Lint warning is the right approach |
 | 6. IPv6 in Docker | 🟢 Low | **Deferred** — Deployment note, not a language fix |
 
-Remaining pain: Issue 1 (silent None on Result indexing) and Issue 5 (SQL interpolation gotcha).
+Remaining: Issue 5 (SQL interpolation gotcha — lint warning approach recommended).
