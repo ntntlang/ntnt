@@ -176,7 +176,7 @@ pub enum Statement {
     /// Job declaration: background job type with perform body and optional failure handler.
     ///
     /// ```ntnt
-    /// Job SendEmail on emails (retry: 5, timeout: 120s) {
+    /// Job SendEmail on emails (retry: 5, timeout: 120s, unique: 3600) {
     ///     perform(to: String, subject: String) {
     ///         // send the email
     ///     }
@@ -190,7 +190,7 @@ pub enum Statement {
         name: String,
         /// Queue name (e.g., "emails")
         queue: String,
-        /// Options like retry, timeout, backoff
+        /// Options like retry, timeout, backoff, unique
         options: Vec<(String, Expression)>,
         /// Parameters for the perform function
         perform_params: Vec<Parameter>,

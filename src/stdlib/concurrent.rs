@@ -769,7 +769,258 @@ pub fn parse_interval(interval: &str) -> Result<Duration> {
     }
 }
 
-/// Schedule a function to run at a fixed interval.
+// ============================================================
+// Cron Expression Parser
+// ============================================================
+
+/// A parsed cron field that can match values
+#[derive(Debug, Clone)]
+enum CronField {
+    /// Match any value
+    Any,
+    /// Match specific values
+    Values(Vec<u32>),
+}
+
+impl CronField {
+    fn matches(&self, value: u32) -> bool {
+        match self {
+            CronField::Any => true,
+            CronField::Values(vals) => vals.contains(&value),
+        }
+    }
+}
+
+/// A parsed 5-field cron expression: minute hour day_of_month month day_of_week
+#[derive(Debug, Clone)]
+pub struct CronExpression {
+    minute: CronField,
+    hour: CronField,
+    day_of_month: CronField,
+    month: CronField,
+    day_of_week: CronField,
+}
+
+/// Parse a single cron field (e.g., "*/15", "1-5", "MON-FRI", "1,3,5")
+fn parse_cron_field(
+    field: &str,
+    min: u32,
+    max: u32,
+    names: &[(&str, u32)],
+) -> std::result::Result<CronField, String> {
+    let field = field.trim();
+
+    if field == "*" {
+        return Ok(CronField::Any);
+    }
+
+    // Handle step: */N or range/N
+    if let Some(step_parts) = field.split_once('/') {
+        let step: u32 = step_parts
+            .1
+            .parse()
+            .map_err(|_| format!("Invalid step value: {}", step_parts.1))?;
+        if step == 0 {
+            return Err("Step value cannot be 0".to_string());
+        }
+
+        let (range_start, range_end) = if step_parts.0 == "*" {
+            (min, max)
+        } else if let Some((s, e)) = step_parts.0.split_once('-') {
+            let s = resolve_cron_value(s, names)?;
+            let e = resolve_cron_value(e, names)?;
+            (s, e)
+        } else {
+            let s = resolve_cron_value(step_parts.0, names)?;
+            (s, max)
+        };
+
+        let mut values = Vec::new();
+        let mut v = range_start;
+        while v <= range_end {
+            values.push(v);
+            v += step;
+        }
+        return Ok(CronField::Values(values));
+    }
+
+    // Handle comma-separated list
+    let mut values = Vec::new();
+    for part in field.split(',') {
+        let part = part.trim();
+        if let Some((s, e)) = part.split_once('-') {
+            let start = resolve_cron_value(s.trim(), names)?;
+            let end = resolve_cron_value(e.trim(), names)?;
+            for v in start..=end {
+                if !values.contains(&v) {
+                    values.push(v);
+                }
+            }
+        } else {
+            let v = resolve_cron_value(part, names)?;
+            if !values.contains(&v) {
+                values.push(v);
+            }
+        }
+    }
+
+    values.sort();
+    Ok(CronField::Values(values))
+}
+
+/// Resolve a cron value — either a number or a named value (MON, JAN, etc.)
+fn resolve_cron_value(s: &str, names: &[(&str, u32)]) -> std::result::Result<u32, String> {
+    let s_upper = s.to_uppercase();
+    for (name, val) in names {
+        if s_upper == *name {
+            return Ok(*val);
+        }
+    }
+    s.parse::<u32>()
+        .map_err(|_| format!("Invalid cron value: {}", s))
+}
+
+/// Day-of-week names
+const DOW_NAMES: &[(&str, u32)] = &[
+    ("SUN", 0),
+    ("MON", 1),
+    ("TUE", 2),
+    ("WED", 3),
+    ("THU", 4),
+    ("FRI", 5),
+    ("SAT", 6),
+];
+
+/// Month names
+const MONTH_NAMES: &[(&str, u32)] = &[
+    ("JAN", 1),
+    ("FEB", 2),
+    ("MAR", 3),
+    ("APR", 4),
+    ("MAY", 5),
+    ("JUN", 6),
+    ("JUL", 7),
+    ("AUG", 8),
+    ("SEP", 9),
+    ("OCT", 10),
+    ("NOV", 11),
+    ("DEC", 12),
+];
+
+/// Parse a 5-field cron expression string
+pub fn parse_cron(expr: &str) -> std::result::Result<CronExpression, String> {
+    let fields: Vec<&str> = expr.split_whitespace().collect();
+    if fields.len() != 5 {
+        return Err(format!(
+            "Cron expression must have 5 fields (minute hour day month dow), got {}",
+            fields.len()
+        ));
+    }
+
+    Ok(CronExpression {
+        minute: parse_cron_field(fields[0], 0, 59, &[])?,
+        hour: parse_cron_field(fields[1], 0, 23, &[])?,
+        day_of_month: parse_cron_field(fields[2], 1, 31, &[])?,
+        month: parse_cron_field(fields[3], 1, 12, MONTH_NAMES)?,
+        day_of_week: parse_cron_field(fields[4], 0, 6, DOW_NAMES)?,
+    })
+}
+
+/// Calculate the next run time from `after` that matches the cron expression.
+/// Returns the next matching UTC timestamp as SystemTime.
+pub fn cron_next_run(cron: &CronExpression, after: std::time::SystemTime) -> std::time::SystemTime {
+    use std::time::UNIX_EPOCH;
+
+    let since_epoch = after.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let total_secs = since_epoch.as_secs();
+
+    // Convert to broken-down time components (UTC)
+    let mut minute = ((total_secs / 60) % 60) as u32;
+    let mut hour = ((total_secs / 3600) % 24) as u32;
+
+    // Days since epoch
+    let mut days = (total_secs / 86400) as i64;
+
+    // Start from the next minute
+    minute += 1;
+    if minute >= 60 {
+        minute = 0;
+        hour += 1;
+        if hour >= 24 {
+            hour = 0;
+            days += 1;
+        }
+    }
+
+    // Search for the next matching time (max ~4 years ahead to avoid infinite loop)
+    let max_days = days + 366 * 4;
+    while days <= max_days {
+        // Convert days since epoch to year/month/day
+        let (_year, month, day, dow) = days_to_ymd(days);
+
+        if cron.month.matches(month)
+            && cron.day_of_month.matches(day)
+            && cron.day_of_week.matches(dow)
+        {
+            while hour < 24 {
+                if cron.hour.matches(hour) {
+                    while minute < 60 {
+                        if cron.minute.matches(minute) {
+                            // Found a match
+                            let day_secs = days as u64 * 86400;
+                            let time_secs = hour as u64 * 3600 + minute as u64 * 60;
+                            return UNIX_EPOCH
+                                + std::time::Duration::from_secs(day_secs + time_secs);
+                        }
+                        minute += 1;
+                    }
+                }
+                minute = 0;
+                hour += 1;
+            }
+        }
+        hour = 0;
+        minute = 0;
+        days += 1;
+    }
+
+    // Fallback (should not happen for valid cron expressions)
+    after + std::time::Duration::from_secs(3600)
+}
+
+/// Convert days since Unix epoch to (year, month, day, day_of_week)
+fn days_to_ymd(days: i64) -> (i32, u32, u32, u32) {
+    // Unix epoch was Thursday (dow=4)
+    let dow = ((days % 7 + 4) % 7) as u32; // 0=Sun, 1=Mon, ...6=Sat
+
+    // Civil calendar calculation (from Howard Hinnant's algorithm)
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i32 + (era * 400) as i32;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    (year, m, d, dow)
+}
+
+/// Check if a schedule string looks like a cron expression (5 space-separated fields)
+fn is_cron_expression(s: &str) -> bool {
+    let trimmed = s.trim();
+    // Must not start with "every " (interval syntax)
+    if trimmed.to_lowercase().starts_with("every ") {
+        return false;
+    }
+    // Check if it has 5 whitespace-separated fields
+    let fields: Vec<&str> = trimmed.split_whitespace().collect();
+    fields.len() == 5
+}
+
+/// Schedule a function to run at a fixed interval or cron expression.
 /// Returns a schedule ID. Overlap prevention: skips tick if previous execution still running.
 pub fn concurrent_schedule(
     interval_str: &str,
@@ -777,8 +1028,6 @@ pub fn concurrent_schedule(
     body: Block,
     closure_bindings: HashMap<String, SerializedValue>,
 ) -> Result<Value> {
-    let duration = parse_interval(interval_str)?;
-
     let schedule_id = SCHEDULE_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
     let cancelled = Arc::new(AtomicBool::new(false));
 
@@ -793,60 +1042,171 @@ pub fn concurrent_schedule(
         registry.insert(schedule_id, handle);
     }
 
-    // Spawn a thread that periodically executes the function
     let schedule_cancelled = Arc::clone(&cancelled);
     let _params = params;
+    let interval_owned = interval_str.to_string();
 
-    thread::spawn(move || {
-        // Flag for overlap prevention
-        let executing = Arc::new(AtomicBool::new(false));
+    if is_cron_expression(interval_str) {
+        // Cron mode
+        let cron = parse_cron(interval_str)
+            .map_err(|e| IntentError::runtime_error(format!("Invalid cron expression: {}", e)))?;
+        let cron_expr_str = interval_owned.clone();
 
-        loop {
-            // Sleep for the interval
-            thread::sleep(duration);
+        thread::spawn(move || {
+            let executing = Arc::new(AtomicBool::new(false));
 
-            // Check cancellation
-            if schedule_cancelled.load(Ordering::Relaxed) {
-                break;
-            }
-
-            // Overlap prevention: skip if previous execution still running
-            if executing.load(Ordering::Relaxed) {
-                eprintln!("[schedule] Skipping tick — previous execution still running");
-                continue;
-            }
-
-            // Execute the function
-            executing.store(true, Ordering::Relaxed);
-            let exec_executing = Arc::clone(&executing);
-            let exec_bindings = closure_bindings.clone();
-            let exec_body = body.clone();
-            let exec_cancelled = Arc::clone(&schedule_cancelled);
-
-            thread::spawn(move || {
-                // Set up cancellation context
-                set_current_task_cancelled(exec_cancelled);
-
-                let mut interpreter = crate::interpreter::Interpreter::new();
-                interpreter.define_all_stdlib_as_globals();
-                for (name, sv) in &exec_bindings {
-                    interpreter.define_variable(name.clone(), sv.to_value());
+            loop {
+                if schedule_cancelled.load(Ordering::Relaxed) {
+                    break;
                 }
 
-                if let Err(e) = interpreter.eval_block(&exec_body) {
-                    eprintln!("[schedule] Error: {}", e);
+                // Calculate next run time
+                let now = std::time::SystemTime::now();
+                let next_run = cron_next_run(&cron, now);
+
+                let wait = next_run
+                    .duration_since(now)
+                    .unwrap_or(Duration::from_secs(60));
+
+                // Sleep in small increments so we can check cancellation
+                let sleep_end = std::time::Instant::now() + wait;
+                while std::time::Instant::now() < sleep_end {
+                    if schedule_cancelled.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    thread::sleep(
+                        Duration::from_millis(500)
+                            .min(sleep_end.saturating_duration_since(std::time::Instant::now())),
+                    );
                 }
 
-                exec_executing.store(false, Ordering::Relaxed);
-            });
-        }
-    });
+                if schedule_cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
 
-    // Return a schedule handle value
+                // Overlap prevention
+                if executing.load(Ordering::Relaxed) {
+                    eprintln!("[schedule/cron] Skipping tick — previous execution still running");
+                    continue;
+                }
+
+                // Cluster safety: for PostgreSQL backend, use advisory lock
+                let should_run = {
+                    use crate::stdlib::jobs::{get_backend, BackendKind};
+                    match get_backend() {
+                        Ok(BackendKind::Postgres(_)) => {
+                            // Try to acquire advisory lock
+                            cron_pg_try_advisory_lock(&cron_expr_str)
+                        }
+                        _ => true,
+                    }
+                };
+
+                if !should_run {
+                    continue;
+                }
+
+                executing.store(true, Ordering::Relaxed);
+                let exec_executing = Arc::clone(&executing);
+                let exec_bindings = closure_bindings.clone();
+                let exec_body = body.clone();
+                let exec_cancelled = Arc::clone(&schedule_cancelled);
+
+                thread::spawn(move || {
+                    set_current_task_cancelled(exec_cancelled);
+
+                    let mut interpreter = crate::interpreter::Interpreter::new();
+                    interpreter.define_all_stdlib_as_globals();
+                    for (name, sv) in &exec_bindings {
+                        interpreter.define_variable(name.clone(), sv.to_value());
+                    }
+
+                    if let Err(e) = interpreter.eval_block(&exec_body) {
+                        eprintln!("[schedule/cron] Error: {}", e);
+                    }
+
+                    exec_executing.store(false, Ordering::Relaxed);
+                });
+            }
+        });
+    } else {
+        // Interval mode (existing behavior)
+        let duration = parse_interval(interval_str)?;
+
+        thread::spawn(move || {
+            let executing = Arc::new(AtomicBool::new(false));
+
+            loop {
+                thread::sleep(duration);
+
+                if schedule_cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                if executing.load(Ordering::Relaxed) {
+                    eprintln!("[schedule] Skipping tick — previous execution still running");
+                    continue;
+                }
+
+                executing.store(true, Ordering::Relaxed);
+                let exec_executing = Arc::clone(&executing);
+                let exec_bindings = closure_bindings.clone();
+                let exec_body = body.clone();
+                let exec_cancelled = Arc::clone(&schedule_cancelled);
+
+                thread::spawn(move || {
+                    set_current_task_cancelled(exec_cancelled);
+
+                    let mut interpreter = crate::interpreter::Interpreter::new();
+                    interpreter.define_all_stdlib_as_globals();
+                    for (name, sv) in &exec_bindings {
+                        interpreter.define_variable(name.clone(), sv.to_value());
+                    }
+
+                    if let Err(e) = interpreter.eval_block(&exec_body) {
+                        eprintln!("[schedule] Error: {}", e);
+                    }
+
+                    exec_executing.store(false, Ordering::Relaxed);
+                });
+            }
+        });
+    }
+
     let mut sched = HashMap::new();
     sched.insert("_schedule_id".to_string(), Value::Int(schedule_id as i64));
     sched.insert("type".to_string(), Value::String("Schedule".to_string()));
     Ok(Value::Map(sched))
+}
+
+/// Try to acquire a PostgreSQL advisory lock for cron cluster safety
+fn cron_pg_try_advisory_lock(cron_expr: &str) -> bool {
+    use std::hash::{Hash, Hasher};
+    let key = format!("cron:{}", cron_expr);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    let hash = hasher.finish() as i64;
+
+    // Try to get a connection from the job pool
+    let pool = match crate::stdlib::jobs::get_job_pool() {
+        Ok(p) => p,
+        Err(_) => return true, // If no pool, run anyway
+    };
+
+    let db_rt = &crate::stdlib::postgres::DB_RUNTIME;
+    db_rt.block_on(async {
+        let client = match pool.get().await {
+            Ok(c) => c,
+            Err(_) => return true,
+        };
+        let row = client
+            .query_one("SELECT pg_try_advisory_lock($1)", &[&hash])
+            .await;
+        match row {
+            Ok(r) => r.get::<_, bool>(0),
+            Err(_) => true,
+        }
+    })
 }
 
 /// Cancel all scheduled tasks (called on shutdown)

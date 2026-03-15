@@ -41,7 +41,8 @@ static POOL_REGISTRY: std::sync::LazyLock<Mutex<HashMap<u64, Pool>>> =
 /// Transaction registry — maps connection handle IDs to dedicated client objects.
 /// Transactions must pin to a single connection, so we check out a client
 /// at BEGIN and hold it until COMMIT/ROLLBACK.
-static TXN_REGISTRY: std::sync::LazyLock<
+/// Public so that std/jobs can look up txn clients for transactional enqueue.
+pub static TXN_REGISTRY: std::sync::LazyLock<
     Mutex<HashMap<u64, std::sync::Arc<tokio::sync::Mutex<deadpool_postgres::Client>>>>,
 > = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 

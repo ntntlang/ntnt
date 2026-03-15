@@ -684,6 +684,7 @@ impl Interpreter {
         let mut max_retries: i64 = 3;
         let mut timeout_ms: Option<u64> = None;
         let mut backoff_base_ms: u64 = 1000;
+        let mut unique_for_secs: Option<u64> = None;
 
         for (key, expr) in options {
             let val = self.eval_expression(expr)?;
@@ -717,6 +718,11 @@ impl Interpreter {
                         backoff_base_ms = n as u64;
                     }
                 }
+                "unique" => {
+                    if let Value::Int(n) = val {
+                        unique_for_secs = Some(n as u64);
+                    }
+                }
                 "priority" => {}
                 _ => {
                     return Err(IntentError::runtime_error(format!(
@@ -733,6 +739,7 @@ impl Interpreter {
             max_retries,
             timeout_ms,
             backoff_base_ms,
+            unique_for_secs,
             perform_params: perform_params.to_vec(),
             perform_body: perform_body.clone(),
             on_failure: on_failure.clone(),
@@ -5493,9 +5500,38 @@ impl Interpreter {
                                     )?;
                                     return Ok(Value::String(job_id));
                                 }
+                                "enqueue_tx" => {
+                                    // JobName.enqueue_tx(tx_handle, args_map)
+                                    // Transactional enqueue — only available with PostgreSQL backend
+                                    if args.len() < 2 {
+                                        return Err(IntentError::runtime_error(
+                                            "enqueue_tx() requires a transaction handle and a Map argument".to_string(),
+                                        ));
+                                    }
+                                    let tx_handle = args[0].clone();
+                                    let job_args = if let Value::Map(ref m) = args[1] {
+                                        let mut serialized = HashMap::new();
+                                        for (k, v) in m {
+                                            serialized.insert(
+                                                k.clone(),
+                                                crate::stdlib::concurrent::SerializedValue::from_value(v)?,
+                                            );
+                                        }
+                                        serialized
+                                    } else {
+                                        return Err(IntentError::type_error(
+                                            "enqueue_tx() second argument must be a Map"
+                                                .to_string(),
+                                        ));
+                                    };
+                                    let job_id = crate::stdlib::jobs::enqueue_job_tx(
+                                        &job_name, job_args, &tx_handle,
+                                    )?;
+                                    return Ok(Value::String(job_id));
+                                }
                                 _ => {
                                     return Err(IntentError::runtime_error(format!(
-                                        "Unknown method '{}' on Job type. Available: enqueue, enqueue_in, enqueue_at",
+                                        "Unknown method '{}' on Job type. Available: enqueue, enqueue_in, enqueue_at, enqueue_tx",
                                         method
                                     )));
                                 }
@@ -5649,9 +5685,45 @@ impl Interpreter {
                                     ));
                                 }
                             }
+                            "pause" => {
+                                if args.is_empty() {
+                                    return Err(IntentError::runtime_error(
+                                        "Queue.pause() requires a queue name argument".to_string(),
+                                    ));
+                                }
+                                if let Value::String(ref queue_name) = args[0] {
+                                    crate::stdlib::jobs::pause_queue(queue_name)?;
+                                    return Ok(Value::Unit);
+                                } else {
+                                    return Err(IntentError::type_error(
+                                        "Queue.pause() requires a string queue name".to_string(),
+                                    ));
+                                }
+                            }
+                            "resume" => {
+                                if args.is_empty() {
+                                    return Err(IntentError::runtime_error(
+                                        "Queue.resume() requires a queue name argument".to_string(),
+                                    ));
+                                }
+                                if let Value::String(ref queue_name) = args[0] {
+                                    crate::stdlib::jobs::resume_queue(queue_name)?;
+                                    return Ok(Value::Unit);
+                                } else {
+                                    return Err(IntentError::type_error(
+                                        "Queue.resume() requires a string queue name".to_string(),
+                                    ));
+                                }
+                            }
+                            "paused" => {
+                                let paused = crate::stdlib::jobs::paused_queues()?;
+                                let result: Vec<Value> =
+                                    paused.into_iter().map(Value::String).collect();
+                                return Ok(Value::Array(result));
+                            }
                             _ => {
                                 return Err(IntentError::runtime_error(format!(
-                                    "Unknown method '{}' on Queue. Available: work_async, work, status, stats, cancel, configure, recent, dead, retry",
+                                    "Unknown method '{}' on Queue. Available: work_async, work, status, stats, cancel, configure, recent, dead, retry, pause, resume, paused",
                                     method
                                 )));
                             }

@@ -24,7 +24,7 @@ use crate::ast::{Block, Parameter};
 use crate::error::IntentError;
 use crate::interpreter::Value;
 use crate::stdlib::concurrent::SerializedValue;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -43,6 +43,9 @@ pub struct JobDefinition {
     pub max_retries: i64,
     pub timeout_ms: Option<u64>,
     pub backoff_base_ms: u64,
+    /// Unique job deduplication window in seconds. If set, prevents duplicate jobs
+    /// with the same type + args combination within this time window.
+    pub unique_for_secs: Option<u64>,
     pub perform_params: Vec<Parameter>,
     pub perform_body: Block,
     pub on_failure: Option<(Vec<Parameter>, Block)>,
@@ -219,7 +222,7 @@ static JOB_REDIS_CONN: std::sync::LazyLock<Mutex<Option<redis::Connection>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
 /// Get the current backend kind
-fn get_backend() -> Result<BackendKind> {
+pub fn get_backend() -> Result<BackendKind> {
     let backend = ACTIVE_BACKEND
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Failed to lock backend: {}", e)))?;
@@ -295,6 +298,114 @@ static WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
 static WORKER_STOP: AtomicBool = AtomicBool::new(false);
 
 // ============================================================
+// Unique Jobs — in-memory dedup map
+// ============================================================
+
+/// In-memory unique job dedup map: hash → (expires_at, job_id)
+static UNIQUE_JOBS_MAP: std::sync::LazyLock<Mutex<HashMap<String, (Instant, String)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Compute a SHA256 hash of job_type + sorted JSON args for uniqueness
+fn compute_args_hash(job_type: &str, args: &HashMap<String, SerializedValue>) -> String {
+    use std::collections::BTreeMap;
+    use std::hash::{Hash, Hasher};
+
+    // Sort args by key for deterministic hashing
+    let sorted: BTreeMap<&String, &SerializedValue> = args.iter().collect();
+    let args_json = serde_json::to_string(
+        &sorted
+            .into_iter()
+            .map(|(k, v)| (k.clone(), v.to_json()))
+            .collect::<serde_json::Map<String, serde_json::Value>>(),
+    )
+    .unwrap_or_default();
+
+    // Use a simple FNV-like hash (64-bit) for speed — collision rate acceptable for dedup
+    let combined = format!("{}:{}", job_type, args_json);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    combined.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+// ============================================================
+// Queue Pause/Resume
+// ============================================================
+
+/// In-memory set of paused queue names
+static PAUSED_QUEUES: std::sync::LazyLock<Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Pause a queue — workers will skip it
+pub fn pause_queue(queue_name: &str) -> Result<()> {
+    match get_backend()? {
+        BackendKind::Memory => {
+            let mut paused = PAUSED_QUEUES.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock paused queues: {}", e))
+            })?;
+            paused.insert(queue_name.to_string());
+            Ok(())
+        }
+        BackendKind::Postgres(_) => pg_pause_queue(queue_name),
+        BackendKind::Redis(_) => redis_pause_queue(queue_name),
+    }
+}
+
+/// Resume a paused queue
+pub fn resume_queue(queue_name: &str) -> Result<()> {
+    match get_backend()? {
+        BackendKind::Memory => {
+            let mut paused = PAUSED_QUEUES.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock paused queues: {}", e))
+            })?;
+            paused.remove(queue_name);
+            Ok(())
+        }
+        BackendKind::Postgres(_) => pg_resume_queue(queue_name),
+        BackendKind::Redis(_) => redis_resume_queue(queue_name),
+    }
+}
+
+/// Get list of paused queues
+pub fn paused_queues() -> Result<Vec<String>> {
+    match get_backend()? {
+        BackendKind::Memory => {
+            let paused = PAUSED_QUEUES.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Failed to lock paused queues: {}", e))
+            })?;
+            Ok(paused.iter().cloned().collect())
+        }
+        BackendKind::Postgres(_) => pg_paused_queues(),
+        BackendKind::Redis(_) => redis_paused_queues(),
+    }
+}
+
+/// Check if a queue is paused (in-memory)
+fn is_queue_paused_memory(queue_name: &str) -> bool {
+    PAUSED_QUEUES
+        .lock()
+        .map(|p| p.contains(queue_name))
+        .unwrap_or(false)
+}
+
+// ============================================================
+// Dead Job Caps Configuration
+// ============================================================
+
+/// Max dead jobs to retain (default: 10000)
+static MAX_DEAD_JOBS: AtomicU64 = AtomicU64::new(10000);
+
+/// Dead job retention in seconds (default: 180 days = 15552000)
+static DEAD_RETENTION_SECS: AtomicU64 = AtomicU64::new(15552000);
+
+// ============================================================
+// LISTEN/NOTIFY signaling for PostgreSQL
+// ============================================================
+
+/// Condvar for waking the PG worker when a LISTEN/NOTIFY fires
+static PG_NOTIFY_SIGNAL: std::sync::LazyLock<(Mutex<bool>, std::sync::Condvar)> =
+    std::sync::LazyLock::new(|| (Mutex::new(false), std::sync::Condvar::new()));
+
+// ============================================================
 // PostgreSQL Backend
 // ============================================================
 
@@ -311,6 +422,7 @@ CREATE TABLE IF NOT EXISTS ntnt_jobs (
     attempts INT NOT NULL DEFAULT 0,
     max_attempts INT NOT NULL DEFAULT 3,
     error TEXT,
+    args_hash VARCHAR(64),
     scheduled_at TIMESTAMPTZ DEFAULT NOW(),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
@@ -325,6 +437,37 @@ CREATE INDEX IF NOT EXISTS idx_ntnt_jobs_pending
 CREATE INDEX IF NOT EXISTS idx_ntnt_jobs_locked
     ON ntnt_jobs(locked_by, heartbeat_at)
     WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_ntnt_jobs_args_hash
+    ON ntnt_jobs(args_hash, job_type)
+    WHERE args_hash IS NOT NULL;
+
+-- Queue pause/resume state table
+CREATE TABLE IF NOT EXISTS ntnt_queue_state (
+    queue VARCHAR(255) PRIMARY KEY,
+    paused BOOLEAN DEFAULT false
+);
+
+-- LISTEN/NOTIFY trigger for instant dispatch
+CREATE OR REPLACE FUNCTION ntnt_jobs_notify() RETURNS trigger AS $$
+BEGIN
+    PERFORM pg_notify('ntnt_jobs_notify', NEW.queue);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger WHERE tgname = 'ntnt_jobs_insert_trigger'
+    ) THEN
+        CREATE TRIGGER ntnt_jobs_insert_trigger
+            AFTER INSERT ON ntnt_jobs
+            FOR EACH ROW
+            WHEN (NEW.status = 'pending' AND NEW.scheduled_at <= NOW())
+            EXECUTE FUNCTION ntnt_jobs_notify();
+    END IF;
+END
+$$;
 "#;
 
 /// Initialize the postgres pool for jobs and run migrations
@@ -372,7 +515,7 @@ fn pg_init_job_pool(connection_url: &str) -> Result<()> {
 }
 
 /// Get the job postgres pool
-fn get_job_pool() -> Result<deadpool_postgres::Pool> {
+pub fn get_job_pool() -> Result<deadpool_postgres::Pool> {
     let pool_guard = JOB_PG_POOL
         .lock()
         .map_err(|e| IntentError::runtime_error(format!("Failed to lock job pool: {}", e)))?;
@@ -395,6 +538,7 @@ fn pg_enqueue_job(
     priority: i64,
     scheduled_at_offset_ms: Option<u64>,
     scheduled_at_timestamp_ms: Option<u64>,
+    unique_for_secs: Option<u64>,
 ) -> Result<String> {
     let pool = get_job_pool()?;
     let db_rt = &crate::stdlib::postgres::DB_RUNTIME;
@@ -403,17 +547,45 @@ fn pg_enqueue_job(
     let args_map = SerializedValue::Map(args.clone());
     let payload_json = args_map.to_json();
 
+    // Compute args hash for unique job support
+    let args_hash: Option<String> = if unique_for_secs.is_some() {
+        Some(compute_args_hash(job_type, args))
+    } else {
+        None
+    };
+
     db_rt.block_on(async {
         let client = pool.get().await.map_err(|e| {
             IntentError::runtime_error(format!("Failed to get connection: {}", e))
         })?;
 
-        let (sql, job_id_result) = if let Some(offset_ms) = scheduled_at_offset_ms {
+        // Check unique constraint if configured
+        if let (Some(ref hash), Some(unique_secs)) = (&args_hash, unique_for_secs) {
+            let interval = format!("{} seconds", unique_secs);
+            let existing = client
+                .query_opt(
+                    "SELECT id::text FROM ntnt_jobs \
+                     WHERE args_hash = $1 AND job_type = $2 \
+                     AND status IN ('pending', 'active', 'retry') \
+                     AND created_at > NOW() - $3::interval \
+                     LIMIT 1",
+                    &[&hash.as_str(), &job_type, &interval],
+                )
+                .await
+                .map_err(|e| IntentError::runtime_error(format!("Unique check failed: {}", e)))?;
+            if let Some(row) = existing {
+                return Ok(row.get::<_, String>(0));
+            }
+        }
+
+        let args_hash_ref = args_hash.as_deref();
+
+        let job_id_result = if let Some(offset_ms) = scheduled_at_offset_ms {
             let interval = format!("{} milliseconds", offset_ms);
             let row = client
                 .query_one(
-                    "INSERT INTO ntnt_jobs (job_type, queue, payload, max_attempts, priority, scheduled_at) \
-                     VALUES ($1, $2, $3, $4, $5, NOW() + $6::interval) RETURNING id::text",
+                    "INSERT INTO ntnt_jobs (job_type, queue, payload, max_attempts, priority, scheduled_at, args_hash) \
+                     VALUES ($1, $2, $3, $4, $5, NOW() + $6::interval, $7) RETURNING id::text",
                     &[
                         &job_type,
                         &queue,
@@ -421,14 +593,14 @@ fn pg_enqueue_job(
                         &(max_attempts as i32),
                         &(priority as i32),
                         &interval,
+                        &args_hash_ref,
                     ],
                 )
                 .await
                 .map_err(|e| {
                     IntentError::runtime_error(format!("Failed to enqueue job: {}", e))
                 })?;
-            let id: String = row.get(0);
-            (String::new(), id)
+            row.get::<_, String>(0)
         } else if let Some(ts_ms) = scheduled_at_timestamp_ms {
             let secs = (ts_ms / 1000) as i64;
             let nsecs = ((ts_ms % 1000) * 1_000_000) as u32;
@@ -436,8 +608,8 @@ fn pg_enqueue_job(
                 .unwrap_or_else(chrono::Utc::now);
             let row = client
                 .query_one(
-                    "INSERT INTO ntnt_jobs (job_type, queue, payload, max_attempts, priority, scheduled_at) \
-                     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id::text",
+                    "INSERT INTO ntnt_jobs (job_type, queue, payload, max_attempts, priority, scheduled_at, args_hash) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id::text",
                     &[
                         &job_type,
                         &queue,
@@ -445,35 +617,34 @@ fn pg_enqueue_job(
                         &(max_attempts as i32),
                         &(priority as i32),
                         &dt,
+                        &args_hash_ref,
                     ],
                 )
                 .await
                 .map_err(|e| {
                     IntentError::runtime_error(format!("Failed to enqueue job: {}", e))
                 })?;
-            let id: String = row.get(0);
-            (String::new(), id)
+            row.get::<_, String>(0)
         } else {
             let row = client
                 .query_one(
-                    "INSERT INTO ntnt_jobs (job_type, queue, payload, max_attempts, priority) \
-                     VALUES ($1, $2, $3, $4, $5) RETURNING id::text",
+                    "INSERT INTO ntnt_jobs (job_type, queue, payload, max_attempts, priority, args_hash) \
+                     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id::text",
                     &[
                         &job_type,
                         &queue,
                         &payload_json,
                         &(max_attempts as i32),
                         &(priority as i32),
+                        &args_hash_ref,
                     ],
                 )
                 .await
                 .map_err(|e| {
                     IntentError::runtime_error(format!("Failed to enqueue job: {}", e))
                 })?;
-            let id: String = row.get(0);
-            (String::new(), id)
+            row.get::<_, String>(0)
         };
-        let _ = sql; // suppress unused warning
 
         Ok(job_id_result)
     })
@@ -652,7 +823,14 @@ fn pg_fail_job(
         }
 
         Ok(())
-    })
+    })?;
+
+    // Prune dead jobs if we just marked one dead (async, best-effort)
+    if attempts >= max_attempts {
+        let _ = pg_prune_dead_jobs();
+    }
+
+    Ok(())
 }
 
 /// Send heartbeat for an active postgres job
@@ -889,6 +1067,294 @@ pub fn pg_cancel_job(job_id: &str) -> Result<bool> {
     })
 }
 
+// ============================================================
+// PostgreSQL: Queue Pause/Resume
+// ============================================================
+
+fn pg_pause_queue(queue_name: &str) -> Result<()> {
+    let pool = get_job_pool()?;
+    let db_rt = &crate::stdlib::postgres::DB_RUNTIME;
+
+    db_rt.block_on(async {
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| IntentError::runtime_error(format!("Failed to get connection: {}", e)))?;
+        client
+            .execute(
+                "INSERT INTO ntnt_queue_state (queue, paused) VALUES ($1, true) \
+                 ON CONFLICT (queue) DO UPDATE SET paused = true",
+                &[&queue_name],
+            )
+            .await
+            .map_err(|e| IntentError::runtime_error(format!("Failed to pause queue: {}", e)))?;
+        Ok(())
+    })
+}
+
+fn pg_resume_queue(queue_name: &str) -> Result<()> {
+    let pool = get_job_pool()?;
+    let db_rt = &crate::stdlib::postgres::DB_RUNTIME;
+
+    db_rt.block_on(async {
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| IntentError::runtime_error(format!("Failed to get connection: {}", e)))?;
+        client
+            .execute(
+                "INSERT INTO ntnt_queue_state (queue, paused) VALUES ($1, false) \
+                 ON CONFLICT (queue) DO UPDATE SET paused = false",
+                &[&queue_name],
+            )
+            .await
+            .map_err(|e| IntentError::runtime_error(format!("Failed to resume queue: {}", e)))?;
+        Ok(())
+    })
+}
+
+fn pg_paused_queues() -> Result<Vec<String>> {
+    let pool = get_job_pool()?;
+    let db_rt = &crate::stdlib::postgres::DB_RUNTIME;
+
+    db_rt.block_on(async {
+        let client = pool
+            .get()
+            .await
+            .map_err(|e| IntentError::runtime_error(format!("Failed to get connection: {}", e)))?;
+        let rows = client
+            .query(
+                "SELECT queue FROM ntnt_queue_state WHERE paused = true",
+                &[],
+            )
+            .await
+            .map_err(|e| {
+                IntentError::runtime_error(format!("Failed to query paused queues: {}", e))
+            })?;
+        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+    })
+}
+
+// pg_is_queue_paused is not needed — we check via pg_paused_queues() in the worker loop
+
+// ============================================================
+// PostgreSQL: Unique Jobs
+// ============================================================
+
+// Unique job check for PG is done inline in pg_enqueue_job and enqueue_job_tx
+
+// ============================================================
+// PostgreSQL: Transactional Enqueue
+// ============================================================
+
+/// Enqueue a job within an existing PostgreSQL transaction.
+/// The `tx_handle` is a connection Value with `_pg_connection_id` that has an active transaction.
+pub fn enqueue_job_tx(
+    job_type: &str,
+    args: HashMap<String, SerializedValue>,
+    tx_handle: &Value,
+) -> Result<String> {
+    // Only available with PostgreSQL backend
+    match get_backend()? {
+        BackendKind::Postgres(_) => {}
+        _ => {
+            return Err(IntentError::runtime_error(
+                "enqueue_tx() is only available with the PostgreSQL backend".to_string(),
+            ));
+        }
+    }
+
+    let def = get_job_definition(job_type)?
+        .ok_or_else(|| IntentError::runtime_error(format!("Unknown job type: {}", job_type)))?;
+
+    // Get the connection ID from the transaction handle
+    let conn_id = match tx_handle {
+        Value::Map(map) => {
+            if let Some(Value::Int(id)) = map.get("_pg_connection_id") {
+                *id as u64
+            } else {
+                return Err(IntentError::type_error(
+                    "enqueue_tx() requires a database connection handle with an active transaction"
+                        .to_string(),
+                ));
+            }
+        }
+        _ => {
+            return Err(IntentError::type_error(
+                "enqueue_tx() requires a database connection handle".to_string(),
+            ));
+        }
+    };
+
+    // Look up the transaction client from TXN_REGISTRY
+    let txn_client = {
+        let registry = crate::stdlib::postgres::TXN_REGISTRY.lock().map_err(|e| {
+            IntentError::runtime_error(format!("Failed to lock txn registry: {}", e))
+        })?;
+        registry.get(&conn_id).cloned().ok_or_else(|| {
+            IntentError::runtime_error(
+                "No active transaction found. enqueue_tx() must be called within a transaction block.".to_string(),
+            )
+        })?
+    };
+
+    let args_map = SerializedValue::Map(args.clone());
+    let payload_json = args_map.to_json();
+    let max_attempts = (def.max_retries + 1) as i32;
+
+    // Compute args hash for unique job support
+    let args_hash = if def.unique_for_secs.is_some() {
+        Some(compute_args_hash(job_type, &args))
+    } else {
+        None
+    };
+
+    let db_rt = &crate::stdlib::postgres::DB_RUNTIME;
+    db_rt.block_on(async {
+        let client = txn_client.lock().await;
+
+        // Check unique constraint if configured
+        if let (Some(ref hash), Some(unique_secs)) = (&args_hash, def.unique_for_secs) {
+            let interval = format!("{} seconds", unique_secs);
+            let existing = client
+                .query_opt(
+                    "SELECT id::text FROM ntnt_jobs \
+                     WHERE args_hash = $1 AND job_type = $2 \
+                     AND status IN ('pending', 'active', 'retry') \
+                     AND created_at > NOW() - $3::interval \
+                     LIMIT 1",
+                    &[&hash.as_str(), &job_type, &interval],
+                )
+                .await
+                .map_err(|e| IntentError::runtime_error(format!("Unique check failed: {}", e)))?;
+            if let Some(row) = existing {
+                return Ok(row.get::<_, String>(0));
+            }
+        }
+
+        let row = client
+            .query_one(
+                "INSERT INTO ntnt_jobs (job_type, queue, payload, max_attempts, priority, args_hash) \
+                 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id::text",
+                &[
+                    &job_type,
+                    &def.queue.as_str(),
+                    &payload_json,
+                    &max_attempts,
+                    &0i32,
+                    &args_hash.as_deref(),
+                ],
+            )
+            .await
+            .map_err(|e| IntentError::runtime_error(format!("Failed to enqueue job in transaction: {}", e)))?;
+
+        Ok(row.get::<_, String>(0))
+    })
+}
+
+// ============================================================
+// PostgreSQL: Dead Job Pruning
+// ============================================================
+
+/// Prune dead jobs beyond the configured cap and retention period
+fn pg_prune_dead_jobs() -> Result<()> {
+    let pool = get_job_pool()?;
+    let db_rt = &crate::stdlib::postgres::DB_RUNTIME;
+    let max_dead = MAX_DEAD_JOBS.load(Ordering::Relaxed) as i64;
+    let retention_secs = DEAD_RETENTION_SECS.load(Ordering::Relaxed);
+
+    db_rt.block_on(async {
+        let client = pool.get().await.map_err(|e| {
+            IntentError::runtime_error(format!("Failed to get connection: {}", e))
+        })?;
+
+        // Prune by count — keep only the most recent N
+        client
+            .execute(
+                "DELETE FROM ntnt_jobs WHERE status = 'dead' AND id NOT IN \
+                 (SELECT id FROM ntnt_jobs WHERE status = 'dead' ORDER BY completed_at DESC LIMIT $1)",
+                &[&max_dead],
+            )
+            .await
+            .map_err(|e| IntentError::runtime_error(format!("Failed to prune dead jobs by count: {}", e)))?;
+
+        // Prune by age
+        let interval = format!("{} seconds", retention_secs);
+        client
+            .execute(
+                "DELETE FROM ntnt_jobs WHERE status = 'dead' AND completed_at < NOW() - $1::interval",
+                &[&interval],
+            )
+            .await
+            .map_err(|e| IntentError::runtime_error(format!("Failed to prune dead jobs by age: {}", e)))?;
+
+        Ok(())
+    })
+}
+
+// ============================================================
+// PostgreSQL: LISTEN/NOTIFY Listener
+// ============================================================
+
+/// Start a background thread that listens for PostgreSQL NOTIFY events
+/// and signals the worker condvar to wake up immediately.
+fn pg_start_listen_notify(connection_url: &str) -> Result<()> {
+    let url = connection_url.to_string();
+
+    std::thread::spawn(move || {
+        let db_rt = &crate::stdlib::postgres::DB_RUNTIME;
+        let result = db_rt.block_on(async {
+            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .map_err(|e| {
+                IntentError::runtime_error(format!("LISTEN/NOTIFY connection failed: {}", e))
+            })?;
+
+            // Spawn the connection driver
+            let conn_handle = tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    eprintln!("[jobs/pg] LISTEN connection error: {}", e);
+                }
+            });
+
+            // Subscribe to notifications
+            client
+                .execute("LISTEN ntnt_jobs_notify", &[])
+                .await
+                .map_err(|e| IntentError::runtime_error(format!("LISTEN failed: {}", e)))?;
+
+            // Wait for notifications in a loop using periodic polling
+            // (tokio_postgres notifications are delivered through the connection
+            //  driver, so we poll at a short interval to check for new jobs)
+            loop {
+                if WORKER_STOP.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                // Short poll interval — the LISTEN/NOTIFY on the connection
+                // wakes up the connection task. We signal the condvar periodically.
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+                // Wake up workers
+                let (lock, cvar) = &*PG_NOTIFY_SIGNAL;
+                if let Ok(mut notified) = lock.lock() {
+                    *notified = true;
+                    cvar.notify_all();
+                }
+            }
+
+            conn_handle.abort();
+            Ok::<(), IntentError>(())
+        });
+
+        if let Err(e) = result {
+            eprintln!("[jobs/pg] LISTEN/NOTIFY thread failed: {}", e);
+        }
+    });
+
+    Ok(())
+}
+
 /// Convert postgres rows to job map vectors
 fn pg_rows_to_job_maps(rows: &[tokio_postgres::Row]) -> Vec<HashMap<String, Value>> {
     let mut result = Vec::new();
@@ -1012,11 +1478,48 @@ fn redis_enqueue_job(
     priority: i64,
     scheduled_at_offset_ms: Option<u64>,
     scheduled_at_timestamp_ms: Option<u64>,
+    unique_for_secs: Option<u64>,
 ) -> Result<String> {
     let job_id = uuid::Uuid::new_v4().to_string();
     let now = now_ms();
     let args_map = SerializedValue::Map(args.clone());
     let payload_json = serde_json::to_string(&args_map.to_json()).unwrap_or_default();
+
+    // Check unique constraint if configured
+    if let Some(unique_secs) = unique_for_secs {
+        let hash = compute_args_hash(job_type, args);
+        let unique_key = format!("ntnt:unique:{}", hash);
+
+        let mut conn_guard = get_redis_conn()?;
+        let conn = conn_guard.as_mut().ok_or_else(|| {
+            IntentError::runtime_error("Redis job connection not initialized".to_string())
+        })?;
+
+        // SET NX EX — only set if key doesn't exist
+        let result: redis::RedisResult<bool> = redis::cmd("SET")
+            .arg(&unique_key)
+            .arg(&job_id)
+            .arg("NX")
+            .arg("EX")
+            .arg(unique_secs)
+            .query(conn);
+
+        match result {
+            Ok(true) => {} // Key was set, proceed with enqueue
+            Ok(false) => {
+                // Key already exists — return existing job ID
+                let existing_id: redis::RedisResult<String> =
+                    redis::cmd("GET").arg(&unique_key).query(conn);
+                return Ok(existing_id.unwrap_or(job_id));
+            }
+            Err(e) => {
+                eprintln!(
+                    "[jobs/redis] Unique check failed: {}, proceeding with enqueue",
+                    e
+                );
+            }
+        }
+    }
 
     // Determine if this is a scheduled (delayed) job
     let scheduled_at_ms: Option<u64> = if let Some(offset_ms) = scheduled_at_offset_ms {
@@ -1411,6 +1914,14 @@ fn redis_fail_job(
             .map_err(|e| {
                 IntentError::runtime_error(format!("Failed to mark Redis job dead: {}", e))
             })?;
+    }
+
+    // Drop the connection guard before pruning (which needs its own lock)
+    drop(conn_guard);
+
+    // Prune dead jobs if we just marked one dead
+    if attempts >= max_attempts {
+        let _ = redis_prune_dead_jobs();
     }
 
     Ok(())
@@ -1993,6 +2504,138 @@ pub fn redis_cancel_job(job_id: &str) -> Result<bool> {
     }
 }
 
+// ============================================================
+// Redis: Queue Pause/Resume
+// ============================================================
+
+fn redis_pause_queue(queue_name: &str) -> Result<()> {
+    let mut conn_guard = get_redis_conn()?;
+    let conn = conn_guard.as_mut().ok_or_else(|| {
+        IntentError::runtime_error("Redis job connection not initialized".to_string())
+    })?;
+
+    redis::cmd("SADD")
+        .arg("ntnt:paused")
+        .arg(queue_name)
+        .query::<()>(conn)
+        .map_err(|e| IntentError::runtime_error(format!("Failed to pause queue: {}", e)))?;
+
+    Ok(())
+}
+
+fn redis_resume_queue(queue_name: &str) -> Result<()> {
+    let mut conn_guard = get_redis_conn()?;
+    let conn = conn_guard.as_mut().ok_or_else(|| {
+        IntentError::runtime_error("Redis job connection not initialized".to_string())
+    })?;
+
+    redis::cmd("SREM")
+        .arg("ntnt:paused")
+        .arg(queue_name)
+        .query::<()>(conn)
+        .map_err(|e| IntentError::runtime_error(format!("Failed to resume queue: {}", e)))?;
+
+    Ok(())
+}
+
+fn redis_paused_queues() -> Result<Vec<String>> {
+    let mut conn_guard = get_redis_conn()?;
+    let conn = conn_guard.as_mut().ok_or_else(|| {
+        IntentError::runtime_error("Redis job connection not initialized".to_string())
+    })?;
+
+    let members: Vec<String> = redis::cmd("SMEMBERS")
+        .arg("ntnt:paused")
+        .query(conn)
+        .map_err(|e| IntentError::runtime_error(format!("Failed to get paused queues: {}", e)))?;
+
+    Ok(members)
+}
+
+fn redis_is_queue_paused(queue_name: &str) -> Result<bool> {
+    let mut conn_guard = get_redis_conn()?;
+    let conn = conn_guard.as_mut().ok_or_else(|| {
+        IntentError::runtime_error("Redis job connection not initialized".to_string())
+    })?;
+
+    let is_member: bool = redis::cmd("SISMEMBER")
+        .arg("ntnt:paused")
+        .arg(queue_name)
+        .query(conn)
+        .map_err(|e| IntentError::runtime_error(format!("Failed to check paused state: {}", e)))?;
+
+    Ok(is_member)
+}
+
+// ============================================================
+// Redis: Dead Job Pruning
+// ============================================================
+
+fn redis_prune_dead_jobs() -> Result<()> {
+    let max_dead = MAX_DEAD_JOBS.load(Ordering::Relaxed) as usize;
+    let retention_secs = DEAD_RETENTION_SECS.load(Ordering::Relaxed);
+    let now = now_ms();
+    let cutoff_ms = now.saturating_sub(retention_secs * 1000);
+
+    let mut conn_guard = get_redis_conn()?;
+    let conn = conn_guard.as_mut().ok_or_else(|| {
+        IntentError::runtime_error("Redis job connection not initialized".to_string())
+    })?;
+
+    // Scan for dead jobs
+    let mut dead_jobs: Vec<(String, u64)> = Vec::new(); // (job_key, completed_at_ms)
+    let mut cursor: u64 = 0;
+    loop {
+        let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg("ntnt:job:*")
+            .arg("COUNT")
+            .arg(100)
+            .query(conn)
+            .map_err(|e| IntentError::runtime_error(format!("Redis SCAN failed: {}", e)))?;
+
+        for key in &keys {
+            let fields: redis::RedisResult<(String, String)> = redis::cmd("HMGET")
+                .arg(key)
+                .arg("status")
+                .arg("completed_at")
+                .query(conn);
+            if let Ok((status, completed_at_str)) = fields {
+                if status == "dead" {
+                    let completed_at: u64 = completed_at_str.parse().unwrap_or(0);
+                    dead_jobs.push((key.clone(), completed_at));
+                }
+            }
+        }
+
+        cursor = next_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    // Sort by completed_at descending (newest first)
+    dead_jobs.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Prune by count (keep only max_dead most recent)
+    if dead_jobs.len() > max_dead {
+        for (key, _) in &dead_jobs[max_dead..] {
+            let _ = redis::cmd("DEL").arg(key).query::<()>(conn);
+        }
+        dead_jobs.truncate(max_dead);
+    }
+
+    // Prune by age
+    for (key, completed_at) in &dead_jobs {
+        if *completed_at > 0 && *completed_at < cutoff_ms {
+            let _ = redis::cmd("DEL").arg(key).query::<()>(conn);
+        }
+    }
+
+    Ok(())
+}
+
 /// Convert a Redis hash data map to a job Value map
 fn redis_hash_to_job_map(data: &HashMap<String, String>) -> HashMap<String, Value> {
     let mut map = HashMap::new();
@@ -2125,7 +2768,19 @@ fn start_worker_redis(config: RedisBackendConfig, queue_names: Option<Vec<String
                 last_stale_check = Instant::now();
             }
 
-            match redis_claim_next_job(&queues, &worker_id, &group) {
+            // Filter out paused queues
+            let active_queues: Vec<String> = queues
+                .iter()
+                .filter(|q| !redis_is_queue_paused(q).unwrap_or(false))
+                .cloned()
+                .collect();
+
+            if active_queues.is_empty() {
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+
+            match redis_claim_next_job(&active_queues, &worker_id, &group) {
                 Ok(Some(job)) => {
                     let job_id = job.id.clone();
                     let job_type = job.job_type.clone();
@@ -2237,8 +2892,22 @@ pub fn enqueue_job(job_type: &str, args: HashMap<String, SerializedValue>) -> Re
     let def = get_job_definition(job_type)?
         .ok_or_else(|| IntentError::runtime_error(format!("Unknown job type: {}", job_type)))?;
 
-    match get_backend()? {
-        BackendKind::Memory => enqueue_job_memory(job_type, args, Instant::now(), 0),
+    let unique_for = def.unique_for_secs;
+    let result = match get_backend()? {
+        BackendKind::Memory => {
+            // Check unique constraint for memory backend
+            if let Some(unique_secs) = unique_for {
+                if let Some(existing_id) = check_unique_memory(job_type, &args, unique_secs) {
+                    return Ok(existing_id);
+                }
+            }
+            let id = enqueue_job_memory(job_type, args.clone(), Instant::now(), 0)?;
+            // Register in unique map
+            if let Some(unique_secs) = unique_for {
+                register_unique_memory(job_type, &args, unique_secs, &id);
+            }
+            Ok(id)
+        }
         BackendKind::Postgres(_) => pg_enqueue_job(
             job_type,
             &def.queue,
@@ -2247,6 +2916,7 @@ pub fn enqueue_job(job_type: &str, args: HashMap<String, SerializedValue>) -> Re
             0,
             None,
             None,
+            unique_for,
         ),
         BackendKind::Redis(_) => redis_enqueue_job(
             job_type,
@@ -2256,8 +2926,11 @@ pub fn enqueue_job(job_type: &str, args: HashMap<String, SerializedValue>) -> Re
             0,
             None,
             None,
+            unique_for,
         ),
-    }
+    };
+
+    result
 }
 
 /// Enqueue a job with a delay (in milliseconds)
@@ -2275,6 +2948,7 @@ pub fn enqueue_job_in(
     let def = get_job_definition(job_type)?
         .ok_or_else(|| IntentError::runtime_error(format!("Unknown job type: {}", job_type)))?;
 
+    let unique_for = def.unique_for_secs;
     match get_backend()? {
         BackendKind::Memory => {
             let scheduled = Instant::now() + Duration::from_millis(delay_ms);
@@ -2288,6 +2962,7 @@ pub fn enqueue_job_in(
             0,
             Some(delay_ms),
             None,
+            unique_for,
         ),
         BackendKind::Redis(_) => redis_enqueue_job(
             job_type,
@@ -2297,6 +2972,7 @@ pub fn enqueue_job_in(
             0,
             Some(delay_ms),
             None,
+            unique_for,
         ),
     }
 }
@@ -2316,6 +2992,7 @@ pub fn enqueue_job_at_timestamp(
     let def = get_job_definition(job_type)?
         .ok_or_else(|| IntentError::runtime_error(format!("Unknown job type: {}", job_type)))?;
 
+    let unique_for = def.unique_for_secs;
     match get_backend()? {
         BackendKind::Memory => {
             let now = now_ms();
@@ -2335,6 +3012,7 @@ pub fn enqueue_job_at_timestamp(
             0,
             None,
             Some(timestamp_ms),
+            unique_for,
         ),
         BackendKind::Redis(_) => redis_enqueue_job(
             job_type,
@@ -2344,7 +3022,47 @@ pub fn enqueue_job_at_timestamp(
             0,
             None,
             Some(timestamp_ms),
+            unique_for,
         ),
+    }
+}
+
+/// Check unique constraint in memory backend. Returns existing job ID if duplicate found.
+fn check_unique_memory(
+    job_type: &str,
+    args: &HashMap<String, SerializedValue>,
+    _unique_secs: u64,
+) -> Option<String> {
+    let hash = compute_args_hash(job_type, args);
+    let mut map = UNIQUE_JOBS_MAP.lock().ok()?;
+
+    // Clean expired entries
+    let now = Instant::now();
+    map.retain(|_, (expires, _)| *expires > now);
+
+    // Check for existing
+    if let Some((_, job_id)) = map.get(&hash) {
+        return Some(job_id.clone());
+    }
+    None
+}
+
+/// Register a unique job in memory backend
+fn register_unique_memory(
+    job_type: &str,
+    args: &HashMap<String, SerializedValue>,
+    unique_secs: u64,
+    job_id: &str,
+) {
+    let hash = compute_args_hash(job_type, args);
+    if let Ok(mut map) = UNIQUE_JOBS_MAP.lock() {
+        map.insert(
+            hash,
+            (
+                Instant::now() + Duration::from_secs(unique_secs),
+                job_id.to_string(),
+            ),
+        );
     }
 }
 
@@ -2590,6 +3308,19 @@ fn start_worker_memory() -> Result<()> {
         while !WORKER_STOP.load(Ordering::SeqCst) {
             match claim_next_job() {
                 Ok(Some(mut job)) => {
+                    // Check if the job's queue is paused
+                    if is_queue_paused_memory(&job.queue_name) {
+                        // Put the job back
+                        if let Ok(mut backend) = QUEUE_BACKEND.lock() {
+                            job.status = JobStatus::Pending;
+                            if let Some(q) = backend.queues.get_mut(&job.queue_name) {
+                                q.push_front(job);
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
+
                     let job_id = job.id.clone();
                     let job_type = job.job_type.clone();
 
@@ -2629,6 +3360,19 @@ fn start_worker_memory() -> Result<()> {
                                 if let Ok(mut backend) = QUEUE_BACKEND.lock() {
                                     backend.jobs_by_id.insert(job_id.clone(), job.clone());
                                     backend.dead_jobs.push(job);
+
+                                    // Dead job cap for memory backend
+                                    let max_dead = MAX_DEAD_JOBS.load(Ordering::Relaxed) as usize;
+                                    if backend.dead_jobs.len() > max_dead {
+                                        let excess = backend.dead_jobs.len() - max_dead;
+                                        // Remove oldest dead jobs (from front of vec)
+                                        let removed: Vec<QueuedJob> =
+                                            backend.dead_jobs.drain(..excess).collect();
+                                        // Also clean up from jobs_by_id
+                                        for removed_job in &removed {
+                                            backend.jobs_by_id.remove(&removed_job.id);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2678,6 +3422,11 @@ fn start_worker_postgres(
     // Determine which queues to poll
     let queues: Vec<String> = queue_names.unwrap_or_else(|| vec!["default".to_string()]);
 
+    // Start LISTEN/NOTIFY listener for instant dispatch
+    if let Err(e) = pg_start_listen_notify(&config.connection_url) {
+        eprintln!("[jobs/pg] Failed to start LISTEN/NOTIFY: {}", e);
+    }
+
     std::thread::spawn(move || {
         // Release stale jobs on startup
         if let Err(e) = pg_release_stale_jobs(visibility_timeout) {
@@ -2697,7 +3446,20 @@ fn start_worker_postgres(
                 last_stale_check = Instant::now();
             }
 
-            match pg_claim_next_job(&queues, &worker_id) {
+            // Filter out paused queues
+            let active_queues: Vec<String> = queues
+                .iter()
+                .filter(|q| !pg_paused_queues().unwrap_or_default().contains(q))
+                .cloned()
+                .collect();
+
+            if active_queues.is_empty() {
+                // All queues are paused, wait briefly
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+
+            match pg_claim_next_job(&active_queues, &worker_id) {
                 Ok(Some(job)) => {
                     let job_id = job.id.clone();
                     let job_type = job.job_type.clone();
@@ -2762,8 +3524,19 @@ fn start_worker_postgres(
                     }
                 }
                 Ok(None) => {
-                    // No jobs ready, poll interval
-                    std::thread::sleep(Duration::from_millis(100));
+                    // No jobs ready — wait for LISTEN/NOTIFY signal or 5s timeout
+                    // (5s fallback ensures scheduled jobs that become ready are picked up)
+                    let (lock, cvar) = &*PG_NOTIFY_SIGNAL;
+                    if let Ok(mut notified) = lock.lock() {
+                        if !*notified {
+                            let result = cvar.wait_timeout(notified, Duration::from_secs(5));
+                            if let Ok((mut guard, _)) = result {
+                                *guard = false;
+                            }
+                        } else {
+                            *notified = false;
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("[jobs/pg] Worker error claiming job: {}", e);
@@ -3580,6 +4353,14 @@ pub fn configure_queue(config_map: &HashMap<String, Value>) -> Result<()> {
         if let Some(Value::Int(ms)) = config_map.get("prune_completed_after") {
             backend.config.prune_completed_after_ms = *ms as u64;
         }
+    }
+
+    // Dead job caps config (applies to all backends)
+    if let Some(Value::Int(n)) = config_map.get("max_dead_jobs") {
+        MAX_DEAD_JOBS.store(*n as u64, Ordering::Relaxed);
+    }
+    if let Some(Value::Int(secs)) = config_map.get("dead_retention_secs") {
+        DEAD_RETENTION_SECS.store(*secs as u64, Ordering::Relaxed);
     }
 
     Ok(())

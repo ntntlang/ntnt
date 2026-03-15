@@ -482,6 +482,30 @@ enum JobsCommands {
         #[arg(long)]
         redis_url: Option<String>,
     },
+    /// Pause a queue (workers will skip it)
+    Pause {
+        /// Queue name to pause
+        #[arg(value_name = "QUEUE")]
+        queue: String,
+        /// PostgreSQL connection URL (or set DATABASE_URL env var)
+        #[arg(long)]
+        postgres_url: Option<String>,
+        /// Redis connection URL (or set REDIS_URL env var)
+        #[arg(long)]
+        redis_url: Option<String>,
+    },
+    /// Resume a paused queue
+    Resume {
+        /// Queue name to resume
+        #[arg(value_name = "QUEUE")]
+        queue: String,
+        /// PostgreSQL connection URL (or set DATABASE_URL env var)
+        #[arg(long)]
+        postgres_url: Option<String>,
+        /// Redis connection URL (or set REDIS_URL env var)
+        #[arg(long)]
+        redis_url: Option<String>,
+    },
 }
 
 /// Format and display an error with rich context (error codes, source snippets, suggestions).
@@ -2719,6 +2743,26 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
             } else {
                 println!("Job {} not found or already completed.", id);
             }
+            Ok(())
+        }
+        JobsCommands::Pause {
+            queue,
+            postgres_url,
+            redis_url,
+        } => {
+            let _backend = init_backend(&postgres_url, &redis_url)?;
+            ntnt::stdlib::jobs::pause_queue(&queue).map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!("Queue '{}' paused.", queue);
+            Ok(())
+        }
+        JobsCommands::Resume {
+            queue,
+            postgres_url,
+            redis_url,
+        } => {
+            let _backend = init_backend(&postgres_url, &redis_url)?;
+            ntnt::stdlib::jobs::resume_queue(&queue).map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!("Queue '{}' resumed.", queue);
             Ok(())
         }
     }
