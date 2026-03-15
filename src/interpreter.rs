@@ -4022,7 +4022,7 @@ impl Interpreter {
                                 }
                                 _ => {
                                     return Err(IntentError::type_error(
-                                        "enable_csp() argument must be a map or false".to_string(),
+                                        "enable_csp() argument must be a map of directives, true (defaults), or false (disable)".to_string(),
                                     ))
                                 }
                             }

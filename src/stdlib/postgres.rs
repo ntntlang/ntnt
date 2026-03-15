@@ -108,8 +108,9 @@ impl ToSql for SqlParam {
                     parsed.to_sql(ty, out)
                 }
                 Type::JSONB | Type::JSON => {
+                    let type_name = if *ty == Type::JSONB { "JSONB" } else { "JSON" };
                     let json_val: serde_json::Value = serde_json::from_str(v)
-                        .map_err(|e| format!("Cannot coerce string to JSONB: {}", e))?;
+                        .map_err(|e| format!("Cannot coerce string to {}: {}", type_name, e))?;
                     json_val.to_sql(ty, out)
                 }
                 Type::UUID => {

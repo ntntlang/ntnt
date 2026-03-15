@@ -69,14 +69,16 @@ fn apply_async_security_headers(response: &mut Response<Body>, csp_header: Optio
                 }
             }
         }
+    }
 
-        // Apply CSP header if configured
-        if let Some((csp_name, csp_value)) = csp_header {
-            if let Ok(name) = header::HeaderName::try_from(csp_name) {
-                if !headers.contains_key(&name) {
-                    if let Ok(hv) = header::HeaderValue::from_str(csp_value) {
-                        headers.insert(name, hv);
-                    }
+    // Apply CSP header independently of NTNT_SECURITY_HEADERS toggle —
+    // CSP is explicitly configured by the user via enable_csp(), not a default header.
+    if let Some((csp_name, csp_value)) = csp_header {
+        let headers = response.headers_mut();
+        if let Ok(name) = header::HeaderName::try_from(csp_name) {
+            if !headers.contains_key(&name) {
+                if let Ok(hv) = header::HeaderValue::from_str(csp_value) {
+                    headers.insert(name, hv);
                 }
             }
         }
@@ -869,7 +871,7 @@ fn cors_layer_from_config(config: &CorsConfig) -> CorsLayer {
     }
 
     // Max age
-    layer = layer.max_age(Duration::from_secs(config.max_age as u64));
+    layer = layer.max_age(Duration::from_secs(config.max_age.max(0) as u64));
 
     layer
 }
@@ -909,24 +911,24 @@ pub async fn start_server_with_bridge(
     // Build the router with catch-all handler
     let mut app = Router::new().fallback(handle_request).with_state(state);
 
-    // Add middleware layers (order matters - applied bottom to top)
-    // 1. CORS (must be outermost to handle preflight OPTIONS)
-    if let Some(ref cors) = config.cors_config {
-        app = app.layer(cors_layer_from_config(cors));
-    }
-
-    // 2. Request timeout
+    // Add middleware layers (last .layer() becomes outermost wrapper)
+    // 1. Request timeout
     app = app.layer(TimeoutLayer::new(Duration::from_secs(
         config.request_timeout_secs,
     )));
 
-    // 3. Compression
+    // 2. Compression
     if config.enable_compression {
         app = app.layer(CompressionLayer::new());
     }
 
-    // 4. Tracing
+    // 3. Tracing
     app = app.layer(TraceLayer::new_for_http());
+
+    // 4. CORS (added last = outermost, handles preflight OPTIONS before other layers)
+    if let Some(ref cors) = config.cors_config {
+        app = app.layer(cors_layer_from_config(cors));
+    }
 
     // Show user-friendly URL (0.0.0.0 means all interfaces, so use localhost for display)
     let display_url = if addr.ip().is_unspecified() {
@@ -1238,7 +1240,8 @@ mod tests {
 
     #[test]
     fn test_cors_layer_from_config_credentials_no_wildcard() {
-        // With credentials=true and wildcard origin, should use specific origin list (not Any)
+        // With credentials=true and wildcard origin, uses AllowOrigin::mirror_request()
+        // to reflect the request's Origin header (wildcard + credentials is forbidden by spec)
         let config = CorsConfig {
             origins: vec!["*".to_string()],
             credentials: true,

@@ -1718,7 +1718,7 @@ impl Glossary {
                         .iter()
                         .take(2) // Just first 2 columns for brevity
                         .map(|(k, v)| {
-                            let v_short = safe_truncate(v, 17);
+                            let v_short = safe_truncate(v, 20);
                             format!("{}={}", k, v_short)
                         })
                         .collect();
@@ -2600,14 +2600,21 @@ fn run_assertion_legacy(
 
 /// Safely truncate a string to at most `max_chars` characters,
 /// appending "..." if truncated. Never panics on multi-byte UTF-8.
+/// Single-pass: only iterates up to max_chars+1, avoids scanning the entire string.
 fn safe_truncate(s: &str, max_chars: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count > max_chars {
-        let truncated: String = s.chars().take(max_chars).collect();
-        format!("{}...", truncated)
-    } else {
-        s.to_string()
+    let mut chars = s.chars();
+    let mut count = 0;
+    let mut end_byte = 0;
+    for ch in chars.by_ref() {
+        if count >= max_chars {
+            // There's at least one more char — needs truncation
+            return format!("{}...", &s[..end_byte]);
+        }
+        count += 1;
+        end_byte += ch.len_utf8();
     }
+    // Reached the end without exceeding max_chars
+    s.to_string()
 }
 
 /// Truncate body for display

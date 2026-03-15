@@ -299,6 +299,10 @@ impl CspConfig {
 
     /// Apply CSP header to a response map (sync path)
     pub fn apply_to_response(&self, response: &mut HashMap<String, Value>) {
+        // Create headers map if missing (mirrors apply_security_headers behavior)
+        if !response.contains_key("headers") {
+            response.insert("headers".to_string(), Value::Map(HashMap::new()));
+        }
         let headers = match response.get_mut("headers") {
             Some(Value::Map(h)) => h,
             _ => return,
