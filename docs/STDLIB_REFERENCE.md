@@ -3110,17 +3110,17 @@ import { channel, send, recv } from "std/concurrent"
 | [`cancel_schedule`](#cancelschedule) | Cancels a scheduled task. Sets the cancellation flag and removes from registry. Returns true if the schedule existed, false otherwise. |
 | [`cancel_task`](#canceltask) | Requests cooperative cancellation of a task. Sets the cancellation flag; the task thread will exit at the next yield point (recv, recv_timeout, sleep_ms, or fetch). Does NOT force immediate termination. Returns true if the task existed, false otherwise. |
 | [`channel`](#channel) | Creates a new unbounded channel and returns a [sender, receiver] pair. |
-| [`close`](#close) | Closes a channel by removing it from the registry. The sender is dropped; any blocking recv() returns Unit once all buffered values are consumed. Returns true if the channel existed, false otherwise. |
-| [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if the channel is closed and empty (sender dropped). This is a cancellation yield point: a cancelled task will exit here. Single-consumer: the receiver lock is held for the blocking duration. |
-| [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or channel disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point. |
+| [`close`](#close) | Closes a channel receiver by removing it from the registry. Once removed, future send(tx, ...) returns false (crossbeam Disconnected). recv(rx) immediately returns Unit since the id is no longer found. Returns true if existed, false otherwise. |
+| [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if all senders have been dropped (Disconnected) or the receiver was closed. This is a cancellation yield point: a cancelled task will exit here. Single-consumer: the receiver lock is held for the blocking duration. |
+| [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or all senders disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point. |
 | [`schedule`](#schedule) | Runs a zero-parameter handler repeatedly at the given interval. Returns a Schedule handle. Interval can be milliseconds (Int) or a string ("5s", "1m"). Zero intervals are rejected. Each tick spawns a thread with catch_unwind; overlap prevention ensures a new tick won't start until the previous one finishes. Panics in tick execution are caught and logged — they don't kill the schedule. |
-| [`select`](#select) | Waits for the first available value from any of the given channels. Returns a map with "channel" (the handle that fired) and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed: returns {"status": "closed"}. This is a cancellation yield point. |
+| [`select`](#select) | Waits for the first available value from any of the given receiver handles. Returns a map with "channel" (the RxChannel that fired) and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed/disconnected: returns {"status": "closed"}. This is a cancellation yield point. |
 | [`send`](#send) | Sends a value through a channel using the sender handle (first element of channel()). Returns false if the receiver has been closed (crossbeam Disconnected). Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum. |
 | [`sleep_ms`](#sleepms) | Pauses execution for specified milliseconds. This is a cancellation yield point: a cancelled task will exit during sleep_ms(). Uses 50ms slices internally. Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks. |
 | [`spawn`](#spawn) | Spawns a zero-parameter function as a background task. Returns a Task handle. The handler's closure environment is serialized for cross-thread use. Serializable capture types: Int, Float, Bool, String, Array, Map, Struct, Enum. The handler must have zero parameters (including no defaults). |
 | [`thread_count`](#threadcount) | Returns the number of available CPU threads. Useful for sizing parallel work. |
 | [`try_await`](#tryawait) | Non-blocking peek at task state. Does NOT remove the task from registry. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired). |
-| [`try_recv`](#tryrecv) | Non-blocking receive. Returns None if no value is available or channel is closed. |
+| [`try_recv`](#tryrecv) | Non-blocking receive. Returns None if no value is available or all senders disconnected. |
 
 #### `after`
 
@@ -3266,17 +3266,17 @@ let msg = recv(rx)
 close(rx: RxChannel) -> Bool
 ```
 
-Closes a channel receiver by removing it from the registry. Once the receiver is removed, any future `send(tx, ...)` returns `false` (crossbeam Disconnected). Returns true if the receiver existed, false otherwise.
+Closes a channel receiver by removing it from the registry. Once removed, future send(tx, ...) returns false (crossbeam Disconnected). recv(rx) immediately returns Unit since the id is no longer found. Returns true if existed, false otherwise.
 
 **Parameters:**
 
-- `rx` — The RxChannel receiver handle (second element of `channel()`)
+- `rx` — The RxChannel receiver handle (second element of channel())
 
 **Examples:**
 
 ```ntnt
-let [tx, rx] = channel()
-close(rx)  // => true  // Close the receiver end
+let [tx, rx] = channel()  // Close the receiver end
+close(rx)  // => true
 ```
 
 **See also:** `channel`
@@ -3295,13 +3295,13 @@ Receives a value from a channel. Blocks until a value is available. Returns Unit
 
 **Parameters:**
 
-- `rx` — The RxChannel receiver handle (second element of `channel()`)
+- `rx` — The RxChannel receiver handle (second element of channel())
 
 **Examples:**
 
 ```ntnt
-let [tx, rx] = channel()
-recv(rx)  // Block until a value is received
+let [tx, rx] = channel()  // Block until a value is received
+recv(rx)
 ```
 
 **See also:** `channel`, `send`, `try_recv`, `recv_timeout`
@@ -3320,14 +3320,14 @@ Receives with timeout. Returns None if timeout expires or all senders disconnect
 
 **Parameters:**
 
-- `rx` — The RxChannel receiver handle (second element of `channel()`)
+- `rx` — The RxChannel receiver handle (second element of channel())
 - `millis` — Timeout in milliseconds (negative values clamped to 0)
 
 **Examples:**
 
 ```ntnt
-let [tx, rx] = channel()
-recv_timeout(rx, 5000)  // Wait up to 5 seconds for a value
+let [tx, rx] = channel()  // Wait up to 5 seconds for a value
+recv_timeout(rx, 5000)
 ```
 
 **See also:** `recv`, `try_recv`
@@ -3366,14 +3366,14 @@ schedule(5000, fn() { print("tick") })  // Run every 5 seconds
 #### `select`
 
 ```ntnt
-select(channels: Array<Channel>, timeout_ms?: Int | String) -> Map
+select(channels: Array<RxChannel>, timeout_ms?: Int | String) -> Map
 ```
 
-Waits for the first available value from any of the given channels. Returns a map with "channel" (the handle that fired) and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed: returns {"status": "closed"}. This is a cancellation yield point.
+Waits for the first available value from any of the given receiver handles. Returns a map with "channel" (the RxChannel that fired) and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed/disconnected: returns {"status": "closed"}. This is a cancellation yield point.
 
 **Parameters:**
 
-- `channels` — Array of Channel handles to wait on
+- `channels` — Array of RxChannel handles to wait on
 - `timeout_ms` — Optional timeout in milliseconds (Int) or as a string interval
 
 **Returns:** Map with channel/value on success, or status on timeout/closed
@@ -3381,8 +3381,10 @@ Waits for the first available value from any of the given channels. Returns a ma
 **Examples:**
 
 ```ntnt
-select([ch_a, ch_b])  // Wait for first value from either channel
-select([ch_a, ch_b], 5000)  // Wait up to 5 seconds
+let [tx_a, rx_a] = channel()  // Wait for first value from either channel
+let [tx_b, rx_b] = channel()
+select([rx_a, rx_b])
+select([rx_a, rx_b], 5000)  // Wait up to 5 seconds
 ```
 
 **See also:** `channel`, `recv`, `recv_timeout`
@@ -3518,13 +3520,13 @@ Non-blocking receive. Returns None if no value is available or all senders disco
 
 **Parameters:**
 
-- `rx` — The RxChannel receiver handle (second element of `channel()`)
+- `rx` — The RxChannel receiver handle (second element of channel())
 
 **Examples:**
 
 ```ntnt
-let [tx, rx] = channel()
-try_recv(rx)  // Check for a value without blocking
+let [tx, rx] = channel()  // Check for a value without blocking
+try_recv(rx)
 ```
 
 **See also:** `recv`, `recv_timeout`

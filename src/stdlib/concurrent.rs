@@ -573,7 +573,9 @@ impl ConcurrencyRuntime {
     }
 
     fn close_channel(&self, channel_id: u64) -> bool {
-        // close() = remove from map. Dropping the Sender causes recv() → Disconnected → Unit.
+        // close() = remove receiver from map. Once the Arc<Mutex<Receiver>> refcount hits 0,
+        // the crossbeam Receiver drops → future send(tx, ...) returns Err(Disconnected) → false.
+        // recv(rx) on a removed channel_id immediately returns Unit (id not found in registry).
         let mut channels = match self.channels.lock() {
             Ok(c) => c,
             Err(_) => return false,
@@ -1774,15 +1776,16 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt recv
     // @module std/concurrent
-    // @signature recv(ch: Channel) -> Any
+    // @signature recv(rx: RxChannel) -> Any
     // Receives a value from a channel. Blocks until a value is available.
-    // Returns Unit if the channel is closed and empty (sender dropped).
+    // Returns Unit if all senders have been dropped (Disconnected) or the receiver was closed.
     // This is a cancellation yield point: a cancelled task will exit here.
     // Single-consumer: the receiver lock is held for the blocking duration.
-    // @param ch The channel handle
+    // @param rx The RxChannel receiver handle (second element of channel())
     // @see_also channel, send, try_recv, recv_timeout
     // @since v0.2.0
-    // @example recv(ch) ~ "Block until a value is received"
+    // @example let [tx, rx] = channel() ~ "Block until a value is received"
+    // @example recv(rx)
     module.insert(
         "recv".to_string(),
         Value::NativeFunction {
@@ -1795,15 +1798,16 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt recv_timeout
     // @module std/concurrent
-    // @signature recv_timeout(ch: Channel, millis: Int) -> Option<Any>
-    // Receives with timeout. Returns None if timeout expires or channel disconnected.
+    // @signature recv_timeout(rx: RxChannel, millis: Int) -> Option<Any>
+    // Receives with timeout. Returns None if timeout expires or all senders disconnected.
     // Loops in ≤100ms slices checking cancellation between iterations.
     // This is a cancellation yield point.
-    // @param ch The channel handle
+    // @param rx The RxChannel receiver handle (second element of channel())
     // @param millis Timeout in milliseconds (negative values clamped to 0)
     // @see_also recv, try_recv
     // @since v0.2.0
-    // @example recv_timeout(ch, 5000) ~ "Wait up to 5 seconds for a value"
+    // @example let [tx, rx] = channel() ~ "Wait up to 5 seconds for a value"
+    // @example recv_timeout(rx, 5000)
     module.insert(
         "recv_timeout".to_string(),
         Value::NativeFunction {
@@ -1821,12 +1825,13 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt try_recv
     // @module std/concurrent
-    // @signature try_recv(ch: Channel) -> Option<Any>
-    // Non-blocking receive. Returns None if no value is available or channel is closed.
-    // @param ch The channel handle
+    // @signature try_recv(rx: RxChannel) -> Option<Any>
+    // Non-blocking receive. Returns None if no value is available or all senders disconnected.
+    // @param rx The RxChannel receiver handle (second element of channel())
     // @see_also recv, recv_timeout
     // @since v0.2.0
-    // @example try_recv(ch) ~ "Check for a value without blocking"
+    // @example let [tx, rx] = channel() ~ "Check for a value without blocking"
+    // @example try_recv(rx)
     module.insert(
         "try_recv".to_string(),
         Value::NativeFunction {
@@ -1839,14 +1844,15 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt close
     // @module std/concurrent
-    // @signature close(ch: Channel) -> Bool
-    // Closes a channel by removing it from the registry. The sender is dropped;
-    // any blocking recv() returns Unit once all buffered values are consumed.
-    // Returns true if the channel existed, false otherwise.
-    // @param ch The channel handle
+    // @signature close(rx: RxChannel) -> Bool
+    // Closes a channel receiver by removing it from the registry. Once removed,
+    // future send(tx, ...) returns false (crossbeam Disconnected). recv(rx) immediately
+    // returns Unit since the id is no longer found. Returns true if existed, false otherwise.
+    // @param rx The RxChannel receiver handle (second element of channel())
     // @see_also channel
     // @since v0.2.0
-    // @example close(ch) => true ~ "Close the channel"
+    // @example let [tx, rx] = channel() ~ "Close the receiver end"
+    // @example close(rx) => true
     module.insert(
         "close".to_string(),
         Value::NativeFunction {
@@ -1859,19 +1865,21 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt select
     // @module std/concurrent
-    // @signature select(channels: Array<Channel>, timeout_ms?: Int | String) -> Map
-    // Waits for the first available value from any of the given channels.
-    // Returns a map with "channel" (the handle that fired) and "value" (the received value).
+    // @signature select(channels: Array<RxChannel>, timeout_ms?: Int | String) -> Map
+    // Waits for the first available value from any of the given receiver handles.
+    // Returns a map with "channel" (the RxChannel that fired) and "value" (the received value).
     // On timeout: returns {"status": "timeout"}.
-    // If all channels are closed: returns {"status": "closed"}.
+    // If all channels are closed/disconnected: returns {"status": "closed"}.
     // This is a cancellation yield point.
-    // @param channels Array of Channel handles to wait on
+    // @param channels Array of RxChannel handles to wait on
     // @param timeout_ms Optional timeout in milliseconds (Int) or as a string interval
     // @returns Map with channel/value on success, or status on timeout/closed
     // @see_also channel, recv, recv_timeout
     // @since v0.5.0
-    // @example select([ch_a, ch_b]) ~ "Wait for first value from either channel"
-    // @example select([ch_a, ch_b], 5000) ~ "Wait up to 5 seconds"
+    // @example let [tx_a, rx_a] = channel() ~ "Wait for first value from either channel"
+    // @example let [tx_b, rx_b] = channel()
+    // @example select([rx_a, rx_b])
+    // @example select([rx_a, rx_b], 5000) ~ "Wait up to 5 seconds"
     module.insert(
         "select".to_string(),
         Value::NativeFunction {
