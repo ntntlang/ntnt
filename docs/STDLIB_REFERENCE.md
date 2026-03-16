@@ -3114,6 +3114,7 @@ import { channel, send, recv } from "std/concurrent"
 | [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if the channel is closed and empty (sender dropped). This is a cancellation yield point: a cancelled task will exit here. Single-consumer: the receiver lock is held for the blocking duration. |
 | [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or channel disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point. |
 | [`schedule`](#schedule) | Runs a zero-parameter handler repeatedly at the given interval. Returns a Schedule handle. Interval can be milliseconds (Int) or a string ("5s", "1m"). Zero intervals are rejected. Each tick spawns a thread with catch_unwind; overlap prevention ensures a new tick won't start until the previous one finishes. Panics in tick execution are caught and logged — they don't kill the schedule. |
+| [`select`](#select) | Waits for the first available value from any of the given channels. Returns a map with "channel" (the handle that fired) and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed: returns {"status": "closed"}. This is a cancellation yield point. |
 | [`send`](#send) | Sends a value through a channel. Returns false if the channel has been closed. Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum. |
 | [`sleep_ms`](#sleepms) | Pauses execution for specified milliseconds. This is a cancellation yield point: a cancelled task will exit during sleep_ms(). Uses 50ms slices internally. Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks. |
 | [`spawn`](#spawn) | Spawns a zero-parameter function as a background task. Returns a Task handle. The handler's closure environment is serialized for cross-thread use. Serializable capture types: Int, Float, Bool, String, Array, Map, Struct, Enum. The handler must have zero parameters (including no defaults). |
@@ -3343,6 +3344,34 @@ schedule(5000, fn() { print("tick") })  // Run every 5 seconds
 ```
 
 **See also:** `cancel_schedule`, `after`
+
+*Since v0.5.0*
+
+---
+
+#### `select`
+
+```ntnt
+select(channels: Array<Channel>, timeout_ms?: Int | String) -> Map
+```
+
+Waits for the first available value from any of the given channels. Returns a map with "channel" (the handle that fired) and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed: returns {"status": "closed"}. This is a cancellation yield point.
+
+**Parameters:**
+
+- `channels` — Array of Channel handles to wait on
+- `timeout_ms` — Optional timeout in milliseconds (Int) or as a string interval
+
+**Returns:** Map with channel/value on success, or status on timeout/closed
+
+**Examples:**
+
+```ntnt
+select([ch_a, ch_b])  // Wait for first value from either channel
+select([ch_a, ch_b], 5000)  // Wait up to 5 seconds
+```
+
+**See also:** `channel`, `recv`, `recv_timeout`
 
 *Since v0.5.0*
 
