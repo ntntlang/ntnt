@@ -36,7 +36,7 @@
 //! ## Cancellation
 //!
 //! Thread-local `CURRENT_TASK_CANCELLED` for cooperative cancellation.
-//! Yield points: `recv()`, `recv_timeout()`, `sleep_ms()`, `http_fetch()`, `http_get()`.
+//! Yield points: `recv()`, `recv_timeout()`, `sleep_ms()`, `fetch()`.
 //! Note: `sleep()` from std/time is NOT cancellation-aware.
 
 use crate::error::IntentError;
@@ -303,11 +303,6 @@ struct ChannelEntry {
 
 struct ScheduleEntry {
     cancelled: Arc<AtomicBool>,
-    /// Overlap prevention: true while a tick is executing.
-    /// Used by the schedule thread (not read from ScheduleEntry directly,
-    /// but cloned out during register_schedule).
-    #[allow(dead_code)]
-    tick_running: Arc<AtomicBool>,
 }
 
 // =============================================================================
@@ -468,23 +463,25 @@ impl ConcurrencyRuntime {
 
     /// Create a new channel. Returns (tx_value, rx_value) — the sender and receiver handles.
     /// The sender Arc lives entirely in TxChannelHandle; the registry holds only the receiver.
-    fn create_channel(&self) -> (Value, Value) {
+    fn create_channel(&self) -> Result<(Value, Value)> {
         let id = self.next_id();
         let (tx, rx) = crossbeam::unbounded::<SerializedValue>();
         let entry = ChannelEntry {
             receiver: Arc::new(Mutex::new(rx)),
         };
-        if let Ok(mut channels) = self.channels.lock() {
-            channels.insert(id, entry);
-        }
-        // Wrap sender in Arc<dyn Any + Send + Sync> for the opaque ChannelSender in Value.
+        let mut channels = self
+            .channels
+            .lock()
+            .map_err(|_| IntentError::runtime_error("Channel registry poisoned".to_string()))?;
+        channels.insert(id, entry);
+        drop(channels);
         let sender_arc: Arc<crossbeam::Sender<SerializedValue>> = Arc::new(tx);
         let tx_val = Value::TxChannelHandle(
             id,
             crate::interpreter::ChannelSender(sender_arc as Arc<dyn std::any::Any + Send + Sync>),
         );
         let rx_val = Value::RxChannelHandle(id);
-        (tx_val, rx_val)
+        Ok((tx_val, rx_val))
     }
 
     /// Clone the receiver Arc from the channel registry.
@@ -586,7 +583,7 @@ impl ConcurrencyRuntime {
     // -------------------------------------------------------------------------
 
     /// Register a new task and return its ID. The caller must spawn the thread.
-    fn register_task(&self, cancelled: Arc<AtomicBool>) -> u64 {
+    fn register_task(&self, cancelled: Arc<AtomicBool>) -> Result<u64> {
         let id = self.next_id();
         let entry = TaskEntry {
             state: Arc::new(Mutex::new(TaskState::Running)),
@@ -596,10 +593,12 @@ impl ConcurrencyRuntime {
             completed_at: Arc::new(Mutex::new(None)),
             last_checked_at: Arc::new(Mutex::new(None)),
         };
-        if let Ok(mut tasks) = self.tasks.lock() {
-            tasks.insert(id, entry);
-        }
-        id
+        let mut tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| IntentError::runtime_error("Task registry poisoned".to_string()))?;
+        tasks.insert(id, entry);
+        Ok(id)
     }
 
     /// Get cloned Arcs for a task (state, result, error_msg, cancelled, completed_at).
@@ -628,7 +627,6 @@ impl ConcurrencyRuntime {
     /// `await_task(handle)` — blocks until task completes, then marks as Consumed.
     /// Returns `Result`: `Ok(value)` or `Err(message)`.
     fn await_task(&self, task_id: u64) -> Result<Value> {
-        // Get Arcs (lock → clone → drop)
         let (state_arc, result_arc, error_arc, _cancelled, _completed_at) =
             match self.get_task_arcs(task_id) {
                 Some(arcs) => arcs,
@@ -641,7 +639,9 @@ impl ConcurrencyRuntime {
 
         // Check for already-consumed or expired handles
         {
-            let state = state_arc.lock().unwrap();
+            let state = state_arc
+                .lock()
+                .map_err(|_| IntentError::runtime_error("Task state mutex poisoned".to_string()))?;
             match *state {
                 TaskState::Consumed => {
                     return Err(IntentError::runtime_error(
@@ -657,10 +657,13 @@ impl ConcurrencyRuntime {
             }
         }
 
-        // Spin-wait for terminal state (10ms slices)
+        // Wait for terminal state (10ms slices, cancellation-aware)
         loop {
+            check_cancellation()?;
             {
-                let state = state_arc.lock().unwrap();
+                let state = state_arc.lock().map_err(|_| {
+                    IntentError::runtime_error("Task state mutex poisoned".to_string())
+                })?;
                 if state.is_terminal() {
                     break;
                 }
@@ -669,30 +672,32 @@ impl ConcurrencyRuntime {
         }
 
         // Read result
-        let state = *state_arc.lock().unwrap();
+        let state = *state_arc
+            .lock()
+            .map_err(|_| IntentError::runtime_error("Task state mutex poisoned".to_string()))?;
         let result_value = match state {
             TaskState::Completed => {
-                let result = result_arc.lock().unwrap();
+                let result = result_arc.lock().map_err(|_| {
+                    IntentError::runtime_error("Task result mutex poisoned".to_string())
+                })?;
                 let val = result.as_ref().map(|s| s.to_value()).unwrap_or(Value::Unit);
                 Value::ok(val)
             }
-            TaskState::Failed => {
-                let err = error_arc.lock().unwrap();
+            TaskState::Failed | TaskState::Panicked => {
+                let err = error_arc.lock().map_err(|_| {
+                    IntentError::runtime_error("Task error mutex poisoned".to_string())
+                })?;
                 let msg = err.clone().unwrap_or_else(|| "Task failed".to_string());
                 Value::err(Value::String(msg))
             }
-            TaskState::Panicked => {
-                let err = error_arc.lock().unwrap();
-                let msg = err.clone().unwrap_or_else(|| "Task panicked".to_string());
-                Value::err(Value::String(msg))
-            }
             TaskState::Running => unreachable!(),
-            // These are caught above, but handle for exhaustiveness
             TaskState::Consumed | TaskState::Expired => unreachable!(),
         };
 
-        // Mark as Consumed instead of removing (preserves handle for try_await)
-        *state_arc.lock().unwrap() = TaskState::Consumed;
+        // Mark as Consumed (preserves handle for try_await)
+        if let Ok(mut s) = state_arc.lock() {
+            *s = TaskState::Consumed;
+        }
 
         Ok(result_value)
     }
@@ -790,18 +795,19 @@ impl ConcurrencyRuntime {
     // Schedules
     // -------------------------------------------------------------------------
 
-    fn register_schedule(&self) -> (u64, Arc<AtomicBool>, Arc<AtomicBool>) {
+    fn register_schedule(&self) -> Result<(u64, Arc<AtomicBool>, Arc<AtomicBool>)> {
         let id = self.next_id();
         let cancelled = Arc::new(AtomicBool::new(false));
         let tick_running = Arc::new(AtomicBool::new(false));
         let entry = ScheduleEntry {
             cancelled: Arc::clone(&cancelled),
-            tick_running: Arc::clone(&tick_running),
         };
-        if let Ok(mut schedules) = self.schedules.lock() {
-            schedules.insert(id, entry);
-        }
-        (id, cancelled, tick_running)
+        let mut schedules = self
+            .schedules
+            .lock()
+            .map_err(|_| IntentError::runtime_error("Schedule registry poisoned".to_string()))?;
+        schedules.insert(id, entry);
+        Ok((id, cancelled, tick_running))
     }
 
     fn cancel_schedule(&self, schedule_id: u64) -> bool {
@@ -899,32 +905,21 @@ fn get_handle_id(handle: &Value, expected_type: &str) -> Result<u64> {
 /// Parse a human-readable interval string like "5s", "1m", "500ms" into Duration.
 fn parse_interval(s: &str) -> Result<Duration> {
     let s = s.trim();
-    if s.ends_with("ms") {
-        let num: u64 = s[..s.len() - 2]
-            .trim()
-            .parse()
-            .map_err(|_| IntentError::runtime_error(format!("Invalid interval: {}", s)))?;
+    let err = |s| IntentError::runtime_error(format!("Invalid interval: {}", s));
+
+    if let Some(num_str) = s.strip_suffix("ms") {
+        let num: u64 = num_str.trim().parse().map_err(|_| err(s))?;
         Ok(Duration::from_millis(num))
-    } else if s.ends_with('s') {
-        let num: u64 = s[..s.len() - 1]
-            .trim()
-            .parse()
-            .map_err(|_| IntentError::runtime_error(format!("Invalid interval: {}", s)))?;
+    } else if let Some(num_str) = s.strip_suffix('s') {
+        let num: u64 = num_str.trim().parse().map_err(|_| err(s))?;
         Ok(Duration::from_secs(num))
-    } else if s.ends_with('m') {
-        let num: u64 = s[..s.len() - 1]
-            .trim()
-            .parse()
-            .map_err(|_| IntentError::runtime_error(format!("Invalid interval: {}", s)))?;
+    } else if let Some(num_str) = s.strip_suffix('m') {
+        let num: u64 = num_str.trim().parse().map_err(|_| err(s))?;
         Ok(Duration::from_secs(num * 60))
-    } else if s.ends_with('h') {
-        let num: u64 = s[..s.len() - 1]
-            .trim()
-            .parse()
-            .map_err(|_| IntentError::runtime_error(format!("Invalid interval: {}", s)))?;
+    } else if let Some(num_str) = s.strip_suffix('h') {
+        let num: u64 = num_str.trim().parse().map_err(|_| err(s))?;
         Ok(Duration::from_secs(num * 3600))
     } else {
-        // Try as plain milliseconds
         let num: u64 = s.parse().map_err(|_| {
             IntentError::runtime_error(format!(
                 "Invalid interval: {}. Use '5s', '1m', '500ms', or '1h'",
@@ -1134,8 +1129,7 @@ fn run_in_fresh_interpreter(
 // --- Channels ---
 
 fn concurrent_channel() -> Result<Value> {
-    let (tx, rx) = RUNTIME.create_channel();
-    // Return [tx, rx] array — callers destructure: let [tx, rx] = channel()
+    let (tx, rx) = RUNTIME.create_channel()?;
     Ok(Value::Array(vec![tx, rx]))
 }
 
@@ -1206,7 +1200,7 @@ fn concurrent_spawn(handler: &Value) -> Result<Value> {
     let (captured, body) = validate_and_capture("spawn", handler)?;
 
     let cancelled = Arc::new(AtomicBool::new(false));
-    let task_id = RUNTIME.register_task(Arc::clone(&cancelled));
+    let task_id = RUNTIME.register_task(Arc::clone(&cancelled))?;
     let (state_arc, result_arc, error_arc, _cancelled_arc, completed_at_arc) =
         RUNTIME.get_task_arcs(task_id).unwrap();
 
@@ -1290,7 +1284,7 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
     let (captured, body) = validate_and_capture("after", handler)?;
 
     let cancelled = Arc::new(AtomicBool::new(false));
-    let task_id = RUNTIME.register_task(Arc::clone(&cancelled));
+    let task_id = RUNTIME.register_task(Arc::clone(&cancelled))?;
     let (state_arc, result_arc, error_arc, _cancelled_arc, completed_at_arc) =
         RUNTIME.get_task_arcs(task_id).unwrap();
 
@@ -1301,13 +1295,11 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
 
         // Cancellation-aware delay (50ms slices)
         let deadline = Instant::now() + delay_duration;
+        let mut cancelled_during_delay = false;
         loop {
             if cancelled.load(AtomicOrdering::Acquire) {
-                *error_arc.lock().unwrap() = Some("Task cancelled".to_string());
-                *state_arc.lock().unwrap() = TaskState::Failed;
-                *completed_at_arc.lock().unwrap() = Some(Instant::now());
-                CURRENT_TASK_CANCELLED.with(|cell| *cell.borrow_mut() = None);
-                return;
+                cancelled_during_delay = true;
+                break;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -1316,9 +1308,15 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
             thread::sleep(remaining.min(Duration::from_millis(50)));
         }
 
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            run_in_fresh_interpreter(&captured, &body)
-        }));
+        let result = if cancelled_during_delay {
+            Ok(Err(IntentError::runtime_error(
+                "Task cancelled".to_string(),
+            )))
+        } else {
+            catch_unwind(AssertUnwindSafe(|| {
+                run_in_fresh_interpreter(&captured, &body)
+            }))
+        };
         finalize_task(
             result,
             &state_arc,
@@ -1361,7 +1359,7 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
     };
 
     let (captured, body) = validate_and_capture("schedule", handler)?;
-    let (schedule_id, cancelled, tick_running) = RUNTIME.register_schedule();
+    let (schedule_id, cancelled, tick_running) = RUNTIME.register_schedule()?;
 
     thread::spawn(move || {
         loop {
@@ -2229,7 +2227,7 @@ mod tests {
     fn test_cancel_task_sets_flag_only() {
         // Create a task handle with a known cancelled flag
         let cancelled = Arc::new(AtomicBool::new(false));
-        let task_id = RUNTIME.register_task(Arc::clone(&cancelled));
+        let task_id = RUNTIME.register_task(Arc::clone(&cancelled)).unwrap();
         let handle = create_handle_value("Task", task_id);
 
         // Cancel should set the flag
@@ -2244,7 +2242,7 @@ mod tests {
 
     #[test]
     fn test_cancel_schedule_removes_from_registry() {
-        let (schedule_id, cancelled, _tick_running) = RUNTIME.register_schedule();
+        let (schedule_id, cancelled, _tick_running) = RUNTIME.register_schedule().unwrap();
         let handle = create_handle_value("Schedule", schedule_id);
 
         // Should exist

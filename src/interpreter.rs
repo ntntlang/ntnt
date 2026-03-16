@@ -753,11 +753,6 @@ impl Interpreter {
         self.current_file = Some(path.to_string());
     }
 
-    /// Replace the interpreter's environment (used by concurrency runtime to inject captured bindings).
-    pub fn set_environment(&mut self, env: Rc<RefCell<Environment>>) {
-        self.environment = env;
-    }
-
     /// Define a variable in the current (global) environment.
     /// Used by the concurrency runtime to inject captured bindings into a fresh interpreter.
     pub fn define_global(&mut self, name: String, value: Value) {
