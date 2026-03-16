@@ -156,15 +156,31 @@ Single global instance (`LazyLock<ConcurrencyRuntime>`) owns all state:
 
 ### ✅ Phase 1: Primitive Hardening
 
-**Commit:** `09f372f` on `feat/concurrency-v2`  
-**Status:** Complete. CI green.
+**Commits:** `f63f23b`→`c2b2685` on `feat/concurrency-v2`  
+**Status:** Complete. All Copilot review comments addressed and resolved. CI green.
 
+#### Core Changes
 - [x] **Opaque handle types** — `Value::TaskHandle(u64)`, `Value::ChannelHandle(u64)`, `Value::ScheduleHandle(u64)`. Type-safe at the Value level.
 - [x] **`try_await` consumed/expired states** — `TaskState::Consumed` and `TaskState::Expired`. Never errors for handles that existed.
 - [x] **`select()` with crossbeam-channel** — Replaced all `std::sync::mpsc`. 100ms cancellation-aware slices.
 - [x] **Docs generated** — `ntnt docs --generate` run, STDLIB_REFERENCE.md updated with `select()`
-- [x] 37 concurrency tests passing (11 new)
+
+#### Copilot Review Fixes (2 rounds, 16 comments, all resolved)
+- [x] **`select()` busy-loop fix** — track disconnected channels in `alive[]` vec, rebuild `crossbeam::Select` excluding dead channels, return `{status: "closed"}` when all dead
+- [x] **Consumed task reaping** — `TaskState::Consumed` included in reaper expiry (5-min TTL, respects `last_checked_at`)
+- [x] **Reaper lock discipline** — clone Arcs while holding registry lock, drop lock, inspect state outside lock (no nested locks)
+- [x] **NativeFunction ambiguity detection** — `find_all_in_loaded_modules()` errors when multiple modules export same name+arity
+- [x] **NativeFunction capture removed** — child interpreter uses own stdlib; no name-based re-injection
+- [x] **Closure capture fail-fast** — `capture_bindings()` returns `Err` listing non-serializable closures
+- [x] **Builtin injection** — `inject_captured` searches builtins via `get_global()` 
+- [x] **Typechecker signatures** — proper return types: `Channel`, `Task`, `Schedule`, `Map`, `Optional<Any>`
+- [x] **Unconditional shutdown** — `RUNTIME.shutdown()` runs even on eval error
+- [x] **Doc wording** — "marks as consumed" (not "removes") in 4 doc files + docstrings
+
+#### Test Status
+- [x] 1,076 tests passing (37 concurrency tests)
 - [x] CI green (fmt + test + build + docs drift)
+- [x] 2 Copilot review rounds, 16 comments, all replied to and resolved
 
 ---
 
@@ -187,7 +203,7 @@ Phase 6  📋  Observability CLI                          ntnt jobs status/list/
 | Phase | Name | Status | Priority |
 |-------|------|--------|----------|
 | 0 | Concurrency Primitives | ✅ Done | — |
-| 1 | Primitive Hardening | ✅ Done | — |
+| 1 | Primitive Hardening | ✅ Done (2 Copilot reviews, 16/16 resolved) | — |
 | 2 | Composition Layer | 📋 Planned | P1 |
 | 3 | Job DSL + In-Memory Backend | 📋 Planned | P0 — core feature |
 | 4 | KV Backend + Dashboard | 📋 Planned | P0 — production req |
@@ -551,6 +567,12 @@ For production apps with existing user auth. The dashboard becomes another admin
 
 10. **Use your own abstractions.** We built `std/kv` for Redis/SQLite. The job system should use it, not reimplement raw Redis Streams.
 
+11. **Copilot review catches real bugs.** Across 2 review rounds (16 comments), it found: select() busy-loop on closed channels, consumed task memory leak, lock discipline violation, NativeFunction ambiguity. These are not style nits — they're correctness bugs that would have hit production.
+
+12. **Reply and resolve Copilot comments immediately.** Don't let review comments pile up. Fix, reply with the commit hash, resolve the thread. Keeps the PR clean and reviewable.
+
+13. **Read the credentials file format.** The GitHub PAT is in a key-value file (`GITHUB_PAT=ghp_...`), not a bare token. Wasted time on "Bad credentials" because of wrong parsing. Check file format before assuming.
+
 ### Architecture Decisions (Resolved)
 
 | Decision | Choice | Why |
@@ -564,6 +586,9 @@ For production apps with existing user auth. The dashboard becomes another admin
 | Job backend | Memory + KV (not raw PG/Redis) | One implementation, multiple stores |
 | Job chaining | Application logic (not DSL) | Explicit > magic |
 | Dashboard auth | Localhost-only default | Secure by default, opt-in escalation |
+| NativeFunction capture | Don't capture; child uses own stdlib | Avoids name ambiguity across modules |
+| Handle serialization | Capturable at spawn, not sendable via channels | spawn(fn() { send(ch,...) }) works; send(ch, another_ch) doesn't |
+| Reaper scope | All terminal states incl. Consumed | Prevents memory leak in long-running servers |
 
 ---
 
@@ -613,6 +638,9 @@ For production apps with existing user auth. The dashboard becomes another admin
 | Simulation mode? | Yes — `effect` blocks, critical for safe development. | 2026-03-16 |
 | Intent verification? | Yes — table stakes for IDD language. | 2026-03-16 |
 | AI diagnosis (ntnt jobs ask/diagnose)? | No — cut. Not a good fit. | 2026-03-16 |
+| NativeFunction capture strategy? | Don't capture. Child interpreter uses own stdlib. Ambiguity detection for edge cases. | 2026-03-16 |
+| Handle serialization? | Capturable at spawn time (closure capture). NOT sendable through channels. | 2026-03-16 |
+| Shutdown on eval error? | Unconditional. Capture result, shutdown, then propagate. | 2026-03-16 |
 
 ### Open
 
@@ -638,3 +666,5 @@ For production apps with existing user auth. The dashboard becomes another admin
 | 2026-03-16 | Phase 1 complete: handle types, try_await states, select() — `f63f23b` |
 | 2026-03-16 | DD-037 v4: KV backend replaces PG+Redis. Checkboxes for tracking. |
 | 2026-03-16 | DD-037 v5: Dashboard security model. Simulation, contracts, intent verification promoted. Job chaining via application logic. Streaming logs promoted to core. Batch enqueue added. AI diagnosis cut. Competitive analysis updated with Josh's PHP system. |
+| 2026-03-16 | Copilot review fixes: `c2b2685` — select() busy-loop, consumed task leak, reaper lock discipline, NativeFunction ambiguity, typechecker sigs, doc wording. All 16 comments resolved. |
+| 2026-03-16 | DD-037 v6: Updated Phase 1 with full Copilot review resolution details. Added lessons 11-13. |
