@@ -48,8 +48,10 @@ fn run_ntnt_code(code: &str) -> (String, String, i32) {
         panic!("No ntnt binary found. Run 'cargo build' first.");
     };
 
-    let output = Command::new(binary)
-        .args(&["run", &test_file])
+    // Wrap with `timeout 10` so a hanging ntnt process can't block the test runner forever.
+    // Exit code 124 means the process timed out.
+    let output = Command::new("timeout")
+        .args(&["10", &binary, "run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
         .output()
@@ -276,14 +278,19 @@ match result {
 fn test_spawn_with_channel() {
     let (stdout, _stderr, code) = run_ntnt_code(
         r#"
-import { spawn, await_task, channel, send, recv } from "std/concurrent"
+import { spawn, await_task, channel, send, recv_timeout } from "std/concurrent"
 
 let ch = channel()
 let task = spawn(fn() {
     send(ch, "from task")
 })
-let msg = recv(ch)
-print(msg)
+// Use recv_timeout instead of blocking recv() — if the task fails to send for
+// any reason (panic, race), recv() would block forever and orphan this process.
+let msg = recv_timeout(ch, 5000)
+match msg {
+    Some(v) => print(v),
+    None => print("ERROR: timed out waiting for task to send")
+}
 await_task(task)
 "#,
     );
