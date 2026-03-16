@@ -42,10 +42,10 @@
 use crate::error::IntentError;
 use crate::interpreter::Value;
 use crossbeam_channel::{self as crossbeam};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -367,7 +367,10 @@ impl ConcurrencyRuntime {
         )> = {
             let tasks = match self.tasks.lock() {
                 Ok(t) => t,
-                Err(_) => return, // poisoned — skip
+                Err(e) => {
+                    eprintln!("[WARN] Task registry mutex poisoned during reap: {}", e);
+                    return;
+                }
             };
             tasks
                 .iter()
@@ -384,11 +387,17 @@ impl ConcurrencyRuntime {
         // Registry lock is dropped here
 
         // Step 2: Inspect per-task state outside registry lock
-        let mut ids_to_expire: Vec<u64> = Vec::new();
+        let mut ids_to_expire: HashSet<u64> = HashSet::new();
         for (id, state_arc, completed_at_arc, last_checked_at_arc) in &task_arcs {
             let state = match state_arc.lock() {
                 Ok(s) => *s,
-                Err(_) => continue, // poisoned — skip
+                Err(e) => {
+                    eprintln!(
+                        "[WARN] Task state mutex poisoned during reap (task {}): {}",
+                        id, e
+                    );
+                    continue;
+                }
             };
             // Only expire tasks in terminal states (not Running or already Expired)
             if !matches!(
@@ -402,7 +411,13 @@ impl ConcurrencyRuntime {
             }
             let completed_at = match completed_at_arc.lock() {
                 Ok(c) => *c,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "[WARN] Task completed_at mutex poisoned during reap (task {}): {}",
+                        id, e
+                    );
+                    continue;
+                }
             };
             let Some(completed) = completed_at else {
                 continue; // no completion time recorded — skip
@@ -413,21 +428,35 @@ impl ConcurrencyRuntime {
             // Check if recently try_await'd
             let last_checked = match last_checked_at_arc.lock() {
                 Ok(l) => *l,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "[WARN] Task last_checked_at mutex poisoned during reap (task {}): {}",
+                        id, e
+                    );
+                    continue;
+                }
             };
             if let Some(checked) = last_checked {
                 if now.duration_since(checked) < recent_check_window {
                     continue; // recently checked — skip
                 }
             }
-            ids_to_expire.push(*id);
+            ids_to_expire.insert(*id);
         }
 
         // Step 3: Mark expired tasks (using already-cloned state Arcs — no registry lock needed)
         for (id, state_arc, _, _) in &task_arcs {
             if ids_to_expire.contains(id) {
-                if let Ok(mut s) = state_arc.lock() {
-                    *s = TaskState::Expired;
+                match state_arc.lock() {
+                    Ok(mut s) => {
+                        *s = TaskState::Expired;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[WARN] Task state mutex poisoned during expire (task {}): {}",
+                            id, e
+                        );
+                    }
                 }
             }
         }
@@ -458,79 +487,53 @@ impl ConcurrencyRuntime {
         (tx_val, rx_val)
     }
 
-    fn recv(&self, channel_id: u64) -> Result<Value> {
-        // Yield point: check cancellation before blocking
-        check_cancellation()?;
+    /// Clone the receiver Arc from the channel registry.
+    /// Returns None if channel_id is not in the registry (closed/removed).
+    fn get_receiver_arc(
+        &self,
+        channel_id: u64,
+    ) -> Result<Option<Arc<Mutex<crossbeam::Receiver<SerializedValue>>>>> {
+        let channels = self
+            .channels
+            .lock()
+            .map_err(|_| IntentError::runtime_error("Channel registry poisoned".to_string()))?;
+        Ok(channels.get(&channel_id).map(|e| Arc::clone(&e.receiver)))
+    }
 
-        // Lock → clone receiver Arc → drop lock → lock receiver → recv
-        let receiver = {
-            let channels = match self.channels.lock() {
-                Ok(c) => c,
-                Err(_) => {
-                    return Err(IntentError::runtime_error(
-                        "Channel registry poisoned".to_string(),
-                    ))
-                }
-            };
-            match channels.get(&channel_id) {
-                Some(entry) => Arc::clone(&entry.receiver),
-                None => return Ok(Value::Unit), // channel removed → disconnected → Unit
-            }
+    /// Lock a receiver Arc, returning the guard.
+    fn lock_receiver(
+        receiver: &Arc<Mutex<crossbeam::Receiver<SerializedValue>>>,
+    ) -> Result<MutexGuard<'_, crossbeam::Receiver<SerializedValue>>> {
+        receiver
+            .lock()
+            .map_err(|_| IntentError::runtime_error("Channel receiver poisoned".to_string()))
+    }
+
+    fn recv(&self, channel_id: u64) -> Result<Value> {
+        check_cancellation()?;
+        let Some(receiver) = self.get_receiver_arc(channel_id)? else {
+            return Ok(Value::Unit);
         };
-        // Channel registry lock dropped. Now lock the receiver (single-consumer).
-        let rx = match receiver.lock() {
-            Ok(r) => r,
-            Err(_) => {
-                return Err(IntentError::runtime_error(
-                    "Channel receiver poisoned".to_string(),
-                ))
-            }
-        };
+        let rx = Self::lock_receiver(&receiver)?;
         match rx.recv() {
             Ok(serialized) => Ok(serialized.to_value()),
-            Err(_) => Ok(Value::Unit), // sender dropped → disconnected → Unit
+            Err(_) => Ok(Value::Unit),
         }
     }
 
     fn recv_timeout(&self, channel_id: u64, timeout_ms: i64) -> Result<Value> {
-        // Yield point: check cancellation
         check_cancellation()?;
-
-        // Clamp negative to 0
         let total_ms = if timeout_ms < 0 { 0 } else { timeout_ms as u64 };
-
-        // Lock → clone receiver Arc → drop lock
-        let receiver = {
-            let channels = match self.channels.lock() {
-                Ok(c) => c,
-                Err(_) => {
-                    return Err(IntentError::runtime_error(
-                        "Channel registry poisoned".to_string(),
-                    ))
-                }
-            };
-            match channels.get(&channel_id) {
-                Some(entry) => Arc::clone(&entry.receiver),
-                None => return Ok(Value::none()), // channel removed → None
-            }
+        let Some(receiver) = self.get_receiver_arc(channel_id)? else {
+            return Ok(Value::none());
         };
-
-        let rx = match receiver.lock() {
-            Ok(r) => r,
-            Err(_) => {
-                return Err(IntentError::runtime_error(
-                    "Channel receiver poisoned".to_string(),
-                ))
-            }
-        };
-
-        // Loop in ≤100ms slices, checking cancellation between iterations
+        let rx = Self::lock_receiver(&receiver)?;
         let deadline = Instant::now() + Duration::from_millis(total_ms);
         loop {
             check_cancellation()?;
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Ok(Value::none()); // timeout
+                return Ok(Value::none());
             }
             let slice = remaining.min(Duration::from_millis(100));
             match rx.recv_timeout(slice) {
@@ -542,29 +545,10 @@ impl ConcurrencyRuntime {
     }
 
     fn try_recv(&self, channel_id: u64) -> Result<Value> {
-        // Lock → clone receiver Arc → drop lock
-        let receiver = {
-            let channels = match self.channels.lock() {
-                Ok(c) => c,
-                Err(_) => {
-                    return Err(IntentError::runtime_error(
-                        "Channel registry poisoned".to_string(),
-                    ))
-                }
-            };
-            match channels.get(&channel_id) {
-                Some(entry) => Arc::clone(&entry.receiver),
-                None => return Ok(Value::none()), // removed
-            }
+        let Some(receiver) = self.get_receiver_arc(channel_id)? else {
+            return Ok(Value::none());
         };
-        let rx = match receiver.lock() {
-            Ok(r) => r,
-            Err(_) => {
-                return Err(IntentError::runtime_error(
-                    "Channel receiver poisoned".to_string(),
-                ))
-            }
-        };
+        let rx = Self::lock_receiver(&receiver)?;
         match rx.try_recv() {
             Ok(serialized) => Ok(Value::some(serialized.to_value())),
             Err(crossbeam::TryRecvError::Empty) => Ok(Value::none()),
@@ -862,6 +846,7 @@ pub static RUNTIME: LazyLock<ConcurrencyRuntime> = LazyLock::new(ConcurrencyRunt
 // Handle value helpers
 // =============================================================================
 
+#[cfg(test)]
 fn create_handle_value(kind: &str, id: u64) -> Value {
     match kind {
         "Task" => Value::TaskHandle(id),
@@ -951,41 +936,48 @@ fn parse_interval(s: &str) -> Result<Duration> {
 // =============================================================================
 
 /// Captured bindings for cross-thread transfer.
-/// Separates serializable values from native function names.
 #[derive(Clone)]
 struct CapturedBindings {
     /// Serializable values (Int, Float, Bool, String, Array, Map, Struct, Enum)
     values: HashMap<String, SerializedValue>,
-    /// NativeFunction bindings — stored with arity for disambiguation when
-    /// multiple modules export the same function name.
-    native_fn_names: Vec<CapturedNativeFn>,
+    /// Full NativeFunction identities — reconstructed directly in the child interpreter.
+    native_fns: Vec<CapturedNativeFn>,
 }
 
+/// Snapshot of a NativeFunction — enough to reconstruct Value::NativeFunction
+/// without ambiguous name-based module lookup.
 #[derive(Clone)]
 struct CapturedNativeFn {
     binding_name: String, // the variable name in user code (may be an alias)
     fn_name: String,      // the canonical function name
+    arity: usize,
+    max_arity: usize,
+    func: fn(&[Value]) -> Result<Value>,
 }
 
 /// Capture all bindings from an environment for cross-thread use.
-/// Suppresses warnings for NativeFunction (expected, not user error).
-/// Only warns for user-defined non-serializable values (closures).
+/// Returns Err with a list of non-serializable closure names if any are found.
 fn capture_bindings(
     bindings: &HashMap<String, Value>,
 ) -> std::result::Result<CapturedBindings, Vec<String>> {
     let mut values = HashMap::new();
-    let mut native_fn_names = Vec::new();
+    let mut native_fns = Vec::new();
     let mut non_serializable_closures = Vec::new();
 
     for (key, value) in bindings {
         match value {
-            Value::NativeFunction { name, .. } => {
-                // Record binding name → canonical function name.
-                // The child interpreter already has all stdlib modules loaded;
-                // this is only needed for aliases (let my_fn = some_stdlib_fn).
-                native_fn_names.push(CapturedNativeFn {
+            Value::NativeFunction {
+                name,
+                arity,
+                max_arity,
+                func,
+            } => {
+                native_fns.push(CapturedNativeFn {
                     binding_name: key.clone(),
                     fn_name: name.clone(),
+                    arity: *arity,
+                    max_arity: *max_arity,
+                    func: *func,
                 });
             }
             _ => match SerializedValue::from_value(value) {
@@ -1013,36 +1005,113 @@ fn capture_bindings(
         return Err(non_serializable_closures);
     }
 
-    Ok(CapturedBindings {
-        values,
-        native_fn_names,
-    })
+    Ok(CapturedBindings { values, native_fns })
 }
 
 /// Inject captured bindings into a fresh interpreter.
-/// - Serializable values are defined directly.
-/// - NativeFunction names are looked up from stdlib modules AND builtins,
-///   with arity used for disambiguation when multiple modules share a name.
 fn inject_captured(interp: &mut crate::interpreter::Interpreter, captured: &CapturedBindings) {
-    // Inject serializable values (user data captured from the enclosing scope)
     for (key, val) in &captured.values {
         interp.define_global(key.clone(), val.to_value());
     }
 
-    // Re-inject native function bindings into the child's global scope.
-    // The child interpreter has all stdlib modules *loaded* but has not *imported*
-    // anything — so `send`, `recv`, etc. are in the module registry but not accessible
-    // as global names. We inject each captured function by its canonical name.
-    // Aliases (let my_send = send) are injected under the alias name.
-    for cap in &captured.native_fn_names {
-        // Look up the canonical function in modules, then builtins
-        if let Some(value) = interp.find_in_loaded_modules(&cap.fn_name) {
-            interp.define_global(cap.binding_name.clone(), value);
-        } else if let Some(value) = interp.get_global(&cap.fn_name) {
-            interp.define_global(cap.binding_name.clone(), value);
-        }
-        // If not found: undefined variable error at runtime (clear message)
+    for cap in &captured.native_fns {
+        interp.define_global(
+            cap.binding_name.clone(),
+            Value::NativeFunction {
+                name: cap.fn_name.clone(),
+                arity: cap.arity,
+                max_arity: cap.max_arity,
+                func: cap.func,
+            },
+        );
     }
+}
+
+// =============================================================================
+// Shared helpers for spawn/after/schedule
+// =============================================================================
+
+/// Validate a handler is a zero-parameter Function, capture its bindings, and return
+/// the captured bindings + cloned body. Used by spawn(), after(), and schedule().
+fn validate_and_capture(
+    caller: &str,
+    handler: &Value,
+) -> Result<(CapturedBindings, crate::ast::Block)> {
+    match handler {
+        Value::Function {
+            params,
+            closure,
+            body,
+            ..
+        } => {
+            if !params.is_empty() {
+                return Err(IntentError::runtime_error(format!(
+                    "{}() handler must be a zero-parameter function",
+                    caller
+                )));
+            }
+            let bindings = closure.borrow().all_bindings();
+            let captured = capture_bindings(&bindings).map_err(|names| {
+                IntentError::runtime_error(format!(
+                    "Cannot capture user-defined function(s) across task boundaries: {}. \
+                     Use closure capture for data, not function references.",
+                    names.join(", ")
+                ))
+            })?;
+            Ok((captured, body.clone()))
+        }
+        _ => Err(IntentError::type_error(format!(
+            "{}() requires a function",
+            caller
+        ))),
+    }
+}
+
+/// Process the result of a catch_unwind(eval_block) and update task state Arcs.
+/// Shared by spawn() and after() thread bodies.
+fn finalize_task(
+    result: std::result::Result<Result<Value>, Box<dyn std::any::Any + Send>>,
+    state_arc: &Arc<Mutex<TaskState>>,
+    result_arc: &Arc<Mutex<Option<SerializedValue>>>,
+    error_arc: &Arc<Mutex<Option<String>>>,
+    completed_at_arc: &Arc<Mutex<Option<Instant>>>,
+) {
+    match result {
+        Ok(Ok(value)) => {
+            *result_arc.lock().unwrap() =
+                Some(SerializedValue::from_value(&value).unwrap_or(SerializedValue::Unit));
+            *state_arc.lock().unwrap() = TaskState::Completed;
+        }
+        Ok(Err(e)) => {
+            *error_arc.lock().unwrap() = Some(format!("{}", e));
+            *state_arc.lock().unwrap() = TaskState::Failed;
+        }
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "Task panicked".to_string()
+            };
+            *error_arc.lock().unwrap() = Some(msg);
+            *state_arc.lock().unwrap() = TaskState::Panicked;
+        }
+    }
+    *completed_at_arc.lock().unwrap() = Some(Instant::now());
+    CURRENT_TASK_CANCELLED.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+/// Run captured bindings in a fresh interpreter. Used inside catch_unwind in task threads.
+fn run_in_fresh_interpreter(
+    captured: &CapturedBindings,
+    body: &crate::ast::Block,
+) -> Result<Value> {
+    let mut interp = crate::interpreter::Interpreter::new();
+    inject_captured(&mut interp, captured);
+    interp.eval_block(body)
 }
 
 // =============================================================================
@@ -1119,122 +1188,32 @@ fn concurrent_close(ch: &Value) -> Result<Value> {
 
 // --- Tasks ---
 
-/// `spawn(handler)` — spawn a zero-parameter function as a background task.
-/// The handler's closure environment is serialized for cross-thread use.
-/// All eval_block calls are wrapped in catch_unwind.
 fn concurrent_spawn(handler: &Value) -> Result<Value> {
-    // Reap expired tasks before spawning (rule 12)
     RUNTIME.reap_expired_tasks();
+    let (captured, body) = validate_and_capture("spawn", handler)?;
 
-    // Validate: must be a Function with no parameters (including defaults) (rule 27)
-    match handler {
-        Value::Function {
-            params,
-            closure,
-            body,
-            ..
-        } => {
-            if !params.is_empty() {
-                return Err(IntentError::runtime_error(
-                    "spawn() handler must be a zero-parameter function. Got a function with parameters.".to_string(),
-                ));
-            }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let task_id = RUNTIME.register_task(Arc::clone(&cancelled));
+    let (state_arc, result_arc, error_arc, _cancelled_arc, completed_at_arc) =
+        RUNTIME.get_task_arcs(task_id).unwrap();
 
-            // Capture environment bindings
-            let bindings = closure.borrow().all_bindings();
-            let captured = match capture_bindings(&bindings) {
-                Ok(c) => c,
-                Err(names) => {
-                    return Err(IntentError::runtime_error(format!(
-                        "Cannot capture user-defined function(s) across task boundaries: {}.                          Use closure capture for data, not function references.",
-                        names.join(", ")
-                    )));
-                }
-            };
-            let body_clone = body.clone();
+    thread::spawn(move || {
+        CURRENT_TASK_CANCELLED.with(|cell| {
+            *cell.borrow_mut() = Some(cancelled);
+        });
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            run_in_fresh_interpreter(&captured, &body)
+        }));
+        finalize_task(
+            result,
+            &state_arc,
+            &result_arc,
+            &error_arc,
+            &completed_at_arc,
+        );
+    });
 
-            // Create cancellation flag and register task
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let task_id = RUNTIME.register_task(Arc::clone(&cancelled));
-
-            // Get Arcs for the task thread (lock → clone → drop)
-            let (state_arc, result_arc, error_arc, _cancelled_arc, completed_at_arc) =
-                RUNTIME.get_task_arcs(task_id).unwrap();
-
-            // Spawn thread
-            thread::spawn(move || {
-                // Install cancellation flag in thread-local
-                CURRENT_TASK_CANCELLED.with(|cell| {
-                    *cell.borrow_mut() = Some(cancelled);
-                });
-
-                // Create a fresh interpreter and inject captured bindings.
-                // Interpreter::new() gives us builtins + stdlib modules.
-                // inject_captured adds serializable values + re-injects native functions.
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    use crate::interpreter::Interpreter;
-
-                    let mut interp = Interpreter::new();
-                    inject_captured(&mut interp, &captured);
-                    interp.eval_block(&body_clone)
-                }));
-
-                // Process result and update task state
-                match result {
-                    Ok(Ok(value)) => {
-                        // Successful completion
-                        match SerializedValue::from_value(&value) {
-                            Ok(serialized) => {
-                                *result_arc.lock().unwrap() = Some(serialized);
-                            }
-                            Err(_) => {
-                                // Result not serializable — store Unit
-                                *result_arc.lock().unwrap() = Some(SerializedValue::Unit);
-                            }
-                        }
-                        *state_arc.lock().unwrap() = TaskState::Completed;
-                    }
-                    Ok(Err(e)) => {
-                        // Runtime error (including cancellation)
-                        *error_arc.lock().unwrap() = Some(format!("{}", e));
-                        *state_arc.lock().unwrap() = TaskState::Failed;
-                    }
-                    Err(panic_info) => {
-                        // Panic
-                        let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                            s.clone()
-                        } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else {
-                            "Task panicked".to_string()
-                        };
-                        *error_arc.lock().unwrap() = Some(msg);
-                        *state_arc.lock().unwrap() = TaskState::Panicked;
-                    }
-                }
-
-                // No sentinel injection needed: the sender Arc lives in the task's
-                // captured TxChannelHandle values. When this thread exits and `captured`
-                // is dropped, every TxChannelHandle's ChannelSender (Arc<Sender>) drops.
-                // If no other TxChannelHandle clones remain, the Arc refcount hits zero,
-                // the Sender drops, and recv() sees Disconnected → returns Unit naturally.
-                // This is exactly how Rust's own channels work.
-
-                // Record completion time for reaper
-                *completed_at_arc.lock().unwrap() = Some(Instant::now());
-
-                // Clear thread-local
-                CURRENT_TASK_CANCELLED.with(|cell| {
-                    *cell.borrow_mut() = None;
-                });
-            });
-
-            Ok(create_handle_value("Task", task_id))
-        }
-        _ => Err(IntentError::type_error(
-            "spawn() requires a function".to_string(),
-        )),
-    }
+    Ok(Value::TaskHandle(task_id))
 }
 
 fn concurrent_await_task(handle: &Value) -> Result<Value> {
@@ -1274,12 +1253,9 @@ fn concurrent_sleep_ms(ms: i64) -> Result<Value> {
 
 // --- after(delay, handler) ---
 
-/// `after(delay, handler)` — run handler after a delay. Returns a Task handle.
 fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
-    // Reap expired tasks (rule 12)
     RUNTIME.reap_expired_tasks();
 
-    // Parse delay
     let delay_duration = match delay {
         Value::Int(ms) => {
             if *ms <= 0 {
@@ -1298,120 +1274,53 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
         }
     };
 
-    // Validate: must be a Function with no parameters (rule 27)
-    match handler {
-        Value::Function {
-            params,
-            closure,
-            body,
-            ..
-        } => {
-            if !params.is_empty() {
-                return Err(IntentError::runtime_error(
-                    "after() handler must be a zero-parameter function. Got a function with parameters.".to_string(),
-                ));
-            }
+    let (captured, body) = validate_and_capture("after", handler)?;
 
-            let bindings = closure.borrow().all_bindings();
-            let captured = match capture_bindings(&bindings) {
-                Ok(c) => c,
-                Err(names) => {
-                    return Err(IntentError::runtime_error(format!(
-                        "Cannot capture user-defined function(s) across task boundaries: {}.                          Use closure capture for data, not function references.",
-                        names.join(", ")
-                    )));
-                }
-            };
-            let body_clone = body.clone();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let task_id = RUNTIME.register_task(Arc::clone(&cancelled));
+    let (state_arc, result_arc, error_arc, _cancelled_arc, completed_at_arc) =
+        RUNTIME.get_task_arcs(task_id).unwrap();
 
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let task_id = RUNTIME.register_task(Arc::clone(&cancelled));
-            let (state_arc, result_arc, error_arc, _cancelled_arc, completed_at_arc) =
-                RUNTIME.get_task_arcs(task_id).unwrap();
+    thread::spawn(move || {
+        CURRENT_TASK_CANCELLED.with(|cell| {
+            *cell.borrow_mut() = Some(Arc::clone(&cancelled));
+        });
 
-            let cancelled_for_thread = Arc::clone(&cancelled);
-
-            thread::spawn(move || {
-                // Install cancellation flag
-                CURRENT_TASK_CANCELLED.with(|cell| {
-                    *cell.borrow_mut() = Some(Arc::clone(&cancelled_for_thread));
-                });
-
-                // Cancellation-aware delay (50ms slices)
-                let deadline = Instant::now() + delay_duration;
-                loop {
-                    if cancelled_for_thread.load(AtomicOrdering::Acquire) {
-                        *error_arc.lock().unwrap() = Some("Task cancelled".to_string());
-                        *state_arc.lock().unwrap() = TaskState::Failed;
-                        *completed_at_arc.lock().unwrap() = Some(Instant::now());
-                        return;
-                    }
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        break;
-                    }
-                    thread::sleep(remaining.min(Duration::from_millis(50)));
-                }
-
-                // Execute handler with catch_unwind
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    use crate::interpreter::Interpreter;
-
-                    let mut interp = Interpreter::new();
-                    inject_captured(&mut interp, &captured);
-                    interp.eval_block(&body_clone)
-                }));
-
-                match result {
-                    Ok(Ok(value)) => {
-                        match SerializedValue::from_value(&value) {
-                            Ok(serialized) => {
-                                *result_arc.lock().unwrap() = Some(serialized);
-                            }
-                            Err(_) => {
-                                *result_arc.lock().unwrap() = Some(SerializedValue::Unit);
-                            }
-                        }
-                        *state_arc.lock().unwrap() = TaskState::Completed;
-                    }
-                    Ok(Err(e)) => {
-                        *error_arc.lock().unwrap() = Some(format!("{}", e));
-                        *state_arc.lock().unwrap() = TaskState::Failed;
-                    }
-                    Err(panic_info) => {
-                        let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                            s.clone()
-                        } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                            s.to_string()
-                        } else {
-                            "Task panicked".to_string()
-                        };
-                        *error_arc.lock().unwrap() = Some(msg);
-                        *state_arc.lock().unwrap() = TaskState::Panicked;
-                    }
-                }
-
+        // Cancellation-aware delay (50ms slices)
+        let deadline = Instant::now() + delay_duration;
+        loop {
+            if cancelled.load(AtomicOrdering::Acquire) {
+                *error_arc.lock().unwrap() = Some("Task cancelled".to_string());
+                *state_arc.lock().unwrap() = TaskState::Failed;
                 *completed_at_arc.lock().unwrap() = Some(Instant::now());
-
-                CURRENT_TASK_CANCELLED.with(|cell| {
-                    *cell.borrow_mut() = None;
-                });
-            });
-
-            Ok(create_handle_value("Task", task_id))
+                CURRENT_TASK_CANCELLED.with(|cell| *cell.borrow_mut() = None);
+                return;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            thread::sleep(remaining.min(Duration::from_millis(50)));
         }
-        _ => Err(IntentError::type_error(
-            "after() requires a function".to_string(),
-        )),
-    }
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            run_in_fresh_interpreter(&captured, &body)
+        }));
+        finalize_task(
+            result,
+            &state_arc,
+            &result_arc,
+            &error_arc,
+            &completed_at_arc,
+        );
+    });
+
+    Ok(Value::TaskHandle(task_id))
 }
 
 // --- schedule(interval, handler) ---
 
-/// `schedule(interval, handler)` — run handler repeatedly at the given interval.
-/// Returns a Schedule handle. Zero-duration intervals are rejected.
 fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
-    // Parse interval
     let interval_duration = match interval {
         Value::Int(ms) => {
             if *ms <= 0 {
@@ -1438,94 +1347,55 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
         }
     };
 
-    // Validate: must be a Function with no parameters (rule 27)
-    match handler {
-        Value::Function {
-            params,
-            closure,
-            body,
-            ..
-        } => {
-            if !params.is_empty() {
-                return Err(IntentError::runtime_error(
-                    "schedule() handler must be a zero-parameter function. Got a function with parameters.".to_string(),
-                ));
+    let (captured, body) = validate_and_capture("schedule", handler)?;
+    let (schedule_id, cancelled, tick_running) = RUNTIME.register_schedule();
+
+    thread::spawn(move || {
+        loop {
+            // Cancellation-aware sleep (50ms slices)
+            let deadline = Instant::now() + interval_duration;
+            loop {
+                if cancelled.load(AtomicOrdering::Acquire) {
+                    return;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                thread::sleep(remaining.min(Duration::from_millis(50)));
             }
 
-            let bindings = closure.borrow().all_bindings();
-            let captured = match capture_bindings(&bindings) {
-                Ok(c) => c,
-                Err(names) => {
-                    return Err(IntentError::runtime_error(format!(
-                        "Cannot capture user-defined function(s) across task boundaries: {}.                          Use closure capture for data, not function references.",
-                        names.join(", ")
-                    )));
-                }
-            };
-            let body_clone = body.clone();
+            if cancelled.load(AtomicOrdering::Acquire) {
+                return;
+            }
 
-            let (schedule_id, cancelled, tick_running) = RUNTIME.register_schedule();
+            // Overlap prevention: skip if previous tick still running
+            if tick_running
+                .compare_exchange(
+                    false,
+                    true,
+                    AtomicOrdering::Acquire,
+                    AtomicOrdering::Acquire,
+                )
+                .is_err()
+            {
+                continue;
+            }
+
+            let tick_captured = captured.clone();
+            let tick_body = body.clone();
+            let tick_running_clone = Arc::clone(&tick_running);
 
             thread::spawn(move || {
-                loop {
-                    // Cancellation-aware sleep (50ms slices) — rule 15
-                    let deadline = Instant::now() + interval_duration;
-                    loop {
-                        if cancelled.load(AtomicOrdering::Acquire) {
-                            return; // schedule cancelled
-                        }
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        if remaining.is_zero() {
-                            break;
-                        }
-                        thread::sleep(remaining.min(Duration::from_millis(50)));
-                    }
-
-                    // Check cancellation again after sleep
-                    if cancelled.load(AtomicOrdering::Acquire) {
-                        return;
-                    }
-
-                    // Overlap prevention (rule 17): skip if previous tick still running
-                    if tick_running
-                        .compare_exchange(
-                            false,
-                            true,
-                            AtomicOrdering::Acquire,
-                            AtomicOrdering::Acquire,
-                        )
-                        .is_err()
-                    {
-                        continue; // previous tick still running, skip this one
-                    }
-
-                    // Clone what the tick thread needs
-                    let tick_captured = captured.clone();
-                    let tick_body = body_clone.clone();
-                    let tick_running_clone = Arc::clone(&tick_running);
-
-                    // Spawn tick execution in a separate thread with catch_unwind (rule 17)
-                    thread::spawn(move || {
-                        let _result = catch_unwind(AssertUnwindSafe(|| {
-                            use crate::interpreter::Interpreter;
-
-                            let mut interp = Interpreter::new();
-                            inject_captured(&mut interp, &tick_captured);
-                            let _ = interp.eval_block(&tick_body);
-                        }));
-
-                        // Reset overlap flag — even on panic (catch_unwind ensures this runs)
-                        tick_running_clone.store(false, AtomicOrdering::Release);
-                    });
-                }
+                let _result = catch_unwind(AssertUnwindSafe(|| {
+                    let _ = run_in_fresh_interpreter(&tick_captured, &tick_body);
+                }));
+                tick_running_clone.store(false, AtomicOrdering::Release);
             });
-
-            Ok(create_handle_value("Schedule", schedule_id))
         }
-        _ => Err(IntentError::type_error(
-            "schedule() requires a function".to_string(),
-        )),
-    }
+    });
+
+    Ok(Value::ScheduleHandle(schedule_id))
 }
 
 fn concurrent_cancel_schedule(handle: &Value) -> Result<Value> {
@@ -2400,10 +2270,13 @@ mod tests {
         // Serializable values captured
         assert!(captured.values.contains_key("x"));
         assert!(!captured.values.contains_key("native_fn"));
-        // Native function recorded for re-lookup with arity
+        // Native function recorded with full identity for direct reconstruction
         assert!(captured
-            .native_fn_names
+            .native_fns
             .iter()
-            .any(|cap| cap.binding_name == "native_fn" && cap.fn_name == "test"));
+            .any(|cap| cap.binding_name == "native_fn"
+                && cap.fn_name == "test"
+                && cap.arity == 0
+                && cap.max_arity == 0));
     }
 }

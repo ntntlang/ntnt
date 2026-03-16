@@ -764,23 +764,6 @@ impl Interpreter {
         self.environment.borrow_mut().define(name, value);
     }
 
-    /// Search all loaded stdlib modules for a function by name.
-    /// Used by the concurrency runtime to re-inject NativeFunction bindings
-    /// into spawned task interpreters.
-    pub fn find_in_loaded_modules(&self, fn_name: &str) -> Option<Value> {
-        // Sort module names for deterministic search order
-        let mut module_names: Vec<&String> = self.loaded_modules.keys().collect();
-        module_names.sort();
-        for module_name in module_names {
-            if let Some(module) = self.loaded_modules.get(module_name.as_str()) {
-                if let Some(value) = module.get(fn_name) {
-                    return Some(value.clone());
-                }
-            }
-        }
-        None
-    }
-
     /// Look up a variable in the global environment (for builtins like len, print, str).
     pub fn get_global(&self, name: &str) -> Option<Value> {
         self.environment.borrow().get(name)

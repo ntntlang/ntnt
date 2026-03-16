@@ -3451,6 +3451,11 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 name: "Result".to_string(),
                 args: vec![Type::Int, Type::String],
             });
+            sig!("is_before", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool);
+            sig!("is_after", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool);
+            sig!("before", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool); // deprecated alias
+            sig!("after", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool);
+            // deprecated alias
         }
         "std/concurrent" => {
             // Channel operations
@@ -3461,11 +3466,11 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("recv_timeout", ["rx" => Type::Named("RxChannel".to_string()), "millis" => Type::Int], Type::Optional(Box::new(Type::Any)));
             sig!("try_recv", ["rx" => Type::Named("RxChannel".to_string())], Type::Optional(Box::new(Type::Any)));
             sig!("close", ["rx" => Type::Named("RxChannel".to_string())], Type::Bool);
-            sig!("select", ["channels" => Type::Array(Box::new(Type::Named("RxChannel".to_string()))), "timeout_ms" => Type::Int], Type::Named("Map".to_string()), variadic);
+            sig!("select", ["channels" => Type::Array(Box::new(Type::Named("RxChannel".to_string()))), "timeout_ms" => Type::Int], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, variadic);
             // Task operations
             sig!("spawn", ["handler" => Type::Any], Type::Named("Task".to_string()));
-            sig!("await_task", ["task" => Type::Named("Task".to_string())], Type::Any, variadic); // Returns Result<Any, String> at runtime
-            sig!("try_await", ["task" => Type::Named("Task".to_string())], Type::Named("Map".to_string()));
+            sig!("await_task", ["task" => Type::Named("Task".to_string())], Type::Any);
+            sig!("try_await", ["task" => Type::Named("Task".to_string())], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) });
             sig!("cancel_task", ["task" => Type::Named("Task".to_string())], Type::Bool);
             sig!("after", ["delay" => Type::Union(vec![Type::Int, Type::String]), "handler" => Type::Any], Type::Named("Task".to_string()));
             // Schedule operations
