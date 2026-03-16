@@ -93,6 +93,15 @@ pub enum Value {
         func: fn(&[Value]) -> Result<Value>,
     },
 
+    /// Task handle (from spawn/after)
+    TaskHandle(u64),
+
+    /// Channel handle (from channel())
+    ChannelHandle(u64),
+
+    /// Schedule handle (from schedule())
+    ScheduleHandle(u64),
+
     /// Return value (for control flow)
     Return(Box<Value>),
 
@@ -188,6 +197,9 @@ impl Value {
             Value::EnumConstructor { .. } => "EnumConstructor",
             Value::Function { .. } => "Function",
             Value::NativeFunction { .. } => "NativeFunction",
+            Value::TaskHandle(_) => "Task",
+            Value::ChannelHandle(_) => "Channel",
+            Value::ScheduleHandle(_) => "Schedule",
             Value::Return(_) => "Return",
             Value::Break => "Break",
             Value::Continue => "Continue",
@@ -280,6 +292,9 @@ impl fmt::Display for Value {
             }
             Value::Function { name, .. } => write!(f, "<fn {}>", name),
             Value::NativeFunction { name, .. } => write!(f, "<native fn {}>", name),
+            Value::TaskHandle(id) => write!(f, "Task({})", id),
+            Value::ChannelHandle(id) => write!(f, "Channel({})", id),
+            Value::ScheduleHandle(id) => write!(f, "Schedule({})", id),
             Value::Return(v) => write!(f, "{}", v),
             Value::Break => write!(f, "<break>"),
             Value::Continue => write!(f, "<continue>"),
@@ -7917,17 +7932,29 @@ impl Interpreter {
                         .zip(vals2.iter())
                         .all(|(x, y)| Self::values_equal(x, y))
             }
+            // Handle equality: same variant + same id
+            (Value::TaskHandle(a), Value::TaskHandle(b)) => a == b,
+            (Value::ChannelHandle(a), Value::ChannelHandle(b)) => a == b,
+            (Value::ScheduleHandle(a), Value::ScheduleHandle(b)) => a == b,
             _ => false, // Different types → not equal
         }
     }
 
     fn eval_binary_op(&self, op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value> {
-        // Handle EnumValue equality (None/Some/Ok/Err comparisons)
+        // Handle EnumValue and handle type equality
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
             let lhs_is_enum = matches!(&lhs, Value::EnumValue { .. });
             let rhs_is_enum = matches!(&rhs, Value::EnumValue { .. });
+            let lhs_is_handle = matches!(
+                &lhs,
+                Value::TaskHandle(_) | Value::ChannelHandle(_) | Value::ScheduleHandle(_)
+            );
+            let rhs_is_handle = matches!(
+                &rhs,
+                Value::TaskHandle(_) | Value::ChannelHandle(_) | Value::ScheduleHandle(_)
+            );
 
-            if lhs_is_enum || rhs_is_enum {
+            if lhs_is_enum || rhs_is_enum || lhs_is_handle || rhs_is_handle {
                 let equal = Self::values_equal(&lhs, &rhs);
                 return match op {
                     BinaryOp::Eq => Ok(Value::Bool(equal)),

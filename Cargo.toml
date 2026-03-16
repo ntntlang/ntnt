@@ -66,6 +66,9 @@ hyper-util = { version = "0.1", features = ["full"] }
 flume = "0.11"
 num_cpus = "1.16"
 
+# Crossbeam channels (multi-producer, multi-consumer, select support)
+crossbeam-channel = "0.5"
+
 # HTTP Server (tiny_http for synchronous test mode)
 tiny_http = "0.12"
 

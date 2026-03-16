@@ -18,11 +18,12 @@
 //!
 //! ## Tasks
 //!
-//! - `await_task()` removes from registry (the "I'm done with this handle" call).
-//! - `try_await()` does NOT remove — it's a peek that updates `last_checked_at`.
+//! - `await_task()` marks state as `Consumed` (the "I'm done with this handle" call).
+//! - `try_await()` peeks without consuming — updates `last_checked_at`. Never errors for
+//!   handles that existed; returns `{status: "consumed"}` or `{status: "expired"}` instead.
 //! - `cancel_task()` only sets the `AtomicBool` flag (cooperative cancellation via yield points).
 //! - All `eval_block` calls are wrapped in `catch_unwind(AssertUnwindSafe(...))`.
-//! - Tasks auto-expire from registry after 5 minutes in terminal state (the reaper runs on
+//! - Tasks auto-expire (marked `Expired`) after 5 minutes in terminal state (the reaper runs on
 //!   `spawn()` and `after()` entry), but only if not recently `try_await()`'d.
 //!
 //! ## Schedules
@@ -40,10 +41,11 @@
 
 use crate::error::IntentError;
 use crate::interpreter::Value;
+use crossbeam_channel::{self as crossbeam};
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{mpsc, Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -97,6 +99,10 @@ pub(crate) enum SerializedValue {
     String(String),
     Array(Vec<SerializedValue>),
     Map(HashMap<String, SerializedValue>),
+    /// Handle types — just the ID, reconstructed to the proper Value variant on deserialization.
+    TaskHandle(u64),
+    ChannelHandle(u64),
+    ScheduleHandle(u64),
 }
 
 impl SerializedValue {
@@ -149,6 +155,9 @@ impl SerializedValue {
                 serialized.insert("__values".to_string(), SerializedValue::Array(vals?));
                 Ok(SerializedValue::Map(serialized))
             }
+            Value::TaskHandle(id) => Ok(SerializedValue::TaskHandle(*id)),
+            Value::ChannelHandle(id) => Ok(SerializedValue::ChannelHandle(*id)),
+            Value::ScheduleHandle(id) => Ok(SerializedValue::ScheduleHandle(*id)),
             _ => Err(IntentError::type_error(
                 "Only serializable types (Int, Float, String, Bool, Array, Map, Struct, Enum) can be sent across task boundaries".to_string(),
             )),
@@ -199,6 +208,9 @@ impl SerializedValue {
                 }
                 Value::Map(result)
             }
+            SerializedValue::TaskHandle(id) => Value::TaskHandle(*id),
+            SerializedValue::ChannelHandle(id) => Value::ChannelHandle(*id),
+            SerializedValue::ScheduleHandle(id) => Value::ScheduleHandle(*id),
         }
     }
 }
@@ -213,13 +225,21 @@ enum TaskState {
     Completed,
     Failed,
     Panicked,
+    /// Result was consumed by await_task — handle is spent.
+    Consumed,
+    /// Reaper cleaned up the task after 5-minute TTL.
+    Expired,
 }
 
 impl TaskState {
     fn is_terminal(self) -> bool {
         matches!(
             self,
-            TaskState::Completed | TaskState::Failed | TaskState::Panicked
+            TaskState::Completed
+                | TaskState::Failed
+                | TaskState::Panicked
+                | TaskState::Consumed
+                | TaskState::Expired
         )
     }
 }
@@ -248,10 +268,11 @@ struct TaskEntry {
 // =============================================================================
 
 struct ChannelEntry {
-    sender: mpsc::Sender<SerializedValue>,
+    sender: crossbeam::Sender<SerializedValue>,
     /// Arc<Mutex<Receiver>> — single-consumer. The MutexGuard is held for the
     /// blocking duration of recv(). A second recv() caller blocks until the first finishes.
-    receiver: Arc<Mutex<mpsc::Receiver<SerializedValue>>>,
+    /// Note: crossbeam Receiver is Clone, but we keep Mutex for single-consumer semantics.
+    receiver: Arc<Mutex<crossbeam::Receiver<SerializedValue>>>,
 }
 
 // =============================================================================
@@ -307,10 +328,10 @@ impl ConcurrencyRuntime {
     /// Reap tasks that have been in terminal state for >5 min AND haven't been
     /// `try_await()`'d recently. Called on `spawn()` and `after()` entry.
     ///
-    /// Tasks removed by `await_task()` are already gone (rule 8), so the reaper
-    /// only catches fire-and-forget tasks.
+    /// Instead of removing from registry, marks state as `Expired` so that
+    /// `try_await()` can return `{status: "expired"}` instead of erroring.
     fn reap_expired_tasks(&self) {
-        let mut tasks = match self.tasks.lock() {
+        let tasks = match self.tasks.lock() {
             Ok(t) => t,
             Err(_) => return, // poisoned — skip
         };
@@ -318,36 +339,43 @@ impl ConcurrencyRuntime {
         let expiry = Duration::from_secs(300); // 5 minutes
         let recent_check_window = Duration::from_secs(300); // 5 minutes
 
-        tasks.retain(|_id, entry| {
+        for (_id, entry) in tasks.iter() {
             let state = match entry.state.lock() {
                 Ok(s) => *s,
-                Err(_) => return true, // poisoned — keep
+                Err(_) => continue, // poisoned — skip
             };
-            if !state.is_terminal() {
-                return true; // still running — keep
+            // Only expire tasks in Completed/Failed/Panicked (not Running, Consumed, or already Expired)
+            if !matches!(
+                state,
+                TaskState::Completed | TaskState::Failed | TaskState::Panicked
+            ) {
+                continue;
             }
             let completed_at = match entry.completed_at.lock() {
                 Ok(c) => *c,
-                Err(_) => return true,
+                Err(_) => continue,
             };
             let Some(completed) = completed_at else {
-                return true; // no completion time recorded — keep
+                continue; // no completion time recorded — skip
             };
             if now.duration_since(completed) < expiry {
-                return true; // not old enough — keep
+                continue; // not old enough — skip
             }
             // Check if recently try_await'd
             let last_checked = match entry.last_checked_at.lock() {
                 Ok(l) => *l,
-                Err(_) => return true,
+                Err(_) => continue,
             };
             if let Some(checked) = last_checked {
                 if now.duration_since(checked) < recent_check_window {
-                    return true; // recently checked — keep
+                    continue; // recently checked — skip
                 }
             }
-            false // expired and not recently checked — reap
-        });
+            // Mark as Expired instead of removing
+            if let Ok(mut s) = entry.state.lock() {
+                *s = TaskState::Expired;
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -356,7 +384,7 @@ impl ConcurrencyRuntime {
 
     fn create_channel(&self) -> u64 {
         let id = self.next_id();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crossbeam::unbounded();
         let entry = ChannelEntry {
             sender: tx,
             receiver: Arc::new(Mutex::new(rx)),
@@ -461,8 +489,8 @@ impl ConcurrencyRuntime {
             let slice = remaining.min(Duration::from_millis(100));
             match rx.recv_timeout(slice) {
                 Ok(serialized) => return Ok(Value::some(serialized.to_value())),
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(Value::none()),
+                Err(crossbeam::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam::RecvTimeoutError::Disconnected) => return Ok(Value::none()),
             }
         }
     }
@@ -493,8 +521,8 @@ impl ConcurrencyRuntime {
         };
         match rx.try_recv() {
             Ok(serialized) => Ok(Value::some(serialized.to_value())),
-            Err(mpsc::TryRecvError::Empty) => Ok(Value::none()),
-            Err(mpsc::TryRecvError::Disconnected) => Ok(Value::none()),
+            Err(crossbeam::TryRecvError::Empty) => Ok(Value::none()),
+            Err(crossbeam::TryRecvError::Disconnected) => Ok(Value::none()),
         }
     }
 
@@ -505,6 +533,16 @@ impl ConcurrencyRuntime {
             Err(_) => return false,
         };
         channels.remove(&channel_id).is_some()
+    }
+
+    /// Get a cloned crossbeam Receiver for use in select().
+    /// crossbeam Receivers are Clone, so this doesn't need the Mutex.
+    fn get_receiver_clone(&self, channel_id: u64) -> Option<crossbeam::Receiver<SerializedValue>> {
+        let channels = self.channels.lock().ok()?;
+        let entry = channels.get(&channel_id)?;
+        // Lock the receiver Mutex just to clone the underlying crossbeam Receiver
+        let rx = entry.receiver.lock().ok()?;
+        Some(rx.clone())
     }
 
     // -------------------------------------------------------------------------
@@ -551,7 +589,7 @@ impl ConcurrencyRuntime {
         ))
     }
 
-    /// `await_task(handle)` — blocks until task completes, then removes from registry.
+    /// `await_task(handle)` — blocks until task completes, then marks as Consumed.
     /// Returns `Result`: `Ok(value)` or `Err(message)`.
     fn await_task(&self, task_id: u64) -> Result<Value> {
         // Get Arcs (lock → clone → drop)
@@ -560,10 +598,28 @@ impl ConcurrencyRuntime {
                 Some(arcs) => arcs,
                 None => {
                     return Err(IntentError::runtime_error(
-                        "Invalid task handle (task already awaited or expired)".to_string(),
+                        "Invalid task handle".to_string(),
                     ))
                 }
             };
+
+        // Check for already-consumed or expired handles
+        {
+            let state = state_arc.lock().unwrap();
+            match *state {
+                TaskState::Consumed => {
+                    return Err(IntentError::runtime_error(
+                        "Task result already consumed by await_task".to_string(),
+                    ))
+                }
+                TaskState::Expired => {
+                    return Err(IntentError::runtime_error(
+                        "Task handle expired (cleaned up after 5 minutes)".to_string(),
+                    ))
+                }
+                _ => {}
+            }
+        }
 
         // Spin-wait for terminal state (10ms slices)
         loop {
@@ -595,18 +651,19 @@ impl ConcurrencyRuntime {
                 Value::err(Value::String(msg))
             }
             TaskState::Running => unreachable!(),
+            // These are caught above, but handle for exhaustiveness
+            TaskState::Consumed | TaskState::Expired => unreachable!(),
         };
 
-        // Remove from registry (rule 8: await_task removes)
-        if let Ok(mut tasks) = self.tasks.lock() {
-            tasks.remove(&task_id);
-        }
+        // Mark as Consumed instead of removing (preserves handle for try_await)
+        *state_arc.lock().unwrap() = TaskState::Consumed;
 
         Ok(result_value)
     }
 
     /// `try_await(handle)` — peek at task state without removing. Updates `last_checked_at`.
-    /// Returns a map: `{ "status": "running"|"completed"|"failed"|"panicked", "result": ... }`
+    /// Returns a map: `{ "status": "running"|"completed"|"failed"|"panicked"|"consumed"|"expired", "result": ... }`
+    /// NEVER returns an error for a handle that existed — returns status map instead.
     fn try_await(&self, task_id: u64) -> Result<Value> {
         // Get arcs
         let arcs = {
@@ -627,7 +684,7 @@ impl ConcurrencyRuntime {
                 ),
                 None => {
                     return Err(IntentError::runtime_error(
-                        "Invalid task handle (task already awaited or expired)".to_string(),
+                        "Invalid task handle".to_string(),
                     ))
                 }
             }
@@ -647,6 +704,8 @@ impl ConcurrencyRuntime {
             TaskState::Completed => "completed",
             TaskState::Failed => "failed",
             TaskState::Panicked => "panicked",
+            TaskState::Consumed => "consumed",
+            TaskState::Expired => "expired",
         };
         result_map.insert("status".to_string(), Value::String(status_str.to_string()));
 
@@ -661,7 +720,7 @@ impl ConcurrencyRuntime {
                 let msg = err.clone().unwrap_or_else(|| "Task error".to_string());
                 result_map.insert("result".to_string(), Value::err(Value::String(msg)));
             }
-            TaskState::Running => {
+            TaskState::Running | TaskState::Consumed | TaskState::Expired => {
                 result_map.insert("result".to_string(), Value::none());
             }
         }
@@ -756,36 +815,36 @@ pub static RUNTIME: LazyLock<ConcurrencyRuntime> = LazyLock::new(ConcurrencyRunt
 // =============================================================================
 
 fn create_handle_value(kind: &str, id: u64) -> Value {
-    let mut m = HashMap::new();
-    m.insert("_handle_id".to_string(), Value::Int(id as i64));
-    m.insert("type".to_string(), Value::String(kind.to_string()));
-    Value::Map(m)
+    match kind {
+        "Task" => Value::TaskHandle(id),
+        "Channel" => Value::ChannelHandle(id),
+        "Schedule" => Value::ScheduleHandle(id),
+        _ => unreachable!("Unknown handle kind: {}", kind),
+    }
 }
 
 fn get_handle_id(handle: &Value, expected_type: &str) -> Result<u64> {
-    match handle {
-        Value::Map(map) => {
-            let type_ok = match map.get("type") {
-                Some(Value::String(t)) => t == expected_type,
-                _ => false,
-            };
-            if !type_ok {
-                return Err(IntentError::type_error(format!(
-                    "Expected a {} handle",
-                    expected_type
-                )));
-            }
-            match map.get("_handle_id") {
-                Some(Value::Int(id)) => Ok(*id as u64),
-                _ => Err(IntentError::type_error(format!(
-                    "Invalid {} handle",
-                    expected_type
-                ))),
-            }
-        }
-        _ => Err(IntentError::type_error(format!(
-            "Expected a {} handle",
+    match (handle, expected_type) {
+        (Value::TaskHandle(id), "Task") => Ok(*id),
+        (Value::ChannelHandle(id), "Channel") => Ok(*id),
+        (Value::ScheduleHandle(id), "Schedule") => Ok(*id),
+        // Wrong handle type
+        (Value::TaskHandle(_), _) => Err(IntentError::type_error(format!(
+            "Expected a {} handle, got a Task handle",
             expected_type
+        ))),
+        (Value::ChannelHandle(_), _) => Err(IntentError::type_error(format!(
+            "Expected a {} handle, got a Channel handle",
+            expected_type
+        ))),
+        (Value::ScheduleHandle(_), _) => Err(IntentError::type_error(format!(
+            "Expected a {} handle, got a Schedule handle",
+            expected_type
+        ))),
+        _ => Err(IntentError::type_error(format!(
+            "Expected a {} handle, got {}",
+            expected_type,
+            handle.type_name()
         ))),
     }
 }
@@ -967,6 +1026,15 @@ fn concurrent_channel() -> Result<Value> {
 
 fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
     let id = get_handle_id(ch, "Channel")?;
+    // Handles cannot be sent through channels (they're process-local references)
+    if matches!(
+        value,
+        Value::TaskHandle(_) | Value::ChannelHandle(_) | Value::ScheduleHandle(_)
+    ) {
+        return Err(IntentError::type_error(
+            "Handles (Task, Channel, Schedule) cannot be sent through channels".to_string(),
+        ));
+    }
     let serialized = SerializedValue::from_value(value)?;
     Ok(Value::Bool(RUNTIME.send(id, serialized)))
 }
@@ -1400,6 +1468,160 @@ fn concurrent_cancel_schedule(handle: &Value) -> Result<Value> {
     Ok(Value::Bool(RUNTIME.cancel_schedule(id)))
 }
 
+// --- select(channels, timeout_ms?) ---
+
+/// `select(channels, timeout_ms?)` — wait for the first value from any of the given channels.
+/// Returns `{channel: <handle>, value: <received>}` on success,
+/// `{status: "timeout"}` on timeout, `{status: "closed"}` if all channels are closed.
+/// This is a cancellation yield point.
+fn concurrent_select(args: &[Value]) -> Result<Value> {
+    // Yield point: check cancellation
+    check_cancellation()?;
+
+    // Parse arguments: first is Array of ChannelHandles, second is optional timeout
+    if args.is_empty() {
+        return Err(IntentError::runtime_error(
+            "select() requires at least one argument: an array of channel handles".to_string(),
+        ));
+    }
+
+    let channels_arr = match &args[0] {
+        Value::Array(arr) => arr,
+        _ => {
+            return Err(IntentError::type_error(
+                "select() first argument must be an array of channel handles".to_string(),
+            ))
+        }
+    };
+
+    if channels_arr.is_empty() {
+        return Err(IntentError::runtime_error(
+            "select() requires at least one channel".to_string(),
+        ));
+    }
+
+    // Extract channel IDs and get receiver clones
+    let mut channel_ids = Vec::with_capacity(channels_arr.len());
+    let mut receivers = Vec::with_capacity(channels_arr.len());
+
+    for (i, ch_val) in channels_arr.iter().enumerate() {
+        let id = match ch_val {
+            Value::ChannelHandle(id) => *id,
+            _ => {
+                return Err(IntentError::type_error(format!(
+                    "select() channel at index {} is not a Channel handle, got {}",
+                    i,
+                    ch_val.type_name()
+                )))
+            }
+        };
+        match RUNTIME.get_receiver_clone(id) {
+            Some(rx) => {
+                channel_ids.push(id);
+                receivers.push(rx);
+            }
+            None => {
+                // Channel already closed/removed — skip it
+                // If all channels are closed, we'll detect that below
+            }
+        }
+    }
+
+    if receivers.is_empty() {
+        // All channels are closed
+        let mut result = HashMap::new();
+        result.insert(
+            "status".to_string(),
+            Value::String("closed".to_string()),
+        );
+        return Ok(Value::Map(result));
+    }
+
+    // Parse optional timeout
+    let timeout = if args.len() > 1 {
+        match &args[1] {
+            Value::Int(ms) => {
+                if *ms <= 0 {
+                    Some(Duration::from_millis(0))
+                } else {
+                    Some(Duration::from_millis(*ms as u64))
+                }
+            }
+            Value::String(s) => Some(parse_interval(s)?),
+            _ => {
+                return Err(IntentError::type_error(
+                    "select() timeout must be an Int (milliseconds) or a String interval"
+                        .to_string(),
+                ))
+            }
+        }
+    } else {
+        None // No timeout — block indefinitely
+    };
+
+    // Use crossbeam Select to wait on multiple receivers
+    let mut sel = crossbeam::Select::new();
+    for rx in &receivers {
+        sel.recv(rx);
+    }
+
+    // Wait with optional timeout, using 100ms slices for cancellation checks
+    let deadline = timeout.map(|t| Instant::now() + t);
+
+    loop {
+        check_cancellation()?;
+
+        let remaining = match deadline {
+            Some(dl) => {
+                let rem = dl.saturating_duration_since(Instant::now());
+                if rem.is_zero() {
+                    // Timeout expired
+                    let mut result = HashMap::new();
+                    result.insert(
+                        "status".to_string(),
+                        Value::String("timeout".to_string()),
+                    );
+                    return Ok(Value::Map(result));
+                }
+                rem.min(Duration::from_millis(100))
+            }
+            None => Duration::from_millis(100), // Check cancellation every 100ms
+        };
+
+        match sel.ready_timeout(remaining) {
+            Ok(index) => {
+                // A receiver is ready — try to receive from it
+                match receivers[index].try_recv() {
+                    Ok(serialized) => {
+                        let mut result = HashMap::new();
+                        result.insert(
+                            "channel".to_string(),
+                            Value::ChannelHandle(channel_ids[index]),
+                        );
+                        result.insert("value".to_string(), serialized.to_value());
+                        return Ok(Value::Map(result));
+                    }
+                    Err(crossbeam::TryRecvError::Empty) => {
+                        // Spurious wakeup — retry
+                        continue;
+                    }
+                    Err(crossbeam::TryRecvError::Disconnected) => {
+                        // This channel is closed — remove and retry with remaining
+                        // We can't modify sel, so just skip and let select retry
+                        // If all channels disconnect, select will keep timing out
+                        // and we'll eventually hit the timeout or cancellation check
+                        continue;
+                    }
+                }
+            }
+            Err(crossbeam::ReadyTimeoutError) => {
+                // Timeout on this slice — loop back to check cancellation/deadline
+                continue;
+            }
+        }
+    }
+}
+
 // --- thread_count ---
 
 fn concurrent_thread_count() -> Result<Value> {
@@ -1538,6 +1760,31 @@ pub fn init() -> HashMap<String, Value> {
             arity: 1,
             max_arity: 1,
             func: |args| concurrent_close(&args[0]),
+        },
+    );
+
+    // @ntnt select
+    // @module std/concurrent
+    // @signature select(channels: Array<Channel>, timeout_ms?: Int | String) -> Map
+    // Waits for the first available value from any of the given channels.
+    // Returns a map with "channel" (the handle that fired) and "value" (the received value).
+    // On timeout: returns {"status": "timeout"}.
+    // If all channels are closed: returns {"status": "closed"}.
+    // This is a cancellation yield point.
+    // @param channels Array of Channel handles to wait on
+    // @param timeout_ms Optional timeout in milliseconds (Int) or as a string interval
+    // @returns Map with channel/value on success, or status on timeout/closed
+    // @see_also channel, recv, recv_timeout
+    // @since v0.5.0
+    // @example select([ch_a, ch_b]) ~ "Wait for first value from either channel"
+    // @example select([ch_a, ch_b], 5000) ~ "Wait up to 5 seconds"
+    module.insert(
+        "select".to_string(),
+        Value::NativeFunction {
+            name: "select".to_string(),
+            arity: 1,
+            max_arity: 2,
+            func: concurrent_select,
         },
     );
 
@@ -1749,6 +1996,7 @@ mod tests {
         assert!(module.contains_key("try_recv"));
         assert!(module.contains_key("recv_timeout"));
         assert!(module.contains_key("close"));
+        assert!(module.contains_key("select"));
         assert!(module.contains_key("sleep_ms"));
         assert!(module.contains_key("thread_count"));
         // New functions
@@ -1764,13 +2012,7 @@ mod tests {
     #[test]
     fn test_channel_creation() {
         let ch = concurrent_channel().unwrap();
-        assert!(matches!(ch, Value::Map(_)));
-        if let Value::Map(map) = &ch {
-            match map.get("type") {
-                Some(Value::String(s)) if s == "Channel" => {}
-                other => panic!("Expected type=Channel, got {:?}", other),
-            }
-        }
+        assert!(matches!(ch, Value::ChannelHandle(_)));
     }
 
     #[test]

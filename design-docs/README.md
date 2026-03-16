@@ -17,7 +17,8 @@ This folder contains planning and design documents for NTNT features.
 | [INTENT_DRIVEN_DEVELOPMENT.md](INTENT_DRIVEN_DEVELOPMENT.md) | ✅ Complete | IDD philosophy and workflow |
 | [INTENT_ASSERTION_LANGUAGE.md](INTENT_ASSERTION_LANGUAGE.md) | ✅ Complete | IAL spec v1.0.0 |
 | [ial_vision_v2.md](ial_vision_v2.md) | 📋 Planning | Future IAL capabilities |
-| [background_jobs.md](background_jobs.md) | 📋 Planning | Async job system design |
+| [dd-037-concurrency-and-jobs.md](dd-037-concurrency-and-jobs.md) | 🔶 In Progress | Concurrency primitives + job system (master roadmap) |
+| [background_jobs.md](background_jobs.md) | 📦 Archived | Original job system design (superseded by DD-037) |
 | [http_updates.md](http_updates.md) | 📋 Planning | HTTP library improvements |
 | [template_engine_updates.md](template_engine_updates.md) | 📋 Planning | Template engine enhancements |
 

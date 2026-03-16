@@ -287,7 +287,7 @@ print(msg)
 await_task(task)
 "#,
     );
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "stderr: {}", _stderr);
     assert!(
         stdout.trim().contains("from task"),
         "Should get 'from task', got: {}",
@@ -670,6 +670,259 @@ print("threads: " + str(count))
     assert!(
         stdout.contains("threads: "),
         "Should print thread count, got: {}",
+        stdout
+    );
+}
+
+// =============================================================================
+// Phase 1 hardening tests: try_await consumed/expired, handle types, select
+// =============================================================================
+
+// --- try_await returns "consumed" after await_task ---
+
+#[test]
+fn test_try_await_consumed_after_await() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task, try_await, sleep_ms } from "std/concurrent"
+
+let task = spawn(fn() { 42 })
+let result = await_task(task)
+sleep_ms(50)
+let status = try_await(task)
+print("status: " + status["status"])
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", _stderr);
+    assert!(
+        stdout.trim().contains("status: consumed"),
+        "try_await after await_task should return consumed, got: {}",
+        stdout
+    );
+}
+
+// --- try_await returns proper status for running/completed/failed ---
+
+#[test]
+fn test_try_await_running_status() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, try_await, sleep_ms } from "std/concurrent"
+
+let task = spawn(fn() {
+    sleep_ms(500)
+    42
+})
+let status = try_await(task)
+print("status: " + status["status"])
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", _stderr);
+    assert!(
+        stdout.trim().contains("status: running"),
+        "try_await on running task should return running, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_try_await_completed_status() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, try_await, sleep_ms } from "std/concurrent"
+
+let task = spawn(fn() { 42 })
+sleep_ms(200)
+let status = try_await(task)
+print("status: " + status["status"])
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", _stderr);
+    assert!(
+        stdout.trim().contains("status: completed"),
+        "try_await on completed task should return completed, got: {}",
+        stdout
+    );
+}
+
+// --- Handle types: spawn returns Task handle, channel returns Channel, schedule returns Schedule ---
+
+#[test]
+fn test_handle_type_task() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+
+let task = spawn(fn() { 42 })
+print("type: " + typeof(task))
+let result = await_task(task)
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", _stderr);
+    assert!(
+        stdout.trim().contains("type: Task"),
+        "spawn should return Task handle, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_handle_type_channel() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { channel, close } from "std/concurrent"
+
+let ch = channel()
+print("type: " + typeof(ch))
+close(ch)
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", _stderr);
+    assert!(
+        stdout.trim().contains("type: Channel"),
+        "channel() should return Channel handle, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_handle_type_schedule() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { schedule, cancel_schedule } from "std/concurrent"
+
+let sched = schedule(60000, fn() { print("tick") })
+print("type: " + typeof(sched))
+cancel_schedule(sched)
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", _stderr);
+    assert!(
+        stdout.trim().contains("type: Schedule"),
+        "schedule() should return Schedule handle, got: {}",
+        stdout
+    );
+}
+
+// --- Handle type safety: wrong handle type gives type error ---
+
+#[test]
+fn test_wrong_handle_type_await_on_channel() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { channel, await_task } from "std/concurrent"
+
+let ch = channel()
+await_task(ch)
+"#,
+    );
+    assert_ne!(code, 0, "Should fail with type error, stdout: {}", stdout);
+    assert!(
+        stderr.contains("Expected a Task handle") || stderr.contains("Task handle"),
+        "Should mention Task handle in error, got stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_wrong_handle_type_send_on_task() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, send, await_task } from "std/concurrent"
+
+let task = spawn(fn() { 42 })
+send(task, "hello")
+await_task(task)
+"#,
+    );
+    assert_ne!(code, 0, "Should fail with type error, stdout: {}", stdout);
+    assert!(
+        stderr.contains("Expected a Channel handle") || stderr.contains("Channel handle"),
+        "Should mention Channel handle in error, got stderr: {}",
+        stderr
+    );
+}
+
+// --- select: two channels, send on one, verify correct channel and value ---
+
+#[test]
+fn test_select_two_channels() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { channel, send, select } from "std/concurrent"
+
+let ch_a = channel()
+let ch_b = channel()
+
+// Send on ch_b directly
+send(ch_b, "from_b")
+
+let result = select([ch_a, ch_b], 5000)
+print("value: " + result["value"])
+
+// Verify we got the value from ch_b
+if result["channel"] == ch_b {
+    print("correct_channel")
+}
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", _stderr);
+    assert!(
+        stdout.contains("value: from_b"),
+        "select should receive value from ch_b, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("correct_channel"),
+        "select should identify the correct channel, got: {}",
+        stdout
+    );
+}
+
+// --- select with timeout: no data sent ---
+
+#[test]
+fn test_select_timeout() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { channel, select } from "std/concurrent"
+
+let ch_a = channel()
+let ch_b = channel()
+
+let result = select([ch_a, ch_b], 200)
+print("status: " + result["status"])
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", _stderr);
+    assert!(
+        stdout.trim().contains("status: timeout"),
+        "select with no data should timeout, got: {}",
+        stdout
+    );
+}
+
+// --- select with closed channels ---
+
+#[test]
+fn test_select_all_closed() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { channel, close, select } from "std/concurrent"
+
+let ch_a = channel()
+let ch_b = channel()
+close(ch_a)
+close(ch_b)
+
+let result = select([ch_a, ch_b], 200)
+print("status: " + result["status"])
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", _stderr);
+    assert!(
+        stdout.trim().contains("status: closed"),
+        "select with all closed channels should return closed, got: {}",
         stdout
     );
 }
