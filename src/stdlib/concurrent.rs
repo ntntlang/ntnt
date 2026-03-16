@@ -331,27 +331,54 @@ impl ConcurrencyRuntime {
     /// Instead of removing from registry, marks state as `Expired` so that
     /// `try_await()` can return `{status: "expired"}` instead of erroring.
     fn reap_expired_tasks(&self) {
-        let tasks = match self.tasks.lock() {
-            Ok(t) => t,
-            Err(_) => return, // poisoned — skip
-        };
         let now = Instant::now();
         let expiry = Duration::from_secs(300); // 5 minutes
         let recent_check_window = Duration::from_secs(300); // 5 minutes
 
-        for (_id, entry) in tasks.iter() {
-            let state = match entry.state.lock() {
+        // Step 1: Acquire registry lock → clone Arcs → drop lock
+        #[allow(clippy::type_complexity)]
+        let task_arcs: Vec<(
+            u64,
+            Arc<Mutex<TaskState>>,
+            Arc<Mutex<Option<Instant>>>,
+            Arc<Mutex<Option<Instant>>>,
+        )> = {
+            let tasks = match self.tasks.lock() {
+                Ok(t) => t,
+                Err(_) => return, // poisoned — skip
+            };
+            tasks
+                .iter()
+                .map(|(id, entry)| {
+                    (
+                        *id,
+                        Arc::clone(&entry.state),
+                        Arc::clone(&entry.completed_at),
+                        Arc::clone(&entry.last_checked_at),
+                    )
+                })
+                .collect()
+        };
+        // Registry lock is dropped here
+
+        // Step 2: Inspect per-task state outside registry lock
+        let mut ids_to_expire: Vec<u64> = Vec::new();
+        for (id, state_arc, completed_at_arc, last_checked_at_arc) in &task_arcs {
+            let state = match state_arc.lock() {
                 Ok(s) => *s,
                 Err(_) => continue, // poisoned — skip
             };
-            // Only expire tasks in Completed/Failed/Panicked (not Running, Consumed, or already Expired)
+            // Only expire tasks in terminal states (not Running or already Expired)
             if !matches!(
                 state,
-                TaskState::Completed | TaskState::Failed | TaskState::Panicked
+                TaskState::Completed
+                    | TaskState::Failed
+                    | TaskState::Panicked
+                    | TaskState::Consumed
             ) {
                 continue;
             }
-            let completed_at = match entry.completed_at.lock() {
+            let completed_at = match completed_at_arc.lock() {
                 Ok(c) => *c,
                 Err(_) => continue,
             };
@@ -362,7 +389,7 @@ impl ConcurrencyRuntime {
                 continue; // not old enough — skip
             }
             // Check if recently try_await'd
-            let last_checked = match entry.last_checked_at.lock() {
+            let last_checked = match last_checked_at_arc.lock() {
                 Ok(l) => *l,
                 Err(_) => continue,
             };
@@ -371,9 +398,15 @@ impl ConcurrencyRuntime {
                     continue; // recently checked — skip
                 }
             }
-            // Mark as Expired instead of removing
-            if let Ok(mut s) = entry.state.lock() {
-                *s = TaskState::Expired;
+            ids_to_expire.push(*id);
+        }
+
+        // Step 3: Mark expired tasks (using already-cloned state Arcs — no registry lock needed)
+        for (id, state_arc, _, _) in &task_arcs {
+            if ids_to_expire.contains(id) {
+                if let Ok(mut s) = state_arc.lock() {
+                    *s = TaskState::Expired;
+                }
             }
         }
     }
@@ -986,18 +1019,38 @@ fn inject_captured(interp: &mut crate::interpreter::Interpreter, captured: &Capt
     // Re-inject native functions
     for cap in &captured.native_fn_names {
         // First: search loaded modules for this function name
-        if let Some(value) = interp.find_in_loaded_modules(&cap.fn_name) {
-            // Verify arity matches to disambiguate (e.g., postgres::connect vs sqlite::connect)
-            if let Value::NativeFunction {
-                arity, max_arity, ..
-            } = &value
-            {
-                if *arity == cap.arity && *max_arity == cap.max_arity {
-                    interp.define_global(cap.binding_name.clone(), value);
-                    continue;
+        let all_matches = interp.find_all_in_loaded_modules(&cap.fn_name);
+
+        // Filter to matches with same arity
+        let arity_matches: Vec<_> = all_matches
+            .iter()
+            .filter(|(_, value)| {
+                if let Value::NativeFunction {
+                    arity, max_arity, ..
+                } = value
+                {
+                    *arity == cap.arity && *max_arity == cap.max_arity
+                } else {
+                    false
                 }
-            }
+            })
+            .collect();
+
+        if arity_matches.len() > 1 {
+            let module_names: Vec<&str> = arity_matches.iter().map(|(m, _)| m.as_str()).collect();
+            eprintln!(
+                "[ERROR] Ambiguous native function capture: '{}' found in multiple modules ({}). Import the specific function to disambiguate.",
+                cap.fn_name,
+                module_names.join(", ")
+            );
+            continue;
         }
+
+        if let Some((_, value)) = arity_matches.into_iter().next() {
+            interp.define_global(cap.binding_name.clone(), value.clone());
+            continue;
+        }
+
         // Fallback: check if it's a builtin already in the global environment
         // (builtins like len, print, str are defined by Interpreter::new())
         if let Some(value) = interp.get_global(&cap.fn_name) {
@@ -1556,17 +1609,21 @@ fn concurrent_select(args: &[Value]) -> Result<Value> {
         None // No timeout — block indefinitely
     };
 
-    // Use crossbeam Select to wait on multiple receivers
-    let mut sel = crossbeam::Select::new();
-    for rx in &receivers {
-        sel.recv(rx);
-    }
+    // Track which channels are still alive (not disconnected)
+    let mut alive = vec![true; receivers.len()];
 
     // Wait with optional timeout, using 100ms slices for cancellation checks
     let deadline = timeout.map(|t| Instant::now() + t);
 
     loop {
         check_cancellation()?;
+
+        // Check if all channels are dead
+        if alive.iter().all(|a| !a) {
+            let mut result = HashMap::new();
+            result.insert("status".to_string(), Value::String("closed".to_string()));
+            return Ok(Value::Map(result));
+        }
 
         let remaining = match deadline {
             Some(dl) => {
@@ -1582,15 +1639,27 @@ fn concurrent_select(args: &[Value]) -> Result<Value> {
             None => Duration::from_millis(100), // Check cancellation every 100ms
         };
 
+        // Rebuild Select each iteration, skipping dead channels
+        // Maps select index back to original receiver index
+        let mut sel = crossbeam::Select::new();
+        let mut sel_to_orig: Vec<usize> = Vec::new();
+        for (i, rx) in receivers.iter().enumerate() {
+            if alive[i] {
+                sel.recv(rx);
+                sel_to_orig.push(i);
+            }
+        }
+
         match sel.ready_timeout(remaining) {
-            Ok(index) => {
+            Ok(sel_index) => {
+                let orig_index = sel_to_orig[sel_index];
                 // A receiver is ready — try to receive from it
-                match receivers[index].try_recv() {
+                match receivers[orig_index].try_recv() {
                     Ok(serialized) => {
                         let mut result = HashMap::new();
                         result.insert(
                             "channel".to_string(),
-                            Value::ChannelHandle(channel_ids[index]),
+                            Value::ChannelHandle(channel_ids[orig_index]),
                         );
                         result.insert("value".to_string(), serialized.to_value());
                         return Ok(Value::Map(result));
@@ -1600,10 +1669,8 @@ fn concurrent_select(args: &[Value]) -> Result<Value> {
                         continue;
                     }
                     Err(crossbeam::TryRecvError::Disconnected) => {
-                        // This channel is closed — remove and retry with remaining
-                        // We can't modify sel, so just skip and let select retry
-                        // If all channels disconnect, select will keep timing out
-                        // and we'll eventually hit the timeout or cancellation check
+                        // Mark this channel as dead so we skip it in future iterations
+                        alive[orig_index] = false;
                         continue;
                     }
                 }
@@ -1807,8 +1874,8 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt await_task
     // @module std/concurrent
     // @signature await_task(task: Task) -> Result<Any, String>
-    // Blocks until the task completes and returns its result. Removes the task from
-    // the registry (this is the "I'm done" call — the handle becomes invalid after).
+    // Blocks until the task completes and returns its result. Marks the task as
+    // consumed (the handle remains valid for try_await, which returns {status: "consumed"}).
     // Returns Ok(value) on success, Err(message) on failure or panic.
     // @param task The task handle from spawn() or after()
     // @returns Result containing the task's return value or error message

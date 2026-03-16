@@ -1568,7 +1568,8 @@ let task = spawn(fn() {
     42
 })
 
-// await_task blocks and returns Result, then removes the task handle
+// await_task blocks and returns Result, then marks the task as consumed
+// The handle remains valid for try_await, which returns {status: "consumed"}
 let result = await_task(task)  // Ok(42) or Err("message")
 match result {
     Ok(val) => print("got: " + str(val)),

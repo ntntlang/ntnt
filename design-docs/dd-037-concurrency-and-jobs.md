@@ -70,6 +70,16 @@ Each spawned task gets a **fresh interpreter instance** with captured bindings i
 - Zero shared mutable state (architecturally impossible)
 - Panic isolation (catch_unwind per task)
 
+**Value serialization for cross-thread use:**
+
+| Type | Serializable | Notes |
+|------|-------------|-------|
+| Int, Float, Bool, String | ✅ | Primitive values |
+| Array, Map | ✅ | Recursively serialized |
+| Struct, Enum | ✅ | Field values serialized |
+| TaskHandle, ChannelHandle, ScheduleHandle | ✅ (capture) | Capturable at spawn time; cannot be sent through channels |
+| Function (closure) | ❌ | Contains `Rc<RefCell>` — not thread-safe |
+
 ### Why KV Instead of Raw PostgreSQL/Redis
 
 ntnt already has `std/kv` — a key-value module that works with Redis, SQLite, and Redis-compatible stores:

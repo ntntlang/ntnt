@@ -3453,22 +3453,23 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             });
         }
         "std/concurrent" => {
-            // Channel operations — handles are Map-typed
-            sig!("channel", [], Type::Any);
-            sig!("send", ["ch" => Type::Any, "value" => Type::Any], Type::Bool);
-            sig!("recv", ["ch" => Type::Any], Type::Any);
-            sig!("recv_timeout", ["ch" => Type::Any, "millis" => Type::Int], Type::Optional(Box::new(Type::Any)));
-            sig!("try_recv", ["ch" => Type::Any], Type::Optional(Box::new(Type::Any)));
-            sig!("close", ["ch" => Type::Any], Type::Bool);
-            // Task operations — spawn/after return Task handles, await returns Result
-            sig!("spawn", ["handler" => Type::Any], Type::Any);
-            sig!("await_task", ["task" => Type::Any], Type::Any); // Result<Any, String>
-            sig!("try_await", ["task" => Type::Any], Type::Optional(Box::new(Type::Any)));
-            sig!("cancel_task", ["task" => Type::Any], Type::Bool);
-            sig!("after", ["delay" => Type::Int, "handler" => Type::Any], Type::Any);
+            // Channel operations
+            sig!("channel", [], Type::Named("Channel".to_string()));
+            sig!("send", ["ch" => Type::Named("Channel".to_string()), "value" => Type::Any], Type::Bool);
+            sig!("recv", ["ch" => Type::Named("Channel".to_string())], Type::Any);
+            sig!("recv_timeout", ["ch" => Type::Named("Channel".to_string()), "millis" => Type::Int], Type::Optional(Box::new(Type::Any)));
+            sig!("try_recv", ["ch" => Type::Named("Channel".to_string())], Type::Optional(Box::new(Type::Any)));
+            sig!("close", ["ch" => Type::Named("Channel".to_string())], Type::Bool);
+            sig!("select", ["channels" => Type::Array(Box::new(Type::Named("Channel".to_string())))], Type::Named("Map".to_string()));
+            // Task operations
+            sig!("spawn", ["handler" => Type::Any], Type::Named("Task".to_string()));
+            sig!("await_task", ["task" => Type::Named("Task".to_string())], Type::Any); // Result<Any, String>
+            sig!("try_await", ["task" => Type::Named("Task".to_string())], Type::Named("Map".to_string()));
+            sig!("cancel_task", ["task" => Type::Named("Task".to_string())], Type::Bool);
+            sig!("after", ["delay" => Type::Int, "handler" => Type::Any], Type::Named("Task".to_string()));
             // Schedule operations
-            sig!("schedule", ["interval" => Type::String, "handler" => Type::Any], Type::Any);
-            sig!("cancel_schedule", ["schedule" => Type::Any], Type::Bool);
+            sig!("schedule", ["interval" => Type::String, "handler" => Type::Any], Type::Named("Schedule".to_string()));
+            sig!("cancel_schedule", ["schedule" => Type::Named("Schedule".to_string())], Type::Bool);
             // Utilities
             sig!("sleep_ms", ["ms" => Type::Int], Type::Unit);
             sig!("thread_count", [], Type::Int);
