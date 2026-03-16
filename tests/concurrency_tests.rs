@@ -76,9 +76,9 @@ fn test_channel_send_recv() {
         r#"
 import { channel, send, recv } from "std/concurrent"
 
-let ch = channel()
-send(ch, "hello")
-let msg = recv(ch)
+let [tx, rx] = channel()
+send(tx, "hello")
+let msg = recv(rx)
 print(msg)
 "#,
     );
@@ -96,8 +96,8 @@ fn test_channel_try_recv_empty() {
         r#"
 import { channel, try_recv } from "std/concurrent"
 
-let ch = channel()
-let result = try_recv(ch)
+let [tx, rx] = channel()
+let result = try_recv(rx)
 match result {
     None => print("empty"),
     Some(v) => print("got: " + str(v))
@@ -118,19 +118,16 @@ fn test_channel_close_returns_unit_on_recv() {
         r#"
 import { channel, send, recv, close } from "std/concurrent"
 
-let ch = channel()
-send(ch, "first")
-close(ch)
-// After close, recv on a closed-and-empty channel returns Unit.
-// But we buffered "first" before close — the sender was already cloned.
-// Actually after close (remove from map), new recv() won't find the channel,
-// so it returns Unit. The buffered message may be lost since we dropped the sender.
-let msg = recv(ch)
+let [tx, rx] = channel()
+send(tx, "first")
+close(rx)
+// After close(rx), the receiver is removed from the registry.
+// recv(rx) no longer finds it and returns Unit immediately.
+let msg = recv(rx)
 print("result: " + str(msg))
 "#,
     );
     assert_eq!(code, 0);
-    // After close(), the channel is removed from the map, so recv() returns Unit
     assert!(
         stdout.contains("result:"),
         "Should print result, got: {}",
@@ -144,9 +141,11 @@ fn test_channel_send_on_closed_returns_false() {
         r#"
 import { channel, send, close } from "std/concurrent"
 
-let ch = channel()
-close(ch)
-let result = send(ch, "test")
+let [tx, rx] = channel()
+close(rx)
+// After the receiver is closed (dropped from registry), the crossbeam Receiver
+// is gone — send() returns false (SendError::Disconnected).
+let result = send(tx, "test")
 print(result)
 "#,
     );
@@ -164,8 +163,8 @@ fn test_channel_recv_timeout() {
         r#"
 import { channel, recv_timeout } from "std/concurrent"
 
-let ch = channel()
-let result = recv_timeout(ch, 100)
+let [tx, rx] = channel()
+let result = recv_timeout(rx, 100)
 match result {
     None => print("timeout"),
     Some(v) => print("got: " + str(v))
@@ -186,9 +185,9 @@ fn test_channel_recv_timeout_with_value() {
         r#"
 import { channel, send, recv_timeout } from "std/concurrent"
 
-let ch = channel()
-send(ch, 42)
-let result = recv_timeout(ch, 1000)
+let [tx, rx] = channel()
+send(tx, 42)
+let result = recv_timeout(rx, 1000)
 match result {
     None => print("timeout"),
     Some(v) => print("got: " + str(v))
@@ -278,19 +277,18 @@ match result {
 fn test_spawn_with_channel() {
     let (stdout, _stderr, code) = run_ntnt_code(
         r#"
-import { spawn, await_task, channel, send, recv_timeout } from "std/concurrent"
+import { spawn, await_task, channel, send, recv } from "std/concurrent"
 
-let ch = channel()
+let [tx, rx] = channel()
 let task = spawn(fn() {
-    send(ch, "from task")
+    send(tx, "from task")
+    // When this task exits, tx drops. If no other tx clones exist,
+    // the sender drops and rx.recv() would return Unit — but we already
+    // sent the message, so recv() returns it first.
 })
-// Use recv_timeout instead of blocking recv() — if the task fails to send for
-// any reason (panic, race), recv() would block forever and orphan this process.
-let msg = recv_timeout(ch, 5000)
-match msg {
-    Some(v) => print(v),
-    None => print("ERROR: timed out waiting for task to send")
-}
+// Plain recv() is safe now: if task panics before send, tx Arc drops → Disconnected → Unit
+let msg = recv(rx)
+print(msg)
 await_task(task)
 "#,
     );
@@ -485,9 +483,9 @@ fn test_schedule_runs_multiple_ticks() {
         r#"
 import { schedule, cancel_schedule, sleep_ms, channel, send, recv_timeout } from "std/concurrent"
 
-let ch = channel()
+let [tx, rx] = channel()
 let sched = schedule(100, fn() {
-    send(ch, "tick")
+    send(tx, "tick")
 })
 
 sleep_ms(350)
@@ -496,7 +494,7 @@ cancel_schedule(sched)
 let mut ticks = 0
 
 fn drain() {
-    let result = recv_timeout(ch, 50)
+    let result = recv_timeout(rx, 50)
     match result {
         Some(v) => {
             ticks = ticks + 1
@@ -779,15 +777,21 @@ fn test_handle_type_channel() {
         r#"
 import { channel, close } from "std/concurrent"
 
-let ch = channel()
-print("type: " + typeof(ch))
-close(ch)
+let [tx, rx] = channel()
+print("tx: " + typeof(tx))
+print("rx: " + typeof(rx))
+close(rx)
 "#,
     );
     assert_eq!(code, 0, "stderr: {}", _stderr);
     assert!(
-        stdout.trim().contains("type: Channel"),
-        "channel() should return Channel handle, got: {}",
+        stdout.contains("tx: TxChannel"),
+        "channel() tx should be TxChannel, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("rx: RxChannel"),
+        "channel() rx should be RxChannel, got: {}",
         stdout
     );
 }
@@ -844,8 +848,8 @@ await_task(task)
     );
     assert_ne!(code, 0, "Should fail with type error, stdout: {}", stdout);
     assert!(
-        stderr.contains("Expected a Channel handle") || stderr.contains("Channel handle"),
-        "Should mention Channel handle in error, got stderr: {}",
+        stderr.contains("TxChannel") || stderr.contains("Channel"),
+        "Should mention TxChannel in error, got stderr: {}",
         stderr
     );
 }
@@ -858,17 +862,15 @@ fn test_select_two_channels() {
         r#"
 import { channel, send, select } from "std/concurrent"
 
-let ch_a = channel()
-let ch_b = channel()
+let [tx_a, rx_a] = channel()
+let [tx_b, rx_b] = channel()
 
-// Send on ch_b directly
-send(ch_b, "from_b")
+send(tx_b, "from_b")
 
-let result = select([ch_a, ch_b], 5000)
+let result = select([rx_a, rx_b], 5000)
 print("value: " + result["value"])
 
-// Verify we got the value from ch_b
-if result["channel"] == ch_b {
+if result["channel"] == rx_b {
     print("correct_channel")
 }
 "#,
@@ -894,10 +896,10 @@ fn test_select_timeout() {
         r#"
 import { channel, select } from "std/concurrent"
 
-let ch_a = channel()
-let ch_b = channel()
+let [tx_a, rx_a] = channel()
+let [tx_b, rx_b] = channel()
 
-let result = select([ch_a, ch_b], 200)
+let result = select([rx_a, rx_b], 200)
 print("status: " + result["status"])
 "#,
     );
@@ -917,12 +919,12 @@ fn test_select_all_closed() {
         r#"
 import { channel, close, select } from "std/concurrent"
 
-let ch_a = channel()
-let ch_b = channel()
-close(ch_a)
-close(ch_b)
+let [tx_a, rx_a] = channel()
+let [tx_b, rx_b] = channel()
+close(rx_a)
+close(rx_b)
 
-let result = select([ch_a, ch_b], 200)
+let result = select([rx_a, rx_b], 200)
 print("status: " + result["status"])
 "#,
     );

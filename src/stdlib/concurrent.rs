@@ -99,9 +99,13 @@ pub(crate) enum SerializedValue {
     String(String),
     Array(Vec<SerializedValue>),
     Map(HashMap<String, SerializedValue>),
-    /// Handle types — just the ID, reconstructed to the proper Value variant on deserialization.
+    /// Task handle — just the ID.
     TaskHandle(u64),
-    ChannelHandle(u64),
+    /// Sender handle — carries the Arc<Sender> so it disconnects naturally on drop.
+    TxChannelHandle(u64, Arc<crossbeam::Sender<SerializedValue>>),
+    /// Receiver handle — just the ID; receiver lives in the registry.
+    RxChannelHandle(u64),
+    /// Schedule handle — just the ID.
     ScheduleHandle(u64),
 }
 
@@ -156,7 +160,19 @@ impl SerializedValue {
                 Ok(SerializedValue::Map(serialized))
             }
             Value::TaskHandle(id) => Ok(SerializedValue::TaskHandle(*id)),
-            Value::ChannelHandle(id) => Ok(SerializedValue::ChannelHandle(*id)),
+            Value::TxChannelHandle(id, cs) => {
+                // Downcast the opaque Arc<dyn Any> back to Arc<Sender<SerializedValue>>.
+                // This clone keeps the sender alive in the spawned task.
+                let sender_arc = Arc::clone(&cs.0)
+                    .downcast::<crossbeam::Sender<SerializedValue>>()
+                    .map_err(|_| {
+                        IntentError::runtime_error(
+                            "Internal: TxChannelHandle contains unexpected sender type".to_string(),
+                        )
+                    })?;
+                Ok(SerializedValue::TxChannelHandle(*id, sender_arc))
+            }
+            Value::RxChannelHandle(id) => Ok(SerializedValue::RxChannelHandle(*id)),
             Value::ScheduleHandle(id) => Ok(SerializedValue::ScheduleHandle(*id)),
             _ => Err(IntentError::type_error(
                 "Only serializable types (Int, Float, String, Bool, Array, Map, Struct, Enum) can be sent across task boundaries".to_string(),
@@ -209,7 +225,13 @@ impl SerializedValue {
                 Value::Map(result)
             }
             SerializedValue::TaskHandle(id) => Value::TaskHandle(*id),
-            SerializedValue::ChannelHandle(id) => Value::ChannelHandle(*id),
+            SerializedValue::TxChannelHandle(id, sender_arc) => Value::TxChannelHandle(
+                *id,
+                crate::interpreter::ChannelSender(
+                    Arc::clone(sender_arc) as Arc<dyn std::any::Any + Send + Sync>
+                ),
+            ),
+            SerializedValue::RxChannelHandle(id) => Value::RxChannelHandle(*id),
             SerializedValue::ScheduleHandle(id) => Value::ScheduleHandle(*id),
         }
     }
@@ -268,10 +290,10 @@ struct TaskEntry {
 // =============================================================================
 
 struct ChannelEntry {
-    sender: crossbeam::Sender<SerializedValue>,
-    /// Arc<Mutex<Receiver>> — single-consumer. The MutexGuard is held for the
-    /// blocking duration of recv(). A second recv() caller blocks until the first finishes.
-    /// Note: crossbeam Receiver is Clone, but we keep Mutex for single-consumer semantics.
+    /// The receiver end. The sender lives entirely in TxChannelHandle values — when all
+    /// TxChannelHandle clones for this channel are dropped, the Arc<Sender> refcount hits
+    /// zero, the Sender drops, and recv() sees Disconnected → returns Unit automatically.
+    /// No sentinel injection required.
     receiver: Arc<Mutex<crossbeam::Receiver<SerializedValue>>>,
 }
 
@@ -415,34 +437,27 @@ impl ConcurrencyRuntime {
     // Channels
     // -------------------------------------------------------------------------
 
-    fn create_channel(&self) -> u64 {
+    /// Create a new channel. Returns (tx_value, rx_value) — the sender and receiver handles.
+    /// The sender Arc lives entirely in TxChannelHandle; the registry holds only the receiver.
+    fn create_channel(&self) -> (Value, Value) {
         let id = self.next_id();
-        let (tx, rx) = crossbeam::unbounded();
+        let (tx, rx) = crossbeam::unbounded::<SerializedValue>();
         let entry = ChannelEntry {
-            sender: tx,
             receiver: Arc::new(Mutex::new(rx)),
         };
-        // Lock, insert, drop
         if let Ok(mut channels) = self.channels.lock() {
             channels.insert(id, entry);
         }
-        id
-    }
-
-    fn send(&self, channel_id: u64, value: SerializedValue) -> bool {
-        // Lock → clone sender → drop lock → send
-        let sender = {
-            let channels = match self.channels.lock() {
-                Ok(c) => c,
-                Err(_) => return false,
-            };
-            match channels.get(&channel_id) {
-                Some(entry) => entry.sender.clone(),
-                None => return false, // channel removed (closed)
-            }
-        };
-        // Sender cloned, lock dropped — safe to send
-        sender.send(value).is_ok()
+        // Wrap sender in Arc<dyn Any + Send + Sync> for the opaque ChannelSender in Value.
+        let sender_arc: Arc<crossbeam::Sender<SerializedValue>> = Arc::new(tx);
+        let tx_val = Value::TxChannelHandle(
+            id,
+            crate::interpreter::ChannelSender(
+                sender_arc as Arc<dyn std::any::Any + Send + Sync>
+            ),
+        );
+        let rx_val = Value::RxChannelHandle(id);
+        (tx_val, rx_val)
     }
 
     fn recv(&self, channel_id: u64) -> Result<Value> {
@@ -850,8 +865,9 @@ pub static RUNTIME: LazyLock<ConcurrencyRuntime> = LazyLock::new(ConcurrencyRunt
 fn create_handle_value(kind: &str, id: u64) -> Value {
     match kind {
         "Task" => Value::TaskHandle(id),
-        "Channel" => Value::ChannelHandle(id),
         "Schedule" => Value::ScheduleHandle(id),
+        // Channel handles are created via RUNTIME.create_channel() which returns (tx, rx) pair.
+        // TxChannelHandle requires a live sender Arc — can't be manufactured from id alone.
         _ => unreachable!("Unknown handle kind: {}", kind),
     }
 }
@@ -859,15 +875,20 @@ fn create_handle_value(kind: &str, id: u64) -> Value {
 fn get_handle_id(handle: &Value, expected_type: &str) -> Result<u64> {
     match (handle, expected_type) {
         (Value::TaskHandle(id), "Task") => Ok(*id),
-        (Value::ChannelHandle(id), "Channel") => Ok(*id),
+        (Value::TxChannelHandle(id, _), "TxChannel") => Ok(*id),
+        (Value::RxChannelHandle(id), "RxChannel") => Ok(*id),
         (Value::ScheduleHandle(id), "Schedule") => Ok(*id),
-        // Wrong handle type
+        // Wrong handle type — helpful error messages
         (Value::TaskHandle(_), _) => Err(IntentError::type_error(format!(
             "Expected a {} handle, got a Task handle",
             expected_type
         ))),
-        (Value::ChannelHandle(_), _) => Err(IntentError::type_error(format!(
-            "Expected a {} handle, got a Channel handle",
+        (Value::TxChannelHandle(_, _), _) => Err(IntentError::type_error(format!(
+            "Expected a {} handle, got a TxChannel handle",
+            expected_type
+        ))),
+        (Value::RxChannelHandle(_), _) => Err(IntentError::type_error(format!(
+            "Expected a {} handle, got a RxChannel handle",
             expected_type
         ))),
         (Value::ScheduleHandle(_), _) => Err(IntentError::type_error(format!(
@@ -1031,42 +1052,68 @@ fn inject_captured(interp: &mut crate::interpreter::Interpreter, captured: &Capt
 // --- Channels ---
 
 fn concurrent_channel() -> Result<Value> {
-    let id = RUNTIME.create_channel();
-    Ok(create_handle_value("Channel", id))
+    let (tx, rx) = RUNTIME.create_channel();
+    // Return [tx, rx] array — callers destructure: let [tx, rx] = channel()
+    Ok(Value::Array(vec![tx, rx]))
 }
 
 fn concurrent_send(ch: &Value, value: &Value) -> Result<Value> {
-    let id = get_handle_id(ch, "Channel")?;
+    // Only TxChannelHandle has the sender capability
+    let sender_arc = match ch {
+        Value::TxChannelHandle(_, cs) => cs
+            .0
+            .downcast_ref::<crossbeam::Sender<SerializedValue>>()
+            .ok_or_else(|| {
+                IntentError::runtime_error(
+                    "Internal: TxChannelHandle contains unexpected sender type".to_string(),
+                )
+            })?,
+        Value::RxChannelHandle(_) => {
+            return Err(IntentError::type_error(
+                "send() requires a TxChannel handle (the first element of channel()). Got RxChannel — you may have passed the wrong end of the channel.".to_string(),
+            ))
+        }
+        other => {
+            return Err(IntentError::type_error(format!(
+                "send() requires a TxChannel handle, got {}",
+                other.type_name()
+            )))
+        }
+    };
     // Handles cannot be sent through channels (they're process-local references)
     if matches!(
         value,
-        Value::TaskHandle(_) | Value::ChannelHandle(_) | Value::ScheduleHandle(_)
+        Value::TaskHandle(_)
+            | Value::TxChannelHandle(_, _)
+            | Value::RxChannelHandle(_)
+            | Value::ScheduleHandle(_)
     ) {
         return Err(IntentError::type_error(
-            "Handles (Task, Channel, Schedule) cannot be sent through channels".to_string(),
+            "Handles (Task, TxChannel, RxChannel, Schedule) cannot be sent through channels"
+                .to_string(),
         ));
     }
     let serialized = SerializedValue::from_value(value)?;
-    Ok(Value::Bool(RUNTIME.send(id, serialized)))
+    Ok(Value::Bool(sender_arc.send(serialized).is_ok()))
 }
 
 fn concurrent_recv(ch: &Value) -> Result<Value> {
-    let id = get_handle_id(ch, "Channel")?;
+    let id = get_handle_id(ch, "RxChannel")?;
     RUNTIME.recv(id)
 }
 
 fn concurrent_recv_timeout(ch: &Value, timeout_ms: i64) -> Result<Value> {
-    let id = get_handle_id(ch, "Channel")?;
+    let id = get_handle_id(ch, "RxChannel")?;
     RUNTIME.recv_timeout(id, timeout_ms)
 }
 
 fn concurrent_try_recv(ch: &Value) -> Result<Value> {
-    let id = get_handle_id(ch, "Channel")?;
+    let id = get_handle_id(ch, "RxChannel")?;
     RUNTIME.try_recv(id)
 }
 
 fn concurrent_close(ch: &Value) -> Result<Value> {
-    let id = get_handle_id(ch, "Channel")?;
+    let id = get_handle_id(ch, "RxChannel")?;
     Ok(Value::Bool(RUNTIME.close_channel(id)))
 }
 
@@ -1166,25 +1213,12 @@ fn concurrent_spawn(handler: &Value) -> Result<Value> {
                     }
                 }
 
-                // Channel death signal: if the task failed or panicked, send a Unit
-                // sentinel into every channel it captured. Without this, a blocking
-                // recv() on a channel that the task was supposed to send to will hang
-                // forever — the global registry holds the only sender, so recv() never
-                // sees a Disconnected signal when the task exits abnormally.
-                //
-                // Unit is the existing "channel closed" return value for recv(), so
-                // callers already know to treat Unit as a disconnect indicator.
-                // Callers should also check await_task() to distinguish clean channel
-                // close from task failure.
-                let task_succeeded =
-                    matches!(*state_arc.lock().unwrap(), TaskState::Completed);
-                if !task_succeeded {
-                    for val in captured.values.values() {
-                        if let SerializedValue::ChannelHandle(id) = val {
-                            RUNTIME.send(*id, SerializedValue::Unit);
-                        }
-                    }
-                }
+                // No sentinel injection needed: the sender Arc lives in the task's
+                // captured TxChannelHandle values. When this thread exits and `captured`
+                // is dropped, every TxChannelHandle's ChannelSender (Arc<Sender>) drops.
+                // If no other TxChannelHandle clones remain, the Arc refcount hits zero,
+                // the Sender drops, and recv() sees Disconnected → returns Unit naturally.
+                // This is exactly how Rust's own channels work.
 
                 // Record completion time for reaper
                 *completed_at_arc.lock().unwrap() = Some(Instant::now());
@@ -1537,10 +1571,16 @@ fn concurrent_select(args: &[Value]) -> Result<Value> {
 
     for (i, ch_val) in channels_arr.iter().enumerate() {
         let id = match ch_val {
-            Value::ChannelHandle(id) => *id,
+            Value::RxChannelHandle(id) => *id,
+            Value::TxChannelHandle(_, _) => {
+                return Err(IntentError::type_error(format!(
+                    "select() channel at index {} is a TxChannel (sender). Pass RxChannel handles (the second element of channel()) to select().",
+                    i
+                )))
+            }
             _ => {
                 return Err(IntentError::type_error(format!(
-                    "select() channel at index {} is not a Channel handle, got {}",
+                    "select() channel at index {} is not an RxChannel handle, got {}",
                     i,
                     ch_val.type_name()
                 )))
@@ -1637,7 +1677,7 @@ fn concurrent_select(args: &[Value]) -> Result<Value> {
                         let mut result = HashMap::new();
                         result.insert(
                             "channel".to_string(),
-                            Value::ChannelHandle(channel_ids[orig_index]),
+                            Value::RxChannelHandle(channel_ids[orig_index]),
                         );
                         result.insert("value".to_string(), serialized.to_value());
                         return Ok(Value::Map(result));
@@ -1681,13 +1721,28 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt channel
     // @module std/concurrent
     // @module_description Structured concurrency: tasks, channels, schedules, and cooperative cancellation
-    // @signature channel() -> Channel
-    // Creates a new unbounded channel for inter-task communication.
+    // @signature channel() -> [TxChannel, RxChannel]
+    // Creates a new unbounded channel and returns a [sender, receiver] pair.
+    //
+    // The sender (TxChannel) and receiver (RxChannel) are separate handles —
+    // exactly like Rust's own channels. Pass the TxChannel to whoever should
+    // send; keep (or pass) the RxChannel to whoever should recv.
+    //
+    // Ownership semantics: when ALL TxChannel clones for a channel are dropped
+    // (e.g. a spawned task exits before or after calling send()), the receiver
+    // automatically sees Disconnected and recv() returns Unit. No sentinel
+    // injection required — this is structural, not approximate.
+    //
     // Channels are single-consumer: only one task should call recv() at a time.
-    // @returns Channel handle
-    // @see_also send, recv, close
-    // @since v0.2.0
-    // @example channel() ~ "Create a channel for inter-task communication"
+    // @returns Array containing [TxChannel, RxChannel]
+    // @see_also send, recv, close, select
+    // @since v0.4.5
+    // @example let [tx, rx] = channel() ~ "Create a channel for inter-task communication"
+    // @example ~ "Pass tx to a spawned task; recv on rx disconnects naturally if task fails"
+    //   let [tx, rx] = channel()
+    //   let task = spawn(fn() { send(tx, "hello") })
+    //   let msg = recv(rx)
+    // @expected "hello"
     module.insert(
         "channel".to_string(),
         Value::NativeFunction {
@@ -1700,14 +1755,15 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt send
     // @module std/concurrent
-    // @signature send(ch: Channel, value: Any) -> Bool
-    // Sends a value through a channel. Returns false if the channel has been closed.
+    // @signature send(tx: TxChannel, value: Any) -> Bool
+    // Sends a value through a channel using the sender handle (first element of channel()).
+    // Returns false if the receiver has been closed (crossbeam Disconnected).
     // Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum.
-    // @param ch The channel handle
+    // @param tx The TxChannel sender handle (first element of channel())
     // @param value The value to send (must be serializable)
-    // @see_also channel, recv
+    // @see_also channel, recv, recv_timeout
     // @since v0.2.0
-    // @example send(ch, "hello") => true ~ "Send a string through the channel"
+    // @example send(tx, "hello") => true ~ "Send a string through the channel"
     module.insert(
         "send".to_string(),
         Value::NativeFunction {
@@ -2051,23 +2107,35 @@ mod tests {
 
     #[test]
     fn test_channel_creation() {
-        let ch = concurrent_channel().unwrap();
-        assert!(matches!(ch, Value::ChannelHandle(_)));
+        let pair = concurrent_channel().unwrap();
+        // channel() returns [tx, rx]
+        assert!(matches!(pair, Value::Array(_)));
+        if let Value::Array(ref v) = pair {
+            assert_eq!(v.len(), 2);
+            assert!(matches!(v[0], Value::TxChannelHandle(_, _)));
+            assert!(matches!(v[1], Value::RxChannelHandle(_)));
+        }
     }
 
     #[test]
     fn test_channel_send_recv() {
-        let ch = concurrent_channel().unwrap();
-        let sent = concurrent_send(&ch, &Value::String("hello".to_string())).unwrap();
+        let pair = concurrent_channel().unwrap();
+        let (tx, rx) = if let Value::Array(ref v) = pair {
+            (v[0].clone(), v[1].clone())
+        } else {
+            panic!("Expected array from channel()");
+        };
+        let sent = concurrent_send(&tx, &Value::String("hello".to_string())).unwrap();
         assert!(matches!(sent, Value::Bool(true)));
-        let received = concurrent_recv(&ch).unwrap();
+        let received = concurrent_recv(&rx).unwrap();
         assert!(matches!(received, Value::String(s) if s == "hello"));
     }
 
     #[test]
     fn test_try_recv_empty() {
-        let ch = concurrent_channel().unwrap();
-        let result = concurrent_try_recv(&ch).unwrap();
+        let pair = concurrent_channel().unwrap();
+        let rx = if let Value::Array(ref v) = pair { v[1].clone() } else { panic!() };
+        let result = concurrent_try_recv(&rx).unwrap();
         match result {
             Value::EnumValue { variant, .. } => assert_eq!(variant, "None"),
             _ => panic!("Expected Option::None"),
@@ -2076,25 +2144,30 @@ mod tests {
 
     #[test]
     fn test_channel_close_removes_from_registry() {
-        let ch = concurrent_channel().unwrap();
-        let id = get_handle_id(&ch, "Channel").unwrap();
+        let pair = concurrent_channel().unwrap();
+        let (tx, rx) = if let Value::Array(ref v) = pair {
+            (v[0].clone(), v[1].clone())
+        } else {
+            panic!("Expected array from channel()");
+        };
+        let id = get_handle_id(&rx, "RxChannel").unwrap();
 
         // Channel should exist
         assert!(RUNTIME.channels.lock().unwrap().contains_key(&id));
 
-        // Close removes it
-        let closed = concurrent_close(&ch).unwrap();
+        // Close removes receiver from registry
+        let closed = concurrent_close(&rx).unwrap();
         assert!(matches!(closed, Value::Bool(true)));
 
-        // Channel should be gone
+        // Channel should be gone from registry
         assert!(!RUNTIME.channels.lock().unwrap().contains_key(&id));
 
-        // Send on closed channel returns false
-        let sent = concurrent_send(&ch, &Value::Int(42)).unwrap();
+        // Send on closed channel returns false (crossbeam Disconnected)
+        let sent = concurrent_send(&tx, &Value::Int(42)).unwrap();
         assert!(matches!(sent, Value::Bool(false)));
 
-        // Close again returns false
-        let closed2 = concurrent_close(&ch).unwrap();
+        // Close again returns false (not in registry)
+        let closed2 = concurrent_close(&rx).unwrap();
         assert!(matches!(closed2, Value::Bool(false)));
     }
 
@@ -2184,9 +2257,10 @@ mod tests {
 
     #[test]
     fn test_recv_timeout_negative_clamped() {
-        let ch = concurrent_channel().unwrap();
+        let pair = concurrent_channel().unwrap();
+        let rx = if let Value::Array(ref v) = pair { v[1].clone() } else { panic!() };
         // Negative timeout should be clamped to 0 and return None immediately
-        let result = concurrent_recv_timeout(&ch, -100).unwrap();
+        let result = concurrent_recv_timeout(&rx, -100).unwrap();
         match result {
             Value::EnumValue { variant, .. } => assert_eq!(variant, "None"),
             _ => panic!("Expected None for negative timeout"),

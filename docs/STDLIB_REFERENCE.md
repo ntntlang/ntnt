@@ -3109,13 +3109,13 @@ import { channel, send, recv } from "std/concurrent"
 | [`await_task`](#awaittask) | Blocks until the task completes and returns its result. Marks the task as consumed (the handle remains valid for try_await, which returns {status: "consumed"}). Returns Ok(value) on success, Err(message) on failure or panic. |
 | [`cancel_schedule`](#cancelschedule) | Cancels a scheduled task. Sets the cancellation flag and removes from registry. Returns true if the schedule existed, false otherwise. |
 | [`cancel_task`](#canceltask) | Requests cooperative cancellation of a task. Sets the cancellation flag; the task thread will exit at the next yield point (recv, recv_timeout, sleep_ms, or fetch). Does NOT force immediate termination. Returns true if the task existed, false otherwise. |
-| [`channel`](#channel) | Creates a new unbounded channel for inter-task communication. Channels are single-consumer: only one task should call recv() at a time. |
+| [`channel`](#channel) | Creates a new unbounded channel and returns a [sender, receiver] pair. |
 | [`close`](#close) | Closes a channel by removing it from the registry. The sender is dropped; any blocking recv() returns Unit once all buffered values are consumed. Returns true if the channel existed, false otherwise. |
 | [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if the channel is closed and empty (sender dropped). This is a cancellation yield point: a cancelled task will exit here. Single-consumer: the receiver lock is held for the blocking duration. |
 | [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or channel disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point. |
 | [`schedule`](#schedule) | Runs a zero-parameter handler repeatedly at the given interval. Returns a Schedule handle. Interval can be milliseconds (Int) or a string ("5s", "1m"). Zero intervals are rejected. Each tick spawns a thread with catch_unwind; overlap prevention ensures a new tick won't start until the previous one finishes. Panics in tick execution are caught and logged — they don't kill the schedule. |
 | [`select`](#select) | Waits for the first available value from any of the given channels. Returns a map with "channel" (the handle that fired) and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed: returns {"status": "closed"}. This is a cancellation yield point. |
-| [`send`](#send) | Sends a value through a channel. Returns false if the channel has been closed. Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum. |
+| [`send`](#send) | Sends a value through a channel using the sender handle (first element of channel()). Returns false if the receiver has been closed (crossbeam Disconnected). Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum. |
 | [`sleep_ms`](#sleepms) | Pauses execution for specified milliseconds. This is a cancellation yield point: a cancelled task will exit during sleep_ms(). Uses 50ms slices internally. Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks. |
 | [`spawn`](#spawn) | Spawns a zero-parameter function as a background task. Returns a Task handle. The handler's closure environment is serialized for cross-thread use. Serializable capture types: Int, Float, Bool, String, Array, Map, Struct, Enum. The handler must have zero parameters (including no defaults). |
 | [`thread_count`](#threadcount) | Returns the number of available CPU threads. Useful for sizing parallel work. |
@@ -3230,22 +3230,33 @@ cancel_task(task)  // => true  // Cancel a running task
 #### `channel`
 
 ```ntnt
-channel() -> Channel
+channel() -> [TxChannel, RxChannel]
 ```
 
-Creates a new unbounded channel for inter-task communication. Channels are single-consumer: only one task should call recv() at a time.
+Creates a new unbounded channel and returns a [sender, receiver] pair.
 
-**Returns:** Channel handle
+The sender (TxChannel) and receiver (RxChannel) are separate handles — exactly like Rust's own channels. Pass the TxChannel to whoever should send; keep (or pass) the RxChannel to whoever should recv.
+
+Ownership semantics: when ALL TxChannel clones for a channel are dropped (e.g. a spawned task exits before or after calling send()), the receiver automatically sees Disconnected and recv() returns Unit. No sentinel injection required — this is structural, not approximate.
+
+Channels are single-consumer: only one task should call recv() at a time.
+
+**Returns:** Array containing [TxChannel, RxChannel]
 
 **Examples:**
 
 ```ntnt
-channel()  // Create a channel for inter-task communication
+let [tx, rx] = channel()  // Create a channel for inter-task communication
+// Pass tx to a spawned task; recv on rx disconnects naturally if task fails
+let [tx, rx] = channel()
+let task = spawn(fn() { send(tx, "hello") })
+let msg = recv(rx)
+// => "hello"
 ```
 
-**See also:** `send`, `recv`, `close`
+**See also:** `send`, `recv`, `close`, `select`
 
-*Since v0.2.0*
+*Since v0.4.5*
 
 ---
 
@@ -3380,23 +3391,23 @@ select([ch_a, ch_b], 5000)  // Wait up to 5 seconds
 #### `send`
 
 ```ntnt
-send(ch: Channel, value: Any) -> Bool
+send(tx: TxChannel, value: Any) -> Bool
 ```
 
-Sends a value through a channel. Returns false if the channel has been closed. Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum.
+Sends a value through a channel using the sender handle (first element of channel()). Returns false if the receiver has been closed (crossbeam Disconnected). Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum.
 
 **Parameters:**
 
-- `ch` — The channel handle
+- `tx` — The TxChannel sender handle (first element of channel())
 - `value` — The value to send (must be serializable)
 
 **Examples:**
 
 ```ntnt
-send(ch, "hello")  // => true  // Send a string through the channel
+send(tx, "hello")  // => true  // Send a string through the channel
 ```
 
-**See also:** `channel`, `recv`
+**See also:** `channel`, `recv`, `recv_timeout`
 
 *Since v0.2.0*
 
