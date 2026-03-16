@@ -557,9 +557,13 @@ impl ConcurrencyRuntime {
     }
 
     fn close_channel(&self, channel_id: u64) -> bool {
-        // close() = remove receiver from map. Once the Arc<Mutex<Receiver>> refcount hits 0,
-        // the crossbeam Receiver drops → future send(tx, ...) returns Err(Disconnected) → false.
-        // recv(rx) on a removed channel_id immediately returns Unit (id not found in registry).
+        // close() = remove receiver from map. recv(rx) on a removed channel_id immediately
+        // returns Unit (id not found in registry).
+        //
+        // Note: if an in-flight recv/recv_timeout/select already cloned the receiver Arc,
+        // the crossbeam Receiver stays alive until those clones drop. send(tx) may still
+        // succeed for those in-flight operations. Once all clones are dropped, the Receiver
+        // drops and send() returns false (Disconnected). This is eventual, not immediate.
         let mut channels = match self.channels.lock() {
             Ok(c) => c,
             Err(_) => return false,
@@ -1077,11 +1081,20 @@ fn finalize_task(
     completed_at_arc: &Arc<Mutex<Option<Instant>>>,
 ) {
     match result {
-        Ok(Ok(value)) => {
-            *result_arc.lock().unwrap() =
-                Some(SerializedValue::from_value(&value).unwrap_or(SerializedValue::Unit));
-            *state_arc.lock().unwrap() = TaskState::Completed;
-        }
+        Ok(Ok(value)) => match SerializedValue::from_value(&value) {
+            Ok(serialized) => {
+                *result_arc.lock().unwrap() = Some(serialized);
+                *state_arc.lock().unwrap() = TaskState::Completed;
+            }
+            Err(_) => {
+                *error_arc.lock().unwrap() = Some(format!(
+                    "Task returned a non-serializable value ({}). \
+                     Only Int, Float, Bool, String, Array, Map, Struct, Enum can cross task boundaries.",
+                    value.type_name()
+                ));
+                *state_arc.lock().unwrap() = TaskState::Failed;
+            }
+        },
         Ok(Err(e)) => {
             *error_arc.lock().unwrap() = Some(format!("{}", e));
             *state_arc.lock().unwrap() = TaskState::Failed;
