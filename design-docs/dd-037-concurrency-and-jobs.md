@@ -28,7 +28,7 @@
 ntnt needs two things:
 
 1. **Concurrency primitives** — spawn tasks, communicate between them, schedule recurring work. The Go-inspired CSP model, but with ntnt's simplicity.
-2. **Background job system** — persistent, reliable, production-grade job queuing with declarative syntax. The Sidekiq/Oban of the ntnt world, but multi-backend and language-native.
+2. **Background job system** — persistent, reliable, production-grade job queuing with declarative syntax. The Sidekiq/Oban of the ntnt world, but backend-agnostic and language-native.
 
 These are layered: primitives first (they're useful alone), jobs built on top.
 
@@ -37,7 +37,7 @@ These are layered: primitives first (they're useful alone), jobs built on top.
 - **CSP by architecture** — `Rc<RefCell>` forces serialization at task boundaries. Two tasks literally cannot share memory. Go says "don't share memory"; ntnt physically can't.
 - **No async/await** — synchronous model, no function coloring. `spawn` + channels achieve the same results.
 - **Declarative jobs** — `Job SendEmail on emails { perform(id) { ... } }` reads like documentation
-- **Multi-backend** — Memory (dev), PostgreSQL (production), Redis (high-throughput)
+- **Two backends** — Memory (dev/simple) and KV (production) via `std/kv`. KV already supports Redis, SQLite, and any Redis-compatible store. No raw PostgreSQL backend — use KV's abstraction.
 
 ---
 
@@ -65,10 +65,32 @@ The interpreter is single-threaded by design (`Rc<RefCell<Environment>>`). All c
 └─────────────────────┘
 ```
 
-Each spawned task gets a **fresh interpreter instance** with captured bindings injected. Cross-task communication goes through channels (mpsc). This gives us:
+Each spawned task gets a **fresh interpreter instance** with captured bindings injected. Cross-task communication goes through channels (crossbeam). This gives us:
 - True parallelism (OS threads)
 - Zero shared mutable state (architecturally impossible)
 - panic isolation (catch_unwind per task)
+
+### Why KV Instead of Raw PostgreSQL/Redis
+
+ntnt already has `std/kv` — a key-value module that works with Redis, SQLite, and Redis-compatible stores (Valkey, DragonflyDB, etc.):
+
+```ntnt
+let kv = unwrap(open("redis://localhost:6379"))   // Redis / Valkey / Dragonfly
+let kv = unwrap(open("sqlite:./jobs.db"))          // SQLite (single-node)
+```
+
+Building the job backend on `std/kv` means:
+- **One implementation, multiple stores.** No separate PG backend and Redis backend to maintain.
+- **Users choose their store.** Same API whether you're using Redis in prod or SQLite in dev.
+- **KV operations map naturally to job queues.** Set with TTL = delayed jobs. List with prefix = queue listing. Atomic get+delete = job claiming.
+- **No SQL schema to manage.** KV is schemaless — the job system owns its key layout.
+
+What we lose vs raw PostgreSQL:
+- No `SELECT FOR UPDATE SKIP LOCKED` (but KV's atomic operations + Lua scripts on Redis achieve the same thing)
+- No transactional enqueue across application tables (but most apps don't need this — enqueue in an `after_commit` hook instead)
+- No advisory locks for cron (but distributed locks via KV's `set-if-not-exists` + TTL work)
+
+The tradeoff is worth it: simpler codebase, fewer dependencies, same production reliability.
 
 ### SerializedValue
 
@@ -83,13 +105,14 @@ Thread-safe enum for crossing task boundaries:
 | Function | ❌ | Cannot cross boundaries — error with names |
 | NativeFunction | ✅ | Re-injected by name in fresh interpreter |
 | Result, Option | ✅ | Via Ok/Err/Some/None wrappers |
+| TaskHandle, ChannelHandle, ScheduleHandle | ❌ | Process-local, cannot cross boundaries |
 
 ### ConcurrencyRuntime
 
 Single global instance (`LazyLock<ConcurrencyRuntime>`) owns all state:
 - Monotonic ID counter (`AtomicU64`) shared by tasks, channels, and schedules
 - Task registry with state, result, error, cancellation flag, completion time
-- Channel registry (mpsc sender/receiver pairs)
+- Channel registry (crossbeam sender/receiver pairs)
 - Schedule registry with cancellation and overlap-prevention flags
 - Lock discipline: acquire → clone Arcs → drop → operate. Never nest locks.
 
@@ -97,52 +120,38 @@ Single global instance (`LazyLock<ConcurrencyRuntime>`) owns all state:
 
 ## Current State — What's Built
 
-### ✅ Phase 1: Concurrency Primitives (`feat/concurrency-v2`)
+### ✅ Phase 0: Concurrency Primitives
 
-**Branch:** `feat/concurrency-v2` (2 commits, +2,895 lines, 26 tests)  
-**Status:** Code complete. Copilot review addressed. Ready for primitive hardening.
+**Branch:** `feat/concurrency-v2`  
+**Status:** Complete.
 
-#### API Surface
+- [x] `spawn(fn) -> TaskHandle` — run function in background thread
+- [x] `await_task(task) -> Result` — block until done, consume handle
+- [x] `try_await(task) -> Map` — non-blocking peek with status
+- [x] `cancel_task(task) -> Bool` — cooperative cancellation
+- [x] `channel() -> ChannelHandle` — create unbounded crossbeam channel
+- [x] `send(ch, value) -> Bool` — send value (false if closed)
+- [x] `recv(ch) -> Value` — blocking receive
+- [x] `recv_timeout(ch, ms) -> Option` — receive with timeout
+- [x] `try_recv(ch) -> Option` — non-blocking receive
+- [x] `close(ch) -> Bool` — close channel
+- [x] `select(channels, timeout?) -> Map` — multi-channel wait
+- [x] `schedule(interval, fn()) -> ScheduleHandle` — recurring execution
+- [x] `cancel_schedule(sched) -> Bool` — stop recurring execution
+- [x] `after(delay, fn()) -> TaskHandle` — delayed one-shot execution
+- [x] `sleep_ms(ms) -> Unit` — cancellation-aware sleep
+- [x] `thread_count() -> Int` — available CPU threads
 
-| Function | Signature | Description |
-|----------|-----------|-------------|
-| `spawn` | `spawn(fn() -> T) -> Task` | Run function in background thread |
-| `await_task` | `await_task(task) -> Result<T, String>` | Block until done, consume handle |
-| `try_await` | `try_await(task) -> Map` | Non-blocking peek: `{status, result}` |
-| `cancel_task` | `cancel_task(task) -> Bool` | Cooperative cancellation (flag-based) |
-| `channel` | `channel() -> Channel` | Create unbounded mpsc channel |
-| `send` | `send(ch, value) -> Bool` | Send value (false if closed) |
-| `recv` | `recv(ch) -> Value` | Blocking receive (Unit if closed) |
-| `recv_timeout` | `recv_timeout(ch, ms) -> Option` | Receive with timeout |
-| `try_recv` | `try_recv(ch) -> Option` | Non-blocking receive |
-| `close` | `close(ch) -> Bool` | Close channel |
-| `schedule` | `schedule(interval, fn()) -> Schedule` | Recurring execution |
-| `cancel_schedule` | `cancel_schedule(sched) -> Bool` | Stop recurring execution |
-| `after` | `after(delay, fn()) -> Task` | Delayed one-shot execution |
-| `sleep_ms` | `sleep_ms(ms) -> Unit` | Cancellation-aware sleep |
-| `thread_count` | `thread_count() -> Int` | Available CPU threads |
+### ✅ Phase 1: Primitive Hardening
 
-#### What Works Well
-- Clean API, reads like English
-- CSP enforced by architecture (serialize-at-boundary)
-- Cooperative cancellation with yield points (recv, sleep_ms, fetch)
-- Schedule overlap prevention (skip tick if previous still running)
-- Panic isolation (catch_unwind per task)
-- Task reaper (5-minute TTL on terminal tasks, respects try_await)
-- String interval parsing ("5s", "1m", "500ms")
+**Commit:** `f63f23b` on `feat/concurrency-v2`  
+**Status:** Complete. CI green.
 
-### ❌ Phase 2–6: Job DSL (Removed from `feat/concurrency-v2`)
-
-The job system (Job DSL, PostgreSQL backend, Redis backend, polish features, refactor) was built across 6 feature branches during the initial implementation. In `feat/concurrency-v2`, **all job code was removed** (-10,440 lines) to rebuild on a solid primitive foundation first.
-
-**The job code still exists on the original branches:**
-- `feat/job-dsl` — Job keyword, in-memory backend, retry/backoff/dead letter
-- `feat/job-dsl-postgres` — PostgreSQL backend, `SELECT FOR UPDATE SKIP LOCKED`, heartbeats
-- `feat/job-dsl-redis` — Redis Streams, consumer groups, XPENDING/XCLAIM recovery
-- `feat/job-dsl-polish` — Unique jobs, transactional enqueue, LISTEN/NOTIFY, cron, queue pause
-- `feat/job-dsl-refactor` — Modular architecture, JobBackend trait
-
-**Total work preserved:** ~4,800 lines Rust, 1,063 tests passing, 14 PG-only ignored.
+- [x] **Opaque handle types** — `Value::TaskHandle(u64)`, `Value::ChannelHandle(u64)`, `Value::ScheduleHandle(u64)` replace Map-based handles. Type-safe at the Value level.
+- [x] **`try_await` consumed/expired states** — `TaskState::Consumed` and `TaskState::Expired`. `await_task` marks Consumed, reaper marks Expired. `try_await` never errors for handles that existed.
+- [x] **`select()` with crossbeam-channel** — Replaced all `std::sync::mpsc` with `crossbeam::channel`. `select([ch_a, ch_b], 5000)` uses `crossbeam::Select` with 100ms cancellation-aware slices.
+- [x] 37 concurrency tests passing (11 new)
+- [x] CI green (`cargo fmt`, `cargo test --locked`, `cargo build --locked`)
 
 ---
 
@@ -151,15 +160,14 @@ The job system (Job DSL, PostgreSQL backend, Redis backend, polish features, ref
 ### Overview
 
 ```
-Phase 0  ✅ Primitives (spawn, channels, schedule, after)     ← DONE
-Phase 1  🔨 Primitive Hardening (try_await, handles, select)  ← NEXT
+Phase 0  ✅ Primitives (spawn, channels, schedule, after, select)    DONE
+Phase 1  ✅ Primitive Hardening (try_await, handles, select)          DONE
 Phase 2  📋 Composition Layer (parallel, race, task groups)
-Phase 3  📋 Job DSL Revival (clean rebuild on solid primitives)
-Phase 4  📋 PostgreSQL Backend
-Phase 5  📋 Redis Backend  
-Phase 6  📋 Polish & Production Features
-Phase 7  📋 Observability & CLI
-Phase 8  📋 Agent-First Features
+Phase 3  📋 Job DSL (declarative jobs, in-memory backend)
+Phase 4  📋 KV Backend (persistent jobs via std/kv)
+Phase 5  📋 Polish & Production Features
+Phase 6  📋 Observability & CLI
+Phase 7  📋 Agent-First Features
 ```
 
 ### Phase Status Table
@@ -167,265 +175,30 @@ Phase 8  📋 Agent-First Features
 | Phase | Name | Status | Branch | Tests | Priority |
 |-------|------|--------|--------|-------|----------|
 | 0 | Primitives | ✅ Done | `feat/concurrency-v2` | 26 | — |
-| 1 | Primitive Hardening | 🔨 Next | `feat/concurrency-v2` | — | **P0 — ship blocker** |
+| 1 | Primitive Hardening | ✅ Done | `feat/concurrency-v2` | 37 | — |
 | 2 | Composition Layer | 📋 Planned | TBD | — | P1 — high value |
-| 3 | Job DSL Revival | 📋 Planned | TBD | — | P1 — core feature |
-| 4 | PostgreSQL Backend | 📋 Planned | TBD | — | P1 — production req |
-| 5 | Redis Backend | 📋 Planned | TBD | — | P2 — high-throughput |
-| 6 | Polish & Production | 📋 Planned | TBD | — | P2 — hardening |
-| 7 | Observability & CLI | 📋 Planned | TBD | — | P2 — DX |
-| 8 | Agent-First Features | 📋 Planned | TBD | — | P3 — differentiator |
+| 3 | Job DSL | 📋 Planned | TBD | — | P1 — core feature |
+| 4 | KV Backend | 📋 Planned | TBD | — | P1 — production req |
+| 5 | Polish & Production | 📋 Planned | TBD | — | P2 — hardening |
+| 6 | Observability & CLI | 📋 Planned | TBD | — | P2 — DX |
+| 7 | Agent-First Features | 📋 Planned | TBD | — | P3 — differentiator |
 
 ---
 
 ## Phase Details
 
-### Phase 1: Primitive Hardening 🔨
-
-**Priority:** P0 — ship blocker. These are the primitive contracts. Get them wrong now, break everyone later.
-
-**Estimated effort:** 1-2 days Rust work, all in `concurrent.rs` + evaluator.
-
-#### Issue 1: `try_await` Return Value Ambiguity
-
-**Problem:** `try_await` errors when the task handle is invalid (already awaited or expired), but the error message doesn't distinguish between "consumed by await_task" and "expired by reaper." More importantly, the caller has no way to distinguish these two cases programmatically.
-
-**Current behavior:**
-```ntnt
-let task = spawn(fn() { return 42 })
-// ... 6 minutes pass, reaper runs ...
-try_await(task)  // RuntimeError: "Invalid task handle (task already awaited or expired)"
-```
-
-**Proposed behavior:** `try_await` returns a map with explicit status:
-
-```ntnt
-// Still running
-try_await(task) // => { status: "running", result: None }
-
-// Completed
-try_await(task) // => { status: "completed", result: Ok(42) }
-
-// Failed  
-try_await(task) // => { status: "failed", result: Err("timeout") }
-
-// Handle was consumed by await_task
-try_await(task) // => { status: "consumed", result: None }
-
-// Handle expired (reaper cleaned it up)
-try_await(task) // => { status: "expired", result: None }
-```
-
-**Implementation:**
-- Don't remove from registry on `await_task` — instead, mark state as `Consumed`
-- Add `TaskState::Consumed` and `TaskState::Expired` variants
-- Reaper marks as `Expired` instead of removing
-- `try_await` never errors on valid-format handles — always returns a status map
-- `await_task` on Consumed/Expired returns clear error
-
-**Why now:** This is a return value contract. Once people write `if try_await(t).status == "running"`, we can't change what statuses exist.
-
----
-
-#### Issue 2: Handle Type Safety
-
-**Problem:** Handles are plain Maps with `{type: "Task", _handle_id: 7}`. Nothing stops you from:
-```ntnt
-let ch = channel()
-await_task(ch)  // Runtime error: "Expected a Task handle" — but only at runtime
-```
-
-Or worse:
-```ntnt
-let fake = map { "type": "Task", "_handle_id": 999 }
-await_task(fake)  // Looks valid, fails with confusing error
-```
-
-**Proposed solution:** Introduce opaque handle types at the Value level.
-
-**Option A: New Value variants (preferred)**
-```rust
-// In interpreter.rs
-enum Value {
-    // ... existing variants ...
-    TaskHandle(u64),
-    ChannelHandle(u64),
-    ScheduleHandle(u64),
-}
-```
-
-- Typechecker can validate: `await_task` requires `TaskHandle`, `send` requires `ChannelHandle`
-- No accidental construction (ntnt code can't create `Value::TaskHandle` directly)
-- Pattern matching in Rust is exhaustive — compiler catches missed cases
-- Display: `Task(7)`, `Channel(3)`, `Schedule(1)`
-- Serialization: handles are NOT serializable across task boundaries (they're process-local)
-
-**Option B: Tagged Maps with validation (simpler, less safe)**
-- Keep Map-based handles
-- Add `_opaque: true` field that ntnt code can't set
-- Runtime validation only
-
-**Recommendation:** Option A. It's more Rust work upfront but eliminates an entire class of bugs. Handles become a real type, not a convention.
-
-**Typechecker integration:**
-```ntnt
-let task: Task = spawn(fn() { 42 })        // Typechecker knows this is Task
-let ch: Channel = channel()                  // Typechecker knows this is Channel
-await_task(ch)                               // ← TYPE ERROR at check time
-```
-
-**Why now:** If handles are Maps in v0.5.0 and we change them to opaque types in v0.6.0, every program that inspects handle fields breaks. Ship the right type from day one.
-
----
-
-#### Issue 3: `select()` — Multi-Channel Wait
-
-**Problem:** Without `select`, you can't express "wait for data from channel A OR channel B, whichever comes first." The workaround is busy-polling with `try_recv`:
-
-```ntnt
-// UGLY: busy-polling pattern
-loop {
-    let a = try_recv(ch_a)
-    if a != None { handle_a(a); break }
-    let b = try_recv(ch_b)
-    if b != None { handle_b(b); break }
-    sleep_ms(10)  // arbitrary delay, wastes CPU or adds latency
-}
-```
-
-Every concurrent language has a primitive for this:
-- Go: `select { case msg := <-ch1: ... case msg := <-ch2: ... }`
-- Rust: `tokio::select! { v = rx1.recv() => ..., v = rx2.recv() => ... }`
-- Erlang: `receive Msg1 -> ...; Msg2 -> ... end`
-
-**Proposed API:**
-
-```ntnt
-import { channel, select } from "std/concurrent"
-
-let ch_a = channel()
-let ch_b = channel()
-
-// Wait for first available value
-let result = select([ch_a, ch_b])
-// => { channel: ch_a, value: "hello" }  (whichever fires first)
-
-// With timeout
-let result = select([ch_a, ch_b], 5000)
-// => { channel: ch_a, value: "data" }   or
-// => { status: "timeout" }              if 5s passes
-```
-
-**Implementation approach:**
-- Spawn monitor threads per channel that forward to a collector channel
-- Or: use `recv_timeout` rotation with decreasing timeouts
-- Or: restructure channels to use `crossbeam::Select` under the hood (cleanest)
-
-**Recommended: crossbeam-channel**
-- Replace `std::sync::mpsc` with `crossbeam::channel` (already battle-tested, similar API)
-- `crossbeam::Select` gives us multi-channel wait for free
-- Also gives us bounded channels (future feature)
-- Minimal diff — crossbeam's API mirrors mpsc
-
-```rust
-// Rust implementation sketch
-fn concurrent_select(channels: &[Value], timeout_ms: Option<i64>) -> Result<Value> {
-    let mut sel = crossbeam::channel::Select::new();
-    // Register each channel's receiver
-    for ch in channels {
-        let id = get_handle_id(ch, "Channel")?;
-        let receiver = RUNTIME.get_receiver(id)?;
-        sel.recv(&receiver);
-    }
-    // Wait with optional timeout
-    match timeout_ms {
-        Some(ms) => sel.ready_timeout(Duration::from_millis(ms as u64)),
-        None => Ok(sel.ready()),
-    }
-}
-```
-
-**Why now:** `select` is not composition — it's a primitive. Channels without select are like arrays without indexing. Every non-trivial concurrent program needs it, and the implementation choice (crossbeam vs polling) affects the entire channel subsystem.
-
----
-
-#### Issue 4: Closure Capture DX (Deferred — P1)
-
-**Problem:** When `spawn()` captures variables from the enclosing scope, non-serializable captures fail at runtime with a good error message, but there's no way to know which variables will be captured without running the code.
-
-**Current error (already decent):**
-```
-Cannot capture user-defined function(s) across task boundaries: my_helper.
-Use closure capture for data, not function references.
-```
-
-**Future improvement (not blocking):**
-- Explicit capture syntax: `spawn(capture: [x, y], fn() { ... })`
-- Or: lint warning at parse time when spawn closure references outer functions
-- Or: `@serializable` annotation on functions that should be capture-safe
-
-**Why deferred:** The error message is clear enough. The fix is a syntax addition that deserves its own design discussion. Won't break anyone to add later.
-
----
-
-#### Issue 5: `parallel()` / Structured Concurrency (Deferred — P1)
-
-**Problem:** No way to say "run these N things concurrently, collect all results, cancel on first error."
-
-```ntnt
-// TODAY: manual boilerplate
-let tasks = urls.map(fn(url) { spawn(fn() { fetch(url) }) })
-let results = tasks.map(fn(t) { await_task(t) })
-// No error handling, no cancellation on failure
-```
-
-**Future API:**
-```ntnt
-// Run all, collect results (cancel remaining on first error)
-let results = parallel([
-    fn() { fetch("/api/users") },
-    fn() { fetch("/api/posts") },
-    fn() { fetch("/api/comments") },
-])
-// => [users, posts, comments]  or throws on first error
-
-// With named tasks
-let results = parallel(map {
-    "users": fn() { fetch("/api/users") },
-    "posts": fn() { fetch("/api/posts") },
-})
-// => { users: [...], posts: [...] }
-```
-
-**Why deferred:** This is composition built on solid primitives. Once spawn + channels + select work correctly, parallel is ~50 lines of ntnt stdlib code (or a thin Rust wrapper). Adding it later doesn't break anything.
-
----
-
-#### Issue 6: Schedule String Validation (Deferred — P2)
-
-**Problem:** `schedule("every 30s", fn() { ... })` parses at runtime. Invalid strings fail silently or with confusing errors.
-
-**Future improvements:**
-- Lint/typecheck warning for unparseable interval strings
-- Autocomplete support in IDE integrations
-- Document all supported interval formats
-
-**Why deferred:** It works. The error messages are adequate. Pure polish.
-
----
-
 ### Phase 2: Composition Layer 📋
 
-**Depends on:** Phase 1 (especially `select`)  
+**Depends on:** Phase 1 ✅  
 **Estimated effort:** 2-3 days
 
-| Feature | Description | Priority |
-|---------|-------------|----------|
-| `parallel(fns)` | Run N functions, collect all results, cancel on first error | High |
-| `race(fns)` | Run N functions, return first result, cancel others | High |
-| `any(channels)` | Alias for select with simpler return | Medium |
-| `task_group()` | Structured scope — all tasks cancelled when scope exits | Medium |
-| `pipeline(fns)` | Chain: output of fn1 → input of fn2 → ... | Low |
+- [ ] `parallel(fns) -> Array` — run N functions, collect all results, cancel on first error
+- [ ] `race(fns) -> Value` — run N functions, return first result, cancel others
+- [ ] `task_group(fn(group))` — structured scope, all tasks cancelled when scope exits
+- [ ] `pipeline(fns) -> Value` — chain: output of fn1 → input of fn2 → ...
+- [ ] Tests for each composition primitive
+- [ ] Documentation in STDLIB_REFERENCE.md
+- [ ] Agent guide updated
 
 ```ntnt
 // parallel — fan-out, fan-in
@@ -453,13 +226,29 @@ These can potentially be implemented in ntnt itself (stdlib .tnt files) once the
 
 ---
 
-### Phase 3: Job DSL Revival 📋
+### Phase 3: Job DSL 📋
 
-**Depends on:** Phase 1 (solid primitives)  
+**Depends on:** Phase 1 ✅ (solid primitives)  
 **Estimated effort:** 3-5 days (rebuilding from preserved branches)  
 **Source:** `feat/job-dsl` branch (preserved)
 
-Rebuild the Job DSL on the hardened primitive foundation. Core features from the original implementation:
+Rebuild the Job DSL on the hardened primitive foundation.
+
+- [ ] `Job Name on queue { perform(args) { ... } }` parser syntax
+- [ ] In-memory backend (default, zero-config)
+- [ ] Retry with configurable backoff (exponential, linear, constant)
+- [ ] Dead letter queue
+- [ ] Job cancellation and timeout
+- [ ] Priority queues (job-level)
+- [ ] `Queue.configure()` for backend selection
+- [ ] `Queue.stats()` for monitoring
+- [ ] `Queue.work()` / `Queue.work_async()` worker modes
+- [ ] Graceful shutdown (drain in-flight jobs)
+- [ ] Job lifecycle: Scheduled → Pending → Active → Completed/Failed/Dead
+- [ ] `on_failure(error, attempt)` hook
+- [ ] Doc comment metadata (`/// Triggers:`, `/// Affects:`)
+- [ ] Tests for each feature
+- [ ] Documentation in STDLIB_REFERENCE.md
 
 ```ntnt
 Job SendWelcomeEmail on emails {
@@ -471,147 +260,156 @@ Job SendWelcomeEmail on emails {
 
 // Enqueue
 SendWelcomeEmail.enqueue(map { "user_id": "123" })
-```
 
-**In scope:**
-- `Job Name on queue { perform(args) { ... } }` syntax
-- In-memory backend (default, zero-config)
-- Retry with configurable backoff (exponential, linear, constant)
-- Dead letter queue
-- Job cancellation and timeout
-- Priority queues
-- Queue.configure() for backend selection
-- Queue.stats() for monitoring
-- Graceful shutdown (drain in-flight jobs)
+// With options
+Job ProcessPayment on payments (retry: 5, timeout: 120s) {
+    perform(order_id: String, amount: Float) {
+        let order = db.find(order_id)
+        stripe.charge(order.customer_id, amount)
+    }
+
+    on_failure(error, attempt) {
+        alert.notify("Payment failed: #{error}")
+    }
+}
+```
 
 **Preserved from original work:**
 - Parser support for Job keyword (in `feat/job-dsl`)
-- In-memory backend with full lifecycle (pending → active → completed/failed/dead)
+- In-memory backend with full lifecycle
 - 10 job-specific tests passing
 
 ---
 
-### Phase 4: PostgreSQL Backend 📋
+### Phase 4: KV Backend 📋
 
 **Depends on:** Phase 3  
-**Estimated effort:** 2-3 days (rebuilding from preserved branch)  
-**Source:** `feat/job-dsl-postgres` branch (preserved)
+**Estimated effort:** 3-4 days
+
+Persistent job storage using ntnt's `std/kv` module. Works with any KV store that `std/kv` supports: Redis, SQLite, Valkey, DragonflyDB, etc.
+
+- [ ] `Queue.configure(map { "backend": "kv", "kv_url": env("KV_URL") })`
+- [ ] Key layout design (e.g., `jobs:pending:<queue>:<id>`, `jobs:active:<id>`, `jobs:dead:<id>`)
+- [ ] Job claiming via atomic KV operations (get + delete / set-if-not-exists)
+- [ ] Worker heartbeats via KV TTL keys (`jobs:heartbeat:<worker_id>`)
+- [ ] Visibility timeout — re-enqueue when heartbeat key expires
+- [ ] Delayed/scheduled jobs via sorted set or TTL polling
+- [ ] Job history with automatic expiry
+- [ ] Distributed locking for cron via `set-if-not-exists` + TTL
+- [ ] Automatic pruning of completed/cancelled jobs
+- [ ] Per-queue statistics via KV counters
+- [ ] Tests with both Redis and SQLite backends
+- [ ] Graceful fallback if KV connection lost (queue to memory, drain on reconnect)
 
 ```ntnt
+import { Queue } from "std/jobs"
+
+// Redis in production
 Queue.configure(map {
-    "backend": "postgres",
-    "postgres_url": env("DATABASE_URL")
+    "backend": "kv",
+    "kv_url": env("KV_URL", "redis://localhost:6379")
 })
+
+// SQLite for simple deploys
+Queue.configure(map {
+    "backend": "kv",
+    "kv_url": "sqlite:./data/jobs.db"
+})
+
+// Still works with zero config (in-memory)
+Queue.configure(map { "backend": "memory" })
 ```
 
-**In scope:**
-- `ntnt_jobs` table (auto-created on first use)
-- `SELECT FOR UPDATE SKIP LOCKED` for distributed locking
-- Worker heartbeats (30s default)
-- Visibility timeout (re-enqueue stale jobs after 5 min)
-- Job history queries
-- Automatic pruning of completed/cancelled jobs
-
-**Preserved from original work:**
-- Full PostgreSQL backend (~1,132 lines)
-- LISTEN/NOTIFY for instant job pickup (from polish branch)
-- Transactional enqueue: `Job.enqueue_tx(tx, args)` — atomic with PG transactions
-- Cron expressions with advisory lock for cluster safety
-
----
-
-### Phase 5: Redis Backend 📋
-
-**Depends on:** Phase 3  
-**Estimated effort:** 2-3 days (rebuilding from preserved branch)  
-**Source:** `feat/job-dsl-redis` branch (preserved)
-
-```ntnt
-Queue.configure(map {
-    "backend": "redis",
-    "redis_url": env("REDIS_URL")
-})
+**Key layout (draft):**
+```
+jobs:queue:<queue_name>:<job_id>   = { payload, status, attempts, created_at, ... }
+jobs:pending:<queue_name>          = sorted set by priority/scheduled_at
+jobs:active:<job_id>               = claimed job data
+jobs:heartbeat:<worker_id>         = TTL key (30s), worker health
+jobs:dead:<job_id>                 = failed job data (180-day TTL)
+jobs:completed:<job_id>            = completed job data (24h TTL)
+jobs:stats:<queue_name>            = { pending, active, completed, failed, dead }
+jobs:unique:<hash>                 = dedup key with TTL
+jobs:lock:cron:<schedule_name>     = distributed lock for cron schedules
 ```
 
-**In scope:**
-- Redis Streams (`XADD`/`XREADGROUP`/`XACK`)
-- Consumer groups for distributed processing
-- `XPENDING`/`XCLAIM` for stale job recovery
-- Sorted set for delayed/scheduled jobs
-- Per-queue statistics
-
-**Preserved from original work:**
-- Full Redis backend (~1,377 lines)
-- Multi-threaded memory worker
-- All tests passing
+**Why this works:**
+- `std/kv` `set` with `ttl` option = automatic job expiry and heartbeats
+- `std/kv` `list` with prefix = queue listing
+- `std/kv` `has` + `set` = atomic claiming (Redis `SETNX`, SQLite `INSERT OR IGNORE`)
+- `std/kv` `del` = job completion/cleanup
+- Same code path for Redis (production) and SQLite (single-node/dev)
 
 ---
 
-### Phase 6: Polish & Production Features 📋
+### Phase 5: Polish & Production Features 📋
 
-**Depends on:** Phases 3-5  
-**Estimated effort:** 2-3 days (rebuilding from preserved branch)  
-**Source:** `feat/job-dsl-polish` branch (preserved)
+**Depends on:** Phases 3-4  
+**Estimated effort:** 2-3 days  
+**Source:** `feat/job-dsl-polish` branch (preserved, needs adaptation from PG/Redis to KV)
 
-| Feature | Description | Backend Support |
-|---------|-------------|-----------------|
-| Unique jobs | SHA256 dedup with TTL: `unique: 3600` | All 3 |
-| Transactional enqueue | `Job.enqueue_tx(tx, args)` — atomic with PG | PostgreSQL |
-| LISTEN/NOTIFY | Instant job pickup via `pg_notify` | PostgreSQL |
-| Cron expressions | `schedule("0 9 * * MON-FRI", fn)` with advisory lock | All 3 |
-| Dead job caps | 10K max, 180-day retention, auto-prune | All 3 |
-| Queue pause/resume | `Queue.pause("name")` / `Queue.resume("name")` | All 3 + CLI |
-| Weighted queues | `{ "critical": 5, "default": 3, "low": 1 }` | All 3 |
-| Job expiration | `expires: 5m` — discard stale jobs | All 3 |
-| Rate limiting | `rate: 100/minute` per job type | All 3 |
+- [ ] Unique jobs — SHA256 dedup with TTL: `unique: 3600`
+- [ ] Cron expressions — `schedule("0 9 * * MON-FRI", fn)` with distributed lock via KV
+- [ ] Dead job caps — 10K max, 180-day retention, auto-prune
+- [ ] Queue pause/resume — `Queue.pause("name")` / `Queue.resume("name")`
+- [ ] Weighted queue processing — `{ "critical": 5, "default": 3, "low": 1 }`
+- [ ] Job expiration — `expires: 5m` (discard stale jobs)
+- [ ] Rate limiting — `rate: 100/minute` per job type
+- [ ] Concurrency limits — `concurrency: 5` per job type
+- [ ] Idempotency support — `idempotent: true` with key-based dedup
 
 ---
 
-### Phase 7: Observability & CLI 📋
+### Phase 6: Observability & CLI 📋
 
 **Depends on:** Phase 3  
 **Estimated effort:** 2-3 days
 
-```bash
-ntnt jobs status              # Summary of all queues
-ntnt jobs list --pending      # Filter by status
-ntnt jobs inspect <job-id>    # Full job details
-ntnt jobs retry <job-id>      # Retry a failed/dead job
-ntnt jobs cancel <job-id>     # Cancel a pending job
-ntnt jobs tail                # Live streaming
-ntnt jobs replay <job-id>     # Re-run with same inputs
-```
-
-Plus:
-- `Queue.stats()` programmatic API (already designed)
-- Optional `/jobs/status` HTTP endpoint (localhost only)
-- `--format=agent` for LLM-optimized output
+- [ ] `ntnt jobs status` — summary of all queues
+- [ ] `ntnt jobs list [--pending|--failed|--dead]` — filter by status
+- [ ] `ntnt jobs inspect <job-id>` — full job details
+- [ ] `ntnt jobs retry <job-id>` — retry a failed/dead job
+- [ ] `ntnt jobs cancel <job-id>` — cancel a pending job
+- [ ] `ntnt jobs tail [--queue=<name>]` — live streaming
+- [ ] `ntnt jobs replay <job-id> [--dry-run]` — re-run with same inputs
+- [ ] `Queue.stats()` programmatic API
+- [ ] Optional `/jobs/status` HTTP endpoint (localhost only)
+- [ ] `--format=agent` for LLM-optimized output
+- [ ] IDD integration — job testing in `.intent` files
 
 ---
 
-### Phase 8: Agent-First Features 📋
+### Phase 7: Agent-First Features 📋
 
-**Depends on:** Phase 7  
+**Depends on:** Phase 6  
 **Estimated effort:** Ongoing
 
 The differentiator. No other job system has this.
 
-| Feature | Description |
-|---------|-------------|
-| Semantic metadata | `/// Triggers: user.created` parsed from doc comments |
-| `ntnt jobs ask` | Natural language queries: "why are emails failing?" |
-| `ntnt jobs diagnose` | AI-powered root cause analysis |
-| Auto-generated tests | Suggest IDD tests from job code |
-| Impact analysis | "If SendEmail fails, what's affected?" |
-| Simulation mode | Dry-run with `effect` blocks |
-| Intent verification | Did the job *achieve its purpose*, not just run? |
-| Job contracts | `requires(args) { ... }` / `ensures(args, result) { ... }` |
+- [ ] Semantic job metadata — `/// Triggers: user.created` parsed from doc comments
+- [ ] `ntnt jobs ask "why are emails failing?"` — natural language queries
+- [ ] `ntnt jobs diagnose <job-id>` — AI-powered root cause analysis
+- [ ] Auto-generated test suggestions from job code
+- [ ] Impact analysis — "If SendEmail fails, what's affected?"
+- [ ] Simulation mode — dry-run with `effect` blocks
+- [ ] Intent verification — did the job *achieve its purpose*, not just run?
+- [ ] Job contracts — `requires(args) { ... }` / `ensures(args, result) { ... }`
+
+---
+
+### Deferred Items (not blocking any phase)
+
+- [ ] **Closure capture DX** — explicit capture syntax: `spawn(capture: [x, y], fn() { ... })`. Error messages are already good. Syntax addition deserves its own design.
+- [ ] **Schedule string validation** — lint warning for unparseable intervals. Works fine today, pure polish.
+- [ ] **Configurable reaper TTL** — currently hardcoded at 5 minutes. Add env var or `ConcurrencyRuntime.configure()`.
+- [ ] **Bounded channels** — `channel(capacity)` for backpressure. crossbeam supports this already, just need to expose it.
+- [ ] **Threadpool for job workers** — thread-per-task works for primitives but may not scale for job workers processing thousands of jobs. Consider `rayon` or custom pool.
 
 ---
 
 ## Lessons Learned
 
-### From Building Phases 0-6 (First Pass)
+### From Building Phases 0-1 (First + Second Pass)
 
 1. **Primitives before patterns.** We built the job system before hardening spawn/channels. That's backwards. The job system inherited every primitive rough edge. Fix the foundation first.
 
@@ -619,13 +417,17 @@ The differentiator. No other job system has this.
 
 3. **Copilot review is genuinely useful.** Across 4 review rounds, it caught: brace-depth tracking gaps, non-deterministic test modes, missing struct field error handling, indentation edge cases. Not a replacement for human review, but a great first pass.
 
-4. **Test count is a vanity metric.** We had 1,063 tests but most were job-specific. The 26 concurrency primitive tests are more valuable because they test the foundation everything else depends on.
+4. **Test count is a vanity metric.** We had 1,063 tests but most were job-specific. The 37 concurrency primitive tests are more valuable because they test the foundation everything else depends on.
 
 5. **`Rc<RefCell>` as a feature, not a limitation.** The interpreter's single-threaded design forces CSP. We leaned into this with serialized capture and it's genuinely better than trying to make the interpreter thread-safe.
 
 6. **Capture errors are the #1 DX issue.** Users will write `spawn(fn() { my_helper(x) })` and not understand why `my_helper` can't cross the thread boundary. The error message is good but the mental model is surprising.
 
 7. **Feature branches as preservation.** All 6 original branches still exist with working code. The v2 rewrite can cherry-pick proven implementations rather than rewriting from scratch.
+
+8. **`cargo fmt` before push.** CI failed on formatting. Sub-agents don't always run rustfmt. Add it to the commit checklist.
+
+9. **Use your own abstractions.** We built `std/kv` to abstract over Redis/SQLite. The job system should use it instead of reimplementing raw Redis Streams and PostgreSQL polling. Less code, fewer backends to maintain, same reliability.
 
 ### Architecture Decisions That Held Up
 
@@ -634,13 +436,8 @@ The differentiator. No other job system has this.
 - **Cooperative cancellation** — simpler than preemption, works because we control the yield points
 - **Monotonic IDs** — no UUID overhead, no collisions within a process
 - **LazyLock global runtime** — simple, no initialization ceremony
-
-### Architecture Decisions to Revisit
-
-- **std::sync::mpsc** → should switch to `crossbeam::channel` for `select` support
-- **Map-based handles** → should become proper Value variants (Phase 1, Issue 2)
-- **5-minute task reaper** → TTL should be configurable, not hardcoded
-- **Thread-per-task** may not scale for job workers processing thousands of jobs — consider a threadpool for Phase 3+
+- **crossbeam-channel** — drop-in replacement for mpsc, enables `select`, battle-tested
+- **Opaque Value variants for handles** — compile-time exhaustiveness, no accidental construction
 
 ---
 
@@ -648,33 +445,32 @@ The differentiator. No other job system has this.
 
 ### Concurrency Primitives
 
-| Feature | ntnt (current) | Go | Elixir | Rust (tokio) |
-|---------|---------------|-----|--------|--------------|
-| Spawn task | `spawn(fn)` | `go func()` | `spawn(fn)` | `tokio::spawn(async)` |
-| Await result | `await_task(t)` | N/A (channels) | `Task.await(t)` | `.await` |
-| Channels | `channel()` | `make(chan)` | N/A (mailbox) | `mpsc::channel()` |
-| Select | ❌ **Phase 1** | `select {}` | `receive do` | `tokio::select!` |
-| Parallel | ❌ **Phase 2** | `errgroup` | `Task.async_stream` | `join!` |
-| Structured | ❌ **Phase 2** | N/A | `Task.Supervisor` | `JoinSet` |
-| Schedule | `schedule("5s", fn)` | ticker | `:timer` | `tokio::interval` |
-| Cancel | Cooperative | Context | `Task.shutdown` | `CancellationToken` |
+| Feature | ntnt | Go | Elixir | Rust (tokio) |
+|---------|------|-----|--------|--------------|
+| Spawn task | ✅ `spawn(fn)` | `go func()` | `spawn(fn)` | `tokio::spawn(async)` |
+| Await result | ✅ `await_task(t)` | N/A (channels) | `Task.await(t)` | `.await` |
+| Channels | ✅ `channel()` | `make(chan)` | N/A (mailbox) | `mpsc::channel()` |
+| Select | ✅ `select(chs)` | `select {}` | `receive do` | `tokio::select!` |
+| Parallel | 📋 Phase 2 | `errgroup` | `Task.async_stream` | `join!` |
+| Structured | 📋 Phase 2 | N/A | `Task.Supervisor` | `JoinSet` |
+| Schedule | ✅ `schedule("5s", fn)` | ticker | `:timer` | `tokio::interval` |
+| Cancel | ✅ Cooperative | Context | `Task.shutdown` | `CancellationToken` |
 
 ### Job Systems
 
 | Feature | ntnt (planned) | Sidekiq (Ruby) | Oban (Elixir) | BullMQ (JS) |
 |---------|---------------|----------------|---------------|-------------|
 | Declaration | `Job X on q { }` | Class + include | `use Oban.Worker` | Class |
-| Multi-backend | Memory+PG+Redis | Redis only | PG only | Redis only |
+| Backend | Memory + KV | Redis only | PG only | Redis only |
+| Backend flexibility | Redis/SQLite/Valkey | Redis only | PG only | Redis only |
 | Unique jobs | ✅ SHA256 dedup | Pro ($) | ✅ Free | ✅ |
-| Transactional | ✅ `enqueue_tx` | ❌ | ✅ (Oban's best feature) | ❌ |
-| Cron | ✅ Advisory lock | Enterprise ($) | ✅ Free | ✅ |
+| Cron | ✅ Distributed lock | Enterprise ($) | ✅ Free | ✅ |
 | Rate limiting | ✅ | Enterprise ($) | ✅ Pro ($) | ✅ |
-| LISTEN/NOTIFY | ✅ | N/A | ✅ | N/A |
 | Pause/resume | ✅ | ✅ | ✅ | ✅ |
-| Intent verification | ✅ (Phase 8) | ❌ | ❌ | ❌ |
-| AI diagnosis | ✅ (Phase 8) | ❌ | ❌ | ❌ |
+| Intent verification | ✅ Phase 7 | ❌ | ❌ | ❌ |
+| AI diagnosis | ✅ Phase 7 | ❌ | ❌ | ❌ |
 
-**Key insight:** ntnt's job system gives away everything Sidekiq charges $250/mo for, plus Oban's transactional enqueue, plus multi-backend flexibility nobody else has.
+**Key insight:** ntnt's job system gives away everything Sidekiq charges $250/mo for, works with any KV store (not locked to Redis or PG), and adds AI-native features nobody else has.
 
 ---
 
@@ -686,26 +482,29 @@ The differentiator. No other job system has this.
 |----------|----------|------|
 | Thread-per-task vs threadpool? | Thread-per-task for primitives. Revisit for job workers. | 2026-03-15 |
 | async/await in ntnt? | No. Synchronous model with spawn + channels. | 2026-03-15 |
-| Job DSL as syntax vs library? | Syntax (`Job` keyword). Makes it first-class, testable in IDD. | 2026-03-15 |
+| Job DSL as syntax vs library? | Syntax (`Job` keyword). First-class, testable in IDD. | 2026-03-15 |
 | One PR or many? | One per phase. Each phase is shippable independently. | 2026-03-16 |
+| crossbeam vs std::mpsc? | **crossbeam.** Enables `select`, drop-in API, battle-tested. | 2026-03-16 |
+| Handle types: Value variants vs tagged maps? | **Value variants.** `TaskHandle(u64)`, `ChannelHandle(u64)`, `ScheduleHandle(u64)`. | 2026-03-16 |
+| `select` return format? | **`{channel: <handle>, value: <data>}`** map. `{status: "timeout"}` on timeout. | 2026-03-16 |
+| PG backend vs KV backend? | **KV.** Use `std/kv` (Redis/SQLite/Valkey). No raw PG backend. | 2026-03-16 |
 
 ### Open
 
 | Question | Options | Notes |
 |----------|---------|-------|
-| crossbeam vs std::mpsc? | crossbeam (for select), std (simpler) | Leaning crossbeam |
-| Handle types: Value variants vs tagged maps? | Variants (safer), Maps (simpler) | Leaning variants |
-| Reaper TTL configurable? | Env var, runtime config, or hardcoded | Needs decision |
-| Job workers: thread-per-task or pool? | Pool (for throughput) | Phase 3 decision |
-| `select` return format? | `{channel, value}` map vs `(index, value)` tuple | Phase 1 decision |
-| Feature flags for backends? | Compile-time (Cargo features) vs runtime | Leaning runtime |
+| Reaper TTL configurable? | Env var, runtime config, or hardcoded | Currently 5min hardcoded |
+| Job workers: thread-per-task or pool? | Pool (for throughput) | Phase 3+ decision |
+| KV job claiming strategy? | `set-if-not-exists` vs Lua script vs list pop | Depends on KV backend |
+| Feature flags for job backends? | Compile-time (Cargo features) vs runtime | Leaning runtime |
 | Where do composition functions live? | Rust (fast) vs ntnt stdlib (extensible) | Both? |
+| KV key layout? | Draft in Phase 4 details | Needs validation |
 
 ---
 
 ## Appendix: Job DSL Design
 
-Full Job DSL syntax, lifecycle, and backend details preserved from the original `background_jobs.md`. See that file for the complete reference (still valid as a design target). Key highlights:
+Full Job DSL syntax, lifecycle, and backend details preserved from the original `background_jobs.md`. See that file for the complete reference. Key highlights:
 
 ### Job Declaration
 
@@ -743,7 +542,7 @@ Queue.work_async()
 Queue.work(map { "queues": ["emails", "payments"], "concurrency": 10 })
 ```
 
-### Composition (Future)
+### Composition (Future — Phase 2+)
 
 ```ntnt
 // Chains (sequential)
@@ -773,3 +572,5 @@ batch.run()
 | 2026-03-15 | Initial implementation: Phases 0-6 built across 6 feature branches |
 | 2026-03-15 | v2 rewrite: stripped job system, rebuilt concurrency primitives clean |
 | 2026-03-16 | DD-037 v3: comprehensive roadmap with lessons learned, DX hardening plan |
+| 2026-03-16 | Phase 1 complete: handle types, try_await states, select() — commit `f63f23b` |
+| 2026-03-16 | DD-037 v4: KV backend replaces PG+Redis. Checkboxes for progress tracking. |
