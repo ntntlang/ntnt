@@ -1530,10 +1530,7 @@ fn concurrent_select(args: &[Value]) -> Result<Value> {
     if receivers.is_empty() {
         // All channels are closed
         let mut result = HashMap::new();
-        result.insert(
-            "status".to_string(),
-            Value::String("closed".to_string()),
-        );
+        result.insert("status".to_string(), Value::String("closed".to_string()));
         return Ok(Value::Map(result));
     }
 
@@ -1577,10 +1574,7 @@ fn concurrent_select(args: &[Value]) -> Result<Value> {
                 if rem.is_zero() {
                     // Timeout expired
                     let mut result = HashMap::new();
-                    result.insert(
-                        "status".to_string(),
-                        Value::String("timeout".to_string()),
-                    );
+                    result.insert("status".to_string(), Value::String("timeout".to_string()));
                     return Ok(Value::Map(result));
                 }
                 rem.min(Duration::from_millis(100))
