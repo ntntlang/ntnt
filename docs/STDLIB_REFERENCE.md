@@ -9950,8 +9950,8 @@ import { now, now_millis, now_nanos } from "std/time"
 | [`add_seconds`](#addseconds) | Adds seconds to a Unix timestamp. |
 | [`add_weeks`](#addweeks) | Adds weeks to a Unix timestamp. |
 | [`add_years`](#addyears) | Adds years to a Unix timestamp with calendar-aware logic. |
-| [`after`](#after) | Deprecated: use is_after() instead. Checks whether the first timestamp is after the second. |
-| [`before`](#before) | Deprecated: use is_before() instead. Checks whether the first timestamp is before the second. |
+| [`after`](#after) | Checks whether the first timestamp is after the second. |
+| [`before`](#before) | Checks whether the first timestamp is before the second. |
 | [`day`](#day) | Extracts the day of the month from a Unix timestamp (UTC). |
 | [`day_of_year`](#dayofyear) | Extracts the ordinal day of the year from a timestamp (UTC). |
 | [`diff`](#diff) | Computes the difference between two timestamps. |
@@ -9963,8 +9963,6 @@ import { now, now_millis, now_nanos } from "std/time"
 | [`format_in`](#formatin) | Formats a Unix timestamp as a string in the specified timezone. |
 | [`format_timestamp`](#formattimestamp) | Formats a Unix timestamp as a string (legacy alias for format()). |
 | [`hour`](#hour) | Extracts the hour from a Unix timestamp (UTC). |
-| [`is_after`](#isafter) | Checks whether the first timestamp is after the second. |
-| [`is_before`](#isbefore) | Checks whether the first timestamp is before the second. |
 | [`is_leap_year`](#isleapyear) | Checks whether the year of the given timestamp is a leap year. |
 | [`list_timezones`](#listtimezones) | Returns a list of commonly used IANA timezone identifiers. |
 | [`make_date`](#makedate) | Creates a Unix timestamp for midnight UTC from date components. |
@@ -10227,7 +10225,9 @@ add_years(0, 1)  // => 31536000  // Add 1 year to epoch
 after(timestamp1: Int, timestamp2: Int) -> Bool
 ```
 
-Deprecated: use is_after() instead. Checks whether the first timestamp is after the second.
+Checks whether the first timestamp is after the second.
+
+Returns true if timestamp1 > timestamp2.
 
 **Parameters:**
 
@@ -10240,13 +10240,14 @@ Deprecated: use is_after() instead. Checks whether the first timestamp is after 
 
 ```ntnt
 after(86400, 0)  // => true  // Day 1 is after epoch
+after(0, 86400)  // => false  // Epoch is not after day 1
 ```
 
 **Errors:**
 
 - **TypeError**: after() requires two timestamps — *Fix: Pass two Int arguments*
 
-**See also:** `is_after`
+**See also:** `before`, `equal`, `diff`
 
 *Since v0.1.0*
 
@@ -10258,7 +10259,9 @@ after(86400, 0)  // => true  // Day 1 is after epoch
 before(timestamp1: Int, timestamp2: Int) -> Bool
 ```
 
-Deprecated: use is_before() instead. Checks whether the first timestamp is before the second.
+Checks whether the first timestamp is before the second.
+
+Returns true if timestamp1 < timestamp2.
 
 **Parameters:**
 
@@ -10271,13 +10274,14 @@ Deprecated: use is_before() instead. Checks whether the first timestamp is befor
 
 ```ntnt
 before(0, 86400)  // => true  // Epoch is before day 1
+before(86400, 0)  // => false  // Day 1 is not before epoch
 ```
 
 **Errors:**
 
 - **TypeError**: before() requires two timestamps — *Fix: Pass two Int arguments*
 
-**See also:** `is_before`
+**See also:** `after`, `equal`, `diff`
 
 *Since v0.1.0*
 
@@ -10375,7 +10379,7 @@ diff(3600, 0).hours  // => 1  // One hour difference
 
 - **TypeError**: diff() requires two timestamps — *Fix: Pass two Int arguments*
 
-**See also:** `is_before`, `is_after`, `equal`
+**See also:** `before`, `after`, `equal`
 
 *Since v0.1.0*
 
@@ -10507,7 +10511,7 @@ equal(0, 1)  // => false  // Different timestamps are not equal
 
 - **TypeError**: equal() requires two timestamps — *Fix: Pass two Int arguments*
 
-**See also:** `is_before`, `is_after`, `diff`
+**See also:** `before`, `after`, `diff`
 
 *Since v0.1.0*
 
@@ -10643,74 +10647,6 @@ hour(0)  // => 0  // Epoch is midnight
 - **RuntimeError**: Invalid timestamp — *Fix: Ensure the timestamp is a valid Unix epoch value*
 
 **See also:** `minute`, `second`, `year`, `month`, `day`, `to_utc`
-
-*Since v0.1.0*
-
----
-
-#### `is_after`
-
-```ntnt
-is_after(timestamp1: Int, timestamp2: Int) -> Bool
-```
-
-Checks whether the first timestamp is after the second.
-
-Returns true if timestamp1 > timestamp2.
-
-**Parameters:**
-
-- `timestamp1` — First Unix timestamp in seconds
-- `timestamp2` — Second Unix timestamp in seconds
-
-**Returns:** true if timestamp1 is later than timestamp2
-
-**Examples:**
-
-```ntnt
-is_after(86400, 0)  // => true  // Day 1 is after epoch
-is_after(0, 86400)  // => false  // Epoch is not after day 1
-```
-
-**Errors:**
-
-- **TypeError**: is_after() requires two timestamps — *Fix: Pass two Int arguments*
-
-**See also:** `is_before`, `equal`, `diff`
-
-*Since v0.1.0*
-
----
-
-#### `is_before`
-
-```ntnt
-is_before(timestamp1: Int, timestamp2: Int) -> Bool
-```
-
-Checks whether the first timestamp is before the second.
-
-Returns true if timestamp1 < timestamp2.
-
-**Parameters:**
-
-- `timestamp1` — First Unix timestamp in seconds
-- `timestamp2` — Second Unix timestamp in seconds
-
-**Returns:** true if timestamp1 is earlier than timestamp2
-
-**Examples:**
-
-```ntnt
-is_before(0, 86400)  // => true  // Epoch is before day 1
-is_before(86400, 0)  // => false  // Day 1 is not before epoch
-```
-
-**Errors:**
-
-- **TypeError**: is_before() requires two timestamps — *Fix: Pass two Int arguments*
-
-**See also:** `is_after`, `equal`, `diff`
 
 *Since v0.1.0*
 

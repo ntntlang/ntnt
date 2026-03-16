@@ -797,7 +797,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param timestamp1 First Unix timestamp in seconds
     // @param timestamp2 Second Unix timestamp in seconds
     // @returns Map with keys: seconds, minutes, hours, days (all Int)
-    // @see_also is_before, is_after, equal
+    // @see_also before, after, equal
     // @since v0.1.0
     // @tags #time #pure #deterministic
     // @example diff(86400, 0).days => 1 ~ "One day difference"
@@ -828,77 +828,20 @@ pub fn init() -> HashMap<String, Value> {
 
     // ========== Comparisons ==========
 
-    // @ntnt is_before
+    // @ntnt before
     // @module std/time
-    // @signature is_before(timestamp1: Int, timestamp2: Int) -> Bool
+    // @signature before(timestamp1: Int, timestamp2: Int) -> Bool
     // Checks whether the first timestamp is before the second.
     //
     // Returns true if timestamp1 < timestamp2.
     // @param timestamp1 First Unix timestamp in seconds
     // @param timestamp2 Second Unix timestamp in seconds
     // @returns true if timestamp1 is earlier than timestamp2
-    // @see_also is_after, equal, diff
+    // @see_also after, equal, diff
     // @since v0.1.0
     // @tags #time #pure #deterministic
-    // @example is_before(0, 86400) => true ~ "Epoch is before day 1"
-    // @example is_before(86400, 0) => false ~ "Day 1 is not before epoch"
-    // @error TypeError ~ "is_before() requires two timestamps" fix: "Pass two Int arguments"
-    module.insert(
-        "is_before".to_string(),
-        Value::NativeFunction {
-            name: "is_before".to_string(),
-            arity: 2,
-            max_arity: 2,
-            func: |args| match (&args[0], &args[1]) {
-                (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 < ts2)),
-                _ => Err(IntentError::type_error(
-                    "is_before() requires two timestamps".to_string(),
-                )),
-            },
-        },
-    );
-
-    // @ntnt is_after
-    // @module std/time
-    // @signature is_after(timestamp1: Int, timestamp2: Int) -> Bool
-    // Checks whether the first timestamp is after the second.
-    //
-    // Returns true if timestamp1 > timestamp2.
-    // @param timestamp1 First Unix timestamp in seconds
-    // @param timestamp2 Second Unix timestamp in seconds
-    // @returns true if timestamp1 is later than timestamp2
-    // @see_also is_before, equal, diff
-    // @since v0.1.0
-    // @tags #time #pure #deterministic
-    // @example is_after(86400, 0) => true ~ "Day 1 is after epoch"
-    // @example is_after(0, 86400) => false ~ "Epoch is not after day 1"
-    // @error TypeError ~ "is_after() requires two timestamps" fix: "Pass two Int arguments"
-    module.insert(
-        "is_after".to_string(),
-        Value::NativeFunction {
-            name: "is_after".to_string(),
-            arity: 2,
-            max_arity: 2,
-            func: |args| match (&args[0], &args[1]) {
-                (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 > ts2)),
-                _ => Err(IntentError::type_error(
-                    "is_after() requires two timestamps".to_string(),
-                )),
-            },
-        },
-    );
-
-    // @ntnt before
-    // @module std/time
-    // @signature before(timestamp1: Int, timestamp2: Int) -> Bool
-    // Deprecated: use is_before() instead. Checks whether the first timestamp is before the second.
-    // @param timestamp1 First Unix timestamp in seconds
-    // @param timestamp2 Second Unix timestamp in seconds
-    // @returns true if timestamp1 is earlier than timestamp2
-    // @see_also is_before
-    // @since v0.1.0
-    // @tags #time, #pure, #deterministic, #deprecated
     // @example before(0, 86400) => true ~ "Epoch is before day 1"
+    // @example before(86400, 0) => false ~ "Day 1 is not before epoch"
     // @error TypeError ~ "before() requires two timestamps" fix: "Pass two Int arguments"
     module.insert(
         "before".to_string(),
@@ -906,14 +849,11 @@ pub fn init() -> HashMap<String, Value> {
             name: "before".to_string(),
             arity: 2,
             max_arity: 2,
-            func: |args| {
-                eprintln!("[DEPRECATED] before() is deprecated. Use is_before() instead.");
-                match (&args[0], &args[1]) {
-                    (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 < ts2)),
-                    _ => Err(IntentError::type_error(
-                        "before() requires two timestamps".to_string(),
-                    )),
-                }
+            func: |args| match (&args[0], &args[1]) {
+                (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 < ts2)),
+                _ => Err(IntentError::type_error(
+                    "before() requires two timestamps".to_string(),
+                )),
             },
         },
     );
@@ -921,14 +861,17 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt after
     // @module std/time
     // @signature after(timestamp1: Int, timestamp2: Int) -> Bool
-    // Deprecated: use is_after() instead. Checks whether the first timestamp is after the second.
+    // Checks whether the first timestamp is after the second.
+    //
+    // Returns true if timestamp1 > timestamp2.
     // @param timestamp1 First Unix timestamp in seconds
     // @param timestamp2 Second Unix timestamp in seconds
     // @returns true if timestamp1 is later than timestamp2
-    // @see_also is_after
+    // @see_also before, equal, diff
     // @since v0.1.0
-    // @tags #time, #pure, #deterministic, #deprecated
+    // @tags #time #pure #deterministic
     // @example after(86400, 0) => true ~ "Day 1 is after epoch"
+    // @example after(0, 86400) => false ~ "Epoch is not after day 1"
     // @error TypeError ~ "after() requires two timestamps" fix: "Pass two Int arguments"
     module.insert(
         "after".to_string(),
@@ -936,14 +879,11 @@ pub fn init() -> HashMap<String, Value> {
             name: "after".to_string(),
             arity: 2,
             max_arity: 2,
-            func: |args| {
-                eprintln!("[DEPRECATED] after() is deprecated. Use is_after() instead.");
-                match (&args[0], &args[1]) {
-                    (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 > ts2)),
-                    _ => Err(IntentError::type_error(
-                        "after() requires two timestamps".to_string(),
-                    )),
-                }
+            func: |args| match (&args[0], &args[1]) {
+                (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 > ts2)),
+                _ => Err(IntentError::type_error(
+                    "after() requires two timestamps".to_string(),
+                )),
             },
         },
     );
@@ -957,7 +897,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param timestamp1 First Unix timestamp in seconds
     // @param timestamp2 Second Unix timestamp in seconds
     // @returns true if both timestamps are the same value
-    // @see_also is_before, is_after, diff
+    // @see_also before, after, diff
     // @since v0.1.0
     // @tags #time #pure #deterministic
     // @example equal(0, 0) => true ~ "Same timestamps are equal"

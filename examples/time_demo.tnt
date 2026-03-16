@@ -8,7 +8,7 @@ import {
     to_timezone,
     make_date, make_time, parse_datetime, parse_iso,
     add_days, add_weeks, add_months, add_years, add_hours, add_seconds,
-    diff, is_before, is_after,
+    diff, before, after,
     list_timezones,
     MINUTE, HOUR, DAY, WEEK
 } from "std/time"
@@ -106,8 +106,8 @@ print("\n--- Comparisons ---")
 let past = add_days(ts, -7)
 let future = add_days(ts, 7)
 
-print("7 days ago before now: " + str(is_before(past, ts)))
-print("7 days from now after now: " + str(is_after(future, ts)))
+print("7 days ago before now: " + str(before(past, ts)))
+print("7 days from now after now: " + str(after(future, ts)))
 
 let d = diff(ts, past)
 print("Difference: " + str(d["days"]) + " days, " + str(d["hours"]) + " hours")
