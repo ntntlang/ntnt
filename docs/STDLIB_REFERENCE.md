@@ -3106,7 +3106,7 @@ import { channel, send, recv } from "std/concurrent"
 | Function | Description |
 |----------|-------------|
 | [`after`](#after) | Runs a zero-parameter handler function after a delay. Returns a Task handle. Delay can be milliseconds (Int) or a human-readable string ("5s", "1m", "500ms"). The delay is cancellation-aware (50ms slices). |
-| [`await_task`](#awaittask) | Blocks until the task completes and returns its result. Removes the task from the registry (this is the "I'm done" call — the handle becomes invalid after). Returns Ok(value) on success, Err(message) on failure or panic. |
+| [`await_task`](#awaittask) | Blocks until the task completes and returns its result. Marks the task as consumed (the handle remains valid for try_await, which returns {status: "consumed"}). Returns Ok(value) on success, Err(message) on failure or panic. |
 | [`cancel_schedule`](#cancelschedule) | Cancels a scheduled task. Sets the cancellation flag and removes from registry. Returns true if the schedule existed, false otherwise. |
 | [`cancel_task`](#canceltask) | Requests cooperative cancellation of a task. Sets the cancellation flag; the task thread will exit at the next yield point (recv, recv_timeout, sleep_ms, or fetch). Does NOT force immediate termination. Returns true if the task existed, false otherwise. |
 | [`channel`](#channel) | Creates a new unbounded channel for inter-task communication. Channels are single-consumer: only one task should call recv() at a time. |
@@ -3155,7 +3155,7 @@ after(1000, fn() { print("delayed!") })  // Run after 1 second
 await_task(task: Task) -> Result<Any, String>
 ```
 
-Blocks until the task completes and returns its result. Removes the task from the registry (this is the "I'm done" call — the handle becomes invalid after). Returns Ok(value) on success, Err(message) on failure or panic.
+Blocks until the task completes and returns its result. Marks the task as consumed (the handle remains valid for try_await, which returns {status: "consumed"}). Returns Ok(value) on success, Err(message) on failure or panic.
 
 **Parameters:**
 
