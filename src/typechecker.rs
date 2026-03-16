@@ -3477,6 +3477,9 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             });
             sig!("is_before", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool);
             sig!("is_after", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool);
+            sig!("before", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool); // deprecated alias
+            sig!("after", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool);
+            // deprecated alias
         }
         "std/concurrent" => {
             // Channel operations

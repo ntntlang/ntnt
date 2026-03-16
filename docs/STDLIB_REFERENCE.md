@@ -9950,6 +9950,8 @@ import { now, now_millis, now_nanos } from "std/time"
 | [`add_seconds`](#addseconds) | Adds seconds to a Unix timestamp. |
 | [`add_weeks`](#addweeks) | Adds weeks to a Unix timestamp. |
 | [`add_years`](#addyears) | Adds years to a Unix timestamp with calendar-aware logic. |
+| [`after`](#after) | Deprecated: use is_after() instead. Checks whether the first timestamp is after the second. |
+| [`before`](#before) | Deprecated: use is_before() instead. Checks whether the first timestamp is before the second. |
 | [`day`](#day) | Extracts the day of the month from a Unix timestamp (UTC). |
 | [`day_of_year`](#dayofyear) | Extracts the ordinal day of the year from a timestamp (UTC). |
 | [`diff`](#diff) | Computes the difference between two timestamps. |
@@ -10214,6 +10216,68 @@ add_years(0, 1)  // => 31536000  // Add 1 year to epoch
 - **RuntimeError**: Invalid date after year addition — *Fix: The resulting date is out of representable range*
 
 **See also:** `add_months`, `add_days`, `is_leap_year`, `diff`
+
+*Since v0.1.0*
+
+---
+
+#### `after`
+
+```ntnt
+after(timestamp1: Int, timestamp2: Int) -> Bool
+```
+
+Deprecated: use is_after() instead. Checks whether the first timestamp is after the second.
+
+**Parameters:**
+
+- `timestamp1` — First Unix timestamp in seconds
+- `timestamp2` — Second Unix timestamp in seconds
+
+**Returns:** true if timestamp1 is later than timestamp2
+
+**Examples:**
+
+```ntnt
+after(86400, 0)  // => true  // Day 1 is after epoch
+```
+
+**Errors:**
+
+- **TypeError**: after() requires two timestamps — *Fix: Pass two Int arguments*
+
+**See also:** `is_after`
+
+*Since v0.1.0*
+
+---
+
+#### `before`
+
+```ntnt
+before(timestamp1: Int, timestamp2: Int) -> Bool
+```
+
+Deprecated: use is_before() instead. Checks whether the first timestamp is before the second.
+
+**Parameters:**
+
+- `timestamp1` — First Unix timestamp in seconds
+- `timestamp2` — Second Unix timestamp in seconds
+
+**Returns:** true if timestamp1 is earlier than timestamp2
+
+**Examples:**
+
+```ntnt
+before(0, 86400)  // => true  // Epoch is before day 1
+```
+
+**Errors:**
+
+- **TypeError**: before() requires two timestamps — *Fix: Pass two Int arguments*
+
+**See also:** `is_before`
 
 *Since v0.1.0*
 
