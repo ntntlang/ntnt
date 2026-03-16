@@ -48,10 +48,12 @@ fn run_ntnt_code(code: &str) -> (String, String, i32) {
         panic!("No ntnt binary found. Run 'cargo build' first.");
     };
 
-    // Wrap with `timeout 10` so a hanging ntnt process can't block the test runner forever.
-    // Exit code 124 means the process timed out.
-    let output = Command::new("timeout")
-        .args(&["10", &binary, "run", &test_file])
+    // Run ntnt directly. The two-handle channel design (TxChannel/RxChannel) ensures
+    // recv() unblocks automatically when all sender clones drop — no external timeout
+    // wrapper needed to prevent zombie processes. This also makes tests portable
+    // across Linux, macOS, and Windows (no dependency on `timeout` from GNU coreutils).
+    let output = Command::new(&binary)
+        .args(&["run", &test_file])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .env("NTNT_ENV", "development")
         .output()

@@ -452,9 +452,7 @@ impl ConcurrencyRuntime {
         let sender_arc: Arc<crossbeam::Sender<SerializedValue>> = Arc::new(tx);
         let tx_val = Value::TxChannelHandle(
             id,
-            crate::interpreter::ChannelSender(
-                sender_arc as Arc<dyn std::any::Any + Send + Sync>
-            ),
+            crate::interpreter::ChannelSender(sender_arc as Arc<dyn std::any::Any + Send + Sync>),
         );
         let rx_val = Value::RxChannelHandle(id);
         (tx_val, rx_val)
@@ -2134,7 +2132,11 @@ mod tests {
     #[test]
     fn test_try_recv_empty() {
         let pair = concurrent_channel().unwrap();
-        let rx = if let Value::Array(ref v) = pair { v[1].clone() } else { panic!() };
+        let rx = if let Value::Array(ref v) = pair {
+            v[1].clone()
+        } else {
+            panic!()
+        };
         let result = concurrent_try_recv(&rx).unwrap();
         match result {
             Value::EnumValue { variant, .. } => assert_eq!(variant, "None"),
@@ -2258,7 +2260,11 @@ mod tests {
     #[test]
     fn test_recv_timeout_negative_clamped() {
         let pair = concurrent_channel().unwrap();
-        let rx = if let Value::Array(ref v) = pair { v[1].clone() } else { panic!() };
+        let rx = if let Value::Array(ref v) = pair {
+            v[1].clone()
+        } else {
+            panic!()
+        };
         // Negative timeout should be clamped to 0 and return None immediately
         let result = concurrent_recv_timeout(&rx, -100).unwrap();
         match result {
