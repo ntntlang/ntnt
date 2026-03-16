@@ -781,6 +781,29 @@ fn values_equal(a: &Value, b: &Value) -> bool {
                     .zip(vals2.iter())
                     .all(|(x, y)| values_equal(x, y))
         }
+        // Map deep equality: same keys with equal values
+        (Value::Map(a), Value::Map(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(k, v)| b.get(k).map_or(false, |bv| values_equal(v, bv)))
+        }
+        // Struct deep equality: same name with equal fields
+        (
+            Value::Struct {
+                name: n1,
+                fields: f1,
+            },
+            Value::Struct {
+                name: n2,
+                fields: f2,
+            },
+        ) => {
+            n1 == n2
+                && f1.len() == f2.len()
+                && f1
+                    .iter()
+                    .all(|(k, v)| f2.get(k).map_or(false, |fv| values_equal(v, fv)))
+        }
         // Handle equality: same variant + same id
         (Value::TaskHandle(a), Value::TaskHandle(b)) => a == b,
         (Value::TxChannelHandle(a, _), Value::TxChannelHandle(b, _)) => a == b,

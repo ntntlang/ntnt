@@ -6,6 +6,16 @@
 
 NTNT (pronounced "Intent") is an agent-native programming language for AI-driven web development. File extension: `.tnt`
 
+## OpenClaw Skill (Core Development)
+
+For core NTNT language/runtime development (Rust compiler work, stdlib functions, interpreter changes), load the full OpenClaw skill for deep context:
+
+```
+~/.openclaw/skills/ntnt/SKILL.md
+```
+
+Read this skill file when working on compiler internals, adding stdlib functions, modifying the interpreter, or any Rust-level changes to the NTNT runtime. It contains comprehensive guidance beyond what this CLAUDE.md covers.
+
 ## Building NTNT
 
 ```bash

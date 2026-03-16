@@ -3121,6 +3121,18 @@ impl TypeContext {
                     });
                 }
             };
+            ($name:expr, [$($pname:expr => $ptype:expr),*], $ret:expr, required($n:expr)) => {
+                {
+                    let params: Vec<(String, Type)> = vec![$(($pname.to_string(), $ptype)),*];
+                    b.insert($name.to_string(), FunctionSig {
+                        params,
+                        return_type: $ret,
+                        variadic: false,
+                        required_params: $n,
+                        type_params: vec![],
+                    });
+                }
+            };
         }
 
         // I/O
@@ -3257,6 +3269,18 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     return_type: $ret,
                     variadic: true,
                     required_params,
+                    type_params: vec![],
+                });
+            }
+        };
+        ($name:expr, [$($pname:expr => $ptype:expr),*], $ret:expr, required($n:expr)) => {
+            {
+                let params: Vec<(String, Type)> = vec![$(($pname.to_string(), $ptype)),*];
+                sigs.insert($name.to_string(), FunctionSig {
+                    params,
+                    return_type: $ret,
+                    variadic: false,
+                    required_params: $n,
                     type_params: vec![],
                 });
             }
@@ -3453,9 +3477,6 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             });
             sig!("is_before", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool);
             sig!("is_after", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool);
-            sig!("before", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool); // deprecated alias
-            sig!("after", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool);
-            // deprecated alias
         }
         "std/concurrent" => {
             // Channel operations
@@ -3466,7 +3487,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("recv_timeout", ["rx" => Type::Named("RxChannel".to_string()), "millis" => Type::Int], Type::Optional(Box::new(Type::Any)));
             sig!("try_recv", ["rx" => Type::Named("RxChannel".to_string())], Type::Optional(Box::new(Type::Any)));
             sig!("close", ["rx" => Type::Named("RxChannel".to_string())], Type::Bool);
-            sig!("select", ["channels" => Type::Array(Box::new(Type::Named("RxChannel".to_string()))), "timeout_ms" => Type::Union(vec![Type::Int, Type::String])], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, variadic);
+            sig!("select", ["channels" => Type::Array(Box::new(Type::Named("RxChannel".to_string()))), "timeout_ms" => Type::Union(vec![Type::Int, Type::String])], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, required(1));
             // Task operations
             sig!("spawn", ["handler" => Type::Any], Type::Named("Task".to_string()));
             sig!("await_task", ["task" => Type::Named("Task".to_string())], Type::Generic { name: "Result".to_string(), args: vec![Type::Any, Type::String] });

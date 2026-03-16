@@ -3114,7 +3114,7 @@ import { channel, send, recv } from "std/concurrent"
 | [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if all senders have been dropped (Disconnected) or the receiver was closed. This is a cancellation yield point: a cancelled task will exit here. Single-consumer: the receiver lock is held for the blocking duration. |
 | [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or all senders disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point. |
 | [`schedule`](#schedule) | Runs a zero-parameter handler repeatedly at the given interval. Returns a Schedule handle. Interval can be milliseconds (Int) or a string ("5s", "1m"). Zero intervals are rejected. Each tick spawns a thread with catch_unwind; overlap prevention ensures a new tick won't start until the previous one finishes. Panics in tick execution are caught and logged — they don't kill the schedule. |
-| [`select`](#select) | Waits for the first available value from any of the given receiver handles. Returns a map with "channel" (the RxChannel that fired) and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed/disconnected: returns {"status": "closed"}. This is a cancellation yield point. |
+| [`select`](#select) | Waits for the first available value from any of the given receiver handles. Returns a map with "status": "ok", "channel" (the RxChannel that fired), and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed/disconnected: returns {"status": "closed"}. All return shapes include a "status" key for consistent pattern matching. This is a cancellation yield point. |
 | [`send`](#send) | Sends a value through a channel using the sender handle (first element of channel()). Returns false if the receiver has been closed (crossbeam Disconnected). Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum. |
 | [`sleep_ms`](#sleepms) | Pauses execution for specified milliseconds. This is a cancellation yield point: a cancelled task will exit during sleep_ms(). Uses 50ms slices internally. Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks. |
 | [`spawn`](#spawn) | Spawns a zero-parameter function as a background task. Returns a Task handle. The handler's closure environment is serialized for cross-thread use. Serializable capture types: Int, Float, Bool, String, Array, Map, Struct, Enum. The handler must have zero parameters (including no defaults). |
@@ -3145,7 +3145,7 @@ after(1000, fn() { print("delayed!") })  // Run after 1 second
 
 **See also:** `spawn`, `await_task`, `schedule`
 
-*Since v0.5.0*
+*Since v0.4.6*
 
 ---
 
@@ -3171,7 +3171,7 @@ await_task(task)  // => Ok(42)  // Wait for task result
 
 **See also:** `spawn`, `try_await`, `cancel_task`
 
-*Since v0.5.0*
+*Since v0.4.6*
 
 ---
 
@@ -3197,7 +3197,7 @@ cancel_schedule(sched)  // => true  // Cancel a scheduled task
 
 **See also:** `schedule`
 
-*Since v0.5.0*
+*Since v0.4.6*
 
 ---
 
@@ -3223,7 +3223,7 @@ cancel_task(task)  // => true  // Cancel a running task
 
 **See also:** `spawn`, `await_task`
 
-*Since v0.5.0*
+*Since v0.4.6*
 
 ---
 
@@ -3256,7 +3256,7 @@ let msg = recv(rx)
 
 **See also:** `send`, `recv`, `close`, `select`
 
-*Since v0.4.5*
+*Since v0.4.6*
 
 ---
 
@@ -3281,7 +3281,7 @@ close(rx)  // => true
 
 **See also:** `channel`
 
-*Since v0.2.0*
+*Since v0.4.6*
 
 ---
 
@@ -3306,7 +3306,7 @@ recv(rx)
 
 **See also:** `channel`, `send`, `try_recv`, `recv_timeout`
 
-*Since v0.2.0*
+*Since v0.4.6*
 
 ---
 
@@ -3332,7 +3332,7 @@ recv_timeout(rx, 5000)
 
 **See also:** `recv`, `try_recv`
 
-*Since v0.2.0*
+*Since v0.4.6*
 
 ---
 
@@ -3359,7 +3359,7 @@ schedule(5000, fn() { print("tick") })  // Run every 5 seconds
 
 **See also:** `cancel_schedule`, `after`
 
-*Since v0.5.0*
+*Since v0.4.6*
 
 ---
 
@@ -3369,7 +3369,7 @@ schedule(5000, fn() { print("tick") })  // Run every 5 seconds
 select(channels: Array<RxChannel>, timeout_ms?: Int | String) -> Map
 ```
 
-Waits for the first available value from any of the given receiver handles. Returns a map with "channel" (the RxChannel that fired) and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed/disconnected: returns {"status": "closed"}. This is a cancellation yield point.
+Waits for the first available value from any of the given receiver handles. Returns a map with "status": "ok", "channel" (the RxChannel that fired), and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed/disconnected: returns {"status": "closed"}. All return shapes include a "status" key for consistent pattern matching. This is a cancellation yield point.
 
 **Parameters:**
 
@@ -3389,7 +3389,7 @@ select([rx_a, rx_b], 5000)  // Wait up to 5 seconds
 
 **See also:** `channel`, `recv`, `recv_timeout`
 
-*Since v0.5.0*
+*Since v0.4.6*
 
 ---
 
@@ -3414,7 +3414,7 @@ send(tx, "hello")  // => true  // Send a string through the channel
 
 **See also:** `channel`, `recv`, `recv_timeout`
 
-*Since v0.2.0*
+*Since v0.4.6*
 
 ---
 
@@ -3436,7 +3436,7 @@ Pauses execution for specified milliseconds. This is a cancellation yield point:
 sleep_ms(1000)  // Sleep for 1 second (cancellation-aware)
 ```
 
-*Since v0.5.0*
+*Since v0.4.6*
 
 ---
 
@@ -3462,7 +3462,7 @@ spawn(fn() { 42 })  // Spawn a background task
 
 **See also:** `await_task`, `try_await`, `cancel_task`
 
-*Since v0.5.0*
+*Since v0.4.6*
 
 ---
 
@@ -3480,7 +3480,7 @@ Returns the number of available CPU threads. Useful for sizing parallel work.
 thread_count()  // => 8  // Number of CPU threads
 ```
 
-*Since v0.2.0*
+*Since v0.4.6*
 
 ---
 
@@ -3506,7 +3506,7 @@ try_await(task)  // => {"status": "running", "result": None}  // Check task stat
 
 **See also:** `spawn`, `await_task`, `cancel_task`
 
-*Since v0.5.0*
+*Since v0.4.6*
 
 ---
 
@@ -3531,7 +3531,7 @@ try_recv(rx)
 
 **See also:** `recv`, `recv_timeout`
 
-*Since v0.2.0*
+*Since v0.4.6*
 
 ---
 
@@ -9950,8 +9950,6 @@ import { now, now_millis, now_nanos } from "std/time"
 | [`add_seconds`](#addseconds) | Adds seconds to a Unix timestamp. |
 | [`add_weeks`](#addweeks) | Adds weeks to a Unix timestamp. |
 | [`add_years`](#addyears) | Adds years to a Unix timestamp with calendar-aware logic. |
-| [`after`](#after) | Deprecated: use is_after() instead. Checks whether the first timestamp is after the second. |
-| [`before`](#before) | Deprecated: use is_before() instead. Checks whether the first timestamp is before the second. |
 | [`day`](#day) | Extracts the day of the month from a Unix timestamp (UTC). |
 | [`day_of_year`](#dayofyear) | Extracts the ordinal day of the year from a timestamp (UTC). |
 | [`diff`](#diff) | Computes the difference between two timestamps. |
@@ -10216,68 +10214,6 @@ add_years(0, 1)  // => 31536000  // Add 1 year to epoch
 - **RuntimeError**: Invalid date after year addition — *Fix: The resulting date is out of representable range*
 
 **See also:** `add_months`, `add_days`, `is_leap_year`, `diff`
-
-*Since v0.1.0*
-
----
-
-#### `after`
-
-```ntnt
-after(timestamp1: Int, timestamp2: Int) -> Bool
-```
-
-Deprecated: use is_after() instead. Checks whether the first timestamp is after the second.
-
-**Parameters:**
-
-- `timestamp1` — First Unix timestamp in seconds
-- `timestamp2` — Second Unix timestamp in seconds
-
-**Returns:** true if timestamp1 is later than timestamp2
-
-**Examples:**
-
-```ntnt
-after(86400, 0)  // => true  // Day 1 is after epoch
-```
-
-**Errors:**
-
-- **TypeError**: after() requires two timestamps — *Fix: Pass two Int arguments*
-
-**See also:** `is_after`
-
-*Since v0.1.0*
-
----
-
-#### `before`
-
-```ntnt
-before(timestamp1: Int, timestamp2: Int) -> Bool
-```
-
-Deprecated: use is_before() instead. Checks whether the first timestamp is before the second.
-
-**Parameters:**
-
-- `timestamp1` — First Unix timestamp in seconds
-- `timestamp2` — Second Unix timestamp in seconds
-
-**Returns:** true if timestamp1 is earlier than timestamp2
-
-**Examples:**
-
-```ntnt
-before(0, 86400)  // => true  // Epoch is before day 1
-```
-
-**Errors:**
-
-- **TypeError**: before() requires two timestamps — *Fix: Pass two Int arguments*
-
-**See also:** `is_before`
 
 *Since v0.1.0*
 

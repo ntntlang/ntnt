@@ -888,66 +888,6 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
-    // @ntnt before
-    // @module std/time
-    // @signature before(timestamp1: Int, timestamp2: Int) -> Bool
-    // Deprecated: use is_before() instead. Checks whether the first timestamp is before the second.
-    // @param timestamp1 First Unix timestamp in seconds
-    // @param timestamp2 Second Unix timestamp in seconds
-    // @returns true if timestamp1 is earlier than timestamp2
-    // @see_also is_before
-    // @since v0.1.0
-    // @tags #time, #pure, #deterministic, #deprecated
-    // @example before(0, 86400) => true ~ "Epoch is before day 1"
-    // @error TypeError ~ "before() requires two timestamps" fix: "Pass two Int arguments"
-    module.insert(
-        "before".to_string(),
-        Value::NativeFunction {
-            name: "before".to_string(),
-            arity: 2,
-            max_arity: 2,
-            func: |args| {
-                eprintln!("[DEPRECATED] before() is deprecated. Use is_before() instead.");
-                match (&args[0], &args[1]) {
-                    (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 < ts2)),
-                    _ => Err(IntentError::type_error(
-                        "before() requires two timestamps".to_string(),
-                    )),
-                }
-            },
-        },
-    );
-
-    // @ntnt after
-    // @module std/time
-    // @signature after(timestamp1: Int, timestamp2: Int) -> Bool
-    // Deprecated: use is_after() instead. Checks whether the first timestamp is after the second.
-    // @param timestamp1 First Unix timestamp in seconds
-    // @param timestamp2 Second Unix timestamp in seconds
-    // @returns true if timestamp1 is later than timestamp2
-    // @see_also is_after
-    // @since v0.1.0
-    // @tags #time, #pure, #deterministic, #deprecated
-    // @example after(86400, 0) => true ~ "Day 1 is after epoch"
-    // @error TypeError ~ "after() requires two timestamps" fix: "Pass two Int arguments"
-    module.insert(
-        "after".to_string(),
-        Value::NativeFunction {
-            name: "after".to_string(),
-            arity: 2,
-            max_arity: 2,
-            func: |args| {
-                eprintln!("[DEPRECATED] after() is deprecated. Use is_after() instead.");
-                match (&args[0], &args[1]) {
-                    (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 > ts2)),
-                    _ => Err(IntentError::type_error(
-                        "after() requires two timestamps".to_string(),
-                    )),
-                }
-            },
-        },
-    );
-
     // @ntnt equal
     // @module std/time
     // @signature equal(timestamp1: Int, timestamp2: Int) -> Bool

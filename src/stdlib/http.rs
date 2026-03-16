@@ -798,6 +798,11 @@ fn http_fetch(opts: &HashMap<String, Value>) -> Result<Value> {
 
 /// Download a file from URL
 fn http_download(url: &str, file_path: &str) -> Result<Value> {
+    // Cancellation yield point: check before making the network request
+    if crate::stdlib::concurrent::is_current_task_cancelled() {
+        return Err(IntentError::runtime_error("Task cancelled".to_string()));
+    }
+
     // SSRF protection: validate URL before making request
     if let Err(reason) = validate_url_for_ssrf(url) {
         return Ok(Value::err(Value::String(format!(

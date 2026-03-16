@@ -7369,6 +7369,17 @@ impl Interpreter {
         // Wait for server thread to finish
         let _ = server_handle.join();
 
+        // Run shutdown handlers (mirrors sync server path)
+        let shutdown_handlers: Vec<Value> = self.server_state.get_shutdown_handlers().to_vec();
+        if !shutdown_handlers.is_empty() {
+            println!("\nRunning shutdown handlers...");
+            for handler in shutdown_handlers {
+                if let Err(e) = self.call_function(handler, vec![]) {
+                    eprintln!("Shutdown handler error: {}", e);
+                }
+            }
+        }
+
         Ok(Value::Unit)
     }
 

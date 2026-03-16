@@ -15,6 +15,7 @@
 //!   `recv()` to return `Unit` (disconnected).
 //! - `send()` on a removed channel returns `false`.
 //! - `recv()` is single-consumer — the receiver `MutexGuard` is held for the blocking duration.
+//!   Uses 100ms timeout slices internally for cancellation awareness.
 //!
 //! ## Tasks
 //!
@@ -25,6 +26,8 @@
 //! - All `eval_block` calls are wrapped in `catch_unwind(AssertUnwindSafe(...))`.
 //! - Tasks auto-expire (marked `Expired`) after 5 minutes in terminal state (the reaper runs on
 //!   `spawn()` and `after()` entry), but only if not recently `try_await()`'d.
+//! - Expired entries are removed from the registry after 7 days (configurable via
+//!   `NTNT_TASK_REMOVAL_TTL` env var in seconds) to prevent memory leaks in long-running servers.
 //!
 //! ## Schedules
 //!
@@ -45,7 +48,7 @@ use crossbeam_channel::{self as crossbeam};
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -88,8 +91,8 @@ fn check_cancellation() -> Result<()> {
 
 /// Serialized value for thread-safe transmission across task/channel boundaries.
 ///
-/// Handles: Unit, Int, Float, Bool, String, Array, Map, Struct (via `__type` marker),
-/// EnumValue (via `__enum` marker).
+/// Each NTNT value type has a dedicated variant — no marker keys that could
+/// collide with user data.
 #[derive(Debug, Clone)]
 pub(crate) enum SerializedValue {
     Unit,
@@ -99,6 +102,17 @@ pub(crate) enum SerializedValue {
     String(String),
     Array(Vec<SerializedValue>),
     Map(HashMap<String, SerializedValue>),
+    /// Struct with type name and serialized fields.
+    Struct {
+        name: String,
+        fields: HashMap<String, SerializedValue>,
+    },
+    /// Enum variant with enum name, variant name, and associated values.
+    EnumValue {
+        enum_name: String,
+        variant: String,
+        values: Vec<SerializedValue>,
+    },
     /// Task handle — just the ID.
     TaskHandle(u64),
     /// Sender handle — carries the Arc<Sender> so it disconnects naturally on drop.
@@ -132,32 +146,25 @@ impl SerializedValue {
             }
             Value::Struct { name, fields } => {
                 let mut serialized = HashMap::new();
-                serialized.insert(
-                    "__type".to_string(),
-                    SerializedValue::String(name.clone()),
-                );
                 for (k, v) in fields {
                     serialized.insert(k.clone(), Self::from_value(v)?);
                 }
-                Ok(SerializedValue::Map(serialized))
+                Ok(SerializedValue::Struct {
+                    name: name.clone(),
+                    fields: serialized,
+                })
             }
             Value::EnumValue {
                 enum_name,
                 variant,
                 values,
             } => {
-                let mut serialized = HashMap::new();
-                serialized.insert(
-                    "__enum".to_string(),
-                    SerializedValue::String(enum_name.clone()),
-                );
-                serialized.insert(
-                    "__variant".to_string(),
-                    SerializedValue::String(variant.clone()),
-                );
                 let vals: Result<Vec<_>> = values.iter().map(Self::from_value).collect();
-                serialized.insert("__values".to_string(), SerializedValue::Array(vals?));
-                Ok(SerializedValue::Map(serialized))
+                Ok(SerializedValue::EnumValue {
+                    enum_name: enum_name.clone(),
+                    variant: variant.clone(),
+                    values: vals?,
+                })
             }
             Value::TaskHandle(id) => Ok(SerializedValue::TaskHandle(*id)),
             Value::TxChannelHandle(id, cs) => {
@@ -180,7 +187,7 @@ impl SerializedValue {
         }
     }
 
-    /// Convert back to Value, reconstructing Struct and EnumValue from markers.
+    /// Convert back to Value.
     pub(crate) fn to_value(&self) -> Value {
         match self {
             SerializedValue::Unit => Value::Unit,
@@ -190,40 +197,31 @@ impl SerializedValue {
             SerializedValue::String(s) => Value::String(s.clone()),
             SerializedValue::Array(arr) => Value::Array(arr.iter().map(|v| v.to_value()).collect()),
             SerializedValue::Map(map) => {
-                // Check for __enum marker first
-                if let Some(SerializedValue::String(enum_name)) = map.get("__enum") {
-                    if let (
-                        Some(SerializedValue::String(variant)),
-                        Some(SerializedValue::Array(values)),
-                    ) = (map.get("__variant"), map.get("__values"))
-                    {
-                        return Value::EnumValue {
-                            enum_name: enum_name.clone(),
-                            variant: variant.clone(),
-                            values: values.iter().map(|v| v.to_value()).collect(),
-                        };
-                    }
-                }
-                // Check for __type marker (struct)
-                if let Some(SerializedValue::String(type_name)) = map.get("__type") {
-                    let mut fields = HashMap::new();
-                    for (k, v) in map {
-                        if k != "__type" {
-                            fields.insert(k.clone(), v.to_value());
-                        }
-                    }
-                    return Value::Struct {
-                        name: type_name.clone(),
-                        fields,
-                    };
-                }
-                // Regular map
                 let mut result = HashMap::new();
                 for (k, v) in map {
                     result.insert(k.clone(), v.to_value());
                 }
                 Value::Map(result)
             }
+            SerializedValue::Struct { name, fields } => {
+                let mut result = HashMap::new();
+                for (k, v) in fields {
+                    result.insert(k.clone(), v.to_value());
+                }
+                Value::Struct {
+                    name: name.clone(),
+                    fields: result,
+                }
+            }
+            SerializedValue::EnumValue {
+                enum_name,
+                variant,
+                values,
+            } => Value::EnumValue {
+                enum_name: enum_name.clone(),
+                variant: variant.clone(),
+                values: values.iter().map(|v| v.to_value()).collect(),
+            },
             SerializedValue::TaskHandle(id) => Value::TaskHandle(*id),
             SerializedValue::TxChannelHandle(id, sender_arc) => Value::TxChannelHandle(
                 *id,
@@ -270,19 +268,31 @@ impl TaskState {
 // Task entry
 // =============================================================================
 
+/// Mutable task state protected by a single mutex. Updated atomically in `finalize_task()`.
+struct TaskInner {
+    state: TaskState,
+    result: Option<SerializedValue>,
+    error_msg: Option<String>,
+    completed_at: Option<Instant>,
+}
+
 struct TaskEntry {
-    /// Current state of the task. Written by task thread, read by main thread.
-    state: Arc<Mutex<TaskState>>,
-    /// The result once the task reaches a terminal state.
-    result: Arc<Mutex<Option<SerializedValue>>>,
-    /// The error message if the task failed/panicked.
-    error_msg: Arc<Mutex<Option<String>>>,
+    /// Core mutable state — one lock instead of four.
+    inner: Arc<Mutex<TaskInner>>,
     /// Cooperative cancellation flag. Set by `cancel_task()` with Release ordering.
     cancelled: Arc<AtomicBool>,
-    /// When the task entered a terminal state (for reaper).
-    completed_at: Arc<Mutex<Option<Instant>>>,
     /// Last time `try_await()` checked this task (prevents reaping active handles).
     last_checked_at: Arc<Mutex<Option<Instant>>>,
+    /// Condvar notified by `finalize_task()` when the task reaches a terminal state.
+    /// `await_task()` waits on this instead of polling with `thread::sleep`.
+    completed_notify: Arc<(Mutex<bool>, Condvar)>,
+}
+
+/// Cloned Arcs for operating on a task outside the registry lock.
+/// Replaces the old 6-tuple return from `get_task_arcs()`.
+struct TaskArcs {
+    inner: Arc<Mutex<TaskInner>>,
+    completed_notify: Arc<(Mutex<bool>, Condvar)>,
 }
 
 // =============================================================================
@@ -295,6 +305,10 @@ struct ChannelEntry {
     /// zero, the Sender drops, and recv() sees Disconnected → returns Unit automatically.
     /// No sentinel injection required.
     receiver: Arc<Mutex<crossbeam::Receiver<SerializedValue>>>,
+    /// Weak probe to the sender Arc. When all TxChannelHandle clones are dropped, this
+    /// becomes dead (upgrade() returns None). Used by the channel reaper to detect
+    /// orphaned channels where close() was never called.
+    sender_probe: Weak<dyn std::any::Any + Send + Sync>,
 }
 
 // =============================================================================
@@ -316,21 +330,28 @@ struct ScheduleEntry {
 pub struct ConcurrencyRuntime {
     /// Monotonic ID counter shared by tasks, channels, and schedules.
     id_counter: AtomicU64,
+    /// Number of currently active (Running) tasks. Incremented on spawn, decremented on finalize.
+    active_tasks: AtomicU64,
     /// Task registry. Lock, clone Arcs, drop, then operate.
     tasks: Mutex<HashMap<u64, TaskEntry>>,
     /// Channel registry. close() = remove from this map.
     channels: Mutex<HashMap<u64, ChannelEntry>>,
     /// Schedule registry. cancel_schedule() = set flag + remove.
     schedules: Mutex<HashMap<u64, ScheduleEntry>>,
+    /// Last time the inline reaper ran. Used to rate-limit reap_expired_tasks() calls on
+    /// spawn()/after() to at most once per 10 seconds, avoiding O(n) Arc clones on every spawn.
+    last_inline_reap: Mutex<Instant>,
 }
 
 impl ConcurrencyRuntime {
     fn new() -> Self {
         ConcurrencyRuntime {
             id_counter: AtomicU64::new(1),
+            active_tasks: AtomicU64::new(0),
             tasks: Mutex::new(HashMap::new()),
             channels: Mutex::new(HashMap::new()),
             schedules: Mutex::new(HashMap::new()),
+            last_inline_reap: Mutex::new(Instant::now()),
         }
     }
 
@@ -339,27 +360,42 @@ impl ConcurrencyRuntime {
     }
 
     // -------------------------------------------------------------------------
-    // Reaper — auto-expire terminal tasks older than 5 minutes
+    // Reaper — auto-expire terminal tasks older than 5 minutes, remove after 7 days
     // -------------------------------------------------------------------------
 
-    /// Reap tasks that have been in terminal state for >5 min AND haven't been
-    /// `try_await()`'d recently. Called on `spawn()` and `after()` entry.
+    /// Rate-limited wrapper around `reap_expired_tasks`. Only runs the full reap if at least
+    /// 10 seconds have elapsed since the last inline reap. This avoids O(n) Arc clones on
+    /// every `spawn()`/`after()` call when many tasks are in the registry.
+    fn try_reap_expired_tasks(&self) {
+        let should_reap = {
+            let last = match self.last_inline_reap.lock() {
+                Ok(l) => *l,
+                Err(_) => return,
+            };
+            last.elapsed() >= Duration::from_secs(10)
+        };
+        if should_reap {
+            self.reap_expired_tasks();
+            if let Ok(mut last) = self.last_inline_reap.lock() {
+                *last = Instant::now();
+            }
+        }
+    }
+
+    /// Reap tasks in two phases:
+    /// 1. Mark terminal tasks as `Expired` after 5 minutes (unless recently `try_await()`'d).
+    /// 2. Remove `Expired` entries from the registry after the removal TTL (default 7 days,
+    ///    configurable via `NTNT_TASK_REMOVAL_TTL` in seconds).
     ///
-    /// Instead of removing from registry, marks state as `Expired` so that
-    /// `try_await()` can return `{status: "expired"}` instead of erroring.
+    /// Called on `spawn()` and `after()` entry.
     fn reap_expired_tasks(&self) {
         let now = Instant::now();
         let expiry = Duration::from_secs(300); // 5 minutes
         let recent_check_window = Duration::from_secs(300); // 5 minutes
+        let removal_ttl = task_removal_ttl();
 
         // Step 1: Acquire registry lock → clone Arcs → drop lock
-        #[allow(clippy::type_complexity)]
-        let task_arcs: Vec<(
-            u64,
-            Arc<Mutex<TaskState>>,
-            Arc<Mutex<Option<Instant>>>,
-            Arc<Mutex<Option<Instant>>>,
-        )> = {
+        let task_arcs: Vec<(u64, Arc<Mutex<TaskInner>>, Arc<Mutex<Option<Instant>>>)> = {
             let tasks = match self.tasks.lock() {
                 Ok(t) => t,
                 Err(e) => {
@@ -372,8 +408,7 @@ impl ConcurrencyRuntime {
                 .map(|(id, entry)| {
                     (
                         *id,
-                        Arc::clone(&entry.state),
-                        Arc::clone(&entry.completed_at),
+                        Arc::clone(&entry.inner),
                         Arc::clone(&entry.last_checked_at),
                     )
                 })
@@ -383,18 +418,30 @@ impl ConcurrencyRuntime {
 
         // Step 2: Inspect per-task state outside registry lock
         let mut ids_to_expire: HashSet<u64> = HashSet::new();
-        for (id, state_arc, completed_at_arc, last_checked_at_arc) in &task_arcs {
-            let state = match state_arc.lock() {
-                Ok(s) => *s,
+        let mut ids_to_remove: Vec<u64> = Vec::new();
+        for (id, inner_arc, last_checked_at_arc) in &task_arcs {
+            let (state, completed_at) = match inner_arc.lock() {
+                Ok(inner) => (inner.state, inner.completed_at),
                 Err(e) => {
                     eprintln!(
-                        "[WARN] Task state mutex poisoned during reap (task {}): {}",
+                        "[WARN] Task inner mutex poisoned during reap (task {}): {}",
                         id, e
                     );
                     continue;
                 }
             };
-            // Only expire tasks in terminal states (not Running or already Expired)
+
+            // Phase 2: Remove entries that have been Expired for longer than removal_ttl
+            if state == TaskState::Expired {
+                if let Some(completed) = completed_at {
+                    if now.duration_since(completed) >= removal_ttl {
+                        ids_to_remove.push(*id);
+                    }
+                }
+                continue;
+            }
+
+            // Phase 1: Only expire tasks in terminal states (not Running or already Expired)
             if !matches!(
                 state,
                 TaskState::Completed
@@ -404,16 +451,6 @@ impl ConcurrencyRuntime {
             ) {
                 continue;
             }
-            let completed_at = match completed_at_arc.lock() {
-                Ok(c) => *c,
-                Err(e) => {
-                    eprintln!(
-                        "[WARN] Task completed_at mutex poisoned during reap (task {}): {}",
-                        id, e
-                    );
-                    continue;
-                }
-            };
             let Some(completed) = completed_at else {
                 continue; // no completion time recorded — skip
             };
@@ -439,19 +476,77 @@ impl ConcurrencyRuntime {
             ids_to_expire.insert(*id);
         }
 
-        // Step 3: Mark expired tasks (using already-cloned state Arcs — no registry lock needed)
-        for (id, state_arc, _, _) in &task_arcs {
+        // Step 3: Mark expired tasks (using already-cloned inner Arcs — no registry lock needed)
+        for (id, inner_arc, _) in &task_arcs {
             if ids_to_expire.contains(id) {
-                match state_arc.lock() {
-                    Ok(mut s) => {
-                        *s = TaskState::Expired;
+                match inner_arc.lock() {
+                    Ok(mut inner) => {
+                        inner.state = TaskState::Expired;
                     }
                     Err(e) => {
                         eprintln!(
-                            "[WARN] Task state mutex poisoned during expire (task {}): {}",
+                            "[WARN] Task inner mutex poisoned during expire (task {}): {}",
                             id, e
                         );
                     }
+                }
+            }
+        }
+
+        // Step 4: Remove long-expired entries from the registry to free memory
+        if !ids_to_remove.is_empty() {
+            if let Ok(mut tasks) = self.tasks.lock() {
+                for id in &ids_to_remove {
+                    tasks.remove(id);
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Channel reaper — remove orphaned channels
+    // -------------------------------------------------------------------------
+
+    /// Reap channels where all senders have been dropped and no messages remain.
+    /// This prevents memory leaks from channels where `close()` is never called.
+    ///
+    /// A channel is considered dead when:
+    /// 1. `sender_probe.upgrade()` returns None (all TxChannelHandle clones dropped), AND
+    /// 2. The crossbeam receiver is empty (no buffered messages to consume).
+    fn reap_disconnected_channels(&self) {
+        // Step 1: Lock registry, find candidates where sender_probe is dead
+        let candidates: Vec<(u64, Arc<Mutex<crossbeam::Receiver<SerializedValue>>>)> = {
+            let channels = match self.channels.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            channels
+                .iter()
+                .filter(|(_, entry)| entry.sender_probe.upgrade().is_none())
+                .map(|(id, entry)| (*id, Arc::clone(&entry.receiver)))
+                .collect()
+        };
+        // Registry lock dropped here
+
+        if candidates.is_empty() {
+            return;
+        }
+
+        // Step 2: Check if channels are fully drained (sender dead + no messages remaining)
+        let mut ids_to_remove = Vec::new();
+        for (id, receiver) in &candidates {
+            if let Ok(rx) = receiver.lock() {
+                if rx.is_empty() {
+                    ids_to_remove.push(*id);
+                }
+            }
+        }
+
+        // Step 3: Remove dead channels from registry
+        if !ids_to_remove.is_empty() {
+            if let Ok(mut channels) = self.channels.lock() {
+                for id in &ids_to_remove {
+                    channels.remove(id);
                 }
             }
         }
@@ -466,8 +561,13 @@ impl ConcurrencyRuntime {
     fn create_channel(&self) -> Result<(Value, Value)> {
         let id = self.next_id();
         let (tx, rx) = crossbeam::unbounded::<SerializedValue>();
+        // Create the type-erased sender Arc and a Weak probe before moving into the entry.
+        // The Weak lets the channel reaper detect when all TxChannelHandle clones have dropped.
+        let sender_arc: Arc<dyn std::any::Any + Send + Sync> = Arc::new(tx);
+        let sender_probe = Arc::downgrade(&sender_arc);
         let entry = ChannelEntry {
             receiver: Arc::new(Mutex::new(rx)),
+            sender_probe,
         };
         let mut channels = self
             .channels
@@ -475,11 +575,7 @@ impl ConcurrencyRuntime {
             .map_err(|_| IntentError::runtime_error("Channel registry poisoned".to_string()))?;
         channels.insert(id, entry);
         drop(channels);
-        let sender_arc: Arc<crossbeam::Sender<SerializedValue>> = Arc::new(tx);
-        let tx_val = Value::TxChannelHandle(
-            id,
-            crate::interpreter::ChannelSender(sender_arc as Arc<dyn std::any::Any + Send + Sync>),
-        );
+        let tx_val = Value::TxChannelHandle(id, crate::interpreter::ChannelSender(sender_arc));
         let rx_val = Value::RxChannelHandle(id);
         Ok((tx_val, rx_val))
     }
@@ -512,9 +608,16 @@ impl ConcurrencyRuntime {
             return Ok(Value::Unit);
         };
         let rx = Self::lock_receiver(&receiver)?;
-        match rx.recv() {
-            Ok(serialized) => Ok(serialized.to_value()),
-            Err(_) => Ok(Value::Unit),
+        // Use 100ms timeout slices so recv() is a true cancellation yield point.
+        // Without this, a cancelled task blocked on recv() would hang forever
+        // if the sender never sends or drops.
+        loop {
+            check_cancellation()?;
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(serialized) => return Ok(serialized.to_value()),
+                Err(crossbeam::RecvTimeoutError::Timeout) => continue,
+                Err(crossbeam::RecvTimeoutError::Disconnected) => return Ok(Value::Unit),
+            }
         }
     }
 
@@ -586,12 +689,15 @@ impl ConcurrencyRuntime {
     fn register_task(&self, cancelled: Arc<AtomicBool>) -> Result<u64> {
         let id = self.next_id();
         let entry = TaskEntry {
-            state: Arc::new(Mutex::new(TaskState::Running)),
-            result: Arc::new(Mutex::new(None)),
-            error_msg: Arc::new(Mutex::new(None)),
+            inner: Arc::new(Mutex::new(TaskInner {
+                state: TaskState::Running,
+                result: None,
+                error_msg: None,
+                completed_at: None,
+            })),
             cancelled,
-            completed_at: Arc::new(Mutex::new(None)),
             last_checked_at: Arc::new(Mutex::new(None)),
+            completed_notify: Arc::new((Mutex::new(false), Condvar::new())),
         };
         let mut tasks = self
             .tasks
@@ -601,48 +707,38 @@ impl ConcurrencyRuntime {
         Ok(id)
     }
 
-    /// Get cloned Arcs for a task (state, result, error_msg, cancelled, completed_at).
-    /// Returns None if the task doesn't exist.
-    fn get_task_arcs(
-        &self,
-        task_id: u64,
-    ) -> Option<(
-        Arc<Mutex<TaskState>>,
-        Arc<Mutex<Option<SerializedValue>>>,
-        Arc<Mutex<Option<String>>>,
-        Arc<AtomicBool>,
-        Arc<Mutex<Option<Instant>>>,
-    )> {
-        let tasks = self.tasks.lock().ok()?;
-        let entry = tasks.get(&task_id)?;
-        Some((
-            Arc::clone(&entry.state),
-            Arc::clone(&entry.result),
-            Arc::clone(&entry.error_msg),
-            Arc::clone(&entry.cancelled),
-            Arc::clone(&entry.completed_at),
-        ))
+    /// Get cloned Arcs for a task's core state.
+    /// Returns Ok(None) if the task doesn't exist, Err if the registry mutex is poisoned.
+    fn get_task_arcs(&self, task_id: u64) -> Result<Option<TaskArcs>> {
+        let tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| IntentError::runtime_error("Task registry poisoned".to_string()))?;
+        Ok(tasks.get(&task_id).map(|entry| TaskArcs {
+            inner: Arc::clone(&entry.inner),
+            completed_notify: Arc::clone(&entry.completed_notify),
+        }))
     }
 
     /// `await_task(handle)` — blocks until task completes, then marks as Consumed.
     /// Returns `Result`: `Ok(value)` or `Err(message)`.
     fn await_task(&self, task_id: u64) -> Result<Value> {
-        let (state_arc, result_arc, error_arc, _cancelled, _completed_at) =
-            match self.get_task_arcs(task_id) {
-                Some(arcs) => arcs,
-                None => {
-                    return Err(IntentError::runtime_error(
-                        "Invalid task handle".to_string(),
-                    ))
-                }
-            };
+        let arcs = match self.get_task_arcs(task_id)? {
+            Some(arcs) => arcs,
+            None => {
+                return Err(IntentError::runtime_error(
+                    "Invalid task handle".to_string(),
+                ))
+            }
+        };
 
         // Check for already-consumed or expired handles
         {
-            let state = state_arc
+            let inner = arcs
+                .inner
                 .lock()
-                .map_err(|_| IntentError::runtime_error("Task state mutex poisoned".to_string()))?;
-            match *state {
+                .map_err(|_| IntentError::runtime_error("Task inner mutex poisoned".to_string()))?;
+            match inner.state {
                 TaskState::Consumed => {
                     return Err(IntentError::runtime_error(
                         "Task result already consumed by await_task".to_string(),
@@ -657,47 +753,75 @@ impl ConcurrencyRuntime {
             }
         }
 
-        // Wait for terminal state (10ms slices, cancellation-aware)
+        // Wait for terminal state using Condvar (50ms timeout for cancellation checks).
+        //
+        // Lock ordering safety: `inner` and `completed_notify` are never held simultaneously.
+        // Each loop iteration: check inner (acquire+release), then wait on condvar
+        // (acquire+release). This matches finalize_task(), which also acquires them
+        // sequentially (inner first, then completed_notify), preventing ABBA deadlocks.
+        let (lock, cvar) = &*arcs.completed_notify;
         loop {
             check_cancellation()?;
             {
-                let state = state_arc.lock().map_err(|_| {
-                    IntentError::runtime_error("Task state mutex poisoned".to_string())
+                let inner = arcs.inner.lock().map_err(|_| {
+                    IntentError::runtime_error("Task inner mutex poisoned".to_string())
                 })?;
-                if state.is_terminal() {
+                if inner.state.is_terminal() {
                     break;
                 }
             }
-            thread::sleep(Duration::from_millis(10));
+            // inner lock is dropped before acquiring notify lock — no nesting
+            let guard = lock.lock().map_err(|_| {
+                IntentError::runtime_error("Task notify mutex poisoned".to_string())
+            })?;
+            let (_guard, _) = cvar
+                .wait_timeout(guard, Duration::from_millis(50))
+                .map_err(|_| {
+                    IntentError::runtime_error("Task notify mutex poisoned during wait".to_string())
+                })?;
+            // notify lock dropped at end of scope before next iteration checks inner
         }
 
-        // Read result
-        let state = *state_arc
+        // Read result and mark as Consumed — single lock acquisition
+        let mut inner = arcs
+            .inner
             .lock()
-            .map_err(|_| IntentError::runtime_error("Task state mutex poisoned".to_string()))?;
-        let result_value = match state {
+            .map_err(|_| IntentError::runtime_error("Task inner mutex poisoned".to_string()))?;
+        let result_value = match inner.state {
             TaskState::Completed => {
-                let result = result_arc.lock().map_err(|_| {
-                    IntentError::runtime_error("Task result mutex poisoned".to_string())
-                })?;
-                let val = result.as_ref().map(|s| s.to_value()).unwrap_or(Value::Unit);
+                let val = inner
+                    .result
+                    .as_ref()
+                    .map(|s| s.to_value())
+                    .unwrap_or(Value::Unit);
                 Value::ok(val)
             }
             TaskState::Failed | TaskState::Panicked => {
-                let err = error_arc.lock().map_err(|_| {
-                    IntentError::runtime_error("Task error mutex poisoned".to_string())
-                })?;
-                let msg = err.clone().unwrap_or_else(|| "Task failed".to_string());
+                let msg = inner
+                    .error_msg
+                    .clone()
+                    .unwrap_or_else(|| "Task failed".to_string());
                 Value::err(Value::String(msg))
             }
-            TaskState::Running => unreachable!(),
-            TaskState::Consumed | TaskState::Expired => unreachable!(),
+            TaskState::Running => {
+                unreachable!("await_task: task still Running after condvar loop")
+            }
+            // Another concurrent await_task call may have consumed the result
+            // between our condvar wakeup and re-acquiring the inner lock.
+            TaskState::Consumed => {
+                return Err(IntentError::runtime_error(
+                    "Task result already consumed by a concurrent await_task call".to_string(),
+                ))
+            }
+            TaskState::Expired => {
+                return Err(IntentError::runtime_error(
+                    "Task handle expired while awaiting".to_string(),
+                ))
+            }
         };
 
         // Mark as Consumed (preserves handle for try_await)
-        if let Ok(mut s) = state_arc.lock() {
-            *s = TaskState::Consumed;
-        }
+        inner.state = TaskState::Consumed;
 
         Ok(result_value)
     }
@@ -706,8 +830,8 @@ impl ConcurrencyRuntime {
     /// Returns a map: `{ "status": "running"|"completed"|"failed"|"panicked"|"consumed"|"expired", "result": ... }`
     /// NEVER returns an error for a handle that existed — returns status map instead.
     fn try_await(&self, task_id: u64) -> Result<Value> {
-        // Get arcs
-        let arcs = {
+        // Get arcs (inner + last_checked_at)
+        let (inner_arc, last_checked_arc) = {
             let tasks = match self.tasks.lock() {
                 Ok(t) => t,
                 Err(_) => {
@@ -717,12 +841,7 @@ impl ConcurrencyRuntime {
                 }
             };
             match tasks.get(&task_id) {
-                Some(entry) => (
-                    Arc::clone(&entry.state),
-                    Arc::clone(&entry.result),
-                    Arc::clone(&entry.error_msg),
-                    Arc::clone(&entry.last_checked_at),
-                ),
+                Some(entry) => (Arc::clone(&entry.inner), Arc::clone(&entry.last_checked_at)),
                 None => {
                     return Err(IntentError::runtime_error(
                         "Invalid task handle".to_string(),
@@ -730,17 +849,18 @@ impl ConcurrencyRuntime {
                 }
             }
         };
-        let (state_arc, result_arc, error_arc, last_checked_arc) = arcs;
 
         // Update last_checked_at (rule 13: prevents reaper from invalidating active handles)
         if let Ok(mut last_checked) = last_checked_arc.lock() {
             *last_checked = Some(Instant::now());
         }
 
-        let state = *state_arc.lock().unwrap();
+        let inner = inner_arc
+            .lock()
+            .map_err(|_| IntentError::runtime_error("Task inner mutex poisoned".to_string()))?;
         let mut result_map = HashMap::new();
 
-        let status_str = match state {
+        let status_str = match inner.state {
             TaskState::Running => "running",
             TaskState::Completed => "completed",
             TaskState::Failed => "failed",
@@ -750,15 +870,20 @@ impl ConcurrencyRuntime {
         };
         result_map.insert("status".to_string(), Value::String(status_str.to_string()));
 
-        match state {
+        match inner.state {
             TaskState::Completed => {
-                let result = result_arc.lock().unwrap();
-                let val = result.as_ref().map(|s| s.to_value()).unwrap_or(Value::Unit);
+                let val = inner
+                    .result
+                    .as_ref()
+                    .map(|s| s.to_value())
+                    .unwrap_or(Value::Unit);
                 result_map.insert("result".to_string(), Value::ok(val));
             }
             TaskState::Failed | TaskState::Panicked => {
-                let err = error_arc.lock().unwrap();
-                let msg = err.clone().unwrap_or_else(|| "Task error".to_string());
+                let msg = inner
+                    .error_msg
+                    .clone()
+                    .unwrap_or_else(|| "Task error".to_string());
                 result_map.insert("result".to_string(), Value::err(Value::String(msg)));
             }
             TaskState::Running | TaskState::Consumed | TaskState::Expired => {
@@ -773,7 +898,7 @@ impl ConcurrencyRuntime {
     /// Does NOT force state to Cancelled. The task thread checks the flag at yield points.
     fn cancel_task(&self, task_id: u64) -> Result<Value> {
         // Lock → clone cancelled Arc → drop → set flag
-        let cancelled = {
+        let cancelled_arc = {
             let tasks = match self.tasks.lock() {
                 Ok(t) => t,
                 Err(_) => {
@@ -787,7 +912,7 @@ impl ConcurrencyRuntime {
                 None => return Ok(Value::Bool(false)),
             }
         };
-        cancelled.store(true, AtomicOrdering::Release);
+        cancelled_arc.store(true, AtomicOrdering::Release);
         Ok(Value::Bool(true))
     }
 
@@ -851,6 +976,46 @@ impl ConcurrencyRuntime {
 
 /// The single global concurrency runtime.
 pub static RUNTIME: LazyLock<ConcurrencyRuntime> = LazyLock::new(ConcurrencyRuntime::new);
+
+/// Read the reaper interval from NTNT_TASK_REAP_INTERVAL env var (seconds), default 300s (5 min).
+fn reap_interval() -> Duration {
+    std::env::var("NTNT_TASK_REAP_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(300))
+}
+
+/// Read the task removal TTL from NTNT_TASK_REMOVAL_TTL env var (seconds).
+/// Expired task entries are removed from the registry after this duration.
+/// Default: 604800s (7 days).
+fn task_removal_ttl() -> Duration {
+    std::env::var("NTNT_TASK_REMOVAL_TTL")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(604800)) // 7 days
+}
+
+/// Maximum number of concurrent active tasks.
+/// Configurable via NTNT_MAX_TASKS env var. Default: 1024.
+fn max_tasks() -> u64 {
+    std::env::var("NTNT_MAX_TASKS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(1024)
+}
+
+/// Starts a dedicated reaper thread that periodically cleans up expired tasks.
+/// Spawned exactly once via `LazyLock`.
+static REAPER_STARTED: LazyLock<()> = LazyLock::new(|| {
+    let interval = reap_interval();
+    thread::spawn(move || loop {
+        thread::sleep(interval);
+        RUNTIME.reap_expired_tasks();
+        RUNTIME.reap_disconnected_channels();
+    });
+});
 
 // =============================================================================
 // Handle value helpers
@@ -1066,47 +1231,71 @@ fn validate_and_capture(
     }
 }
 
-/// Process the result of a catch_unwind(eval_block) and update task state Arcs.
+/// Process the result of a catch_unwind(eval_block) and update task state atomically.
 /// Shared by spawn() and after() thread bodies.
+///
+/// Locks `inner` ONCE and sets all fields (state, result/error_msg, completed_at) atomically.
+/// This eliminates the possibility of inconsistent state (e.g., result stored but state not updated).
+///
+/// Lock ordering: acquires `inner` first, releases it, THEN acquires `completed_notify`.
+/// This matches await_task() which also acquires them sequentially (inner, then notify).
+/// Neither function holds both locks simultaneously — no ABBA deadlock possible.
 fn finalize_task(
     result: std::result::Result<Result<Value>, Box<dyn std::any::Any + Send>>,
-    state_arc: &Arc<Mutex<TaskState>>,
-    result_arc: &Arc<Mutex<Option<SerializedValue>>>,
-    error_arc: &Arc<Mutex<Option<String>>>,
-    completed_at_arc: &Arc<Mutex<Option<Instant>>>,
+    inner_arc: &Arc<Mutex<TaskInner>>,
+    completed_notify: &Arc<(Mutex<bool>, Condvar)>,
 ) {
-    match result {
-        Ok(Ok(value)) => match SerializedValue::from_value(&value) {
-            Ok(serialized) => {
-                *result_arc.lock().unwrap() = Some(serialized);
-                *state_arc.lock().unwrap() = TaskState::Completed;
+    match inner_arc.lock() {
+        Ok(mut inner) => {
+            match result {
+                Ok(Ok(value)) => match SerializedValue::from_value(&value) {
+                    Ok(serialized) => {
+                        inner.result = Some(serialized);
+                        inner.state = TaskState::Completed;
+                    }
+                    Err(_) => {
+                        inner.error_msg = Some(format!(
+                                "Task returned a non-serializable value ({}). \
+                                 Only Int, Float, Bool, String, Array, Map, Struct, Enum can cross task boundaries.",
+                                value.type_name()
+                            ));
+                        inner.state = TaskState::Failed;
+                    }
+                },
+                Ok(Err(e)) => {
+                    inner.error_msg = Some(format!("{}", e));
+                    inner.state = TaskState::Failed;
+                }
+                Err(panic_info) => {
+                    let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else {
+                        "Task panicked".to_string()
+                    };
+                    inner.error_msg = Some(msg);
+                    inner.state = TaskState::Panicked;
+                }
             }
-            Err(_) => {
-                *error_arc.lock().unwrap() = Some(format!(
-                    "Task returned a non-serializable value ({}). \
-                     Only Int, Float, Bool, String, Array, Map, Struct, Enum can cross task boundaries.",
-                    value.type_name()
-                ));
-                *state_arc.lock().unwrap() = TaskState::Failed;
-            }
-        },
-        Ok(Err(e)) => {
-            *error_arc.lock().unwrap() = Some(format!("{}", e));
-            *state_arc.lock().unwrap() = TaskState::Failed;
+            inner.completed_at = Some(Instant::now());
         }
-        Err(panic_info) => {
-            let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "Task panicked".to_string()
-            };
-            *error_arc.lock().unwrap() = Some(msg);
-            *state_arc.lock().unwrap() = TaskState::Panicked;
+        Err(_) => {
+            // Even on poisoned mutex, we MUST still notify and decrement below.
+            // Without notification, await_task() would hang forever on the condvar.
+            eprintln!("[WARN] finalize_task: inner mutex poisoned, cannot update task state");
         }
     }
-    *completed_at_arc.lock().unwrap() = Some(Instant::now());
+    // Always notify waiting await_task() calls, even if inner mutex was poisoned.
+    // This prevents await_task from blocking forever on a poisoned task.
+    if let Ok(mut done) = completed_notify.0.lock() {
+        *done = true;
+        completed_notify.1.notify_all();
+    } else {
+        eprintln!("[WARN] finalize_task: notify mutex poisoned, cannot wake await_task waiters");
+    }
+    // Always decrement active task counter
+    RUNTIME.active_tasks.fetch_sub(1, AtomicOrdering::Release);
     CURRENT_TASK_CANCELLED.with(|cell| {
         *cell.borrow_mut() = None;
     });
@@ -1195,14 +1384,31 @@ fn concurrent_close(ch: &Value) -> Result<Value> {
 
 // --- Tasks ---
 
+fn check_task_limit() -> Result<()> {
+    let active = RUNTIME.active_tasks.load(AtomicOrdering::Acquire);
+    let limit = max_tasks();
+    if active >= limit {
+        return Err(IntentError::runtime_error(format!(
+            "Maximum concurrent task limit reached ({}). \
+             Set NTNT_MAX_TASKS to increase the limit.",
+            limit
+        )));
+    }
+    Ok(())
+}
+
 fn concurrent_spawn(handler: &Value) -> Result<Value> {
-    RUNTIME.reap_expired_tasks();
+    RUNTIME.try_reap_expired_tasks();
+    check_task_limit()?;
     let (captured, body) = validate_and_capture("spawn", handler)?;
 
     let cancelled = Arc::new(AtomicBool::new(false));
     let task_id = RUNTIME.register_task(Arc::clone(&cancelled))?;
-    let (state_arc, result_arc, error_arc, _cancelled_arc, completed_at_arc) =
-        RUNTIME.get_task_arcs(task_id).unwrap();
+    RUNTIME.active_tasks.fetch_add(1, AtomicOrdering::Release);
+    // Safe: task_id was just returned by register_task(), so it must exist in the registry
+    let arcs = RUNTIME
+        .get_task_arcs(task_id)?
+        .expect("task just registered must exist");
 
     thread::spawn(move || {
         CURRENT_TASK_CANCELLED.with(|cell| {
@@ -1211,13 +1417,7 @@ fn concurrent_spawn(handler: &Value) -> Result<Value> {
         let result = catch_unwind(AssertUnwindSafe(|| {
             run_in_fresh_interpreter(&captured, &body)
         }));
-        finalize_task(
-            result,
-            &state_arc,
-            &result_arc,
-            &error_arc,
-            &completed_at_arc,
-        );
+        finalize_task(result, &arcs.inner, &arcs.completed_notify);
     });
 
     Ok(Value::TaskHandle(task_id))
@@ -1261,7 +1461,8 @@ fn concurrent_sleep_ms(ms: i64) -> Result<Value> {
 // --- after(delay, handler) ---
 
 fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
-    RUNTIME.reap_expired_tasks();
+    RUNTIME.try_reap_expired_tasks();
+    check_task_limit()?;
 
     let delay_duration = match delay {
         Value::Int(ms) => {
@@ -1285,8 +1486,11 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
 
     let cancelled = Arc::new(AtomicBool::new(false));
     let task_id = RUNTIME.register_task(Arc::clone(&cancelled))?;
-    let (state_arc, result_arc, error_arc, _cancelled_arc, completed_at_arc) =
-        RUNTIME.get_task_arcs(task_id).unwrap();
+    RUNTIME.active_tasks.fetch_add(1, AtomicOrdering::Release);
+    // Safe: task_id was just returned by register_task(), so it must exist in the registry
+    let arcs = RUNTIME
+        .get_task_arcs(task_id)?
+        .expect("task just registered must exist");
 
     thread::spawn(move || {
         CURRENT_TASK_CANCELLED.with(|cell| {
@@ -1317,13 +1521,7 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
                 run_in_fresh_interpreter(&captured, &body)
             }))
         };
-        finalize_task(
-            result,
-            &state_arc,
-            &result_arc,
-            &error_arc,
-            &completed_at_arc,
-        );
+        finalize_task(result, &arcs.inner, &arcs.completed_notify);
     });
 
     Ok(Value::TaskHandle(task_id))
@@ -1382,12 +1580,7 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
 
             // Overlap prevention: skip if previous tick still running
             if tick_running
-                .compare_exchange(
-                    false,
-                    true,
-                    AtomicOrdering::Acquire,
-                    AtomicOrdering::Acquire,
-                )
+                .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
                 .is_err()
             {
                 continue;
@@ -1396,11 +1589,20 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
             let tick_captured = captured.clone();
             let tick_body = body.clone();
             let tick_running_clone = Arc::clone(&tick_running);
+            let tick_cancelled = Arc::clone(&cancelled);
 
             thread::spawn(move || {
+                // Install cancellation flag so yield points (fetch, sleep_ms, recv)
+                // in tick bodies respect schedule cancellation.
+                CURRENT_TASK_CANCELLED.with(|cell| {
+                    *cell.borrow_mut() = Some(tick_cancelled);
+                });
                 let _result = catch_unwind(AssertUnwindSafe(|| {
                     let _ = run_in_fresh_interpreter(&tick_captured, &tick_body);
                 }));
+                CURRENT_TASK_CANCELLED.with(|cell| {
+                    *cell.borrow_mut() = None;
+                });
                 tick_running_clone.store(false, AtomicOrdering::Release);
             });
         }
@@ -1417,8 +1619,9 @@ fn concurrent_cancel_schedule(handle: &Value) -> Result<Value> {
 // --- select(channels, timeout_ms?) ---
 
 /// `select(channels, timeout_ms?)` — wait for the first value from any of the given channels.
-/// Returns `{channel: <handle>, value: <received>}` on success,
+/// Returns `{status: "ok", channel: <handle>, value: <received>}` on success,
 /// `{status: "timeout"}` on timeout, `{status: "closed"}` if all channels are closed.
+/// All return shapes include a `status` key for consistent pattern matching.
 /// This is a cancellation yield point.
 fn concurrent_select(args: &[Value]) -> Result<Value> {
     // Yield point: check cancellation
@@ -1556,6 +1759,7 @@ fn concurrent_select(args: &[Value]) -> Result<Value> {
                 match receivers[orig_index].try_recv() {
                     Ok(serialized) => {
                         let mut result = HashMap::new();
+                        result.insert("status".to_string(), Value::String("ok".to_string()));
                         result.insert(
                             "channel".to_string(),
                             Value::RxChannelHandle(channel_ids[orig_index]),
@@ -1597,6 +1801,9 @@ fn concurrent_thread_count() -> Result<Value> {
 // =============================================================================
 
 pub fn init() -> HashMap<String, Value> {
+    // Start the periodic reaper thread (runs exactly once via LazyLock)
+    LazyLock::force(&REAPER_STARTED);
+
     let mut module = HashMap::new();
 
     // @ntnt channel
@@ -1617,7 +1824,7 @@ pub fn init() -> HashMap<String, Value> {
     // Channels are single-consumer: only one task should call recv() at a time.
     // @returns Array containing [TxChannel, RxChannel]
     // @see_also send, recv, close, select
-    // @since v0.4.5
+    // @since v0.4.6
     // @example let [tx, rx] = channel() ~ "Create a channel for inter-task communication"
     // @example ~ "Pass tx to a spawned task; recv on rx disconnects naturally if task fails"
     //   let [tx, rx] = channel()
@@ -1643,7 +1850,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param tx The TxChannel sender handle (first element of channel())
     // @param value The value to send (must be serializable)
     // @see_also channel, recv, recv_timeout
-    // @since v0.2.0
+    // @since v0.4.6
     // @example send(tx, "hello") => true ~ "Send a string through the channel"
     module.insert(
         "send".to_string(),
@@ -1664,7 +1871,7 @@ pub fn init() -> HashMap<String, Value> {
     // Single-consumer: the receiver lock is held for the blocking duration.
     // @param rx The RxChannel receiver handle (second element of channel())
     // @see_also channel, send, try_recv, recv_timeout
-    // @since v0.2.0
+    // @since v0.4.6
     // @example let [tx, rx] = channel() ~ "Block until a value is received"
     // @example recv(rx)
     module.insert(
@@ -1686,7 +1893,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param rx The RxChannel receiver handle (second element of channel())
     // @param millis Timeout in milliseconds (negative values clamped to 0)
     // @see_also recv, try_recv
-    // @since v0.2.0
+    // @since v0.4.6
     // @example let [tx, rx] = channel() ~ "Wait up to 5 seconds for a value"
     // @example recv_timeout(rx, 5000)
     module.insert(
@@ -1710,7 +1917,7 @@ pub fn init() -> HashMap<String, Value> {
     // Non-blocking receive. Returns None if no value is available or all senders disconnected.
     // @param rx The RxChannel receiver handle (second element of channel())
     // @see_also recv, recv_timeout
-    // @since v0.2.0
+    // @since v0.4.6
     // @example let [tx, rx] = channel() ~ "Check for a value without blocking"
     // @example try_recv(rx)
     module.insert(
@@ -1731,7 +1938,7 @@ pub fn init() -> HashMap<String, Value> {
     // returns Unit since the id is no longer found. Returns true if existed, false otherwise.
     // @param rx The RxChannel receiver handle (second element of channel())
     // @see_also channel
-    // @since v0.2.0
+    // @since v0.4.6
     // @example let [tx, rx] = channel() ~ "Close the receiver end"
     // @example close(rx) => true
     module.insert(
@@ -1748,15 +1955,16 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/concurrent
     // @signature select(channels: Array<RxChannel>, timeout_ms?: Int | String) -> Map
     // Waits for the first available value from any of the given receiver handles.
-    // Returns a map with "channel" (the RxChannel that fired) and "value" (the received value).
+    // Returns a map with "status": "ok", "channel" (the RxChannel that fired), and "value" (the received value).
     // On timeout: returns {"status": "timeout"}.
     // If all channels are closed/disconnected: returns {"status": "closed"}.
+    // All return shapes include a "status" key for consistent pattern matching.
     // This is a cancellation yield point.
     // @param channels Array of RxChannel handles to wait on
     // @param timeout_ms Optional timeout in milliseconds (Int) or as a string interval
     // @returns Map with channel/value on success, or status on timeout/closed
     // @see_also channel, recv, recv_timeout
-    // @since v0.5.0
+    // @since v0.4.6
     // @example let [tx_a, rx_a] = channel() ~ "Wait for first value from either channel"
     // @example let [tx_b, rx_b] = channel()
     // @example select([rx_a, rx_b])
@@ -1781,7 +1989,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param handler A zero-parameter function to run in the background
     // @returns Task handle for use with await_task, try_await, cancel_task
     // @see_also await_task, try_await, cancel_task
-    // @since v0.5.0
+    // @since v0.4.6
     // @example spawn(fn() { 42 }) ~ "Spawn a background task"
     module.insert(
         "spawn".to_string(),
@@ -1802,7 +2010,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param task The task handle from spawn() or after()
     // @returns Result containing the task's return value or error message
     // @see_also spawn, try_await, cancel_task
-    // @since v0.5.0
+    // @since v0.4.6
     // @example await_task(task) => Ok(42) ~ "Wait for task result"
     module.insert(
         "await_task".to_string(),
@@ -1823,7 +2031,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param task The task handle
     // @returns Map with status and result fields
     // @see_also spawn, await_task, cancel_task
-    // @since v0.5.0
+    // @since v0.4.6
     // @example try_await(task) => {"status": "running", "result": None} ~ "Check task status"
     module.insert(
         "try_await".to_string(),
@@ -1845,7 +2053,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param task The task handle
     // @returns Bool indicating whether the cancellation was requested
     // @see_also spawn, await_task
-    // @since v0.5.0
+    // @since v0.4.6
     // @example cancel_task(task) => true ~ "Cancel a running task"
     module.insert(
         "cancel_task".to_string(),
@@ -1867,7 +2075,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param handler A zero-parameter function to run after the delay
     // @returns Task handle
     // @see_also spawn, await_task, schedule
-    // @since v0.5.0
+    // @since v0.4.6
     // @example after(1000, fn() { print("delayed!") }) ~ "Run after 1 second"
     module.insert(
         "after".to_string(),
@@ -1891,7 +2099,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param handler A zero-parameter function to run on each tick
     // @returns Schedule handle for use with cancel_schedule
     // @see_also cancel_schedule, after
-    // @since v0.5.0
+    // @since v0.4.6
     // @example schedule(5000, fn() { print("tick") }) ~ "Run every 5 seconds"
     module.insert(
         "schedule".to_string(),
@@ -1911,7 +2119,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param schedule The schedule handle from schedule()
     // @returns Bool indicating whether the schedule was cancelled
     // @see_also schedule
-    // @since v0.5.0
+    // @since v0.4.6
     // @example cancel_schedule(sched) => true ~ "Cancel a scheduled task"
     module.insert(
         "cancel_schedule".to_string(),
@@ -1930,7 +2138,7 @@ pub fn init() -> HashMap<String, Value> {
     // a cancelled task will exit during sleep_ms(). Uses 50ms slices internally.
     // Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks.
     // @param ms Duration to sleep in milliseconds
-    // @since v0.5.0
+    // @since v0.4.6
     // @example sleep_ms(1000) ~ "Sleep for 1 second (cancellation-aware)"
     module.insert(
         "sleep_ms".to_string(),
@@ -1951,7 +2159,7 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/concurrent
     // @signature thread_count() -> Int
     // Returns the number of available CPU threads. Useful for sizing parallel work.
-    // @since v0.2.0
+    // @since v0.4.6
     // @example thread_count() => 8 ~ "Number of CPU threads"
     module.insert(
         "thread_count".to_string(),
@@ -2236,8 +2444,8 @@ mod tests {
         assert!(cancelled.load(AtomicOrdering::Acquire));
 
         // Task state should still be Running (cooperative — not forced)
-        let (state_arc, _, _, _, _) = RUNTIME.get_task_arcs(task_id).unwrap();
-        assert_eq!(*state_arc.lock().unwrap(), TaskState::Running);
+        let arcs = RUNTIME.get_task_arcs(task_id).unwrap().unwrap();
+        assert_eq!(arcs.inner.lock().unwrap().state, TaskState::Running);
     }
 
     #[test]

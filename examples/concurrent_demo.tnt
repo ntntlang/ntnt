@@ -109,7 +109,7 @@ fn main() {
 
     // Consume until the done sentinel
     print("Consuming work items...")
-    let running = true
+    let mut running = true
     while running {
         let item = recv(work_rx)
         if item["job_id"] == -1 {

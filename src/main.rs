@@ -1096,6 +1096,9 @@ fn test_http_server(
     // Run the server (will exit when shutdown_flag is set)
     let _ = interpreter.eval(&ast);
 
+    // Shutdown concurrency runtime to prevent leaked tasks/schedules
+    ntnt::stdlib::concurrent::RUNTIME.shutdown();
+
     // Wait for request thread to finish
     request_handle.join().ok();
 
