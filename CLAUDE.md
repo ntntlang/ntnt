@@ -1,10 +1,20 @@
 <!-- NTNT coding guide sections are sourced from docs/AI_AGENT_GUIDE.md -->
 <!-- To update NTNT coding instructions, edit AI_AGENT_GUIDE.md and copy to all agent files -->
-<!-- Last synced: 2026-03-15 -->
+<!-- Last synced: 2026-03-16 -->
 
 # NTNT Language - Claude Code Instructions
 
 NTNT (pronounced "Intent") is an agent-native programming language for AI-driven web development. File extension: `.tnt`
+
+## OpenClaw Skill (Core Development)
+
+For core NTNT language/runtime development (Rust compiler work, stdlib functions, interpreter changes), load the full OpenClaw skill for deep context:
+
+```
+~/.openclaw/skills/ntnt/SKILL.md
+```
+
+Read this skill file when working on compiler internals, adding stdlib functions, modifying the interpreter, or any Rust-level changes to the NTNT runtime. It contains comprehensive guidance beyond what this CLAUDE.md covers.
 
 ## Building NTNT
 
@@ -1558,20 +1568,98 @@ use_middleware(request_logger())  // Logs method, path, status, duration for eve
 
 ## Concurrency (`std/concurrent`)
 
-Channels for inter-task communication and timing utilities.
+Structured concurrency: tasks, channels, schedules, and cooperative cancellation.
+
+### Channels
 
 ```ntnt
-import { channel, send, recv, recv_timeout, try_recv, close, sleep_ms } from "std/concurrent"
+import { channel, send, recv, recv_timeout, try_recv, close } from "std/concurrent"
 
-let ch = channel()
-send(ch, "hello")
-let msg = recv(ch)          // Blocks until value available
+// channel() returns [TxChannel, RxChannel] — always destructure
+let [tx, rx] = channel()
+send(tx, "hello")                // Returns true (false if receiver closed)
+let msg = recv(rx)               // Blocks until value available; returns Unit on disconnect
+let msg = recv_timeout(rx, 5000) // Option — None on timeout or disconnect
+let msg = try_recv(rx)           // Option — None if no message waiting
+close(rx)                        // Removes receiver from registry; future send() → false
+```
 
-let msg = recv_timeout(ch, 5000)  // Option — None if timeout
-let msg = try_recv(ch)             // Option — None if no message waiting
+**Two-handle design:** `tx` (TxChannel) is the sender; `rx` (RxChannel) is the receiver. When all `tx` clones drop (e.g. a spawned task exits), `recv(rx)` automatically returns `Unit` — no sentinel needed. Mirrors Rust's own channel ownership semantics.
 
-close(ch)
-sleep_ms(1000)  // Sleep for 1 second
+Channels are single-consumer: only one task should call `recv()` at a time.
+
+**Serializable types for send/recv:** Int, Float, Bool, String, Array, Map, Struct, Enum.
+
+### Tasks (spawn/await)
+
+```ntnt
+import { spawn, await_task, try_await, cancel_task, sleep_ms } from "std/concurrent"
+
+// Handler must be zero-parameter (no params, including no defaults)
+let task = spawn(fn() {
+    sleep_ms(100)
+    42
+})
+
+// await_task blocks and returns Result, then marks the task as consumed
+// The handle remains valid for try_await, which returns {status: "consumed"}
+let result = await_task(task)  // Ok(42) or Err("message")
+match result {
+    Ok(val) => print("got: " + str(val)),
+    Err(e) => print("error: " + str(e))
+}
+
+// try_await peeks without removing (returns Map with status + result)
+let status = try_await(task)
+// { "status": "running"|"completed"|"failed"|"panicked"|"consumed"|"expired", "result": Ok(val)|Err(msg)|None }
+
+// cancel_task sets cooperative cancellation flag (checked at yield points)
+cancel_task(task)  // Task exits at next recv/recv_timeout/sleep_ms/fetch call
+```
+
+### Delayed Execution
+
+```ntnt
+import { after, await_task } from "std/concurrent"
+
+let task = after(1000, fn() { "delayed" })       // 1000ms delay
+let task = after("5s", fn() { "five seconds" })  // String interval: ms, s, m, h
+let result = await_task(task)                     // Result<Any, String>
+```
+
+### Scheduled Execution
+
+```ntnt
+import { schedule, cancel_schedule, sleep_ms } from "std/concurrent"
+
+// Zero-duration intervals are rejected
+let sched = schedule("5s", fn() {
+    print("tick")
+})
+
+sleep_ms(30000)
+cancel_schedule(sched)  // Sets flag AND removes from registry
+```
+
+Schedule ticks run in separate threads with `catch_unwind` — panics don't kill the schedule.
+Overlap prevention: a new tick won't start until the previous one finishes.
+
+### Cancellation Yield Points
+
+These functions check the cooperative cancellation flag:
+- `recv()`, `recv_timeout()` — from `std/concurrent`
+- `sleep_ms()` — from `std/concurrent`
+- `fetch()` — from `std/http`
+
+**Important:** `sleep()` from `std/time` is NOT cancellation-aware. Use `sleep_ms()` from `std/concurrent` in spawned tasks.
+
+### Timing
+
+```ntnt
+import { sleep_ms, thread_count } from "std/concurrent"
+
+sleep_ms(1000)         // Cancellation-aware sleep (50ms slices)
+let cpus = thread_count()  // Available CPU threads
 ```
 
 ---
@@ -1758,7 +1846,7 @@ import { parse_url, encode_component, build_query, parse_query } from "std/url"
 import { parse_csv, parse_with_headers } from "std/csv"
 import { to_html } from "std/markdown"
 import { join_path, dirname, basename, extension } from "std/path"
-import { channel, send, recv, sleep_ms } from "std/concurrent"
+import { channel, send, recv, sleep_ms, spawn, await_task, schedule, cancel_schedule } from "std/concurrent"
 ```
 
 ### CLI Commands

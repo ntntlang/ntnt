@@ -921,7 +921,14 @@ fn run_file(path: &PathBuf, timeout: u64) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    interpreter.eval(&ast)?;
+    let result = interpreter.eval(&ast);
+
+    // Shutdown concurrency runtime unconditionally — cancel all tasks and schedules
+    // even on eval error, so schedules/tasks don't outlive the program (rule 28)
+    ntnt::stdlib::concurrent::RUNTIME.shutdown();
+
+    result?;
+
     Ok(())
 }
 
@@ -1088,6 +1095,9 @@ fn test_http_server(
 
     // Run the server (will exit when shutdown_flag is set)
     let _ = interpreter.eval(&ast);
+
+    // Shutdown concurrency runtime to prevent leaked tasks/schedules
+    ntnt::stdlib::concurrent::RUNTIME.shutdown();
 
     // Wait for request thread to finish
     request_handle.join().ok();
@@ -1813,7 +1823,7 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
         "files": results,
         "summary": {
             "total": files.len(),
-            "valid": files.len() - error_count,
+            "valid": files.len().saturating_sub(error_count),
             "errors": error_count,
             "warnings": warning_count,
         }

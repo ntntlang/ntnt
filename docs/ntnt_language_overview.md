@@ -58,9 +58,9 @@ NTNT avoids specific `async/await` syntax overhead in favor of Go-style channels
 ```ntnt
 import { channel, send, recv } from "std/concurrent"
 
-let ch = channel()
-send(ch, "data")
-let msg = recv(ch)
+let [tx, rx] = channel()  // returns [TxChannel, RxChannel]
+send(tx, "data")
+let msg = recv(rx)
 ```
 
 ## Comparison: NTNT vs. Rust

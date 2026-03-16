@@ -19,6 +19,26 @@ use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
+/// Opaque sender handle for a concurrent channel.
+///
+/// Wraps `Arc<crossbeam_channel::Sender<SerializedValue>>` as `Arc<dyn Any + Send + Sync>`
+/// to avoid a circular dependency between interpreter.rs (which defines Value) and
+/// stdlib/concurrent.rs (which defines SerializedValue). The concrete type is only
+/// known inside concurrent.rs, which downcasts on send.
+///
+/// Ownership semantics mirror Rust's own channels: when all `TxChannelHandle` values
+/// holding a clone of this Arc are dropped (task exits, scope ends), the underlying
+/// `Sender` drops and the paired `Receiver` sees `Disconnected`, causing `recv()` to
+/// return `Unit` — no sentinel injection needed.
+#[derive(Clone)]
+pub struct ChannelSender(pub(crate) std::sync::Arc<dyn std::any::Any + Send + Sync>);
+
+impl std::fmt::Debug for ChannelSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ChannelSender(Arc)")
+    }
+}
+
 /// Runtime values
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -92,6 +112,22 @@ pub enum Value {
         max_arity: usize,
         func: fn(&[Value]) -> Result<Value>,
     },
+
+    /// Task handle (from spawn/after)
+    TaskHandle(u64),
+
+    /// Channel sender handle — the sending end returned by channel().
+    /// Holds an opaque Arc<dyn Any + Send + Sync> (actually Arc<crossbeam::Sender<T>>)
+    /// so that when all TxChannelHandle clones drop, the sender drops and the receiver
+    /// sees Disconnected — exactly how Rust's mpsc/crossbeam channels work.
+    TxChannelHandle(u64, ChannelSender),
+
+    /// Channel receiver handle — the receiving end returned by channel().
+    /// The receiver is held in the ConcurrencyRuntime registry by ID.
+    RxChannelHandle(u64),
+
+    /// Schedule handle (from schedule())
+    ScheduleHandle(u64),
 
     /// Return value (for control flow)
     Return(Box<Value>),
@@ -188,6 +224,10 @@ impl Value {
             Value::EnumConstructor { .. } => "EnumConstructor",
             Value::Function { .. } => "Function",
             Value::NativeFunction { .. } => "NativeFunction",
+            Value::TaskHandle(_) => "Task",
+            Value::TxChannelHandle(_, _) => "TxChannel",
+            Value::RxChannelHandle(_) => "RxChannel",
+            Value::ScheduleHandle(_) => "Schedule",
             Value::Return(_) => "Return",
             Value::Break => "Break",
             Value::Continue => "Continue",
@@ -280,6 +320,10 @@ impl fmt::Display for Value {
             }
             Value::Function { name, .. } => write!(f, "<fn {}>", name),
             Value::NativeFunction { name, .. } => write!(f, "<native fn {}>", name),
+            Value::TaskHandle(id) => write!(f, "Task({})", id),
+            Value::TxChannelHandle(id, _) => write!(f, "TxChannel({})", id),
+            Value::RxChannelHandle(id) => write!(f, "RxChannel({})", id),
+            Value::ScheduleHandle(id) => write!(f, "Schedule({})", id),
             Value::Return(v) => write!(f, "{}", v),
             Value::Break => write!(f, "<break>"),
             Value::Continue => write!(f, "<continue>"),
@@ -707,6 +751,17 @@ impl Interpreter {
     /// Set the current file path for relative imports
     pub fn set_current_file(&mut self, path: &str) {
         self.current_file = Some(path.to_string());
+    }
+
+    /// Define a variable in the current (global) environment.
+    /// Used by the concurrency runtime to inject captured bindings into a fresh interpreter.
+    pub fn define_global(&mut self, name: String, value: Value) {
+        self.environment.borrow_mut().define(name, value);
+    }
+
+    /// Look up a variable in the global environment (for builtins like len, print, str).
+    pub fn get_global(&self, name: &str) -> Option<Value> {
+        self.environment.borrow().get(name)
     }
 
     /// Resolve a path relative to the current script's directory
@@ -2519,13 +2574,18 @@ impl Interpreter {
         );
     }
 
-    /// Define standard library functions that are always available
+    /// Define standard library functions that are always available.
+    /// Modules and function names are sorted for deterministic resolution (rule 26).
     fn define_stdlib(&mut self) {
-        // Initialize standard library modules from the stdlib module
         use crate::stdlib;
         let modules = stdlib::init_all_modules();
-        for (name, module) in modules {
-            self.loaded_modules.insert(name, module);
+        // Sort module names for deterministic insertion order
+        let mut module_names: Vec<String> = modules.keys().cloned().collect();
+        module_names.sort();
+        for name in module_names {
+            if let Some(module) = modules.get(&name) {
+                self.loaded_modules.insert(name, module.clone());
+            }
         }
     }
 
@@ -3715,7 +3775,7 @@ impl Interpreter {
         }
     }
 
-    fn eval_block(&mut self, block: &Block) -> Result<Value> {
+    pub fn eval_block(&mut self, block: &Block) -> Result<Value> {
         let previous = Rc::clone(&self.environment);
         self.environment = Rc::new(RefCell::new(Environment::with_parent(Rc::clone(&previous))));
 
@@ -6494,6 +6554,23 @@ impl Interpreter {
                 max_arity,
                 func,
             } => {
+                // Eval-path guard: skip concurrency functions in non-Normal modes (rule 24/25).
+                // spawn() skipped in Worker and HotReload modes.
+                // schedule(), after() skipped in Worker, HotReload, and UnitTest modes.
+                match self.execution_mode {
+                    ExecutionMode::Worker | ExecutionMode::HotReload => {
+                        if matches!(fn_name.as_str(), "spawn" | "schedule" | "after") {
+                            return Ok(Value::Unit);
+                        }
+                    }
+                    ExecutionMode::UnitTest => {
+                        if matches!(fn_name.as_str(), "schedule" | "after") {
+                            return Ok(Value::Unit);
+                        }
+                    }
+                    ExecutionMode::Normal => {}
+                }
+
                 if arity == max_arity {
                     // Exact arity (most functions)
                     if args.len() != arity && arity != 0 {
@@ -7292,6 +7369,17 @@ impl Interpreter {
         // Wait for server thread to finish
         let _ = server_handle.join();
 
+        // Run shutdown handlers (mirrors sync server path)
+        let shutdown_handlers: Vec<Value> = self.server_state.get_shutdown_handlers().to_vec();
+        if !shutdown_handlers.is_empty() {
+            println!("\nRunning shutdown handlers...");
+            for handler in shutdown_handlers {
+                if let Err(e) = self.call_function(handler, vec![]) {
+                    eprintln!("Shutdown handler error: {}", e);
+                }
+            }
+        }
+
         Ok(Value::Unit)
     }
 
@@ -7862,17 +7950,36 @@ impl Interpreter {
                         .zip(vals2.iter())
                         .all(|(x, y)| Self::values_equal(x, y))
             }
+            // Handle equality: same variant + same id
+            (Value::TaskHandle(a), Value::TaskHandle(b)) => a == b,
+            (Value::TxChannelHandle(a, _), Value::TxChannelHandle(b, _)) => a == b,
+            (Value::RxChannelHandle(a), Value::RxChannelHandle(b)) => a == b,
+            (Value::ScheduleHandle(a), Value::ScheduleHandle(b)) => a == b,
             _ => false, // Different types → not equal
         }
     }
 
     fn eval_binary_op(&self, op: BinaryOp, lhs: Value, rhs: Value) -> Result<Value> {
-        // Handle EnumValue equality (None/Some/Ok/Err comparisons)
+        // Handle EnumValue and handle type equality
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
             let lhs_is_enum = matches!(&lhs, Value::EnumValue { .. });
             let rhs_is_enum = matches!(&rhs, Value::EnumValue { .. });
+            let lhs_is_handle = matches!(
+                &lhs,
+                Value::TaskHandle(_)
+                    | Value::TxChannelHandle(_, _)
+                    | Value::RxChannelHandle(_)
+                    | Value::ScheduleHandle(_)
+            );
+            let rhs_is_handle = matches!(
+                &rhs,
+                Value::TaskHandle(_)
+                    | Value::TxChannelHandle(_, _)
+                    | Value::RxChannelHandle(_)
+                    | Value::ScheduleHandle(_)
+            );
 
-            if lhs_is_enum || rhs_is_enum {
+            if lhs_is_enum || rhs_is_enum || lhs_is_handle || rhs_is_handle {
                 let equal = Self::values_equal(&lhs, &rhs);
                 return match op {
                     BinaryOp::Eq => Ok(Value::Bool(equal)),

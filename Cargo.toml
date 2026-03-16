@@ -1,6 +1,6 @@
 [package]
 name = "ntnt"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2021"
 authors = ["NTNT Language Team"]
 description = "NTNT (Intent) - A programming language designed for AI-driven development"
@@ -65,6 +65,9 @@ hyper-util = { version = "0.1", features = ["full"] }
 # Worker pool channels and CPU detection
 flume = "0.11"
 num_cpus = "1.16"
+
+# Crossbeam channels (multi-producer, multi-consumer, select support)
+crossbeam-channel = "0.5"
 
 # HTTP Server (tiny_http for synchronous test mode)
 tiny_http = "0.12"

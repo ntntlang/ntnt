@@ -3121,6 +3121,18 @@ impl TypeContext {
                     });
                 }
             };
+            ($name:expr, [$($pname:expr => $ptype:expr),*], $ret:expr, required($n:expr)) => {
+                {
+                    let params: Vec<(String, Type)> = vec![$(($pname.to_string(), $ptype)),*];
+                    b.insert($name.to_string(), FunctionSig {
+                        params,
+                        return_type: $ret,
+                        variadic: false,
+                        required_params: $n,
+                        type_params: vec![],
+                    });
+                }
+            };
         }
 
         // I/O
@@ -3257,6 +3269,18 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     return_type: $ret,
                     variadic: true,
                     required_params,
+                    type_params: vec![],
+                });
+            }
+        };
+        ($name:expr, [$($pname:expr => $ptype:expr),*], $ret:expr, required($n:expr)) => {
+            {
+                let params: Vec<(String, Type)> = vec![$(($pname.to_string(), $ptype)),*];
+                sigs.insert($name.to_string(), FunctionSig {
+                    params,
+                    return_type: $ret,
+                    variadic: false,
+                    required_params: $n,
                     type_params: vec![],
                 });
             }
@@ -3451,12 +3475,31 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 name: "Result".to_string(),
                 args: vec![Type::Int, Type::String],
             });
+            sig!("before", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool);
+            sig!("after", ["timestamp1" => Type::Int, "timestamp2" => Type::Int], Type::Bool);
         }
         "std/concurrent" => {
-            sig!("channel", [], Type::Any);
-            sig!("send", ["ch" => Type::Any, "value" => Type::Any], Type::Unit);
-            sig!("recv", ["ch" => Type::Any], Type::Any);
+            // Channel operations
+            // channel() returns [TxChannel, RxChannel] — destructure with let [tx, rx] = channel()
+            sig!("channel", [], Type::Array(Box::new(Type::Any)));
+            sig!("send", ["tx" => Type::Named("TxChannel".to_string()), "value" => Type::Any], Type::Bool);
+            sig!("recv", ["rx" => Type::Named("RxChannel".to_string())], Type::Any);
+            sig!("recv_timeout", ["rx" => Type::Named("RxChannel".to_string()), "millis" => Type::Int], Type::Optional(Box::new(Type::Any)));
+            sig!("try_recv", ["rx" => Type::Named("RxChannel".to_string())], Type::Optional(Box::new(Type::Any)));
+            sig!("close", ["rx" => Type::Named("RxChannel".to_string())], Type::Bool);
+            sig!("select", ["channels" => Type::Array(Box::new(Type::Named("RxChannel".to_string()))), "timeout_ms" => Type::Union(vec![Type::Int, Type::String])], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, required(1));
+            // Task operations
+            sig!("spawn", ["handler" => Type::Any], Type::Named("Task".to_string()));
+            sig!("await_task", ["task" => Type::Named("Task".to_string())], Type::Generic { name: "Result".to_string(), args: vec![Type::Any, Type::String] });
+            sig!("try_await", ["task" => Type::Named("Task".to_string())], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) });
+            sig!("cancel_task", ["task" => Type::Named("Task".to_string())], Type::Bool);
+            sig!("after", ["delay" => Type::Union(vec![Type::Int, Type::String]), "handler" => Type::Any], Type::Named("Task".to_string()));
+            // Schedule operations
+            sig!("schedule", ["interval" => Type::Union(vec![Type::String, Type::Int]), "handler" => Type::Any], Type::Named("Schedule".to_string()));
+            sig!("cancel_schedule", ["schedule" => Type::Named("Schedule".to_string())], Type::Bool);
+            // Utilities
             sig!("sleep_ms", ["ms" => Type::Int], Type::Unit);
+            sig!("thread_count", [], Type::Int);
         }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));

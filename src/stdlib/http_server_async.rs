@@ -985,6 +985,9 @@ async fn shutdown_signal() {
     }
 
     println!("\n🛑 Shutdown signal received, stopping server...");
+
+    // Shutdown concurrency runtime — cancel all tasks and schedules (rule 28)
+    crate::stdlib::concurrent::RUNTIME.shutdown();
 }
 
 // === Helper functions for creating NTNT response Values ===

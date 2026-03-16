@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.4.5
+> Last updated: v0.4.6
 
 ## Table of Contents
 
@@ -3095,7 +3095,7 @@ values(map { "a": 1, "b": 2 })  // => [1, 2]  // Get map values
 
 ## std/concurrent
 
-Concurrent execution with parallel and background tasks
+Structured concurrency: tasks, channels, schedules, and cooperative cancellation
 
 ```ntnt
 import { channel, send, recv } from "std/concurrent"
@@ -3105,132 +3105,316 @@ import { channel, send, recv } from "std/concurrent"
 
 | Function | Description |
 |----------|-------------|
-| [`channel`](#channel) | Creates a new unbounded channel for inter-task communication. |
-| [`close`](#close) | Closes a channel. Senders will fail, receivers get remaining messages then Unit. |
-| [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if channel is closed and empty. |
-| [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or channel disconnected. |
-| [`send`](#send) | Sends a value through a channel. Returns false if channel is closed. |
-| [`sleep_ms`](#sleepms) | Pauses execution for specified milliseconds. |
+| [`after`](#after) | Runs a zero-parameter handler function after a delay. Returns a Task handle. Delay can be milliseconds (Int) or a human-readable string ("5s", "1m", "500ms"). The delay is cancellation-aware (50ms slices). |
+| [`await_task`](#awaittask) | Blocks until the task completes and returns its result. Marks the task as consumed (the handle remains valid for try_await, which returns {status: "consumed"}). Returns Ok(value) on success, Err(message) on failure or panic. |
+| [`cancel_schedule`](#cancelschedule) | Cancels a scheduled task. Sets the cancellation flag and removes from registry. Returns true if the schedule existed, false otherwise. |
+| [`cancel_task`](#canceltask) | Requests cooperative cancellation of a task. Sets the cancellation flag; the task thread will exit at the next yield point (recv, recv_timeout, sleep_ms, or fetch). Does NOT force immediate termination. Returns true if the task existed, false otherwise. |
+| [`channel`](#channel) | Creates a new unbounded channel and returns a [sender, receiver] pair. |
+| [`close`](#close) | Closes a channel receiver by removing it from the registry. Once removed, future send(tx, ...) returns false (crossbeam Disconnected). recv(rx) immediately returns Unit since the id is no longer found. Returns true if existed, false otherwise. |
+| [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if all senders have been dropped (Disconnected) or the receiver was closed. This is a cancellation yield point: a cancelled task will exit here. Single-consumer: the receiver lock is held for the blocking duration. |
+| [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or all senders disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point. |
+| [`schedule`](#schedule) | Runs a zero-parameter handler repeatedly at the given interval. Returns a Schedule handle. Interval can be milliseconds (Int) or a string ("5s", "1m"). Zero intervals are rejected. Each tick spawns a thread with catch_unwind; overlap prevention ensures a new tick won't start until the previous one finishes. Panics in tick execution are caught and logged — they don't kill the schedule. |
+| [`select`](#select) | Waits for the first available value from any of the given receiver handles. Returns a map with "status": "ok", "channel" (the RxChannel that fired), and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed/disconnected: returns {"status": "closed"}. All return shapes include a "status" key for consistent pattern matching. This is a cancellation yield point. |
+| [`send`](#send) | Sends a value through a channel using the sender handle (first element of channel()). Returns false if the receiver has been closed (crossbeam Disconnected). Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum. |
+| [`sleep_ms`](#sleepms) | Pauses execution for specified milliseconds. This is a cancellation yield point: a cancelled task will exit during sleep_ms(). Uses 50ms slices internally. Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks. |
+| [`spawn`](#spawn) | Spawns a zero-parameter function as a background task. Returns a Task handle. The handler's closure environment is serialized for cross-thread use. Serializable capture types: Int, Float, Bool, String, Array, Map, Struct, Enum. The handler must have zero parameters (including no defaults). |
 | [`thread_count`](#threadcount) | Returns the number of available CPU threads. Useful for sizing parallel work. |
-| [`try_recv`](#tryrecv) | Non-blocking receive. Returns None if no value is available. |
+| [`try_await`](#tryawait) | Non-blocking peek at task state. Does NOT remove the task from registry. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired). |
+| [`try_recv`](#tryrecv) | Non-blocking receive. Returns None if no value is available or all senders disconnected. |
 
-#### `channel`
+#### `after`
 
 ```ntnt
-channel() -> Channel
+after(delay: Int | String, handler: Function) -> Task
 ```
 
-Creates a new unbounded channel for inter-task communication.
+Runs a zero-parameter handler function after a delay. Returns a Task handle. Delay can be milliseconds (Int) or a human-readable string ("5s", "1m", "500ms"). The delay is cancellation-aware (50ms slices).
 
-**Returns:** Channel handle (Map with _channel_id)
+**Parameters:**
+
+- `delay` — Delay in milliseconds (Int) or as a string interval
+- `handler` — A zero-parameter function to run after the delay
+
+**Returns:** Task handle
 
 **Examples:**
 
 ```ntnt
-channel()  // Create a channel for inter-task communication
+after(1000, fn() { print("delayed!") })  // Run after 1 second
 ```
 
-**See also:** `send`, `recv`, `close`
+**See also:** `spawn`, `await_task`, `schedule`
 
-*Since v0.2.0*
+*Since v0.4.6*
+
+---
+
+#### `await_task`
+
+```ntnt
+await_task(task: Task) -> Result<Any, String>
+```
+
+Blocks until the task completes and returns its result. Marks the task as consumed (the handle remains valid for try_await, which returns {status: "consumed"}). Returns Ok(value) on success, Err(message) on failure or panic.
+
+**Parameters:**
+
+- `task` — The task handle from spawn() or after()
+
+**Returns:** Result containing the task's return value or error message
+
+**Examples:**
+
+```ntnt
+await_task(task)  // => Ok(42)  // Wait for task result
+```
+
+**See also:** `spawn`, `try_await`, `cancel_task`
+
+*Since v0.4.6*
+
+---
+
+#### `cancel_schedule`
+
+```ntnt
+cancel_schedule(schedule: Schedule) -> Bool
+```
+
+Cancels a scheduled task. Sets the cancellation flag and removes from registry. Returns true if the schedule existed, false otherwise.
+
+**Parameters:**
+
+- `schedule` — The schedule handle from schedule()
+
+**Returns:** Bool indicating whether the schedule was cancelled
+
+**Examples:**
+
+```ntnt
+cancel_schedule(sched)  // => true  // Cancel a scheduled task
+```
+
+**See also:** `schedule`
+
+*Since v0.4.6*
+
+---
+
+#### `cancel_task`
+
+```ntnt
+cancel_task(task: Task) -> Bool
+```
+
+Requests cooperative cancellation of a task. Sets the cancellation flag; the task thread will exit at the next yield point (recv, recv_timeout, sleep_ms, or fetch). Does NOT force immediate termination. Returns true if the task existed, false otherwise.
+
+**Parameters:**
+
+- `task` — The task handle
+
+**Returns:** Bool indicating whether the cancellation was requested
+
+**Examples:**
+
+```ntnt
+cancel_task(task)  // => true  // Cancel a running task
+```
+
+**See also:** `spawn`, `await_task`
+
+*Since v0.4.6*
+
+---
+
+#### `channel`
+
+```ntnt
+channel() -> [TxChannel, RxChannel]
+```
+
+Creates a new unbounded channel and returns a [sender, receiver] pair.
+
+The sender (TxChannel) and receiver (RxChannel) are separate handles — exactly like Rust's own channels. Pass the TxChannel to whoever should send; keep (or pass) the RxChannel to whoever should recv.
+
+Ownership semantics: when ALL TxChannel clones for a channel are dropped (e.g. a spawned task exits before or after calling send()), the receiver automatically sees Disconnected and recv() returns Unit. No sentinel injection required — this is structural, not approximate.
+
+Channels are single-consumer: only one task should call recv() at a time.
+
+**Returns:** Array containing [TxChannel, RxChannel]
+
+**Examples:**
+
+```ntnt
+let [tx, rx] = channel()  // Create a channel for inter-task communication
+// Pass tx to a spawned task; recv on rx disconnects naturally if task fails
+let [tx, rx] = channel()
+let task = spawn(fn() { send(tx, "hello") })
+let msg = recv(rx)
+// => "hello"
+```
+
+**See also:** `send`, `recv`, `close`, `select`
+
+*Since v0.4.6*
 
 ---
 
 #### `close`
 
 ```ntnt
-close(ch: Channel) -> Bool
+close(rx: RxChannel) -> Bool
 ```
 
-Closes a channel. Senders will fail, receivers get remaining messages then Unit.
+Closes a channel receiver by removing it from the registry. Once removed, future send(tx, ...) returns false (crossbeam Disconnected). recv(rx) immediately returns Unit since the id is no longer found. Returns true if existed, false otherwise.
 
 **Parameters:**
 
-- `ch` — The channel to close
+- `rx` — The RxChannel receiver handle (second element of channel())
 
 **Examples:**
 
 ```ntnt
-close(ch)  // Close the channel when done
+let [tx, rx] = channel()  // Close the receiver end
+close(rx)  // => true
 ```
 
 **See also:** `channel`
 
-*Since v0.2.0*
+*Since v0.4.6*
 
 ---
 
 #### `recv`
 
 ```ntnt
-recv(ch: Channel) -> Any
+recv(rx: RxChannel) -> Any
 ```
 
-Receives a value from a channel. Blocks until a value is available. Returns Unit if channel is closed and empty.
+Receives a value from a channel. Blocks until a value is available. Returns Unit if all senders have been dropped (Disconnected) or the receiver was closed. This is a cancellation yield point: a cancelled task will exit here. Single-consumer: the receiver lock is held for the blocking duration.
 
 **Parameters:**
 
-- `ch` — The channel to receive from
+- `rx` — The RxChannel receiver handle (second element of channel())
 
 **Examples:**
 
 ```ntnt
-recv(ch)  // Block until a value is received
+let [tx, rx] = channel()  // Block until a value is received
+recv(rx)
 ```
 
 **See also:** `channel`, `send`, `try_recv`, `recv_timeout`
 
-*Since v0.2.0*
+*Since v0.4.6*
 
 ---
 
 #### `recv_timeout`
 
 ```ntnt
-recv_timeout(ch: Channel, millis: Int) -> Option<Any>
+recv_timeout(rx: RxChannel, millis: Int) -> Option<Any>
 ```
 
-Receives with timeout. Returns None if timeout expires or channel disconnected.
+Receives with timeout. Returns None if timeout expires or all senders disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point.
 
 **Parameters:**
 
-- `ch` — The channel to receive from
-- `millis` — Timeout in milliseconds
+- `rx` — The RxChannel receiver handle (second element of channel())
+- `millis` — Timeout in milliseconds (negative values clamped to 0)
 
 **Examples:**
 
 ```ntnt
-recv_timeout(ch, 5000)  // Wait up to 5 seconds for a value
+let [tx, rx] = channel()  // Wait up to 5 seconds for a value
+recv_timeout(rx, 5000)
 ```
 
 **See also:** `recv`, `try_recv`
 
-*Since v0.2.0*
+*Since v0.4.6*
+
+---
+
+#### `schedule`
+
+```ntnt
+schedule(interval: Int | String, handler: Function) -> Schedule
+```
+
+Runs a zero-parameter handler repeatedly at the given interval. Returns a Schedule handle. Interval can be milliseconds (Int) or a string ("5s", "1m"). Zero intervals are rejected. Each tick spawns a thread with catch_unwind; overlap prevention ensures a new tick won't start until the previous one finishes. Panics in tick execution are caught and logged — they don't kill the schedule.
+
+**Parameters:**
+
+- `interval` — Interval in milliseconds (Int) or as a string
+- `handler` — A zero-parameter function to run on each tick
+
+**Returns:** Schedule handle for use with cancel_schedule
+
+**Examples:**
+
+```ntnt
+schedule(5000, fn() { print("tick") })  // Run every 5 seconds
+```
+
+**See also:** `cancel_schedule`, `after`
+
+*Since v0.4.6*
+
+---
+
+#### `select`
+
+```ntnt
+select(channels: Array<RxChannel>, timeout_ms?: Int | String) -> Map
+```
+
+Waits for the first available value from any of the given receiver handles. Returns a map with "status": "ok", "channel" (the RxChannel that fired), and "value" (the received value). On timeout: returns {"status": "timeout"}. If all channels are closed/disconnected: returns {"status": "closed"}. All return shapes include a "status" key for consistent pattern matching. This is a cancellation yield point.
+
+**Parameters:**
+
+- `channels` — Array of RxChannel handles to wait on
+- `timeout_ms` — Optional timeout in milliseconds (Int) or as a string interval
+
+**Returns:** Map with channel/value on success, or status on timeout/closed
+
+**Examples:**
+
+```ntnt
+let [tx_a, rx_a] = channel()  // Wait for first value from either channel
+let [tx_b, rx_b] = channel()
+select([rx_a, rx_b])
+select([rx_a, rx_b], 5000)  // Wait up to 5 seconds
+```
+
+**See also:** `channel`, `recv`, `recv_timeout`
+
+*Since v0.4.6*
 
 ---
 
 #### `send`
 
 ```ntnt
-send(ch: Channel, value: Any) -> Bool
+send(tx: TxChannel, value: Any) -> Bool
 ```
 
-Sends a value through a channel. Returns false if channel is closed.
+Sends a value through a channel using the sender handle (first element of channel()). Returns false if the receiver has been closed (crossbeam Disconnected). Serializable types: Int, Float, Bool, String, Array, Map, Struct, Enum.
 
 **Parameters:**
 
-- `ch` — The channel to send on
-- `value` — The value to send (only primitive types: Int, Float, String, Bool, Array, Map)
+- `tx` — The TxChannel sender handle (first element of channel())
+- `value` — The value to send (must be serializable)
 
 **Examples:**
 
 ```ntnt
-send(ch, "hello")  // Send a string through the channel
+send(tx, "hello")  // => true  // Send a string through the channel
 ```
 
-**See also:** `channel`, `recv`
+**See also:** `channel`, `recv`, `recv_timeout`
 
-*Since v0.2.0*
+*Since v0.4.6*
 
 ---
 
@@ -3240,7 +3424,7 @@ send(ch, "hello")  // Send a string through the channel
 sleep_ms(ms: Int) -> Unit
 ```
 
-Pauses execution for specified milliseconds.
+Pauses execution for specified milliseconds. This is a cancellation yield point: a cancelled task will exit during sleep_ms(). Uses 50ms slices internally. Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks.
 
 **Parameters:**
 
@@ -3249,10 +3433,36 @@ Pauses execution for specified milliseconds.
 **Examples:**
 
 ```ntnt
-sleep_ms(1000)  // Sleep for 1 second
+sleep_ms(1000)  // Sleep for 1 second (cancellation-aware)
 ```
 
-*Since v0.2.0*
+*Since v0.4.6*
+
+---
+
+#### `spawn`
+
+```ntnt
+spawn(handler: Function) -> Task
+```
+
+Spawns a zero-parameter function as a background task. Returns a Task handle. The handler's closure environment is serialized for cross-thread use. Serializable capture types: Int, Float, Bool, String, Array, Map, Struct, Enum. The handler must have zero parameters (including no defaults).
+
+**Parameters:**
+
+- `handler` — A zero-parameter function to run in the background
+
+**Returns:** Task handle for use with await_task, try_await, cancel_task
+
+**Examples:**
+
+```ntnt
+spawn(fn() { 42 })  // Spawn a background task
+```
+
+**See also:** `await_task`, `try_await`, `cancel_task`
+
+*Since v0.4.6*
 
 ---
 
@@ -3270,31 +3480,58 @@ Returns the number of available CPU threads. Useful for sizing parallel work.
 thread_count()  // => 8  // Number of CPU threads
 ```
 
-*Since v0.2.0*
+*Since v0.4.6*
+
+---
+
+#### `try_await`
+
+```ntnt
+try_await(task: Task) -> Map
+```
+
+Non-blocking peek at task state. Does NOT remove the task from registry. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired).
+
+**Parameters:**
+
+- `task` — The task handle
+
+**Returns:** Map with status and result fields
+
+**Examples:**
+
+```ntnt
+try_await(task)  // => {"status": "running", "result": None}  // Check task status
+```
+
+**See also:** `spawn`, `await_task`, `cancel_task`
+
+*Since v0.4.6*
 
 ---
 
 #### `try_recv`
 
 ```ntnt
-try_recv(ch: Channel) -> Option<Any>
+try_recv(rx: RxChannel) -> Option<Any>
 ```
 
-Non-blocking receive. Returns None if no value is available.
+Non-blocking receive. Returns None if no value is available or all senders disconnected.
 
 **Parameters:**
 
-- `ch` — The channel to receive from
+- `rx` — The RxChannel receiver handle (second element of channel())
 
 **Examples:**
 
 ```ntnt
-try_recv(ch)  // Check for a value without blocking
+let [tx, rx] = channel()  // Check for a value without blocking
+try_recv(rx)
 ```
 
 **See also:** `recv`, `recv_timeout`
 
-*Since v0.2.0*
+*Since v0.4.6*
 
 ---
 
