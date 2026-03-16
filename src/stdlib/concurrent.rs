@@ -1010,7 +1010,10 @@ fn capture_bindings(
 /// - Serializable values are defined directly.
 /// - NativeFunction names are looked up from stdlib modules AND builtins,
 ///   with arity used for disambiguation when multiple modules share a name.
-fn inject_captured(interp: &mut crate::interpreter::Interpreter, captured: &CapturedBindings) {
+fn inject_captured(
+    interp: &mut crate::interpreter::Interpreter,
+    captured: &CapturedBindings,
+) -> Result<()> {
     // Inject serializable values
     for (key, val) in &captured.values {
         interp.define_global(key.clone(), val.to_value());
@@ -1036,15 +1039,10 @@ fn inject_captured(interp: &mut crate::interpreter::Interpreter, captured: &Capt
             })
             .collect();
 
-        if arity_matches.len() > 1 {
-            let module_names: Vec<&str> = arity_matches.iter().map(|(m, _)| m.as_str()).collect();
-            eprintln!(
-                "[ERROR] Ambiguous native function capture: '{}' found in multiple modules ({}). Import the specific function to disambiguate.",
-                cap.fn_name,
-                module_names.join(", ")
-            );
-            continue;
-        }
+        // If multiple modules export the same function name with the same arity,
+        // pick the first match. This can happen legitimately (e.g., `after` exists in
+        // both std/concurrent and std/time). Future improvement: capture the module path
+        // at bind time to avoid ambiguity entirely.
 
         if let Some((_, value)) = arity_matches.into_iter().next() {
             interp.define_global(cap.binding_name.clone(), value.clone());
@@ -1064,6 +1062,8 @@ fn inject_captured(interp: &mut crate::interpreter::Interpreter, captured: &Capt
             }
         }
     }
+
+    Ok(())
 }
 
 // =============================================================================
@@ -1170,7 +1170,7 @@ fn concurrent_spawn(handler: &Value) -> Result<Value> {
                     use crate::interpreter::Interpreter;
 
                     let mut interp = Interpreter::new();
-                    inject_captured(&mut interp, &captured);
+                    inject_captured(&mut interp, &captured)?;
                     interp.eval_block(&body_clone)
                 }));
 
@@ -1346,7 +1346,7 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
                     use crate::interpreter::Interpreter;
 
                     let mut interp = Interpreter::new();
-                    inject_captured(&mut interp, &captured);
+                    inject_captured(&mut interp, &captured)?;
                     interp.eval_block(&body_clone)
                 }));
 
@@ -1498,7 +1498,10 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
                             use crate::interpreter::Interpreter;
 
                             let mut interp = Interpreter::new();
-                            inject_captured(&mut interp, &tick_captured);
+                            if let Err(e) = inject_captured(&mut interp, &tick_captured) {
+                                eprintln!("[schedule] Failed to inject captured bindings: {}", e);
+                                return;
+                            }
                             let _ = interp.eval_block(&tick_body);
                         }));
 
