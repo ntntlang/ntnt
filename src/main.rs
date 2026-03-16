@@ -1820,7 +1820,7 @@ fn validate_project(path: &PathBuf) -> anyhow::Result<()> {
         "files": results,
         "summary": {
             "total": files.len(),
-            "valid": files.len() - error_count,
+            "valid": files.len().saturating_sub(error_count),
             "errors": error_count,
             "warnings": warning_count,
         }

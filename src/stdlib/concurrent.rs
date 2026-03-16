@@ -2287,7 +2287,8 @@ mod tests {
     fn test_handle_id_extraction() {
         let handle = create_handle_value("Task", 42);
         assert_eq!(get_handle_id(&handle, "Task").unwrap(), 42);
-        assert!(get_handle_id(&handle, "Channel").is_err());
+        assert!(get_handle_id(&handle, "RxChannel").is_err());
+        assert!(get_handle_id(&handle, "TxChannel").is_err());
         assert!(get_handle_id(&Value::Int(42), "Task").is_err());
     }
 

@@ -1545,13 +1545,16 @@ Structured concurrency: tasks, channels, schedules, and cooperative cancellation
 ```ntnt
 import { channel, send, recv, recv_timeout, try_recv, close } from "std/concurrent"
 
-let ch = channel()
-send(ch, "hello")            // Returns true (false if channel closed)
-let msg = recv(ch)            // Blocks until value available; returns Unit if closed
-let msg = recv_timeout(ch, 5000)  // Option — None on timeout or disconnect
-let msg = try_recv(ch)             // Option — None if no message waiting
-close(ch)                     // Removes channel from registry; recv() → Unit
+// channel() returns [TxChannel, RxChannel] — always destructure
+let [tx, rx] = channel()
+send(tx, "hello")                // Returns true (false if receiver closed)
+let msg = recv(rx)               // Blocks until value available; returns Unit on disconnect
+let msg = recv_timeout(rx, 5000) // Option — None on timeout or disconnect
+let msg = try_recv(rx)           // Option — None if no message waiting
+close(rx)                        // Removes receiver from registry; future send() → false
 ```
+
+**Two-handle design:** `tx` (TxChannel) is the sender; `rx` (RxChannel) is the receiver. When all `tx` clones drop (e.g. a spawned task exits), `recv(rx)` automatically returns `Unit` — no sentinel needed. Mirrors Rust's own channel ownership semantics.
 
 Channels are single-consumer: only one task should call `recv()` at a time.
 

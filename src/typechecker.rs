@@ -3454,13 +3454,14 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
         }
         "std/concurrent" => {
             // Channel operations
-            sig!("channel", [], Type::Named("Channel".to_string()));
-            sig!("send", ["ch" => Type::Named("Channel".to_string()), "value" => Type::Any], Type::Bool);
-            sig!("recv", ["ch" => Type::Named("Channel".to_string())], Type::Any);
-            sig!("recv_timeout", ["ch" => Type::Named("Channel".to_string()), "millis" => Type::Int], Type::Optional(Box::new(Type::Any)));
-            sig!("try_recv", ["ch" => Type::Named("Channel".to_string())], Type::Optional(Box::new(Type::Any)));
-            sig!("close", ["ch" => Type::Named("Channel".to_string())], Type::Bool);
-            sig!("select", ["channels" => Type::Array(Box::new(Type::Named("Channel".to_string()))), "timeout_ms" => Type::Int], Type::Named("Map".to_string()), variadic);
+            // channel() returns [TxChannel, RxChannel] — destructure with let [tx, rx] = channel()
+            sig!("channel", [], Type::Array(Box::new(Type::Any)));
+            sig!("send", ["tx" => Type::Named("TxChannel".to_string()), "value" => Type::Any], Type::Bool);
+            sig!("recv", ["rx" => Type::Named("RxChannel".to_string())], Type::Any);
+            sig!("recv_timeout", ["rx" => Type::Named("RxChannel".to_string()), "millis" => Type::Int], Type::Optional(Box::new(Type::Any)));
+            sig!("try_recv", ["rx" => Type::Named("RxChannel".to_string())], Type::Optional(Box::new(Type::Any)));
+            sig!("close", ["rx" => Type::Named("RxChannel".to_string())], Type::Bool);
+            sig!("select", ["channels" => Type::Array(Box::new(Type::Named("RxChannel".to_string()))), "timeout_ms" => Type::Int], Type::Named("Map".to_string()), variadic);
             // Task operations
             sig!("spawn", ["handler" => Type::Any], Type::Named("Task".to_string()));
             sig!("await_task", ["task" => Type::Named("Task".to_string())], Type::Any, variadic); // Returns Result<Any, String> at runtime
