@@ -944,8 +944,6 @@ struct CapturedBindings {
 struct CapturedNativeFn {
     binding_name: String, // the variable name in user code (may be an alias)
     fn_name: String,      // the canonical function name
-    arity: usize,         // for disambiguation when names collide
-    max_arity: usize,
 }
 
 /// Capture all bindings from an environment for cross-thread use.
@@ -960,19 +958,13 @@ fn capture_bindings(
 
     for (key, value) in bindings {
         match value {
-            Value::NativeFunction {
-                name,
-                arity,
-                max_arity,
-                ..
-            } => {
-                // Record function name + arity for re-lookup in child interpreter.
-                // Arity disambiguates when modules share names (e.g., connect, query).
+            Value::NativeFunction { name, .. } => {
+                // Record binding name → canonical function name.
+                // The child interpreter already has all stdlib modules loaded;
+                // this is only needed for aliases (let my_fn = some_stdlib_fn).
                 native_fn_names.push(CapturedNativeFn {
                     binding_name: key.clone(),
                     fn_name: name.clone(),
-                    arity: *arity,
-                    max_arity: *max_arity,
                 });
             }
             _ => match SerializedValue::from_value(value) {
@@ -1010,60 +1002,26 @@ fn capture_bindings(
 /// - Serializable values are defined directly.
 /// - NativeFunction names are looked up from stdlib modules AND builtins,
 ///   with arity used for disambiguation when multiple modules share a name.
-fn inject_captured(
-    interp: &mut crate::interpreter::Interpreter,
-    captured: &CapturedBindings,
-) -> Result<()> {
-    // Inject serializable values
+fn inject_captured(interp: &mut crate::interpreter::Interpreter, captured: &CapturedBindings) {
+    // Inject serializable values (user data captured from the enclosing scope)
     for (key, val) in &captured.values {
         interp.define_global(key.clone(), val.to_value());
     }
 
-    // Re-inject native functions
+    // Re-inject native function bindings into the child's global scope.
+    // The child interpreter has all stdlib modules *loaded* but has not *imported*
+    // anything — so `send`, `recv`, etc. are in the module registry but not accessible
+    // as global names. We inject each captured function by its canonical name.
+    // Aliases (let my_send = send) are injected under the alias name.
     for cap in &captured.native_fn_names {
-        // First: search loaded modules for this function name
-        let all_matches = interp.find_all_in_loaded_modules(&cap.fn_name);
-
-        // Filter to matches with same arity
-        let arity_matches: Vec<_> = all_matches
-            .iter()
-            .filter(|(_, value)| {
-                if let Value::NativeFunction {
-                    arity, max_arity, ..
-                } = value
-                {
-                    *arity == cap.arity && *max_arity == cap.max_arity
-                } else {
-                    false
-                }
-            })
-            .collect();
-
-        // If multiple modules export the same function name with the same arity,
-        // pick the first match. This can happen legitimately (e.g., `after` exists in
-        // both std/concurrent and std/time). Future improvement: capture the module path
-        // at bind time to avoid ambiguity entirely.
-
-        if let Some((_, value)) = arity_matches.into_iter().next() {
-            interp.define_global(cap.binding_name.clone(), value.clone());
-            continue;
+        // Look up the canonical function in modules, then builtins
+        if let Some(value) = interp.find_in_loaded_modules(&cap.fn_name) {
+            interp.define_global(cap.binding_name.clone(), value);
+        } else if let Some(value) = interp.get_global(&cap.fn_name) {
+            interp.define_global(cap.binding_name.clone(), value);
         }
-
-        // Fallback: check if it's a builtin already in the global environment
-        // (builtins like len, print, str are defined by Interpreter::new())
-        if let Some(value) = interp.get_global(&cap.fn_name) {
-            if let Value::NativeFunction {
-                arity, max_arity, ..
-            } = &value
-            {
-                if *arity == cap.arity && *max_arity == cap.max_arity {
-                    interp.define_global(cap.binding_name.clone(), value);
-                }
-            }
-        }
+        // If not found: undefined variable error at runtime (clear message)
     }
-
-    Ok(())
 }
 
 // =============================================================================
@@ -1170,7 +1128,7 @@ fn concurrent_spawn(handler: &Value) -> Result<Value> {
                     use crate::interpreter::Interpreter;
 
                     let mut interp = Interpreter::new();
-                    inject_captured(&mut interp, &captured)?;
+                    inject_captured(&mut interp, &captured);
                     interp.eval_block(&body_clone)
                 }));
 
@@ -1346,7 +1304,7 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
                     use crate::interpreter::Interpreter;
 
                     let mut interp = Interpreter::new();
-                    inject_captured(&mut interp, &captured)?;
+                    inject_captured(&mut interp, &captured);
                     interp.eval_block(&body_clone)
                 }));
 
@@ -1498,10 +1456,7 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
                             use crate::interpreter::Interpreter;
 
                             let mut interp = Interpreter::new();
-                            if let Err(e) = inject_captured(&mut interp, &tick_captured) {
-                                eprintln!("[schedule] Failed to inject captured bindings: {}", e);
-                                return;
-                            }
+                            inject_captured(&mut interp, &tick_captured);
                             let _ = interp.eval_block(&tick_body);
                         }));
 
