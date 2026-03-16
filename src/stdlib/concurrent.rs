@@ -1166,6 +1166,26 @@ fn concurrent_spawn(handler: &Value) -> Result<Value> {
                     }
                 }
 
+                // Channel death signal: if the task failed or panicked, send a Unit
+                // sentinel into every channel it captured. Without this, a blocking
+                // recv() on a channel that the task was supposed to send to will hang
+                // forever — the global registry holds the only sender, so recv() never
+                // sees a Disconnected signal when the task exits abnormally.
+                //
+                // Unit is the existing "channel closed" return value for recv(), so
+                // callers already know to treat Unit as a disconnect indicator.
+                // Callers should also check await_task() to distinguish clean channel
+                // close from task failure.
+                let task_succeeded =
+                    matches!(*state_arc.lock().unwrap(), TaskState::Completed);
+                if !task_succeeded {
+                    for val in captured.values.values() {
+                        if let SerializedValue::ChannelHandle(id) = val {
+                            RUNTIME.send(*id, SerializedValue::Unit);
+                        }
+                    }
+                }
+
                 // Record completion time for reaper
                 *completed_at_arc.lock().unwrap() = Some(Instant::now());
 
