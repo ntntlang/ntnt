@@ -3460,15 +3460,15 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("recv_timeout", ["ch" => Type::Named("Channel".to_string()), "millis" => Type::Int], Type::Optional(Box::new(Type::Any)));
             sig!("try_recv", ["ch" => Type::Named("Channel".to_string())], Type::Optional(Box::new(Type::Any)));
             sig!("close", ["ch" => Type::Named("Channel".to_string())], Type::Bool);
-            sig!("select", ["channels" => Type::Array(Box::new(Type::Named("Channel".to_string())))], Type::Named("Map".to_string()));
+            sig!("select", ["channels" => Type::Array(Box::new(Type::Named("Channel".to_string()))), "timeout_ms" => Type::Int], Type::Named("Map".to_string()), variadic);
             // Task operations
             sig!("spawn", ["handler" => Type::Any], Type::Named("Task".to_string()));
-            sig!("await_task", ["task" => Type::Named("Task".to_string())], Type::Any); // Result<Any, String>
+            sig!("await_task", ["task" => Type::Named("Task".to_string())], Type::Any, variadic); // Returns Result<Any, String> at runtime
             sig!("try_await", ["task" => Type::Named("Task".to_string())], Type::Named("Map".to_string()));
             sig!("cancel_task", ["task" => Type::Named("Task".to_string())], Type::Bool);
-            sig!("after", ["delay" => Type::Int, "handler" => Type::Any], Type::Named("Task".to_string()));
+            sig!("after", ["delay" => Type::Union(vec![Type::Int, Type::String]), "handler" => Type::Any], Type::Named("Task".to_string()));
             // Schedule operations
-            sig!("schedule", ["interval" => Type::String, "handler" => Type::Any], Type::Named("Schedule".to_string()));
+            sig!("schedule", ["interval" => Type::Union(vec![Type::String, Type::Int]), "handler" => Type::Any], Type::Named("Schedule".to_string()));
             sig!("cancel_schedule", ["schedule" => Type::Named("Schedule".to_string())], Type::Bool);
             // Utilities
             sig!("sleep_ms", ["ms" => Type::Int], Type::Unit);

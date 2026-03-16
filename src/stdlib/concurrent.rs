@@ -1808,8 +1808,9 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt close
     // @module std/concurrent
     // @signature close(ch: Channel) -> Bool
-    // Closes a channel by removing it from the registry. The sender is dropped,
-    // causing any blocking recv() to return Unit. Returns true if the channel existed.
+    // Closes a channel by removing it from the registry. The sender is dropped;
+    // any blocking recv() returns Unit once all buffered values are consumed.
+    // Returns true if the channel existed, false otherwise.
     // @param ch The channel handle
     // @see_also channel
     // @since v0.2.0
@@ -1896,8 +1897,8 @@ pub fn init() -> HashMap<String, Value> {
     // @module std/concurrent
     // @signature try_await(task: Task) -> Map
     // Non-blocking peek at task state. Does NOT remove the task from registry.
-    // Returns a map with "status" ("running", "completed", "failed", "panicked")
-    // and "result" (Ok(value), Err(message), or None if still running).
+    // Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired")
+    // and "result" (Ok(value), Err(message), or None if still running/consumed/expired).
     // @param task The task handle
     // @returns Map with status and result fields
     // @see_also spawn, await_task, cancel_task

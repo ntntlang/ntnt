@@ -3110,7 +3110,7 @@ import { channel, send, recv } from "std/concurrent"
 | [`cancel_schedule`](#cancelschedule) | Cancels a scheduled task. Sets the cancellation flag and removes from registry. Returns true if the schedule existed, false otherwise. |
 | [`cancel_task`](#canceltask) | Requests cooperative cancellation of a task. Sets the cancellation flag; the task thread will exit at the next yield point (recv, recv_timeout, sleep_ms, or fetch). Does NOT force immediate termination. Returns true if the task existed, false otherwise. |
 | [`channel`](#channel) | Creates a new unbounded channel for inter-task communication. Channels are single-consumer: only one task should call recv() at a time. |
-| [`close`](#close) | Closes a channel by removing it from the registry. The sender is dropped, causing any blocking recv() to return Unit. Returns true if the channel existed. |
+| [`close`](#close) | Closes a channel by removing it from the registry. The sender is dropped; any blocking recv() returns Unit once all buffered values are consumed. Returns true if the channel existed, false otherwise. |
 | [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if the channel is closed and empty (sender dropped). This is a cancellation yield point: a cancelled task will exit here. Single-consumer: the receiver lock is held for the blocking duration. |
 | [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or channel disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point. |
 | [`schedule`](#schedule) | Runs a zero-parameter handler repeatedly at the given interval. Returns a Schedule handle. Interval can be milliseconds (Int) or a string ("5s", "1m"). Zero intervals are rejected. Each tick spawns a thread with catch_unwind; overlap prevention ensures a new tick won't start until the previous one finishes. Panics in tick execution are caught and logged — they don't kill the schedule. |
@@ -3119,7 +3119,7 @@ import { channel, send, recv } from "std/concurrent"
 | [`sleep_ms`](#sleepms) | Pauses execution for specified milliseconds. This is a cancellation yield point: a cancelled task will exit during sleep_ms(). Uses 50ms slices internally. Note: sleep() from std/time is NOT cancellation-aware — use this for spawned tasks. |
 | [`spawn`](#spawn) | Spawns a zero-parameter function as a background task. Returns a Task handle. The handler's closure environment is serialized for cross-thread use. Serializable capture types: Int, Float, Bool, String, Array, Map, Struct, Enum. The handler must have zero parameters (including no defaults). |
 | [`thread_count`](#threadcount) | Returns the number of available CPU threads. Useful for sizing parallel work. |
-| [`try_await`](#tryawait) | Non-blocking peek at task state. Does NOT remove the task from registry. Returns a map with "status" ("running", "completed", "failed", "panicked") and "result" (Ok(value), Err(message), or None if still running). |
+| [`try_await`](#tryawait) | Non-blocking peek at task state. Does NOT remove the task from registry. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired). |
 | [`try_recv`](#tryrecv) | Non-blocking receive. Returns None if no value is available or channel is closed. |
 
 #### `after`
@@ -3255,7 +3255,7 @@ channel()  // Create a channel for inter-task communication
 close(ch: Channel) -> Bool
 ```
 
-Closes a channel by removing it from the registry. The sender is dropped, causing any blocking recv() to return Unit. Returns true if the channel existed.
+Closes a channel by removing it from the registry. The sender is dropped; any blocking recv() returns Unit once all buffered values are consumed. Returns true if the channel existed, false otherwise.
 
 **Parameters:**
 
@@ -3474,7 +3474,7 @@ thread_count()  // => 8  // Number of CPU threads
 try_await(task: Task) -> Map
 ```
 
-Non-blocking peek at task state. Does NOT remove the task from registry. Returns a map with "status" ("running", "completed", "failed", "panicked") and "result" (Ok(value), Err(message), or None if still running).
+Non-blocking peek at task state. Does NOT remove the task from registry. Returns a map with "status" ("running", "completed", "failed", "panicked", "consumed", "expired") and "result" (Ok(value), Err(message), or None if still running/consumed/expired).
 
 **Parameters:**
 

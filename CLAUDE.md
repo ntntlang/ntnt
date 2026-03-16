@@ -1598,7 +1598,7 @@ match result {
 
 // try_await peeks without removing (returns Map with status + result)
 let status = try_await(task)
-// { "status": "running"|"completed"|"failed"|"panicked", "result": Ok(val)|Err(msg)|None }
+// { "status": "running"|"completed"|"failed"|"panicked"|"consumed"|"expired", "result": Ok(val)|Err(msg)|None }
 
 // cancel_task sets cooperative cancellation flag (checked at yield points)
 cancel_task(task)  // Task exits at next recv/recv_timeout/sleep_ms/fetch call
