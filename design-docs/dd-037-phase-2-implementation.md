@@ -1,6 +1,6 @@
 # DD-037 Phase 2: Job DSL + KV Backend — Implementation Plan
 
-**Status:** Planning
+**Status:** In Progress (PR 2a ✅ merged, PR 2b 🔄 in review, PR 2c 📋 planned)
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md)
 **Created:** 2026-03-16
 **Target branch:** `feat/job-dsl-v2`
@@ -77,8 +77,8 @@ The 0.4.2 async connection pool and worker pool performance gains are unaffected
 ## Sub-Phases
 
 ```
-PR 2a  📋  Parser + Registry + Enqueue MVP       parse Job syntax, store in KV, basic enqueue
-PR 2b  📋  Workers + Lifecycle + Retry            claim jobs, run via spawn(), retry on failure
+PR 2a  ✅  Parser + Registry + Enqueue MVP       parse Job syntax, store in KV, basic enqueue           (#32, merged 2026-03-17)
+PR 2b  🔄  Workers + Lifecycle + Retry            claim jobs, run via spawn(), retry on failure          (#33, in review)
 PR 2c  📋  DX: Testing Mode + Logs + CLI + Docs   assert_enqueued, streaming logs, ntnt worker
 ```
 
@@ -93,12 +93,12 @@ PR 2c  📋  DX: Testing Mode + Logs + CLI + Docs   assert_enqueued, streaming l
 **Estimated effort:** 2-3 days
 
 ### Lexer (`src/lexer.rs`)
-- [ ] Add `Job` keyword token
-- [ ] `on` is already a keyword (used by `on_shutdown`, `on_error`) — no change needed
-- [ ] `perform` and `on_failure` are parsed contextually inside `Job` blocks, not keywords
+- [x] ~~Add `Job` keyword token~~ → `job` is a contextual keyword (parsed as identifier, not token), avoids breaking existing code using `job` as a variable name
+- [x] `on` is already a keyword (used by `on_shutdown`, `on_error`) — no change needed
+- [x] `perform` and `on_failure` are parsed contextually inside `Job` blocks, not keywords
 
 ### AST (`src/ast.rs`)
-- [ ] Add `Statement::Job` variant:
+- [x] Add `Statement::Job` variant:
   ```rust
   Job {
       name: String,              // "SendEmail"
@@ -110,29 +110,29 @@ PR 2c  📋  DX: Testing Mode + Logs + CLI + Docs   assert_enqueued, streaming l
   }
   ```
 ### Parser (`src/parser.rs`)
-- [ ] Parse `Job Name on queue { perform(args) { body } }` syntax
-- [ ] Parse optional inline options: `Job Name on queue (retry: 5, timeout: 120) { ... }`
-- [ ] Parse optional `on_failure(error, attempt) { ... }` block
-- [ ] `Job` declarations are top-level statements (like `fn`, `struct`, `enum`)
+- [x] Parse `job Name on queue { perform(args) { body } }` syntax
+- [x] Parse optional inline options: `job Name on queue (retry: 5, timeout: 120) { ... }`
+- [x] Parse optional `on_failure(error, attempt) { ... }` block
+- [x] `job` declarations are top-level statements (like `fn`, `struct`, `enum`)
 
 ### Interpreter — Job Registry (`src/interpreter.rs`)
-- [ ] Add `eval_statement` arm for `Statement::Job`: evaluate options, write `JobDefinition` to `JOB_RUNTIME.job_registry` (see Architecture Notes — registry is global, not per-interpreter)
-- [ ] Job names must be unique — error on duplicate registration
-- [ ] Execution mode guards: skip job registration in HotReload worker mode (same pattern as `spawn`)
+- [x] Add `eval_statement` arm for `Statement::Job`: evaluate options, write `JobDefinition` to `JOB_RUNTIME.job_registry` (see Architecture Notes — registry is global, not per-interpreter)
+- [x] Job names must be unique — error on duplicate registration
+- [x] Execution mode guards: skip job registration in HotReload worker mode (same pattern as `spawn`)
 
 ### KV Integration (`src/stdlib/jobs.rs` — new file)
-- [ ] `configure_queue(opts)` — takes a map with `"store"` key
+- [x] `configure_queue(opts)` — takes a map with `"store"` key
   - Default: `"sqlite:./jobs.db"` if no store specified
   - Opens a KV connection via `std/kv::open()`, stores handle in module-level state
   - Validates store URL format
-- [ ] `enqueue(job_name, args)` — the core enqueue function:
+- [x] `enqueue(job_name, args)` — the core enqueue function:
   - Look up job name in registry (error if not registered)
   - Generate job ID (UUID via `std/crypto::uuid()`)
   - Serialize job data: `{ type, queue, payload, status: "pending", attempts: 0, created_at, ... }`
   - Write to KV: `set(kv, "jobs:data:<id>", job_data)` + add to queue sorted set
   - Return job ID as String
-- [ ] `job_status(job_id)` — read job data from KV, return status map
-- [ ] `cancel_job(job_id)` — set status to "cancelled", remove from queue
+- [x] `job_status(job_id)` — read job data from KV, return status map
+- [x] `cancel_job(job_id)` — set status to "cancelled", remove from queue
 
 ### std/kv approach for PR 2a
 
@@ -149,27 +149,27 @@ jobs:active:<id>                             →  TTL key for visibility timeout
 **Atomic claiming (PR 2b concern, not PR 2a):** Deferred. When PR 2b is started, add a `claim(kv, prefix)` operation to std/kv that does `BEGIN IMMEDIATE; SELECT..LIMIT 1; UPDATE; COMMIT` for SQLite and `ZPOPMIN` / Lua script for Redis. Do not implement in PR 2a.
 
 ### Typechecker (`src/typechecker.rs`)
-- [ ] Add `Job` to statement checking (skip body for now, or treat like function body)
-- [ ] Add signatures: `configure_queue`, `enqueue`, `job_status`, `cancel_job`
+- [x] Add `Job` to statement checking — type-checks perform body, on_failure body, and option expressions
+- [x] Add signatures: `configure_queue`, `enqueue`, `job_status`, `cancel_job`
 
 ### Build system (`build.rs`)
-- [ ] `src/stdlib/jobs.rs` will be auto-discovered by build.rs glob — no config needed
-- [ ] Add `// @ntnt` doc blocks to all functions (build enforces this)
+- [x] `src/stdlib/jobs.rs` will be auto-discovered by build.rs glob — no config needed
+- [x] Add `// @ntnt` doc blocks to all functions (build enforces this)
 
 ### Tests
-- [ ] Parser test: `Job SendEmail on emails { perform(to) { print(to) } }` parses correctly
-- [ ] Parser test: options, on_failure handler
-- [ ] Integration test: register job → enqueue → verify in KV → check status
-- [ ] Integration test: cancel job
-- [ ] Integration test: enqueue unregistered job → error
-- [ ] Integration test: duplicate job name → error
+- [x] Parser test: `job SendEmail on emails { perform(to) { print(to) } }` parses correctly
+- [x] Parser test: options, on_failure handler
+- [x] Integration test: register job → enqueue → verify in KV → check status
+- [x] Integration test: cancel job
+- [x] Integration test: enqueue unregistered job → error
+- [x] Integration test: duplicate job name → error
 
 ### PR 2a Completion Criteria
-- [ ] All tests pass (`cargo test`)
-- [ ] `cargo build --release --locked && ntnt docs --generate` — CI will fail on docs drift
-- [ ] `// @ntnt` doc blocks on all new public functions
-- [ ] Typechecker signatures complete (not partial — Copilot will flag this)
-- [ ] No `eprintln!` for error handling — return `Err(...)` or `Value::Error`
+- [x] All tests pass (`cargo test`)
+- [x] `cargo build --release --locked && ntnt docs --generate` — CI will fail on docs drift
+- [x] `// @ntnt` doc blocks on all new public functions
+- [x] Typechecker signatures complete (not partial — Copilot will flag this)
+- [x] No `eprintln!` for error handling — return `Err(...)` or `Value::Error`
 
 ### What this PR does NOT include
 - No workers (jobs sit in queue)
@@ -189,19 +189,19 @@ jobs:active:<id>                             →  TTL key for visibility timeout
 **Depends on:** PR 2a merged
 
 ### Worker Loop (`src/stdlib/jobs.rs`)
-- [ ] `work_async()` — starts a worker loop in-process via `spawn()`:
+- [x] `work_async(opts?)` — starts worker loop(s) via `std::thread::spawn`, integrated with ConcurrencyRuntime for cancellation/await
   - Poll KV queue for pending jobs (configurable poll interval, default 1s)
-  - Claim job: atomically move from pending → active (KV get + set with TTL)
+  - Claim job: atomically via `kv_claim()` (`BEGIN IMMEDIATE; SELECT; DELETE; COMMIT`)
   - Deserialize job data, look up `JobDefinition` in registry
-  - Run `perform` body in a fresh interpreter via `run_in_fresh_interpreter()` (same pattern as `spawn()` in std/concurrent)
-  - On success: status → "completed", store result, set completion TTL
+  - Run `perform` body in a fresh `Interpreter::new()` with params injected from payload
+  - On success: status → "completed", record `completed_at`
   - On failure: increment attempts, check retry policy, either re-queue or mark dead
-  - Cancellation-aware: check `RUNTIME` shutdown flag between jobs
-- [ ] `work_jobs(opts)` — blocking worker mode for `ntnt worker` CLI:
-  - Same logic as `work_async()` but blocks the main thread
+  - Cancellation-aware: checks `is_current_task_cancelled()` between iterations
+- [x] `work_jobs(opts?)` — blocking worker mode for `ntnt worker` CLI:
+  - Same logic as `work_async()` but runs on the calling thread
   - `opts.concurrency`: number of concurrent `spawn()` workers (default: 1)
-  - `opts.queues`: which queues to process (default: all registered)
-- [ ] Worker heartbeat: periodic KV write with TTL (e.g., every 10s, TTL 30s)
+  - `opts.queues`: array of queue names to process (default: all)
+- [ ] Worker heartbeat: periodic KV write with TTL — deferred to PR 2c (visibility timeout TTL key is set on claim)
 
 ### Job Lifecycle State Machine
 ```
@@ -213,57 +213,58 @@ Scheduled ─→ Pending ─→ Active ─→ Completed
                 │
                 └─→ Cancelled
 ```
-- [ ] All state transitions are KV writes (atomic where possible)
-- [ ] `completed_at`, `failed_at`, `dead_at` timestamps recorded
-- [ ] `error` field stores last failure message
+- [x] All state transitions are KV writes
+- [x] `completed_at`, `failed_at`, `dead_at` timestamps recorded
+- [x] `error` field stores last failure message
 
 ### Retry Logic
-- [ ] Retry count from job options: `retry: 5` (default: 3)
-- [ ] Backoff strategies:
-  - `exponential` (default): delay = base * 2^attempt (base = 5s)
+- [x] Retry count from job options: `retry: 5` (default: 3)
+- [x] Backoff strategies:
+  - `exponential` (default): delay = base * 2^attempt (base = 5s, capped at 3600s)
   - `linear`: delay = base * attempt
   - `constant`: delay = base
-- [ ] Syntax: `Job X on q (retry: 5, backoff: "exponential") { ... }`
-- [ ] Retry delay → re-enqueue with `scheduled_at` in the future
-- [ ] `on_failure(error, attempt)` hook called on each failure (before retry decision)
+- [x] Syntax: `job X on q (retry: 5, backoff: "exponential") { ... }`
+- [x] Retry delay → re-enqueue with `scheduled_at` in the future
+- [x] `on_failure(error, attempt)` hook called on each failure (before retry decision)
 
 ### Scheduled Jobs
-- [ ] `enqueue_at(JobName, timestamp, args)` — enqueue with future `scheduled_at`
-- [ ] `enqueue_in(JobName, delay_seconds, args)` — convenience wrapper
-- [ ] Worker skips jobs where `scheduled_at > now()` during polling
-- [ ] KV sorted set ordering: `scheduled_at` as score (pending jobs sorted by when they should run)
+- [x] `enqueue_at(job_name, timestamp_nanos, args)` — enqueue with future `scheduled_at`
+- [x] `enqueue_in(job_name, delay_seconds, args)` — convenience wrapper
+- [x] Worker skips jobs where `scheduled_at > now()` during polling (re-enqueues them)
+- [x] Pending key timestamp controls ordering — scheduled jobs sort after immediate ones
 
 ### Job Timeout
-- [ ] `timeout` option: `Job X on q (timeout: 30) { ... }` (seconds)
-- [ ] Worker wraps execution in a deadline check
-- [ ] Timeout → failure (same as error, triggers retry)
+- [ ] `timeout` option — deferred to PR 2c (post-execution elapsed check)
 
 ### Visibility Timeout
-- [ ] Active jobs get a KV TTL key: `jobs:active:<id>` with configurable timeout (default 5 min)
-- [ ] If worker dies mid-job, TTL expires, and job becomes re-claimable
-- [ ] Worker refreshes TTL periodically during long jobs (heartbeat pattern)
+- [x] Active jobs get a KV TTL key: `jobs:active:<id>` with 300s TTL
+- [ ] If worker dies mid-job, TTL expires, and job becomes re-claimable — recovery mechanism deferred
+- [ ] Worker refreshes TTL periodically during long jobs — deferred to PR 2c
 
 ### Graceful Shutdown
-- [ ] `RUNTIME.shutdown()` integration: stop claiming new jobs, wait for in-flight to complete
-- [ ] Configurable drain timeout (default 30s) — after which in-flight jobs are abandoned and re-claimable via visibility timeout
+- [x] Cancellation-aware: `cancel_task()` on the worker TaskHandle stops claiming new jobs
+- [ ] Configurable drain timeout — deferred to PR 2c
 
 ### Tests
-- [ ] Integration: enqueue → work_async → job runs → status is completed
-- [ ] Integration: job fails → retries N times → eventually dead
-- [ ] Integration: job fails → on_failure handler called with error and attempt count
-- [ ] Integration: enqueue_in → job doesn't run until delay passes
-- [ ] Integration: cancel pending job → worker skips it
-- [ ] Integration: job timeout → treated as failure
-- [ ] Integration: graceful shutdown → in-flight jobs complete, no new claims
-- [ ] Unit: backoff calculation (exponential, linear, constant)
-- [ ] Unit: state machine transitions
+- [ ] Integration: enqueue → work_async → job runs → status is completed (requires subprocess test, deferred)
+- [ ] Integration: job fails → retries N times → eventually dead (requires subprocess test, deferred)
+- [ ] Integration: job fails → on_failure handler called (requires subprocess test, deferred)
+- [ ] Integration: enqueue_in → job doesn't run until delay passes (requires subprocess test, deferred)
+- [ ] Integration: cancel pending job → worker skips it (requires subprocess test, deferred)
+- [ ] Integration: job timeout → treated as failure (deferred with timeout feature)
+- [ ] Integration: graceful shutdown (deferred with drain timeout)
+- [x] Unit: backoff calculation (exponential, linear, constant, default)
+- [x] Unit: execute_job_perform with empty body
+- [x] Unit: enqueue_at and enqueue_in
+- [x] Unit: type error handling for enqueue_at/enqueue_in
+- [x] Unit: parse_work_opts defaults and custom values
 
 ### PR 2b Completion Criteria
-- [ ] All tests pass (`cargo test`)
-- [ ] `cargo build --release --locked && ntnt docs --generate`
-- [ ] `// @ntnt` doc blocks on all new public functions in jobs.rs
-- [ ] Typechecker signatures complete for `work_async`, `work_jobs`, `enqueue_at`, `enqueue_in`
-- [ ] No `eprintln!` — use structured logging (stderr JSON, same format as PR 2c streaming logs — define the format early even if the full hook isn't wired yet)
+- [x] All tests pass (`cargo test`) — 724 lib, 314 integration
+- [x] `cargo build --release --locked && ntnt docs --generate` — 373 total functions
+- [x] `// @ntnt` doc blocks on all new public functions in jobs.rs
+- [x] Typechecker signatures complete for `work_async`, `work_jobs`, `enqueue_at`, `enqueue_in`
+- [x] No `eprintln!` in new code
 
 ### What this PR does NOT include
 - No testing mode (assert_enqueued)
@@ -280,6 +281,19 @@ Scheduled ─→ Pending ─→ Active ─→ Completed
 
 **Estimated effort:** 2 days
 **Depends on:** PR 2b merged
+
+### Items deferred from PR 2b
+
+These were identified during PR 2b review and deferred to 2c:
+
+- [ ] **Redis atomic claim via Lua script** — current Redis `claim()` uses SCAN+GET+DEL which is not atomic under concurrent workers. Replace with a Lua script (`EVAL`) for multi-worker Redis deployments. Document the caveat until then.
+- [ ] **Job timeout** — `timeout` option: `job X on q (timeout: 30) { ... }`. Worker checks elapsed time after execution; treat timeout as failure (triggers retry).
+- [ ] **Worker heartbeat refresh** — periodically refresh the `jobs:active:<id>` TTL during long-running jobs (e.g., every 30s). Currently TTL is set once on claim (300s).
+- [ ] **Graceful shutdown drain timeout** — configurable drain timeout (default 30s) for `work_jobs()`. After timeout, in-flight jobs are abandoned and become re-claimable via visibility timeout expiry.
+- [ ] **`work_jobs()` cooperative cancellation** — currently `work_jobs()` doesn't register a ConcurrencyRuntime task, so `is_current_task_cancelled()` always returns false. Add Ctrl-C signal handler or register a task so it can be cancelled.
+- [ ] **`work_async(concurrency > 1)` partial spawn cleanup** — if `spawn_worker_task` fails mid-loop (e.g., task limit), already-spawned workers are leaked without accessible handles. Cancel previously spawned workers on failure.
+- [ ] **`work_async` return type consistency** — returns `TaskHandle` for concurrency=1 but `Array<TaskHandle>` for >1. Consider always returning `Array<TaskHandle>` for a uniform API.
+- [ ] **Scheduled job claim optimization** — worker currently claims all pending keys including future-scheduled ones, then re-enqueues if not ready (KV churn). Use prefix-aware claiming (`jobs:pending:<now_ts_prefix>`) or timestamp comparison in the claim query to skip not-ready jobs without the claim+re-enqueue cycle.
 
 ### Testing Mode
 - [ ] `configure_queue(map { "mode": "testing" })` — jobs collected in memory, nothing runs
@@ -310,7 +324,7 @@ Scheduled ─→ Pending ─→ Active ─→ Completed
 - [ ] Single KV round-trip where possible
 
 ### Priority Queues
-- [ ] Job-level priority: `Job X on q (priority: 1) { ... }` (lower = higher priority)
+- [ ] Job-level priority: `job X on q (priority: 1) { ... }` (lower = higher priority)
 - [ ] Priority encoded in sorted set score (priority * 1e12 + scheduled_at)
 
 ### CLI: `ntnt worker`
@@ -343,14 +357,18 @@ Scheduled ─→ Pending ─→ Active ─→ Completed
 - [ ] Priority: higher-priority jobs claimed first
 - [ ] CLI: `ntnt worker` starts and processes jobs (integration test)
 - [ ] CLI: `ntnt jobs status` shows correct counts
+- [ ] Integration: job fails → retries N times → eventually dead (subprocess test)
+- [ ] Integration: job fails → on_failure handler called (subprocess test)
+- [ ] Integration: enqueue_in → job doesn't run until delay passes (subprocess test)
+- [ ] Integration: graceful shutdown → in-flight jobs complete, no new claims
 
 ---
 
 ## Pre-Implementation Checklist
 
-- [ ] **Branch**: Create `feat/job-dsl-v2` from `main`. Verify `git log main --oneline | head` shows the Phase 1 concurrency commits.
-- [ ] **std/kv approach confirmed**: Key-prefix ordering (decided). No new std/kv operations needed for PR 2a. Document the key layout in a comment at the top of `src/stdlib/jobs.rs` before writing anything else.
-- [ ] **enqueue() API**: String literal — `enqueue("SendEmail", args)`. All examples in code and tests use this form.
+- [x] **Branch**: `feat/job-dsl-v2` (PR 2a, merged), `feat/job-workers-v2` (PR 2b, in review)
+- [x] **std/kv approach confirmed**: Key-prefix ordering. `kv_claim()` added in PR 2b for atomic claiming.
+- [x] **enqueue() API**: String literal — `enqueue("SendEmail", args)`. All examples use this form.
 
 ---
 
@@ -364,12 +382,15 @@ Scheduled ─→ Pending ─→ Active ─→ Completed
 5. Run `cargo build --release --locked && ntnt docs --generate` before every push
 6. Test count baseline: ~383 `#[test]` functions (post Phase 1 merge). Report final count on completion.
 
-## Open Design Questions (resolve during implementation)
+## Open Design Questions (resolved)
 
-| Question | Context | Leaning |
-|----------|---------|---------|
-| How does `enqueue(JobName, args)` resolve `JobName` at runtime? | Is it a string lookup in the registry? A Value? | **Resolved: String literal** — `enqueue("SendEmail", args)`. Update all examples to string form. Identifier form is ambiguous and harder to implement. |
-| Should `Job` declarations be importable across files? | A job defined in `lib/jobs.tnt` used in `routes/api.tnt` | Yes — jobs register globally like routes. Import the file, Job auto-registers. |
-| Worker poll interval | How often to check KV for new jobs | 1s default, configurable via `work_async(map { "poll_interval": 500 })` |
-| Job args: Map only or any serializable? | Oban/Sidekiq use maps/hashes | Map only — matches KV storage and keeps it simple |
-| Queue auto-creation | Does enqueue auto-create the queue or require explicit config? | Auto-create. configure_queue() is for settings, not queue creation. |
+| Question | Resolution |
+|----------|------------|
+| How does `enqueue(JobName, args)` resolve `JobName` at runtime? | **Resolved (PR 2a):** String literal — `enqueue("SendEmail", args)`. |
+| Should `Job` declarations be importable across files? | **Resolved (PR 2a):** Yes — jobs register globally via `JOB_RUNTIME`. Import the file, `job` auto-registers. |
+| Worker poll interval | **Resolved (PR 2b):** 1s default, configurable via `work_async(map { "poll_interval": 500 })`. |
+| Job args: Map only or any serializable? | **Resolved (PR 2a):** Map only — matches KV storage. |
+| Queue auto-creation | **Resolved (PR 2a):** Auto-create. `configure_queue()` is for settings, not queue creation. |
+| `job` as keyword or contextual? | **Resolved (PR 2a review):** Contextual identifier — avoids breaking existing code using `job` as a variable name. |
+| `JobDefinition` stores perform body? | **Resolved (PR 2a review):** Yes — `perform_params`, `perform_body`, `on_failure` stored for worker execution. |
+| Atomic claiming mechanism | **Resolved (PR 2b):** `kv_claim()` — SQLite `BEGIN IMMEDIATE` transaction, Redis SCAN+GET+DEL. |

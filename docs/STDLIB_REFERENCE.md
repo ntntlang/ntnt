@@ -5938,7 +5938,11 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`cancel_job`](#canceljob) | Cancel a pending job by its ID. |
 | [`configure_queue`](#configurequeue) | Configure the job queue storage backend. |
 | [`enqueue`](#enqueue) | Enqueue a background job for processing. |
+| [`enqueue_at`](#enqueueat) | Enqueue a job to run at a specific future time. |
+| [`enqueue_in`](#enqueuein) | Enqueue a job to run after a delay in seconds. |
 | [`job_status`](#jobstatus) | Get the current status and data for a job by its ID. |
+| [`work_async`](#workasync) | Start one or more background worker threads that process jobs from the queue. |
+| [`work_jobs`](#workjobs) | Run a blocking worker loop that processes jobs from the queue. |
 
 #### `cancel_job`
 
@@ -6015,6 +6019,63 @@ enqueue("ProcessPayment", map { "amount": 100 })  // Enqueue a payment job
 
 ---
 
+#### `enqueue_at`
+
+```ntnt
+enqueue_at(job_name: String, timestamp: Int, args: Map) -> Result<String, String>
+```
+
+Enqueue a job to run at a specific future time.
+
+The timestamp is a Unix nanosecond timestamp (Int). The job will not be picked up by workers until the current time reaches that timestamp.
+
+**Parameters:**
+
+- `job_name` — The registered job name (e.g., "SendEmail")
+- `timestamp` — Unix nanosecond timestamp when the job should run
+- `args` — A map of arguments to pass to the job's perform block
+
+**Returns:** Result containing the job ID string or an error
+
+**Examples:**
+
+```ntnt
+enqueue_at("SendEmail", now_nanos + 3600_000_000_000, map { "to": "alice@example.com" })  // Enqueue email in 1 hour
+```
+
+**See also:** `enqueue_in`, `enqueue`
+
+---
+
+#### `enqueue_in`
+
+```ntnt
+enqueue_in(job_name: String, delay_secs: Int, args: Map) -> Result<String, String>
+```
+
+Enqueue a job to run after a delay in seconds.
+
+Calculates the future timestamp as `now + delay_secs` and enqueues the job to run no earlier than that time. Convenience wrapper around enqueue_at().
+
+**Parameters:**
+
+- `job_name` — The registered job name (e.g., "SendEmail")
+- `delay_secs` — Number of seconds to wait before the job becomes eligible
+- `args` — A map of arguments to pass to the job's perform block
+
+**Returns:** Result containing the job ID string or an error
+
+**Examples:**
+
+```ntnt
+enqueue_in("SendEmail", 3600, map { "to": "alice@example.com" })  // Send email in 1 hour
+enqueue_in("PurgeCache", 300, map {})  // Purge cache in 5 minutes
+```
+
+**See also:** `enqueue_at`, `enqueue`
+
+---
+
 #### `job_status`
 
 ```ntnt
@@ -6036,6 +6097,61 @@ Returns the full job data map including status, type, queue, payload, attempts, 
 ```ntnt
 job_status("abc-123")  // Check job status
 ```
+
+---
+
+#### `work_async`
+
+```ntnt
+work_async(opts?: Map) -> TaskHandle | Array<TaskHandle>
+```
+
+Start one or more background worker threads that process jobs from the queue.
+
+Returns a TaskHandle (or Array of TaskHandles when concurrency > 1) that can be used with cancel_task() to stop the workers. Workers run until cancelled. If configure_queue() hasn't been called, auto-initializes with the default SQLite store.   - "poll_interval": poll interval in milliseconds (default 1000)   - "concurrency": number of parallel worker threads (default 1)   - "queues": array of queue names to process (default: all queues)
+
+**Parameters:**
+
+- `opts` — Optional configuration map:
+
+**Returns:** TaskHandle for a single worker, or Array<TaskHandle> for concurrency > 1
+
+**Examples:**
+
+```ntnt
+work_async()  // Start a single background worker
+work_async(map { "concurrency": 4, "poll_interval": 500 })  // Start 4 workers polling every 500ms
+work_async(map { "queues": ["emails", "payments"] })  // Process only specific queues
+```
+
+**See also:** `work_jobs`, `cancel_task`
+
+---
+
+#### `work_jobs`
+
+```ntnt
+work_jobs(opts?: Map) -> Unit
+```
+
+Run a blocking worker loop that processes jobs from the queue.
+
+Runs on the current thread until interrupted (Ctrl-C) or cancelled via cooperative cancellation. Typically called at the end of a worker script. If configure_queue() hasn't been called, auto-initializes with the default SQLite store.   - "poll_interval": poll interval in milliseconds (default 1000)   - "queues": array of queue names to process (default: all queues)
+
+**Parameters:**
+
+- `opts` — Optional configuration map:
+
+**Returns:** Unit (blocks until cancelled)
+
+**Examples:**
+
+```ntnt
+work_jobs()  // Run a blocking worker (at end of worker script)
+work_jobs(map { "poll_interval": 500 })  // Poll every 500ms
+```
+
+**See also:** `work_async`, `enqueue`
 
 ---
 

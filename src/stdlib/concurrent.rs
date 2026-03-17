@@ -240,7 +240,7 @@ impl SerializedValue {
 // =============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TaskState {
+pub(crate) enum TaskState {
     Running,
     Completed,
     Failed,
@@ -269,11 +269,11 @@ impl TaskState {
 // =============================================================================
 
 /// Mutable task state protected by a single mutex. Updated atomically in `finalize_task()`.
-struct TaskInner {
-    state: TaskState,
-    result: Option<SerializedValue>,
-    error_msg: Option<String>,
-    completed_at: Option<Instant>,
+pub(crate) struct TaskInner {
+    pub(crate) state: TaskState,
+    pub(crate) result: Option<SerializedValue>,
+    pub(crate) error_msg: Option<String>,
+    pub(crate) completed_at: Option<Instant>,
 }
 
 struct TaskEntry {
@@ -290,9 +290,9 @@ struct TaskEntry {
 
 /// Cloned Arcs for operating on a task outside the registry lock.
 /// Replaces the old 6-tuple return from `get_task_arcs()`.
-struct TaskArcs {
-    inner: Arc<Mutex<TaskInner>>,
-    completed_notify: Arc<(Mutex<bool>, Condvar)>,
+pub(crate) struct TaskArcs {
+    pub(crate) inner: Arc<Mutex<TaskInner>>,
+    pub(crate) completed_notify: Arc<(Mutex<bool>, Condvar)>,
 }
 
 // =============================================================================
@@ -331,7 +331,7 @@ pub struct ConcurrencyRuntime {
     /// Monotonic ID counter shared by tasks, channels, and schedules.
     id_counter: AtomicU64,
     /// Number of currently active (Running) tasks. Incremented on spawn, decremented on finalize.
-    active_tasks: AtomicU64,
+    pub(crate) active_tasks: AtomicU64,
     /// Task registry. Lock, clone Arcs, drop, then operate.
     tasks: Mutex<HashMap<u64, TaskEntry>>,
     /// Channel registry. close() = remove from this map.
@@ -366,7 +366,7 @@ impl ConcurrencyRuntime {
     /// Rate-limited wrapper around `reap_expired_tasks`. Only runs the full reap if at least
     /// 10 seconds have elapsed since the last inline reap. This avoids O(n) Arc clones on
     /// every `spawn()`/`after()` call when many tasks are in the registry.
-    fn try_reap_expired_tasks(&self) {
+    pub(crate) fn try_reap_expired_tasks(&self) {
         let should_reap = {
             let last = match self.last_inline_reap.lock() {
                 Ok(l) => *l,
@@ -686,7 +686,7 @@ impl ConcurrencyRuntime {
     // -------------------------------------------------------------------------
 
     /// Register a new task and return its ID. The caller must spawn the thread.
-    fn register_task(&self, cancelled: Arc<AtomicBool>) -> Result<u64> {
+    pub(crate) fn register_task(&self, cancelled: Arc<AtomicBool>) -> Result<u64> {
         let id = self.next_id();
         let entry = TaskEntry {
             inner: Arc::new(Mutex::new(TaskInner {
@@ -709,7 +709,7 @@ impl ConcurrencyRuntime {
 
     /// Get cloned Arcs for a task's core state.
     /// Returns Ok(None) if the task doesn't exist, Err if the registry mutex is poisoned.
-    fn get_task_arcs(&self, task_id: u64) -> Result<Option<TaskArcs>> {
+    pub(crate) fn get_task_arcs(&self, task_id: u64) -> Result<Option<TaskArcs>> {
         let tasks = self
             .tasks
             .lock()
@@ -1240,7 +1240,7 @@ fn validate_and_capture(
 /// Lock ordering: acquires `inner` first, releases it, THEN acquires `completed_notify`.
 /// This matches await_task() which also acquires them sequentially (inner, then notify).
 /// Neither function holds both locks simultaneously — no ABBA deadlock possible.
-fn finalize_task(
+pub(crate) fn finalize_task(
     result: std::result::Result<Result<Value>, Box<dyn std::any::Any + Send>>,
     inner_arc: &Arc<Mutex<TaskInner>>,
     completed_notify: &Arc<(Mutex<bool>, Condvar)>,
@@ -1384,7 +1384,7 @@ fn concurrent_close(ch: &Value) -> Result<Value> {
 
 // --- Tasks ---
 
-fn check_task_limit() -> Result<()> {
+pub(crate) fn check_task_limit() -> Result<()> {
     let active = RUNTIME.active_tasks.load(AtomicOrdering::Acquire);
     let limit = max_tasks();
     if active >= limit {
