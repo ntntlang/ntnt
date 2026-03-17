@@ -402,12 +402,14 @@ impl SQLiteKV {
                         IntentError::runtime_error(format!("KV claim delete error: {}", e))
                     })?;
                 self.conn.execute_batch("COMMIT").map_err(|e| {
+                    let _ = self.conn.execute_batch("ROLLBACK");
                     IntentError::runtime_error(format!("KV claim commit error: {}", e))
                 })?;
                 Ok(Some((key, deserialize_value(&value, &type_hint))))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 self.conn.execute_batch("COMMIT").map_err(|e| {
+                    let _ = self.conn.execute_batch("ROLLBACK");
                     IntentError::runtime_error(format!("KV claim commit error: {}", e))
                 })?;
                 Ok(None)
@@ -1441,9 +1443,13 @@ pub fn kv_list(handle: &Value, prefix: Option<&str>) -> Result<Vec<String>> {
     }
 }
 
-/// Atomically claim the first key matching a prefix from a KV store handle.
+/// Claim the first key matching a prefix from a KV store handle.
 /// Returns Some((key, value)) or None if no matching key exists.
-/// The claimed key is deleted from the store in the same operation.
+/// The claimed key is deleted from the store.
+///
+/// Atomicity: SQLite uses `BEGIN IMMEDIATE` for full transaction safety.
+/// Redis uses SCAN+GET+DEL which is not atomic under concurrent workers —
+/// a Lua-script backend is planned for multi-worker Redis deployments.
 pub fn kv_claim(handle: &Value, prefix: &str) -> Result<Option<(String, Value)>> {
     let backend = get_backend_type(handle)?;
     match backend {

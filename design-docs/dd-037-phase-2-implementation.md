@@ -282,6 +282,18 @@ Scheduled ─→ Pending ─→ Active ─→ Completed
 **Estimated effort:** 2 days
 **Depends on:** PR 2b merged
 
+### Items deferred from PR 2b
+
+These were identified during PR 2b review and deferred to 2c:
+
+- [ ] **Redis atomic claim via Lua script** — current Redis `claim()` uses SCAN+GET+DEL which is not atomic under concurrent workers. Replace with a Lua script (`EVAL`) for multi-worker Redis deployments. Document the caveat until then.
+- [ ] **Job timeout** — `timeout` option: `job X on q (timeout: 30) { ... }`. Worker checks elapsed time after execution; treat timeout as failure (triggers retry).
+- [ ] **Worker heartbeat refresh** — periodically refresh the `jobs:active:<id>` TTL during long-running jobs (e.g., every 30s). Currently TTL is set once on claim (300s).
+- [ ] **Graceful shutdown drain timeout** — configurable drain timeout (default 30s) for `work_jobs()`. After timeout, in-flight jobs are abandoned and become re-claimable via visibility timeout expiry.
+- [ ] **`work_jobs()` cooperative cancellation** — currently `work_jobs()` doesn't register a ConcurrencyRuntime task, so `is_current_task_cancelled()` always returns false. Add Ctrl-C signal handler or register a task so it can be cancelled.
+- [ ] **`work_async(concurrency > 1)` partial spawn cleanup** — if `spawn_worker_task` fails mid-loop (e.g., task limit), already-spawned workers are leaked without accessible handles. Cancel previously spawned workers on failure.
+- [ ] **`work_async` return type consistency** — returns `TaskHandle` for concurrency=1 but `Array<TaskHandle>` for >1. Consider always returning `Array<TaskHandle>` for a uniform API.
+
 ### Testing Mode
 - [ ] `configure_queue(map { "mode": "testing" })` — jobs collected in memory, nothing runs
 - [ ] `assert_enqueued(JobName, args)` — verify a job was enqueued
@@ -311,7 +323,7 @@ Scheduled ─→ Pending ─→ Active ─→ Completed
 - [ ] Single KV round-trip where possible
 
 ### Priority Queues
-- [ ] Job-level priority: `Job X on q (priority: 1) { ... }` (lower = higher priority)
+- [ ] Job-level priority: `job X on q (priority: 1) { ... }` (lower = higher priority)
 - [ ] Priority encoded in sorted set score (priority * 1e12 + scheduled_at)
 
 ### CLI: `ntnt worker`
@@ -344,6 +356,10 @@ Scheduled ─→ Pending ─→ Active ─→ Completed
 - [ ] Priority: higher-priority jobs claimed first
 - [ ] CLI: `ntnt worker` starts and processes jobs (integration test)
 - [ ] CLI: `ntnt jobs status` shows correct counts
+- [ ] Integration: job fails → retries N times → eventually dead (subprocess test)
+- [ ] Integration: job fails → on_failure handler called (subprocess test)
+- [ ] Integration: enqueue_in → job doesn't run until delay passes (subprocess test)
+- [ ] Integration: graceful shutdown → in-flight jobs complete, no new claims
 
 ---
 

@@ -413,10 +413,7 @@ fn enqueue_internal(
     job_data.insert("payload".to_string(), payload);
     job_data.insert("status".to_string(), Value::String("pending".to_string()));
     job_data.insert("attempts".to_string(), Value::Int(0));
-    job_data.insert(
-        "created_at".to_string(),
-        Value::String(pending_ts.to_string()),
-    );
+    job_data.insert("created_at".to_string(), Value::String(timestamp_key()));
 
     // Copy job options (retry, timeout, etc.)
     for (k, v) in &job_def.options {
@@ -574,6 +571,7 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                     "error".to_string(),
                     Value::String(format!("No job definition found for '{}'", job_type)),
                 );
+                job_data.insert("dead_at".to_string(), Value::String(timestamp_key()));
                 let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
                 let _ = kv::kv_del(&kv_handle, &active_key);
                 continue;
@@ -610,6 +608,12 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                     _ => 3,
                 };
 
+                // Record failed_at on every failure
+                let fail_ts = timestamp_key();
+                job_data.insert("failed_at".to_string(), Value::String(fail_ts));
+                job_data.insert("error".to_string(), Value::String(err_msg.clone()));
+                job_data.insert("attempts".to_string(), Value::Int(new_attempts));
+
                 // Call on_failure handler (fire-and-forget)
                 execute_on_failure(&def, &err_msg, new_attempts);
 
@@ -635,8 +639,6 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                     let new_pending_key = format!("jobs:pending:{}:{}", future_ts, job_id);
 
                     job_data.insert("status".to_string(), Value::String("pending".to_string()));
-                    job_data.insert("attempts".to_string(), Value::Int(new_attempts));
-                    job_data.insert("error".to_string(), Value::String(err_msg.clone()));
                     job_data.insert(
                         "pending_key".to_string(),
                         Value::String(new_pending_key.clone()),
@@ -653,9 +655,7 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                 } else {
                     // Exhausted retries — mark as dead
                     job_data.insert("status".to_string(), Value::String("dead".to_string()));
-                    job_data.insert("attempts".to_string(), Value::Int(new_attempts));
-                    job_data.insert("error".to_string(), Value::String(err_msg));
-                    job_data.insert("failed_at".to_string(), Value::String(timestamp_key()));
+                    job_data.insert("dead_at".to_string(), Value::String(timestamp_key()));
                     let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
                 }
 
@@ -1083,6 +1083,12 @@ pub fn init() -> HashMap<String, Value> {
                         )),
                     };
 
+                if ts_nanos < 0 {
+                    return Err(IntentError::runtime_error(
+                        "enqueue_at() timestamp must be non-negative".to_string(),
+                    ));
+                }
+
                 let payload = match &args[2] {
                     Value::Map(_) => args[2].clone(),
                     _ => {
@@ -1231,7 +1237,12 @@ pub fn init() -> HashMap<String, Value> {
             arity: 0,
             max_arity: 1,
             func: |args| {
-                let (poll_interval, _concurrency, queues) = parse_work_opts(args)?;
+                let (poll_interval, concurrency, queues) = parse_work_opts(args)?;
+                if concurrency > 1 {
+                    return Err(IntentError::runtime_error(
+                        "work_jobs() does not support concurrency > 1. Use work_async() for multiple worker threads.".to_string(),
+                    ));
+                }
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
                 let kv_info = extract_kv_handle_info(&kv_handle)?;
                 worker_loop(kv_info, poll_interval, queues);
@@ -1822,5 +1833,111 @@ mod tests {
             queues,
             Some(vec!["emails".to_string(), "payments".to_string()])
         );
+    }
+
+    #[test]
+    fn test_worker_loop_end_to_end() {
+        with_clean_runtime(|| {
+            // Register a job with an empty perform body (returns Unit on success)
+            JOB_RUNTIME
+                .register_job(test_job_def("E2EJob", "default"))
+                .unwrap();
+
+            // Configure in-memory SQLite
+            let module = init();
+            let configure_fn = match module.get("configure_queue").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+            let mut opts = HashMap::new();
+            opts.insert(
+                "store".to_string(),
+                Value::String("sqlite::memory:".to_string()),
+            );
+            configure_fn(&[Value::Map(opts)]).unwrap();
+
+            // Enqueue a job
+            let enqueue_fn = match module.get("enqueue").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+            let result = enqueue_fn(&[
+                Value::String("E2EJob".to_string()),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+            let job_id = match result {
+                Value::EnumValue { values, .. } => match &values[0] {
+                    Value::String(s) => s.clone(),
+                    _ => panic!("Expected string ID"),
+                },
+                _ => panic!("Expected Ok"),
+            };
+
+            // Run worker_loop in a thread for one iteration, then cancel
+            let kv_handle = JOB_RUNTIME.get_or_init_kv().unwrap();
+            let kv_info = extract_kv_handle_info(&kv_handle).unwrap();
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel_clone = cancel.clone();
+            let handle = std::thread::spawn(move || {
+                // Set cancellation flag so the loop can be stopped
+                crate::stdlib::concurrent::CURRENT_TASK_CANCELLED.with(|cell| {
+                    *cell.borrow_mut() = Some(cancel_clone);
+                });
+                worker_loop(kv_info, 50, None);
+            });
+
+            // Give the worker time to process
+            std::thread::sleep(std::time::Duration::from_millis(300));
+
+            // Cancel the worker
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+            handle.join().unwrap();
+
+            // Check job status — should be "completed"
+            let status_fn = match module.get("job_status").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+            let status = status_fn(&[Value::String(job_id)]).unwrap();
+            match status {
+                Value::EnumValue {
+                    variant, values, ..
+                } if variant == "Ok" => match &values[0] {
+                    Value::Map(data) => {
+                        assert!(
+                            matches!(data.get("status"), Some(Value::String(s)) if s == "completed"),
+                            "Expected 'completed', got {:?}",
+                            data.get("status")
+                        );
+                        assert!(data.get("completed_at").is_some());
+                    }
+                    _ => panic!("Expected Map"),
+                },
+                _ => panic!("Expected Ok from job_status"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_enqueue_at_rejects_negative_timestamp() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("NegTsJob", "default"))
+                .unwrap();
+            let module = init();
+            let enqueue_at_fn = match module.get("enqueue_at").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+            let result = enqueue_at_fn(&[
+                Value::String("NegTsJob".to_string()),
+                Value::Int(-1),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(result.is_err());
+            let err = format!("{}", result.unwrap_err());
+            assert!(err.contains("non-negative"));
+        });
     }
 }
