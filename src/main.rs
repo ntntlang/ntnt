@@ -338,18 +338,21 @@ enum Commands {
         #[arg(long, default_value = "1000")]
         poll_interval: u64,
     },
-    /// Show job queue status
+    /// Manage and inspect the job queue
     ///
-    /// Loads the NTNT source file to get KV configuration, then
-    /// displays counts of pending, active, completed, failed, and dead jobs.
+    /// Use subcommands to view status, list jobs, inspect details, retry,
+    /// cancel, or bulk-clear jobs. All subcommands take the .tnt file that
+    /// has the queue configuration as the first argument.
     ///
     /// Examples:
-    ///   ntnt jobs server.tnt
-    Jobs {
-        /// The source file containing job/queue configuration
-        #[arg(value_name = "FILE")]
-        file: PathBuf,
-    },
+    ///   ntnt jobs status server.tnt
+    ///   ntnt jobs list server.tnt --status=failed
+    ///   ntnt jobs inspect server.tnt <JOB_ID>
+    ///   ntnt jobs retry server.tnt <JOB_ID>
+    ///   ntnt jobs cancel server.tnt <JOB_ID>
+    ///   ntnt jobs clear server.tnt --status=completed
+    #[command(subcommand)]
+    Jobs(JobsCommands),
 }
 
 /// Intent-Driven Development subcommands
@@ -449,6 +452,121 @@ enum IntentCommands {
         /// Don't automatically open the browser
         #[arg(long = "no-open")]
         no_open: bool,
+    },
+}
+
+/// Job management subcommands
+#[derive(Subcommand)]
+enum JobsCommands {
+    /// Show job queue status (counts by status)
+    ///
+    /// Loads the NTNT source file to get KV configuration, then displays
+    /// counts of pending, active, completed, failed, dead, and cancelled jobs.
+    ///
+    /// Examples:
+    ///   ntnt jobs status server.tnt
+    Status {
+        /// The source file containing job/queue configuration
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
+    /// List individual jobs with optional filters
+    ///
+    /// Examples:
+    ///   ntnt jobs list server.tnt
+    ///   ntnt jobs list server.tnt --status=failed --limit=20
+    ///   ntnt jobs list server.tnt --queue=emails --format=json
+    List {
+        /// The source file containing job/queue configuration
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Filter by status (pending/active/completed/failed/dead/cancelled)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Filter by queue name
+        #[arg(long)]
+        queue: Option<String>,
+
+        /// Maximum number of jobs to show (default: 50)
+        #[arg(long, default_value = "50")]
+        limit: usize,
+
+        /// Output format: json (default: table)
+        #[arg(long)]
+        format: Option<String>,
+    },
+    /// Show full details of a single job
+    ///
+    /// Displays all job fields: id, type, queue, status, payload, attempts,
+    /// retry config, timestamps, and error message if any.
+    ///
+    /// Examples:
+    ///   ntnt jobs inspect server.tnt abc12345
+    Inspect {
+        /// The source file containing job/queue configuration
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Job ID to inspect
+        #[arg(value_name = "JOB_ID")]
+        job_id: String,
+    },
+    /// Retry a failed or dead job
+    ///
+    /// Resets the job status to pending and re-queues it for processing.
+    ///
+    /// Examples:
+    ///   ntnt jobs retry server.tnt abc12345
+    Retry {
+        /// The source file containing job/queue configuration
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Job ID to retry
+        #[arg(value_name = "JOB_ID")]
+        job_id: String,
+    },
+    /// Cancel a pending job
+    ///
+    /// Removes the job from the pending queue and marks it as cancelled.
+    ///
+    /// Examples:
+    ///   ntnt jobs cancel server.tnt abc12345
+    Cancel {
+        /// The source file containing job/queue configuration
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Job ID to cancel
+        #[arg(value_name = "JOB_ID")]
+        job_id: String,
+    },
+    /// Bulk delete jobs by status
+    ///
+    /// Requires --status to prevent accidental wipe-all. Use --older-than
+    /// to only clear jobs older than a given duration (e.g., 7d, 24h, 30m).
+    ///
+    /// Examples:
+    ///   ntnt jobs clear server.tnt --status=completed
+    ///   ntnt jobs clear server.tnt --status=dead --older-than=7d --yes
+    Clear {
+        /// The source file containing job/queue configuration
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Status of jobs to clear (required — prevents accidental wipe-all)
+        #[arg(long)]
+        status: String,
+
+        /// Only clear jobs older than this duration (e.g., 7d, 24h, 30m)
+        #[arg(long)]
+        older_than: Option<String>,
+
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -621,7 +739,7 @@ fn main() {
             queues,
             poll_interval,
         }) => run_worker_command(&file, concurrency, queues, poll_interval),
-        Some(Commands::Jobs { file }) => run_jobs_status_command(&file),
+        Some(Commands::Jobs(jobs_cmd)) => run_jobs_command(jobs_cmd),
         None => {
             if let Some(file) = cli.file {
                 run_file(&file, 30)
@@ -1172,6 +1290,630 @@ fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
     println!("  Total:      {}", data_keys.len());
 
     Ok(())
+}
+
+/// Load a .tnt file, run strict type checking, evaluate it to register jobs
+/// and initialize the KV store. Returns the KV handle for querying job data.
+fn jobs_load_kv(path: &PathBuf) -> anyhow::Result<ntnt::interpreter::Value> {
+    let source = fs::read_to_string(path)?;
+    let mut interpreter = Interpreter::new();
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let path_str = canonical_path.to_string_lossy();
+    interpreter.set_current_file(&path_str);
+    interpreter.set_main_source_file(&path_str);
+
+    let lexer = Lexer::new(&source);
+    let tokens: Vec<_> = lexer.collect();
+    let mut parser = IntentParser::new(tokens);
+    let ast = parser.parse()?;
+
+    if let Some(errors) = ntnt::typechecker::strict_check_with_file(&ast, &source, Some(&path_str))
+    {
+        for diag in &errors {
+            let location = if diag.line > 0 {
+                format!(" (line {})", diag.line)
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "{}: {}{}",
+                "type error".red().bold(),
+                diag.message,
+                location
+            );
+            if let Some(hint) = &diag.hint {
+                eprintln!("  {}: {}", "hint".cyan(), hint);
+            }
+        }
+        eprintln!(
+            "\n{}: {} type error(s) found. Fix them or unset NTNT_STRICT to run anyway.",
+            "blocked".red().bold(),
+            errors.len()
+        );
+        std::process::exit(1);
+    }
+
+    interpreter.eval(&ast)?;
+    let kv_handle = ntnt::stdlib::jobs::JOB_RUNTIME.get_or_init_kv()?;
+    Ok(kv_handle)
+}
+
+/// Dispatch jobs subcommands
+fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
+    match cmd {
+        JobsCommands::Status { file } => run_jobs_status_command(&file),
+        JobsCommands::List {
+            file,
+            status,
+            queue,
+            limit,
+            format,
+        } => run_jobs_list_command(
+            &file,
+            status.as_deref(),
+            queue.as_deref(),
+            limit,
+            format.as_deref(),
+        ),
+        JobsCommands::Inspect { file, job_id } => run_jobs_inspect_command(&file, &job_id),
+        JobsCommands::Retry { file, job_id } => run_jobs_retry_command(&file, &job_id),
+        JobsCommands::Cancel { file, job_id } => run_jobs_cancel_command(&file, &job_id),
+        JobsCommands::Clear {
+            file,
+            status,
+            older_than,
+            yes,
+        } => run_jobs_clear_command(&file, &status, older_than.as_deref(), yes),
+    }
+}
+
+/// List jobs with optional status and queue filters
+fn run_jobs_list_command(
+    path: &PathBuf,
+    status_filter: Option<&str>,
+    queue_filter: Option<&str>,
+    limit: usize,
+    format: Option<&str>,
+) -> anyhow::Result<()> {
+    use ntnt::interpreter::Value;
+
+    let kv_handle = jobs_load_kv(path)?;
+    let data_keys = ntnt::stdlib::kv::kv_list(&kv_handle, Some("jobs:data:"))?;
+
+    let mut jobs: Vec<std::collections::HashMap<String, Value>> = Vec::new();
+    for key in &data_keys {
+        if let Ok(Value::Map(data)) = ntnt::stdlib::kv::kv_get(&kv_handle, key) {
+            if let Some(sf) = status_filter {
+                match data.get("status") {
+                    Some(Value::String(s)) if s == sf => {}
+                    _ => continue,
+                }
+            }
+            if let Some(qf) = queue_filter {
+                match data.get("queue") {
+                    Some(Value::String(q)) if q == qf => {}
+                    _ => continue,
+                }
+            }
+            jobs.push(data);
+        }
+    }
+
+    // Sort newest first (created_at is zero-padded nanoseconds: lexicographic = chronological)
+    jobs.sort_by(|a, b| {
+        let a_ts = match a.get("created_at") {
+            Some(Value::String(s)) => s.as_str(),
+            _ => "",
+        };
+        let b_ts = match b.get("created_at") {
+            Some(Value::String(s)) => s.as_str(),
+            _ => "",
+        };
+        b_ts.cmp(a_ts)
+    });
+    let total = jobs.len();
+    jobs.truncate(limit);
+
+    if format == Some("json") {
+        println!("[");
+        let n = jobs.len();
+        for (i, job) in jobs.iter().enumerate() {
+            let id = jobs_str_field(job, "id");
+            let jtype = jobs_str_field(job, "type");
+            let queue = jobs_str_field(job, "queue");
+            let status = jobs_str_field(job, "status");
+            let attempts = jobs_int_field(job, "attempts");
+            let created_at = jobs_str_field(job, "created_at");
+            let comma = if i + 1 < n { "," } else { "" };
+            println!(
+                "  {{\"id\":\"{}\",\"type\":\"{}\",\"queue\":\"{}\",\"status\":\"{}\",\"attempts\":{},\"created_at\":\"{}\"}}{}",
+                id, jtype, queue, status, attempts, created_at, comma
+            );
+        }
+        println!("]");
+    } else {
+        if jobs.is_empty() {
+            println!("{}", "No jobs found.".yellow());
+            return Ok(());
+        }
+        println!(
+            "{}  {}  {}  {}  {}  {}",
+            format!("{:<10}", "ID").cyan().bold(),
+            format!("{:<20}", "TYPE").cyan().bold(),
+            format!("{:<15}", "QUEUE").cyan().bold(),
+            format!("{:<12}", "STATUS").cyan().bold(),
+            format!("{:<8}", "ATTEMPTS").cyan().bold(),
+            "CREATED AT".cyan().bold(),
+        );
+        println!("{}", "─".repeat(82).dimmed());
+        for job in &jobs {
+            let id = jobs_str_field(job, "id");
+            let id_short = if id.len() > 8 { &id[..8] } else { id.as_str() };
+            let id_col = format!("{:<10}", id_short);
+            let jtype = jobs_str_field(job, "type");
+            let type_trunc = if jtype.len() > 20 {
+                format!("{}…", &jtype[..19])
+            } else {
+                jtype.clone()
+            };
+            let type_col = format!("{:<20}", type_trunc);
+            let queue = jobs_str_field(job, "queue");
+            let queue_trunc = if queue.len() > 15 {
+                format!("{}…", &queue[..14])
+            } else {
+                queue.clone()
+            };
+            let queue_col = format!("{:<15}", queue_trunc);
+            let status = jobs_str_field(job, "status");
+            let status_padded = format!("{:<12}", &status);
+            let status_col = match status.as_str() {
+                "pending" => status_padded.yellow().to_string(),
+                "active" => status_padded.cyan().to_string(),
+                "completed" => status_padded.green().to_string(),
+                "failed" => status_padded.red().to_string(),
+                "dead" => status_padded.red().bold().to_string(),
+                "cancelled" => status_padded.dimmed().to_string(),
+                _ => status_padded,
+            };
+            let attempts = jobs_int_field(job, "attempts");
+            let attempts_col = format!("{:<8}", attempts);
+            let created_at = format_ns_timestamp(&jobs_str_field(job, "created_at"));
+            println!(
+                "{}  {}  {}  {}  {}  {}",
+                id_col, type_col, queue_col, status_col, attempts_col, created_at
+            );
+        }
+        println!("{}", "─".repeat(82).dimmed());
+        println!("Showing {} of {} total jobs", jobs.len(), total);
+    }
+
+    Ok(())
+}
+
+/// Show full details of a single job
+fn run_jobs_inspect_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
+    use ntnt::interpreter::Value;
+
+    let kv_handle = jobs_load_kv(path)?;
+    let data_key = format!("jobs:data:{}", job_id);
+    let val = ntnt::stdlib::kv::kv_get(&kv_handle, &data_key)?;
+
+    let job_data = match val {
+        Value::Map(m) => m,
+        Value::Unit => {
+            eprintln!("{}: Job '{}' not found", "error".red().bold(), job_id);
+            std::process::exit(1);
+        }
+        _ => anyhow::bail!("Unexpected value type for job data"),
+    };
+
+    let status = jobs_str_field(&job_data, "status");
+    let status_colored = match status.as_str() {
+        "pending" => status.yellow().to_string(),
+        "active" => status.cyan().to_string(),
+        "completed" => status.green().to_string(),
+        "failed" => status.red().to_string(),
+        "dead" => status.red().bold().to_string(),
+        "cancelled" => status.dimmed().to_string(),
+        _ => status.clone(),
+    };
+
+    println!(
+        "{}",
+        "── Job Details ────────────────────────────────────"
+            .cyan()
+            .bold()
+    );
+    print_job_field("ID", &jobs_str_field(&job_data, "id"));
+    print_job_field("Type", &jobs_str_field(&job_data, "type"));
+    print_job_field("Queue", &jobs_str_field(&job_data, "queue"));
+    println!(
+        "  {} {}",
+        format!("{:<20}", "Status:").dimmed(),
+        status_colored
+    );
+    print_job_field(
+        "Attempts",
+        &jobs_int_field(&job_data, "attempts").to_string(),
+    );
+    if let Some(v) = job_data.get("retry") {
+        print_job_field("Max Retries", &jobs_value_display(v));
+    }
+    if let Some(v) = job_data.get("timeout") {
+        print_job_field("Timeout", &format!("{}s", jobs_value_display(v)));
+    }
+    if let Some(v) = job_data.get("backoff") {
+        print_job_field("Backoff Strategy", &jobs_value_display(v));
+    }
+    let created_at = jobs_str_field(&job_data, "created_at");
+    if !created_at.is_empty() {
+        print_job_field("Created At", &format_ns_timestamp(&created_at));
+    }
+    if let Some(Value::String(ts)) = job_data.get("scheduled_at") {
+        print_job_field("Scheduled At", &format_ns_timestamp(ts));
+    }
+    if let Some(Value::String(ts)) = job_data.get("completed_at") {
+        print_job_field("Completed At", &format_ns_timestamp(ts));
+    }
+    if let Some(Value::String(ts)) = job_data.get("failed_at") {
+        print_job_field("Failed At", &format_ns_timestamp(ts));
+    }
+    if let Some(Value::String(ts)) = job_data.get("dead_at") {
+        print_job_field("Dead At", &format_ns_timestamp(ts));
+    }
+    if let Some(Value::String(err)) = job_data.get("error") {
+        if !err.is_empty() {
+            println!("  {} {}", format!("{:<20}", "Error:").dimmed(), err.red());
+        }
+    }
+    if let Some(payload) = job_data.get("payload") {
+        println!("  {}", format!("{:<20}", "Payload:").dimmed());
+        println!("{}", jobs_pretty_value(payload, 4));
+    }
+    println!(
+        "{}",
+        "──────────────────────────────────────────────────".dimmed()
+    );
+
+    Ok(())
+}
+
+/// Retry a failed or dead job by re-queuing it as pending
+fn run_jobs_retry_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
+    use ntnt::interpreter::Value;
+
+    let kv_handle = jobs_load_kv(path)?;
+    let data_key = format!("jobs:data:{}", job_id);
+    let val = ntnt::stdlib::kv::kv_get(&kv_handle, &data_key)?;
+
+    let mut job_data = match val {
+        Value::Map(m) => m,
+        Value::Unit => {
+            eprintln!("{}: Job '{}' not found", "error".red().bold(), job_id);
+            std::process::exit(1);
+        }
+        _ => anyhow::bail!("Unexpected value type for job data"),
+    };
+
+    let status = jobs_str_field(&job_data, "status");
+    if status != "failed" && status != "dead" {
+        eprintln!(
+            "{}: Job '{}' has status '{}' — only failed or dead jobs can be retried",
+            "error".red().bold(),
+            job_id,
+            status
+        );
+        std::process::exit(1);
+    }
+
+    let queue = jobs_str_field(&job_data, "queue");
+
+    // Generate a new pending timestamp and queue key
+    let pending_ts = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        format!("{:020}", now.as_nanos())
+    };
+    let new_pending_key = format!("jobs:pending:{}:{}", pending_ts, job_id);
+
+    // Track how many times this job has been manually retried
+    let retry_manually = match job_data.get("retry_manually") {
+        Some(Value::Int(n)) => n + 1,
+        _ => 1,
+    };
+
+    job_data.insert("status".to_string(), Value::String("pending".to_string()));
+    job_data.insert(
+        "pending_key".to_string(),
+        Value::String(new_pending_key.clone()),
+    );
+    job_data.insert("retry_manually".to_string(), Value::Int(retry_manually));
+    job_data.remove("error");
+    job_data.remove("failed_at");
+    job_data.remove("dead_at");
+
+    ntnt::stdlib::kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
+    ntnt::stdlib::kv::kv_set(
+        &kv_handle,
+        &new_pending_key,
+        &Value::String(job_id.to_string()),
+        None,
+    )?;
+
+    println!(
+        "{} Job {} re-queued on {}",
+        "✓".green().bold(),
+        job_id.cyan(),
+        queue.cyan()
+    );
+
+    Ok(())
+}
+
+/// Cancel a pending job by removing it from the queue
+fn run_jobs_cancel_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
+    use ntnt::interpreter::Value;
+
+    let kv_handle = jobs_load_kv(path)?;
+    let data_key = format!("jobs:data:{}", job_id);
+    let val = ntnt::stdlib::kv::kv_get(&kv_handle, &data_key)?;
+
+    let mut job_data = match val {
+        Value::Map(m) => m,
+        Value::Unit => {
+            eprintln!("{}: Job '{}' not found", "error".red().bold(), job_id);
+            std::process::exit(1);
+        }
+        _ => anyhow::bail!("Unexpected value type for job data"),
+    };
+
+    let status = jobs_str_field(&job_data, "status");
+    if status != "pending" && status != "scheduled" {
+        eprintln!(
+            "{}: Job '{}' has status '{}' — only pending or scheduled jobs can be cancelled",
+            "error".red().bold(),
+            job_id,
+            status
+        );
+        std::process::exit(1);
+    }
+
+    // Remove the pending queue ordering key
+    if let Some(Value::String(pk)) = job_data.get("pending_key") {
+        let pk_owned = pk.clone();
+        let _ = ntnt::stdlib::kv::kv_del(&kv_handle, &pk_owned);
+    }
+
+    job_data.insert("status".to_string(), Value::String("cancelled".to_string()));
+    ntnt::stdlib::kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
+
+    println!("{} Job {} cancelled", "✓".green().bold(), job_id.cyan());
+
+    Ok(())
+}
+
+/// Bulk delete jobs by status with optional age filter
+fn run_jobs_clear_command(
+    path: &PathBuf,
+    status_arg: &str,
+    older_than: Option<&str>,
+    yes: bool,
+) -> anyhow::Result<()> {
+    use ntnt::interpreter::Value;
+
+    let cutoff_nanos: Option<u128> = if let Some(dur) = older_than {
+        let secs = parse_duration_secs(dur)?;
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        Some(now_nanos.saturating_sub(secs as u128 * 1_000_000_000))
+    } else {
+        None
+    };
+
+    let kv_handle = jobs_load_kv(path)?;
+    let data_keys = ntnt::stdlib::kv::kv_list(&kv_handle, Some("jobs:data:"))?;
+
+    let mut to_clear: Vec<(String, std::collections::HashMap<String, Value>)> = Vec::new();
+    for key in &data_keys {
+        if let Ok(Value::Map(data)) = ntnt::stdlib::kv::kv_get(&kv_handle, key) {
+            match data.get("status") {
+                Some(Value::String(s)) if s == status_arg => {}
+                _ => continue,
+            }
+            if let Some(cutoff) = cutoff_nanos {
+                match data.get("created_at") {
+                    Some(Value::String(ts)) => {
+                        let job_nanos: u128 = ts.parse().unwrap_or(u128::MAX);
+                        if job_nanos >= cutoff {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+            to_clear.push((key.clone(), data));
+        }
+    }
+
+    if to_clear.is_empty() {
+        println!("{}", "No matching jobs found.".yellow());
+        return Ok(());
+    }
+
+    if !yes {
+        use std::io::Write;
+        print!(
+            "Clear {} {} job(s)? [y/N]: ",
+            to_clear.len().to_string().yellow().bold(),
+            status_arg.cyan()
+        );
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Cancelled.");
+            return Ok(());
+        }
+    }
+
+    let mut cleared = 0usize;
+    for (data_key, job_data) in &to_clear {
+        if let Some(Value::String(pk)) = job_data.get("pending_key") {
+            let _ = ntnt::stdlib::kv::kv_del(&kv_handle, pk.as_str());
+        }
+        let job_id = jobs_str_field(job_data, "id");
+        if !job_id.is_empty() {
+            let active_key = format!("jobs:active:{}", job_id);
+            let _ = ntnt::stdlib::kv::kv_del(&kv_handle, &active_key);
+        }
+        ntnt::stdlib::kv::kv_del(&kv_handle, data_key.as_str())?;
+        cleared += 1;
+    }
+
+    println!(
+        "{} Cleared {} {} job(s)",
+        "✓".green().bold(),
+        cleared.to_string().cyan(),
+        status_arg
+    );
+
+    Ok(())
+}
+
+// ─── Jobs CLI helper functions ────────────────────────────────────────────────
+
+/// Extract a String value from a job data map, or return an empty string.
+fn jobs_str_field(
+    data: &std::collections::HashMap<String, ntnt::interpreter::Value>,
+    key: &str,
+) -> String {
+    match data.get(key) {
+        Some(ntnt::interpreter::Value::String(s)) => s.clone(),
+        Some(v) => jobs_value_display(v),
+        None => String::new(),
+    }
+}
+
+/// Extract an Int value from a job data map, or return 0.
+fn jobs_int_field(
+    data: &std::collections::HashMap<String, ntnt::interpreter::Value>,
+    key: &str,
+) -> i64 {
+    match data.get(key) {
+        Some(ntnt::interpreter::Value::Int(n)) => *n,
+        _ => 0,
+    }
+}
+
+/// Convert a Value to a plain string for CLI output.
+fn jobs_value_display(v: &ntnt::interpreter::Value) -> String {
+    use ntnt::interpreter::Value;
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Int(n) => n.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Unit => "(none)".to_string(),
+        _ => format!("{:?}", v),
+    }
+}
+
+/// Print a labeled key-value pair in the inspect output with consistent column width.
+fn print_job_field(label: &str, value: &str) {
+    let label_col = format!("{:<20}", format!("{}:", label));
+    println!("  {} {}", label_col.dimmed(), value);
+}
+
+/// Recursively pretty-print a Value as JSON-like indented text.
+fn jobs_pretty_value(v: &ntnt::interpreter::Value, indent: usize) -> String {
+    use ntnt::interpreter::Value;
+    let pad = " ".repeat(indent);
+    match v {
+        Value::Map(m) => {
+            if m.is_empty() {
+                return format!("{}{{}}", pad);
+            }
+            let mut lines = vec![format!("{}{{", pad)];
+            for (k, val) in m {
+                lines.push(format!("{}  \"{}\": {}", pad, k, jobs_pretty_value(val, 0)));
+            }
+            lines.push(format!("{}}}", pad));
+            lines.join("\n")
+        }
+        Value::Array(arr) => {
+            if arr.is_empty() {
+                return format!("{}[]", pad);
+            }
+            let items: Vec<String> = arr
+                .iter()
+                .map(|item| format!("{}  {}", pad, jobs_pretty_value(item, 0)))
+                .collect();
+            format!("{}[\n{}\n{}]", pad, items.join(",\n"), pad)
+        }
+        Value::String(s) => format!("\"{}\"", s),
+        Value::Int(n) => n.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Unit => "null".to_string(),
+        _ => format!("{:?}", v),
+    }
+}
+
+/// Format a zero-padded nanosecond Unix timestamp as "YYYY-MM-DD HH:MM:SS" UTC.
+///
+/// Uses the proleptic Gregorian calendar algorithm for accurate leap year handling.
+fn format_ns_timestamp(ns_str: &str) -> String {
+    let nanos: u128 = match ns_str.parse() {
+        Ok(n) => n,
+        Err(_) => return ns_str[..ns_str.len().min(20)].to_string(),
+    };
+    let secs = (nanos / 1_000_000_000) as u64;
+    let secs_in_day = secs % 86400;
+    let hh = secs_in_day / 3600;
+    let mm = (secs_in_day % 3600) / 60;
+    let ss = secs_in_day % 60;
+
+    // Civil calendar algorithm (Howard Hinnant's date.h)
+    let z = (secs / 86400) as i64 + 719_468i64;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+
+    format!("{}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, d, hh, mm, ss)
+}
+
+/// Parse a duration string like "7d", "24h", or "30m" into seconds.
+fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
+    if let Some(n) = s.strip_suffix('d') {
+        let days: u64 = n
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid duration: '{}'", s))?;
+        Ok(days * 86_400)
+    } else if let Some(n) = s.strip_suffix('h') {
+        let hours: u64 = n
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid duration: '{}'", s))?;
+        Ok(hours * 3_600)
+    } else if let Some(n) = s.strip_suffix('m') {
+        let mins: u64 = n
+            .parse()
+            .map_err(|_| anyhow::anyhow!("Invalid duration: '{}'", s))?;
+        Ok(mins * 60)
+    } else {
+        Err(anyhow::anyhow!(
+            "Invalid duration '{}': use Nd, Nh, or Nm (e.g. 7d, 24h, 30m)",
+            s
+        ))
+    }
 }
 
 /// Test mode: runs an HTTP server, makes requests, then exits
