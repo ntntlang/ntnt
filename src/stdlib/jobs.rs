@@ -1589,15 +1589,20 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                let count = jobs.len() as i64;
+                // Run ALL jobs before reporting errors — do not bail early with `?`
+                // so that a single failure never silently discards remaining queued jobs.
+                let mut executed: i64 = 0;
+                let mut errors: Vec<String> = Vec::new();
+
                 for job in jobs {
                     let def = match JOB_RUNTIME.get_job(&job.job_type)? {
                         Some(d) => d,
                         None => {
-                            return Err(IntentError::runtime_error(format!(
+                            errors.push(format!(
                                 "drain_jobs(): no job definition found for '{}'",
                                 job.job_type
-                            )))
+                            ));
+                            continue;
                         }
                     };
 
@@ -1613,15 +1618,20 @@ pub fn init() -> HashMap<String, Value> {
                         _ => HashMap::new(),
                     };
 
-                    execute_job_perform(&def, &payload).map_err(|e| {
-                        IntentError::runtime_error(format!(
+                    match execute_job_perform(&def, &payload) {
+                        Ok(_) => executed += 1,
+                        Err(e) => errors.push(format!(
                             "drain_jobs(): job '{}' failed: {}",
                             job.job_type, e
-                        ))
-                    })?;
+                        )),
+                    }
                 }
 
-                Ok(Value::ok(Value::Int(count)))
+                if !errors.is_empty() {
+                    return Err(IntentError::runtime_error(errors.join("\n")));
+                }
+
+                Ok(Value::ok(Value::Int(executed)))
             },
         },
     );

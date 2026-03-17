@@ -1111,7 +1111,15 @@ fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
                 diag.message,
                 location
             );
+            if let Some(hint) = &diag.hint {
+                eprintln!("  {}: {}", "hint".cyan(), hint);
+            }
         }
+        eprintln!(
+            "\n{}: {} type error(s) found. Fix them or unset NTNT_STRICT to run anyway.",
+            "blocked".red().bold(),
+            errors.len()
+        );
         std::process::exit(1);
     }
 
