@@ -148,6 +148,8 @@ impl Parser {
             self.pub_declaration(attributes)
         } else if self.match_token(&[TokenKind::Server]) {
             self.server_declaration()
+        } else if self.match_identifier_name("job") {
+            self.job_declaration()
         } else {
             // statement() already wraps with Located, so return directly
             return self.statement();
@@ -839,6 +841,103 @@ impl Parser {
         } else {
             false
         }
+    }
+
+    /// Parse a job declaration: `job Name on queue (options) { perform(params) { body } on_failure(params) { body } }`
+    fn job_declaration(&mut self) -> Result<Statement> {
+        let name = self.consume_identifier("Expected job name")?;
+
+        // Parse "on <queue>" — "on" is parsed contextually as an identifier
+        match self.peek() {
+            Some(token) if matches!(&token.kind, TokenKind::Identifier(s) if s == "on") => {
+                self.advance(); // consume "on"
+            }
+            _ => {
+                return Err(IntentError::ParserError {
+                    line: self.current_line(),
+                    column: self.current_column(),
+                    message: "Expected 'on' after job name (e.g., job SendEmail on emails)"
+                        .to_string(),
+                });
+            }
+        }
+
+        let queue = self.consume_identifier("Expected queue name after 'on'")?;
+
+        // Parse optional inline options: (retry: 5, timeout: 120)
+        let options = if self.match_token(&[TokenKind::LeftParen]) {
+            let mut opts = Vec::new();
+            while !self.check(&TokenKind::RightParen) && !self.is_at_end() {
+                let opt_name = self.consume_identifier("Expected option name")?;
+                self.consume(&TokenKind::Colon, "Expected ':' after option name")?;
+                let opt_value = self.expression()?;
+                opts.push((opt_name, opt_value));
+                if !self.match_token(&[TokenKind::Comma]) {
+                    break;
+                }
+            }
+            self.consume(&TokenKind::RightParen, "Expected ')' after job options")?;
+            opts
+        } else {
+            Vec::new()
+        };
+
+        // Parse the job body block: { perform(...) { ... } on_failure(...) { ... } }
+        self.consume(&TokenKind::LeftBrace, "Expected '{' after job declaration")?;
+
+        // Parse perform block (required)
+        let perform_ident = self.consume_identifier("Expected 'perform' inside job body")?;
+        if perform_ident != "perform" {
+            return Err(IntentError::ParserError {
+                line: self.current_line(),
+                column: self.current_column(),
+                message: format!(
+                    "Expected 'perform' inside job body, got '{}'",
+                    perform_ident
+                ),
+            });
+        }
+
+        self.consume(&TokenKind::LeftParen, "Expected '(' after 'perform'")?;
+        let perform_params = self.parse_parameters()?;
+        self.consume(
+            &TokenKind::RightParen,
+            "Expected ')' after perform parameters",
+        )?;
+        self.consume(&TokenKind::LeftBrace, "Expected '{' before perform body")?;
+        let perform_body = self.block()?;
+
+        // Parse optional on_failure block
+        let on_failure = if let Some(token) = self.peek() {
+            if matches!(&token.kind, TokenKind::Identifier(s) if s == "on_failure") {
+                self.advance(); // consume "on_failure"
+                self.consume(&TokenKind::LeftParen, "Expected '(' after 'on_failure'")?;
+                let failure_params = self.parse_parameters()?;
+                self.consume(
+                    &TokenKind::RightParen,
+                    "Expected ')' after on_failure parameters",
+                )?;
+                self.consume(&TokenKind::LeftBrace, "Expected '{' before on_failure body")?;
+                let failure_body = self.block()?;
+                Some((failure_params, failure_body))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Close outer job block
+        self.consume(&TokenKind::RightBrace, "Expected '}' to close job block")?;
+
+        Ok(Statement::Job {
+            name,
+            queue,
+            options,
+            perform_params,
+            perform_body,
+            on_failure,
+        })
     }
 
     /// Parse a server block: `server PORT { ... }`
@@ -2987,5 +3086,105 @@ mod tests {
             }
             _ => panic!("Expected Server statement"),
         }
+    }
+
+    #[test]
+    fn test_job_basic() {
+        let program = parse(
+            r#"job SendEmail on emails {
+                perform(to, body) {
+                    print(to)
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(program.statements.len(), 1);
+        match unwrap_located(&program.statements[0]) {
+            Statement::Job {
+                name,
+                queue,
+                options,
+                perform_params,
+                on_failure,
+                ..
+            } => {
+                assert_eq!(name, "SendEmail");
+                assert_eq!(queue, "emails");
+                assert!(options.is_empty());
+                assert_eq!(perform_params.len(), 2);
+                assert_eq!(perform_params[0].name, "to");
+                assert_eq!(perform_params[1].name, "body");
+                assert!(on_failure.is_none());
+            }
+            _ => panic!("Expected Job statement"),
+        }
+    }
+
+    #[test]
+    fn test_job_with_options() {
+        let program = parse(
+            r#"job ProcessPayment on payments (retry: 5, timeout: 120) {
+                perform(data) {
+                    print(data)
+                }
+            }"#,
+        )
+        .unwrap();
+        match unwrap_located(&program.statements[0]) {
+            Statement::Job {
+                name,
+                queue,
+                options,
+                perform_params,
+                ..
+            } => {
+                assert_eq!(name, "ProcessPayment");
+                assert_eq!(queue, "payments");
+                assert_eq!(options.len(), 2);
+                assert_eq!(options[0].0, "retry");
+                assert_eq!(options[1].0, "timeout");
+                assert_eq!(perform_params.len(), 1);
+            }
+            _ => panic!("Expected Job statement"),
+        }
+    }
+
+    #[test]
+    fn test_job_with_on_failure() {
+        let program = parse(
+            r#"job SendEmail on emails {
+                perform(to) {
+                    print(to)
+                }
+                on_failure(error, attempt) {
+                    print(error)
+                }
+            }"#,
+        )
+        .unwrap();
+        match unwrap_located(&program.statements[0]) {
+            Statement::Job {
+                name, on_failure, ..
+            } => {
+                assert_eq!(name, "SendEmail");
+                let (params, _body) = on_failure.as_ref().expect("Expected on_failure block");
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].name, "error");
+                assert_eq!(params[1].name, "attempt");
+            }
+            _ => panic!("Expected Job statement"),
+        }
+    }
+
+    #[test]
+    fn test_job_missing_on() {
+        let result = parse("job SendEmail emails { perform(to) { print(to) } }");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_job_missing_perform() {
+        let result = parse("job SendEmail on emails { run(to) { print(to) } }");
+        assert!(result.is_err());
     }
 }

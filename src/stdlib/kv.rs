@@ -123,6 +123,11 @@ fn deserialize_value_envelope(data: &str, legacy_type_hint: Option<&str>) -> Val
 }
 
 /// Convert Value to serde_json::Value for serialization
+/// Public wrapper for value_to_json, used by std/jobs for test queue serialization.
+pub fn value_to_json_public(value: &Value) -> serde_json::Value {
+    value_to_json(value)
+}
+
 fn value_to_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Unit => serde_json::Value::Null,
@@ -1191,6 +1196,140 @@ pub fn create_kv_module() -> HashMap<String, Value> {
     );
 
     module
+}
+
+// ============================================================================
+// Public API for cross-module use (used by std/jobs)
+// ============================================================================
+
+/// Open a KV store connection by URL. Returns the KV handle as a Value::Map.
+/// This is the programmatic equivalent of the `open()` stdlib function.
+pub fn open_kv(url: &str) -> Result<Value> {
+    let id = KV_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    if url.starts_with("redis://") || url.starts_with("valkey://") {
+        let kv = RedisKV::new(url)?;
+        let shared = Arc::new(Mutex::new(kv));
+
+        if let Ok(mut registry) = REDIS_KV_REGISTRY.lock() {
+            registry.insert(id, shared);
+        }
+
+        let backend_name = if url.starts_with("valkey://") {
+            "valkey"
+        } else {
+            "redis"
+        };
+        let mut handle = HashMap::new();
+        handle.insert(
+            "_backend".to_string(),
+            Value::String(backend_name.to_string()),
+        );
+        handle.insert("_url".to_string(), Value::String(url.to_string()));
+        handle.insert("_kv_store_id".to_string(), Value::Int(id as i64));
+        return Ok(Value::Map(handle));
+    }
+
+    // SQLite backend
+    let clean_url = url.strip_prefix("sqlite:").unwrap_or(url);
+    let kv = SQLiteKV::new(clean_url)?;
+    let shared = Arc::new(Mutex::new(kv));
+
+    if let Ok(mut registry) = SQLITE_KV_REGISTRY.lock() {
+        registry.insert(id, shared);
+    }
+
+    let mut handle = HashMap::new();
+    handle.insert("_backend".to_string(), Value::String("sqlite".to_string()));
+    handle.insert("_url".to_string(), Value::String(url.to_string()));
+    handle.insert("_kv_store_id".to_string(), Value::Int(id as i64));
+    Ok(Value::Map(handle))
+}
+
+/// Set a key-value pair in a KV store handle.
+pub fn kv_set(handle: &Value, key: &str, value: &Value, ttl: Option<i64>) -> Result<()> {
+    let backend = get_backend_type(handle)?;
+    match backend {
+        KVBackend::SQLite => {
+            let kv_arc = get_sqlite_kv(handle)?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.set(key, value, ttl)?;
+        }
+        KVBackend::Redis => {
+            let kv_arc = get_redis_kv(handle)?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.set(key, value, ttl)?;
+        }
+    }
+    Ok(())
+}
+
+/// Get a value from a KV store handle. Returns Value::Unit if not found.
+pub fn kv_get(handle: &Value, key: &str) -> Result<Value> {
+    let backend = get_backend_type(handle)?;
+    let result = match backend {
+        KVBackend::SQLite => {
+            let kv_arc = get_sqlite_kv(handle)?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.get(key)?
+        }
+        KVBackend::Redis => {
+            let kv_arc = get_redis_kv(handle)?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.get(key)?
+        }
+    };
+    Ok(result.unwrap_or(Value::Unit))
+}
+
+/// Delete a key from a KV store handle.
+pub fn kv_del(handle: &Value, key: &str) -> Result<bool> {
+    let backend = get_backend_type(handle)?;
+    match backend {
+        KVBackend::SQLite => {
+            let kv_arc = get_sqlite_kv(handle)?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.del(key)
+        }
+        KVBackend::Redis => {
+            let kv_arc = get_redis_kv(handle)?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.del(key)
+        }
+    }
+}
+
+/// List keys by optional prefix from a KV store handle.
+pub fn kv_list(handle: &Value, prefix: Option<&str>) -> Result<Vec<String>> {
+    let backend = get_backend_type(handle)?;
+    match backend {
+        KVBackend::SQLite => {
+            let kv_arc = get_sqlite_kv(handle)?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.list(prefix)
+        }
+        KVBackend::Redis => {
+            let kv_arc = get_redis_kv(handle)?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.list(prefix)
+        }
+    }
 }
 
 #[cfg(test)]

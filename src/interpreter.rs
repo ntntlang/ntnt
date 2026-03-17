@@ -3420,6 +3420,48 @@ impl Interpreter {
                 Ok(Value::Unit)
             }
 
+            Statement::Job {
+                name,
+                queue,
+                options,
+                perform_params,
+                perform_body,
+                on_failure,
+            } => {
+                // Skip job registration in HotReload mode (same pattern as spawn)
+                if self.execution_mode == ExecutionMode::HotReload {
+                    return Ok(Value::Unit);
+                }
+
+                // Evaluate option expressions and convert to Send-safe types
+                let mut opts = std::collections::HashMap::new();
+                for (opt_name, opt_expr) in options {
+                    let val = self.eval_expression(opt_expr)?;
+                    if let Some(opt_val) = crate::stdlib::jobs::JobOptionValue::from_value(&val) {
+                        opts.insert(opt_name.clone(), opt_val);
+                    } else {
+                        return Err(IntentError::runtime_error(format!(
+                            "Job option '{}' must be an int, float, string, or bool",
+                            opt_name
+                        )));
+                    }
+                }
+
+                // Register in global JOB_RUNTIME — store full definition including
+                // perform body so workers can execute it in a fresh interpreter (PR 2b)
+                use crate::stdlib::jobs::{JobDefinition, JOB_RUNTIME};
+                JOB_RUNTIME.register_job(JobDefinition {
+                    name: name.clone(),
+                    queue: queue.clone(),
+                    options: opts,
+                    perform_params: perform_params.clone(),
+                    perform_body: perform_body.clone(),
+                    on_failure: on_failure.clone(),
+                })?;
+
+                Ok(Value::Unit)
+            }
+
             Statement::Expression(expr) => self.eval_expression(expr),
 
             Statement::Return(expr) => {

@@ -16,6 +16,7 @@
 - [std/fs](#stdfs)
 - [std/http](#stdhttp)
 - [std/http/server](#stdhttpserver)
+- [std/jobs](#stdjobs)
 - [std/json](#stdjson)
 - [std/kv](#stdkv)
 - [std/log](#stdlog)
@@ -5919,6 +5920,122 @@ with_cookie(html(page), "theme", "dark", map { "max_age": 86400 })  // Cookie wi
 **See also:** `set_cookie`, `delete_cookie`, `get_cookie`
 
 *Since v0.3.11*
+
+---
+
+## std/jobs
+
+Background job queue with persistent storage
+
+```ntnt
+import { configure_queue, enqueue, job_status } from "std/jobs"
+```
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| [`cancel_job`](#canceljob) | Cancel a pending job by its ID. |
+| [`configure_queue`](#configurequeue) | Configure the job queue storage backend. |
+| [`enqueue`](#enqueue) | Enqueue a background job for processing. |
+| [`job_status`](#jobstatus) | Get the current status and data for a job by its ID. |
+
+#### `cancel_job`
+
+```ntnt
+cancel_job(job_id: String) -> Result<Bool, String>
+```
+
+Cancel a pending job by its ID.
+
+Sets the job status to "cancelled" and removes it from the pending queue. Returns true if the job was cancelled, false if it was not in a cancellable state.
+
+**Parameters:**
+
+- `job_id` — The job ID returned by enqueue()
+
+**Returns:** Result containing true if cancelled, false if not cancellable
+
+**Examples:**
+
+```ntnt
+cancel_job("abc-123")  // Cancel a pending job
+```
+
+---
+
+#### `configure_queue`
+
+```ntnt
+configure_queue(opts: Map) -> Result<Unit, String>
+```
+
+Configure the job queue storage backend.
+
+Pass a map with a "store" key to set the KV backend for job storage. If never called, enqueue() auto-initializes with "sqlite:./jobs.db".
+
+**Parameters:**
+
+- `opts` — Configuration map with optional "store" key (e.g., "redis://localhost:6379" or "sqlite:./jobs.db")
+
+**Returns:** Result indicating success or error
+
+**Examples:**
+
+```ntnt
+configure_queue(map { "store": "sqlite:./jobs.db" })  // Use SQLite for job storage
+configure_queue(map { "store": "redis://localhost:6379" })  // Use Redis for job storage
+```
+
+---
+
+#### `enqueue`
+
+```ntnt
+enqueue(job_name: String, args: Map) -> Result<String, String>
+```
+
+Enqueue a background job for processing.
+
+Looks up the job name in the registry, generates a unique ID, serializes the job data, and writes it to the configured KV store. Returns the job ID. If configure_queue() hasn't been called, auto-initializes with SQLite.
+
+**Parameters:**
+
+- `job_name` — The registered job name (e.g., "SendEmail")
+- `args` — A map of arguments to pass to the job's perform block
+
+**Returns:** Result containing the job ID string or an error
+
+**Examples:**
+
+```ntnt
+enqueue("SendEmail", map { "to": "alice@example.com" })  // Enqueue an email job
+enqueue("ProcessPayment", map { "amount": 100 })  // Enqueue a payment job
+```
+
+---
+
+#### `job_status`
+
+```ntnt
+job_status(job_id: String) -> Result<Map, String>
+```
+
+Get the current status and data for a job by its ID.
+
+Returns the full job data map including status, type, queue, payload, attempts, and timestamps. Returns an error if the job ID is not found.
+
+**Parameters:**
+
+- `job_id` — The job ID returned by enqueue()
+
+**Returns:** Result containing the job data map or an error
+
+**Examples:**
+
+```ntnt
+job_status("abc-123")  // Check job status
+```
 
 ---
 

@@ -1218,6 +1218,51 @@ impl TypeContext {
             | Statement::Intent { .. }
             | Statement::Defer(_)
             | Statement::Server { .. } => {}
+
+            Statement::Job {
+                options,
+                perform_params,
+                perform_body,
+                on_failure,
+                ..
+            } => {
+                // Type-check option expressions
+                for (_opt_name, opt_expr) in options {
+                    self.infer_expression(opt_expr);
+                }
+
+                // Type-check perform body (like a function body)
+                self.push_scope();
+                for param in perform_params {
+                    let typ = param
+                        .type_annotation
+                        .as_ref()
+                        .map(|t| self.resolve_type_expr(t))
+                        .unwrap_or(Type::Any);
+                    self.bind(&param.name, typ);
+                }
+                for stmt in &perform_body.statements {
+                    self.check_statement(stmt);
+                }
+                self.pop_scope();
+
+                // Type-check on_failure body if present
+                if let Some((failure_params, failure_body)) = on_failure {
+                    self.push_scope();
+                    for param in failure_params {
+                        let typ = param
+                            .type_annotation
+                            .as_ref()
+                            .map(|t| self.resolve_type_expr(t))
+                            .unwrap_or(Type::Any);
+                        self.bind(&param.name, typ);
+                    }
+                    for stmt in &failure_body.statements {
+                        self.check_statement(stmt);
+                    }
+                    self.pop_scope();
+                }
+            }
             Statement::Located { stmt, .. } => self.check_statement(stmt),
         }
     }
@@ -3500,6 +3545,12 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             // Utilities
             sig!("sleep_ms", ["ms" => Type::Int], Type::Unit);
             sig!("thread_count", [], Type::Int);
+        }
+        "std/jobs" => {
+            sig!("configure_queue", ["opts" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Unit, Type::String] });
+            sig!("enqueue", ["job_name" => Type::String, "args" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::String, Type::String] });
+            sig!("job_status", ["job_id" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
+            sig!("cancel_job", ["job_id" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Bool, Type::String] });
         }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));

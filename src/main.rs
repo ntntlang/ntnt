@@ -3856,6 +3856,20 @@ fn collect_used_names(stmt: &ntnt::ast::Statement, names: &mut std::collections:
             }
             collect_from_groups(groups, names);
         }
+        Statement::Job {
+            perform_body,
+            on_failure,
+            ..
+        } => {
+            for s in &perform_body.statements {
+                collect_used_names(s, names);
+            }
+            if let Some((_, failure_body)) = on_failure {
+                for s in &failure_body.statements {
+                    collect_used_names(s, names);
+                }
+            }
+        }
         Statement::Located { stmt, .. } => collect_used_names(stmt, names),
     }
 }
