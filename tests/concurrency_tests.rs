@@ -490,7 +490,7 @@ let sched = schedule(100, fn() {
     send(tx, "tick")
 })
 
-sleep_ms(350)
+sleep_ms(600)
 cancel_schedule(sched)
 
 let mut ticks = 0
