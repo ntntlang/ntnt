@@ -3,7 +3,7 @@
 **Status:** Planning
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md)
 **Created:** 2026-03-17
-**Depends on:** Phase 2 (PR 2a ✅, PR 2b ✅, PR 2c 🔄)
+**Depends on:** Phase 2 ✅ (all 3 PRs merged)
 
 ---
 
