@@ -374,6 +374,50 @@ impl SQLiteKV {
 
         Ok(())
     }
+
+    /// Atomically claim the first key matching a prefix: SELECT + DELETE in one transaction.
+    /// Returns the key and its raw (value, type) pair, or None if no matching key exists.
+    pub fn claim(&self, prefix: &str) -> Result<Option<(String, Value)>> {
+        let now = now_unix();
+        let pattern = format!("{}%", prefix);
+
+        // BEGIN IMMEDIATE ensures no other writer can interleave
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| IntentError::runtime_error(format!("KV claim begin error: {}", e)))?;
+
+        let row: std::result::Result<(String, String, String), rusqlite::Error> =
+            self.conn.query_row(
+                "SELECT key, value, type FROM _kv WHERE key LIKE ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT 1",
+                params![pattern, now],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            );
+
+        match row {
+            Ok((key, value, type_hint)) => {
+                self.conn
+                    .execute("DELETE FROM _kv WHERE key = ?", params![key])
+                    .map_err(|e| {
+                        let _ = self.conn.execute_batch("ROLLBACK");
+                        IntentError::runtime_error(format!("KV claim delete error: {}", e))
+                    })?;
+                self.conn.execute_batch("COMMIT").map_err(|e| {
+                    IntentError::runtime_error(format!("KV claim commit error: {}", e))
+                })?;
+                Ok(Some((key, deserialize_value(&value, &type_hint))))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                self.conn.execute_batch("COMMIT").map_err(|e| {
+                    IntentError::runtime_error(format!("KV claim commit error: {}", e))
+                })?;
+                Ok(None)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(IntentError::runtime_error(format!("KV claim error: {}", e)))
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -544,6 +588,71 @@ impl RedisKV {
             .query::<()>(&mut self.conn)
             .map_err(|e| IntentError::runtime_error(format!("Redis flush error: {}", e)))?;
         Ok(())
+    }
+
+    /// Atomically claim the first key matching a prefix (sorted lexicographically).
+    /// Uses SCAN to find keys, sorts them, then DEL the first one.
+    pub fn claim(&mut self, prefix: &str) -> Result<Option<(String, Value)>> {
+        let pattern = format!("{}*", prefix);
+        let mut all_keys: Vec<String> = Vec::new();
+        let mut cursor: u64 = 0;
+
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .cursor_arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query(&mut self.conn)
+                .map_err(|e| IntentError::runtime_error(format!("Redis scan error: {}", e)))?;
+
+            all_keys.extend(batch);
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+
+        if all_keys.is_empty() {
+            return Ok(None);
+        }
+
+        // Sort to get lexicographically first (FIFO by timestamp)
+        all_keys.sort_unstable();
+        // Filter out internal type keys
+        all_keys.retain(|k| !k.ends_with(":__type"));
+
+        if all_keys.is_empty() {
+            return Ok(None);
+        }
+
+        let key = &all_keys[0];
+
+        // GET then DEL — not perfectly atomic but sufficient for single-worker setups.
+        // Multi-worker Redis deployments should use Lua scripting (future enhancement).
+        let value: Option<String> = self
+            .conn
+            .get(key)
+            .map_err(|e| IntentError::runtime_error(format!("Redis get error: {}", e)))?;
+
+        let _: i32 = self
+            .conn
+            .del(key)
+            .map_err(|e| IntentError::runtime_error(format!("Redis del error: {}", e)))?;
+
+        match value {
+            Some(data) => {
+                let type_key = format!("{}:__type", key);
+                let legacy_hint: Option<String> = self.conn.get(&type_key).ok();
+                let _: std::result::Result<i32, _> = self.conn.del(&type_key);
+                Ok(Some((
+                    key.clone(),
+                    deserialize_value_envelope(&data, legacy_hint.as_deref()),
+                )))
+            }
+            None => Ok(None), // Key was deleted between SCAN and GET (race)
+        }
     }
 }
 
@@ -1328,6 +1437,29 @@ pub fn kv_list(handle: &Value, prefix: Option<&str>) -> Result<Vec<String>> {
                 .lock()
                 .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
             kv.list(prefix)
+        }
+    }
+}
+
+/// Atomically claim the first key matching a prefix from a KV store handle.
+/// Returns Some((key, value)) or None if no matching key exists.
+/// The claimed key is deleted from the store in the same operation.
+pub fn kv_claim(handle: &Value, prefix: &str) -> Result<Option<(String, Value)>> {
+    let backend = get_backend_type(handle)?;
+    match backend {
+        KVBackend::SQLite => {
+            let kv_arc = get_sqlite_kv(handle)?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.claim(prefix)
+        }
+        KVBackend::Redis => {
+            let kv_arc = get_redis_kv(handle)?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.claim(prefix)
         }
     }
 }

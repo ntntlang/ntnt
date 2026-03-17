@@ -25,9 +25,13 @@
 use crate::ast::{Block, Parameter};
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
+use crate::stdlib::concurrent::{
+    check_task_limit, finalize_task, is_current_task_cancelled, CURRENT_TASK_CANCELLED, RUNTIME,
+};
 use crate::stdlib::kv;
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -264,6 +268,510 @@ fn timestamp_key() -> String {
 }
 
 // ============================================================================
+// Worker helpers
+// ============================================================================
+
+/// Calculate retry backoff duration in seconds.
+///
+/// - "exponential" (default): `base * 2^attempt`, capped at 3600s
+/// - "linear": `base * attempt`
+/// - "constant": `base`
+fn calculate_backoff(strategy: &str, attempt: i64, base_secs: i64) -> i64 {
+    match strategy {
+        "linear" => base_secs * attempt,
+        "constant" => base_secs,
+        _ => {
+            // "exponential" is the default
+            let exp = (2i64).saturating_pow(attempt.max(0) as u32);
+            base_secs.saturating_mul(exp).min(3600)
+        }
+    }
+}
+
+/// Execute a job's perform block in a fresh interpreter.
+///
+/// Creates a new `Interpreter`, injects each perform parameter from the payload
+/// map, then evaluates the perform body wrapped in `catch_unwind`.
+fn execute_job_perform(
+    def: &JobDefinition,
+    payload: &HashMap<String, Value>,
+) -> std::result::Result<Value, String> {
+    let mut interp = crate::interpreter::Interpreter::new();
+
+    // Inject perform parameters from the payload map
+    for param in &def.perform_params {
+        let val = payload.get(&param.name).cloned().unwrap_or(Value::Unit);
+        interp.define_global(param.name.clone(), val);
+    }
+
+    let body = def.perform_body.clone();
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interp.eval_block(&body)));
+
+    match result {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(format!("{}", e)),
+        Err(panic_info) => {
+            let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "job perform panicked".to_string()
+            };
+            Err(msg)
+        }
+    }
+}
+
+/// Execute a job's on_failure handler, if present.
+///
+/// Binds `error` (String) and `attempt` (Int) to the on_failure params
+/// (first and second respectively, falling back to those names if the param
+/// list is shorter).  Errors are silently discarded — on_failure is
+/// fire-and-forget.
+fn execute_on_failure(def: &JobDefinition, error: &str, attempt: i64) {
+    let Some((params, body)) = def.on_failure.as_ref() else {
+        return;
+    };
+
+    let mut interp = crate::interpreter::Interpreter::new();
+
+    // Bind by position: first param → error string, second param → attempt int.
+    // Also bind the conventional names so handlers can use either.
+    interp.define_global("error".to_string(), Value::String(error.to_string()));
+    interp.define_global("attempt".to_string(), Value::Int(attempt));
+
+    if let Some(p) = params.first() {
+        interp.define_global(p.name.clone(), Value::String(error.to_string()));
+    }
+    if let Some(p) = params.get(1) {
+        interp.define_global(p.name.clone(), Value::Int(attempt));
+    }
+
+    let body = body.clone();
+    // Ignore result — on_failure is best-effort
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interp.eval_block(&body)));
+}
+
+/// Core implementation shared by `enqueue()`, `enqueue_at()`, and `enqueue_in()`.
+///
+/// `pending_ts` is the timestamp portion used for the pending key (controls
+/// ordering / scheduling).  For immediate jobs pass `timestamp_key()`.  For
+/// scheduled jobs pass the future nanosecond timestamp as a 20-digit string.
+fn enqueue_internal(
+    job_name: &str,
+    payload: Value,
+    pending_ts: &str,
+    scheduled_at: Option<&str>,
+) -> Result<Value> {
+    // Look up job in registry
+    let job_def = JOB_RUNTIME.get_job(job_name)?;
+    let job_def = match job_def {
+        Some(def) => def,
+        None => {
+            return Err(IntentError::runtime_error(format!(
+                "Job '{}' is not registered. Define it with: job {} on <queue> {{ perform(...) {{ ... }} }}",
+                job_name, job_name
+            )));
+        }
+    };
+
+    let job_id = Uuid::new_v4().to_string();
+
+    // Check test mode
+    {
+        let mut test_queue = JOB_RUNTIME
+            .test_queue
+            .lock()
+            .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+        if let Some(ref mut queue) = *test_queue {
+            let payload_json = serde_json::to_string(&crate::stdlib::kv::value_to_json_public(
+                &payload,
+            ))
+            .map_err(|e| {
+                IntentError::runtime_error(format!("Failed to serialize job payload: {}", e))
+            })?;
+            queue.push(EnqueuedJob {
+                id: job_id.clone(),
+                job_type: job_name.to_string(),
+                queue: job_def.queue.clone(),
+                payload_json,
+            });
+            return Ok(Value::ok(Value::String(job_id)));
+        }
+    }
+
+    // Get KV handle (lazy init)
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+
+    // Build job data map
+    let mut job_data = HashMap::new();
+    job_data.insert("id".to_string(), Value::String(job_id.clone()));
+    job_data.insert("type".to_string(), Value::String(job_name.to_string()));
+    job_data.insert("queue".to_string(), Value::String(job_def.queue.clone()));
+    job_data.insert("payload".to_string(), payload);
+    job_data.insert("status".to_string(), Value::String("pending".to_string()));
+    job_data.insert("attempts".to_string(), Value::Int(0));
+    job_data.insert(
+        "created_at".to_string(),
+        Value::String(pending_ts.to_string()),
+    );
+
+    // Copy job options (retry, timeout, etc.)
+    for (k, v) in &job_def.options {
+        job_data.insert(k.clone(), v.to_value());
+    }
+
+    // Store scheduled_at if provided
+    if let Some(sat) = scheduled_at {
+        job_data.insert("scheduled_at".to_string(), Value::String(sat.to_string()));
+    }
+
+    // Build pending key and store it in job data for O(1) cancel_job lookup
+    let pending_key = format!("jobs:pending:{}:{}", pending_ts, job_id);
+    job_data.insert(
+        "pending_key".to_string(),
+        Value::String(pending_key.clone()),
+    );
+
+    // Write to KV: jobs:data:<id>
+    let data_key = format!("jobs:data:{}", job_id);
+    kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
+
+    // Write queue ordering key: jobs:pending:<timestamp>:<id>
+    kv::kv_set(
+        &kv_handle,
+        &pending_key,
+        &Value::String(job_id.clone()),
+        None,
+    )?;
+
+    Ok(Value::ok(Value::String(job_id)))
+}
+
+/// Worker loop — runs until cooperative cancellation is signalled.
+///
+/// `kv_info`: serializable KV handle info (reconstructed into a `Value` on entry).
+/// `poll_interval_ms`: milliseconds to sleep between empty-queue polls.
+/// `queues`: if Some, only process jobs whose queue field matches one of
+///           these names; if None, process all queues.
+fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<String>>) {
+    let kv_handle = kv_info.to_value();
+    let poll_duration = std::time::Duration::from_millis(poll_interval_ms);
+
+    loop {
+        if is_current_task_cancelled() {
+            break;
+        }
+
+        // Attempt to claim a pending job
+        let claimed = match kv::kv_claim(&kv_handle, "jobs:pending:") {
+            Ok(Some((_pending_key, value))) => value,
+            Ok(None) => {
+                // Queue empty — sleep and try again
+                std::thread::sleep(poll_duration);
+                continue;
+            }
+            Err(_) => {
+                std::thread::sleep(poll_duration);
+                continue;
+            }
+        };
+
+        // The claimed value is the job_id string
+        let job_id = match &claimed {
+            Value::String(s) => s.clone(),
+            _ => {
+                std::thread::sleep(poll_duration);
+                continue;
+            }
+        };
+
+        // Read full job data
+        let data_key = format!("jobs:data:{}", job_id);
+        let job_data_val = match kv::kv_get(&kv_handle, &data_key) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let mut job_data = match job_data_val {
+            Value::Map(m) => m,
+            _ => continue,
+        };
+
+        // Skip cancelled jobs (do not re-enqueue)
+        let status = match job_data.get("status") {
+            Some(Value::String(s)) => s.clone(),
+            _ => "pending".to_string(),
+        };
+        if status == "cancelled" {
+            continue;
+        }
+
+        // Queue filtering: skip jobs whose queue doesn't match our filter
+        if let Some(ref filter) = queues {
+            let job_queue = match job_data.get("queue") {
+                Some(Value::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            if !filter.contains(&job_queue) {
+                // Re-enqueue: restore pending key so another worker (or next poll)
+                // can pick it up.  Use the original pending_key so ordering is
+                // preserved.
+                if let Some(Value::String(pk)) = job_data.get("pending_key") {
+                    let pk = pk.clone();
+                    let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
+                }
+                std::thread::sleep(poll_duration);
+                continue;
+            }
+        }
+
+        // Check scheduled_at: if the job isn't ready yet, re-enqueue it
+        let now_ts = timestamp_key();
+        if let Some(Value::String(scheduled_at)) = job_data.get("scheduled_at") {
+            if scheduled_at.as_str() > now_ts.as_str() {
+                // Not ready — restore pending key with the scheduled timestamp
+                let scheduled_ts = scheduled_at.clone();
+                let pk = format!("jobs:pending:{}:{}", scheduled_ts, job_id);
+                let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
+                // Update stored pending_key to the rescheduled key
+                job_data.insert("pending_key".to_string(), Value::String(pk.clone()));
+                let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
+                std::thread::sleep(poll_duration);
+                continue;
+            }
+        }
+
+        // Write visibility timeout key: jobs:active:<id> with TTL 300s
+        let active_key = format!("jobs:active:{}", job_id);
+        let _ = kv::kv_set(
+            &kv_handle,
+            &active_key,
+            &Value::String(job_id.clone()),
+            Some(300),
+        );
+
+        // Mark status as "active"
+        job_data.insert("status".to_string(), Value::String("active".to_string()));
+        if kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data.clone()), None).is_err() {
+            continue;
+        }
+
+        // Look up the job definition
+        let job_type = match job_data.get("type") {
+            Some(Value::String(s)) => s.clone(),
+            _ => continue,
+        };
+
+        let def = match JOB_RUNTIME.get_job(&job_type) {
+            Ok(Some(d)) => d,
+            _ => {
+                // Unknown job type — mark as dead
+                job_data.insert("status".to_string(), Value::String("dead".to_string()));
+                job_data.insert(
+                    "error".to_string(),
+                    Value::String(format!("No job definition found for '{}'", job_type)),
+                );
+                let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
+                let _ = kv::kv_del(&kv_handle, &active_key);
+                continue;
+            }
+        };
+
+        // Extract payload map
+        let payload = match job_data.get("payload") {
+            Some(Value::Map(m)) => m.clone(),
+            _ => HashMap::new(),
+        };
+
+        // Extract attempt count
+        let attempts = match job_data.get("attempts") {
+            Some(Value::Int(n)) => *n,
+            _ => 0,
+        };
+
+        // Execute
+        match execute_job_perform(&def, &payload) {
+            Ok(_) => {
+                // Success
+                job_data.insert("status".to_string(), Value::String("completed".to_string()));
+                job_data.insert("completed_at".to_string(), Value::String(timestamp_key()));
+                let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
+                let _ = kv::kv_del(&kv_handle, &active_key);
+            }
+            Err(err_msg) => {
+                let new_attempts = attempts + 1;
+
+                // Determine retry limit (default 3)
+                let retry_limit = match job_data.get("retry") {
+                    Some(Value::Int(n)) => *n,
+                    _ => 3,
+                };
+
+                // Call on_failure handler (fire-and-forget)
+                execute_on_failure(&def, &err_msg, new_attempts);
+
+                if new_attempts < retry_limit {
+                    // Re-enqueue with backoff
+                    let backoff_strategy = match job_data.get("backoff") {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => "exponential".to_string(),
+                    };
+                    let base_secs = match job_data.get("backoff_base") {
+                        Some(Value::Int(n)) => *n,
+                        _ => 5,
+                    };
+                    let delay_secs = calculate_backoff(&backoff_strategy, new_attempts, base_secs);
+
+                    // Build new pending key with future timestamp
+                    let future_nanos = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                        + (delay_secs as u128) * 1_000_000_000;
+                    let future_ts = format!("{:020}", future_nanos);
+                    let new_pending_key = format!("jobs:pending:{}:{}", future_ts, job_id);
+
+                    job_data.insert("status".to_string(), Value::String("pending".to_string()));
+                    job_data.insert("attempts".to_string(), Value::Int(new_attempts));
+                    job_data.insert("error".to_string(), Value::String(err_msg.clone()));
+                    job_data.insert(
+                        "pending_key".to_string(),
+                        Value::String(new_pending_key.clone()),
+                    );
+                    job_data.insert("scheduled_at".to_string(), Value::String(future_ts.clone()));
+
+                    let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
+                    let _ = kv::kv_set(
+                        &kv_handle,
+                        &new_pending_key,
+                        &Value::String(job_id.clone()),
+                        None,
+                    );
+                } else {
+                    // Exhausted retries — mark as dead
+                    job_data.insert("status".to_string(), Value::String("dead".to_string()));
+                    job_data.insert("attempts".to_string(), Value::Int(new_attempts));
+                    job_data.insert("error".to_string(), Value::String(err_msg));
+                    job_data.insert("failed_at".to_string(), Value::String(timestamp_key()));
+                    let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
+                }
+
+                let _ = kv::kv_del(&kv_handle, &active_key);
+            }
+        }
+    }
+}
+
+/// Parse shared options for work_async() and work_jobs().
+///
+/// Returns (poll_interval_ms, concurrency, queues).
+fn parse_work_opts(args: &[Value]) -> Result<(u64, usize, Option<Vec<String>>)> {
+    let mut poll_interval: u64 = 1000;
+    let mut concurrency: usize = 1;
+    let mut queues: Option<Vec<String>> = None;
+
+    if let Some(opts_val) = args.first() {
+        let opts = match opts_val {
+            Value::Map(m) => m,
+            Value::Unit => return Ok((poll_interval, concurrency, queues)),
+            _ => {
+                return Err(IntentError::type_error(
+                    "work options must be a map".to_string(),
+                ))
+            }
+        };
+
+        if let Some(v) = opts.get("poll_interval") {
+            match v {
+                Value::Int(n) => poll_interval = (*n).max(1) as u64,
+                _ => {
+                    return Err(IntentError::type_error(
+                        "poll_interval must be an integer (milliseconds)".to_string(),
+                    ))
+                }
+            }
+        }
+
+        if let Some(v) = opts.get("concurrency") {
+            match v {
+                Value::Int(n) => concurrency = (*n).max(1) as usize,
+                _ => {
+                    return Err(IntentError::type_error(
+                        "concurrency must be an integer".to_string(),
+                    ))
+                }
+            }
+        }
+
+        if let Some(v) = opts.get("queues") {
+            match v {
+                Value::Array(arr) => {
+                    let mut names = Vec::new();
+                    for item in arr {
+                        match item {
+                            Value::String(s) => names.push(s.clone()),
+                            _ => {
+                                return Err(IntentError::type_error(
+                                    "queues must be an array of strings".to_string(),
+                                ))
+                            }
+                        }
+                    }
+                    queues = Some(names);
+                }
+                _ => {
+                    return Err(IntentError::type_error(
+                        "queues must be an array of strings".to_string(),
+                    ))
+                }
+            }
+        }
+    }
+
+    Ok((poll_interval, concurrency, queues))
+}
+
+/// Spawn a single worker task registered with the ConcurrencyRuntime.
+///
+/// Returns a `Value::TaskHandle` so callers can cancel the worker via
+/// `cancel_task()`.
+fn spawn_worker_task(
+    kv_handle: Value,
+    poll_interval_ms: u64,
+    queues: Option<Vec<String>>,
+) -> Result<Value> {
+    // Extract serializable KvHandleInfo — Value is not Send due to Rc internals.
+    let kv_info = extract_kv_handle_info(&kv_handle)?;
+
+    RUNTIME.try_reap_expired_tasks();
+    check_task_limit()?;
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let task_id = RUNTIME.register_task(Arc::clone(&cancelled))?;
+    RUNTIME.active_tasks.fetch_add(1, AtomicOrdering::Release);
+    // Safe: task_id was just returned by register_task(), so it must be in the registry
+    let arcs = RUNTIME
+        .get_task_arcs(task_id)?
+        .expect("task just registered must exist");
+
+    std::thread::spawn(move || {
+        CURRENT_TASK_CANCELLED.with(|cell| {
+            *cell.borrow_mut() = Some(cancelled);
+        });
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker_loop(kv_info, poll_interval_ms, queues);
+            Ok(Value::Unit)
+        }));
+        finalize_task(result, &arcs.inner, &arcs.completed_notify);
+    });
+
+    Ok(Value::TaskHandle(task_id))
+}
+
+// ============================================================================
 // Module Export
 // ============================================================================
 
@@ -396,88 +904,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                // Look up job in registry
-                let job_def = JOB_RUNTIME.get_job(&job_name)?;
-                let job_def = match job_def {
-                    Some(def) => def,
-                    None => {
-                        return Err(IntentError::runtime_error(format!(
-                            "Job '{}' is not registered. Define it with: job {} on <queue> {{ perform(...) {{ ... }} }}",
-                            job_name, job_name
-                        )));
-                    }
-                };
-
-                let job_id = Uuid::new_v4().to_string();
-
-                // Check test mode
-                {
-                    let mut test_queue = JOB_RUNTIME.test_queue.lock().map_err(|e| {
-                        IntentError::runtime_error(format!("Lock error: {}", e))
-                    })?;
-                    if let Some(ref mut queue) = *test_queue {
-                        let payload_json = serde_json::to_string(
-                            &crate::stdlib::kv::value_to_json_public(&payload),
-                        )
-                        .map_err(|e| {
-                            IntentError::runtime_error(format!(
-                                "Failed to serialize job payload: {}",
-                                e
-                            ))
-                        })?;
-                        queue.push(EnqueuedJob {
-                            id: job_id.clone(),
-                            job_type: job_name.clone(),
-                            queue: job_def.queue.clone(),
-                            payload_json,
-                        });
-                        return Ok(Value::ok(Value::String(job_id)));
-                    }
-                }
-
-                // Get KV handle (lazy init)
-                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-
-                let ts = timestamp_key();
-
-                // Build job data map
-                let mut job_data = HashMap::new();
-                job_data.insert("id".to_string(), Value::String(job_id.clone()));
-                job_data.insert("type".to_string(), Value::String(job_name.clone()));
-                job_data.insert("queue".to_string(), Value::String(job_def.queue.clone()));
-                job_data.insert("payload".to_string(), payload);
-                job_data.insert(
-                    "status".to_string(),
-                    Value::String("pending".to_string()),
-                );
-                job_data.insert("attempts".to_string(), Value::Int(0));
-                job_data.insert("created_at".to_string(), Value::String(ts.clone()));
-
-                // Copy job options (retry, timeout, etc.)
-                for (k, v) in &job_def.options {
-                    job_data.insert(k.clone(), v.to_value());
-                }
-
-                // Build pending key and store it in job data for O(1) cancel_job lookup
-                let pending_key = format!("jobs:pending:{}:{}", ts, job_id);
-                job_data.insert(
-                    "pending_key".to_string(),
-                    Value::String(pending_key.clone()),
-                );
-
-                // Write to KV: jobs:data:<id>
-                let data_key = format!("jobs:data:{}", job_id);
-                kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
-
-                // Write queue ordering key: jobs:pending:<timestamp>:<id>
-                kv::kv_set(
-                    &kv_handle,
-                    &pending_key,
-                    &Value::String(job_id.clone()),
-                    None,
-                )?;
-
-                Ok(Value::ok(Value::String(job_id)))
+                enqueue_internal(&job_name, payload, &timestamp_key(), None)
             },
         },
     );
@@ -608,6 +1035,207 @@ pub fn init() -> HashMap<String, Value> {
                 }
 
                 Ok(Value::ok(Value::Bool(true)))
+            },
+        },
+    );
+
+    // @ntnt enqueue_at
+    // @module std/jobs
+    // @signature enqueue_at(job_name: String, timestamp: Int, args: Map) -> Result<String, String>
+    // Enqueue a job to run at a specific future time.
+    //
+    // The timestamp is a Unix nanosecond timestamp (Int). The job will not be
+    // picked up by workers until the current time reaches that timestamp.
+    // @param job_name The registered job name (e.g., "SendEmail")
+    // @param timestamp Unix nanosecond timestamp when the job should run
+    // @param args A map of arguments to pass to the job's perform block
+    // @returns Result containing the job ID string or an error
+    // @example enqueue_at("SendEmail", now_nanos + 3600_000_000_000, map { "to": "alice@example.com" }) ~ "Enqueue email in 1 hour"
+    // @see_also enqueue_in, enqueue
+    module.insert(
+        "enqueue_at".to_string(),
+        Value::NativeFunction {
+            name: "enqueue_at".to_string(),
+            arity: 3,
+            max_arity: 3,
+            func: |args| {
+                if args.len() != 3 {
+                    return Err(IntentError::type_error(
+                        "enqueue_at() requires 3 arguments (job_name, timestamp, args)".to_string(),
+                    ));
+                }
+
+                let job_name = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "enqueue_at() first argument must be a string job name".to_string(),
+                        ))
+                    }
+                };
+
+                let ts_nanos =
+                    match &args[1] {
+                        Value::Int(n) => *n,
+                        _ => return Err(IntentError::type_error(
+                            "enqueue_at() second argument must be an integer nanosecond timestamp"
+                                .to_string(),
+                        )),
+                    };
+
+                let payload = match &args[2] {
+                    Value::Map(_) => args[2].clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "enqueue_at() third argument must be a map".to_string(),
+                        ))
+                    }
+                };
+
+                let pending_ts = format!("{:020}", ts_nanos);
+                enqueue_internal(&job_name, payload, &pending_ts, Some(&pending_ts))
+            },
+        },
+    );
+
+    // @ntnt enqueue_in
+    // @module std/jobs
+    // @signature enqueue_in(job_name: String, delay_secs: Int, args: Map) -> Result<String, String>
+    // Enqueue a job to run after a delay in seconds.
+    //
+    // Calculates the future timestamp as `now + delay_secs` and enqueues the job
+    // to run no earlier than that time. Convenience wrapper around enqueue_at().
+    // @param job_name The registered job name (e.g., "SendEmail")
+    // @param delay_secs Number of seconds to wait before the job becomes eligible
+    // @param args A map of arguments to pass to the job's perform block
+    // @returns Result containing the job ID string or an error
+    // @example enqueue_in("SendEmail", 3600, map { "to": "alice@example.com" }) ~ "Send email in 1 hour"
+    // @example enqueue_in("PurgeCache", 300, map {}) ~ "Purge cache in 5 minutes"
+    // @see_also enqueue_at, enqueue
+    module.insert(
+        "enqueue_in".to_string(),
+        Value::NativeFunction {
+            name: "enqueue_in".to_string(),
+            arity: 3,
+            max_arity: 3,
+            func: |args| {
+                if args.len() != 3 {
+                    return Err(IntentError::type_error(
+                        "enqueue_in() requires 3 arguments (job_name, delay_secs, args)"
+                            .to_string(),
+                    ));
+                }
+
+                let job_name = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "enqueue_in() first argument must be a string job name".to_string(),
+                        ))
+                    }
+                };
+
+                let delay_secs = match &args[1] {
+                    Value::Int(n) => *n,
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "enqueue_in() second argument must be an integer (seconds)".to_string(),
+                        ))
+                    }
+                };
+
+                let payload = match &args[2] {
+                    Value::Map(_) => args[2].clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "enqueue_in() third argument must be a map".to_string(),
+                        ))
+                    }
+                };
+
+                let future_nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+                    + (delay_secs.max(0) as u128) * 1_000_000_000;
+                let pending_ts = format!("{:020}", future_nanos);
+                enqueue_internal(&job_name, payload, &pending_ts, Some(&pending_ts))
+            },
+        },
+    );
+
+    // @ntnt work_async
+    // @module std/jobs
+    // @signature work_async(opts?: Map) -> TaskHandle | Array<TaskHandle>
+    // Start one or more background worker threads that process jobs from the queue.
+    //
+    // Returns a TaskHandle (or Array of TaskHandles when concurrency > 1) that
+    // can be used with cancel_task() to stop the workers. Workers run until
+    // cancelled. If configure_queue() hasn't been called, auto-initializes
+    // with the default SQLite store.
+    // @param opts Optional configuration map:
+    //   - "poll_interval": poll interval in milliseconds (default 1000)
+    //   - "concurrency": number of parallel worker threads (default 1)
+    //   - "queues": array of queue names to process (default: all queues)
+    // @returns TaskHandle for a single worker, or Array<TaskHandle> for concurrency > 1
+    // @see_also work_jobs, cancel_task
+    // @example work_async() ~ "Start a single background worker"
+    // @example work_async(map { "concurrency": 4, "poll_interval": 500 }) ~ "Start 4 workers polling every 500ms"
+    // @example work_async(map { "queues": ["emails", "payments"] }) ~ "Process only specific queues"
+    module.insert(
+        "work_async".to_string(),
+        Value::NativeFunction {
+            name: "work_async".to_string(),
+            arity: 0,
+            max_arity: 1,
+            func: |args| {
+                let (poll_interval, concurrency, queues) = parse_work_opts(args)?;
+                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+
+                if concurrency == 1 {
+                    let handle = spawn_worker_task(kv_handle, poll_interval, queues)?;
+                    Ok(handle)
+                } else {
+                    let mut handles = Vec::new();
+                    for _ in 0..concurrency {
+                        let handle =
+                            spawn_worker_task(kv_handle.clone(), poll_interval, queues.clone())?;
+                        handles.push(handle);
+                    }
+                    Ok(Value::Array(handles))
+                }
+            },
+        },
+    );
+
+    // @ntnt work_jobs
+    // @module std/jobs
+    // @signature work_jobs(opts?: Map) -> Unit
+    // Run a blocking worker loop that processes jobs from the queue.
+    //
+    // Runs on the current thread until interrupted (Ctrl-C) or cancelled via
+    // cooperative cancellation. Typically called at the end of a worker script.
+    // If configure_queue() hasn't been called, auto-initializes with the
+    // default SQLite store.
+    // @param opts Optional configuration map:
+    //   - "poll_interval": poll interval in milliseconds (default 1000)
+    //   - "queues": array of queue names to process (default: all queues)
+    // @returns Unit (blocks until cancelled)
+    // @see_also work_async, enqueue
+    // @example work_jobs() ~ "Run a blocking worker (at end of worker script)"
+    // @example work_jobs(map { "poll_interval": 500 }) ~ "Poll every 500ms"
+    module.insert(
+        "work_jobs".to_string(),
+        Value::NativeFunction {
+            name: "work_jobs".to_string(),
+            arity: 0,
+            max_arity: 1,
+            func: |args| {
+                let (poll_interval, _concurrency, queues) = parse_work_opts(args)?;
+                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                let kv_info = extract_kv_handle_info(&kv_handle)?;
+                worker_loop(kv_info, poll_interval, queues);
+                Ok(Value::Unit)
             },
         },
     );
@@ -918,5 +1546,281 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1));
         let k2 = timestamp_key();
         assert!(k2 >= k1);
+    }
+
+    // -----------------------------------------------------------------------
+    // New tests for backoff, execute helpers, and enqueue_at/enqueue_in
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_calculate_backoff_exponential() {
+        // Default: base=5, attempt=0 → 5*1=5
+        assert_eq!(calculate_backoff("exponential", 0, 5), 5);
+        // attempt=1 → 5*2=10
+        assert_eq!(calculate_backoff("exponential", 1, 5), 10);
+        // attempt=2 → 5*4=20
+        assert_eq!(calculate_backoff("exponential", 2, 5), 20);
+        // Capped at 3600
+        assert_eq!(calculate_backoff("exponential", 100, 5), 3600);
+    }
+
+    #[test]
+    fn test_calculate_backoff_linear() {
+        assert_eq!(calculate_backoff("linear", 0, 10), 0);
+        assert_eq!(calculate_backoff("linear", 1, 10), 10);
+        assert_eq!(calculate_backoff("linear", 3, 10), 30);
+    }
+
+    #[test]
+    fn test_calculate_backoff_constant() {
+        assert_eq!(calculate_backoff("constant", 0, 15), 15);
+        assert_eq!(calculate_backoff("constant", 10, 15), 15);
+    }
+
+    #[test]
+    fn test_calculate_backoff_unknown_defaults_to_exponential() {
+        // Unknown strategy falls through to exponential
+        assert_eq!(calculate_backoff("unknown", 1, 5), 10);
+    }
+
+    #[test]
+    fn test_execute_job_perform_empty_body() {
+        // A job with an empty perform body should return Unit
+        let def = test_job_def("EmptyJob", "default");
+        let result = execute_job_perform(&def, &HashMap::new());
+        assert!(result.is_ok(), "Empty body should succeed: {:?}", result);
+    }
+
+    #[test]
+    fn test_enqueue_at() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ScheduledJob", "default"))
+                .unwrap();
+
+            let module = init();
+            let configure_fn = match module.get("configure_queue").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+            let mut opts = HashMap::new();
+            opts.insert(
+                "store".to_string(),
+                Value::String("sqlite::memory:".to_string()),
+            );
+            configure_fn(&[Value::Map(opts)]).unwrap();
+
+            let enqueue_at_fn = match module.get("enqueue_at").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+
+            // Use a timestamp far in the future (year ~2096, fits in i64)
+            let future_nanos: i64 = 4_000_000_000_000_000_000i64;
+            let result = enqueue_at_fn(&[
+                Value::String("ScheduledJob".to_string()),
+                Value::Int(future_nanos),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+
+            // Should return Ok(job_id)
+            let job_id = match result {
+                Value::EnumValue {
+                    variant,
+                    ref values,
+                    ..
+                } if variant == "Ok" => match &values[0] {
+                    Value::String(s) => s.clone(),
+                    _ => panic!("Expected String job ID"),
+                },
+                _ => panic!("Expected Ok from enqueue_at: {:?}", result),
+            };
+
+            // Verify scheduled_at is stored in job data
+            let status_fn = match module.get("job_status").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+            let status = status_fn(&[Value::String(job_id)]).unwrap();
+            match status {
+                Value::EnumValue {
+                    variant, values, ..
+                } if variant == "Ok" => match &values[0] {
+                    Value::Map(data) => {
+                        let scheduled_at = match data.get("scheduled_at") {
+                            Some(Value::String(s)) => s.clone(),
+                            _ => panic!("Expected scheduled_at in job data"),
+                        };
+                        let expected_ts = format!("{:020}", future_nanos);
+                        assert_eq!(scheduled_at, expected_ts);
+                        // Status should be pending
+                        assert!(
+                            matches!(data.get("status"), Some(Value::String(s)) if s == "pending")
+                        );
+                    }
+                    _ => panic!("Expected Map"),
+                },
+                _ => panic!("Expected Ok from job_status"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_enqueue_in() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("DelayedJob", "default"))
+                .unwrap();
+
+            let module = init();
+            let configure_fn = match module.get("configure_queue").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+            let mut opts = HashMap::new();
+            opts.insert(
+                "store".to_string(),
+                Value::String("sqlite::memory:".to_string()),
+            );
+            configure_fn(&[Value::Map(opts)]).unwrap();
+
+            let enqueue_in_fn = match module.get("enqueue_in").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+
+            let before_nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+
+            let result = enqueue_in_fn(&[
+                Value::String("DelayedJob".to_string()),
+                Value::Int(60), // 60 seconds
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+
+            let job_id = match result {
+                Value::EnumValue {
+                    variant,
+                    ref values,
+                    ..
+                } if variant == "Ok" => match &values[0] {
+                    Value::String(s) => s.clone(),
+                    _ => panic!("Expected String job ID"),
+                },
+                _ => panic!("Expected Ok from enqueue_in: {:?}", result),
+            };
+
+            // Verify scheduled_at is at least 60 seconds from before_nanos
+            let status_fn = match module.get("job_status").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+            let status = status_fn(&[Value::String(job_id)]).unwrap();
+            match status {
+                Value::EnumValue {
+                    variant, values, ..
+                } if variant == "Ok" => match &values[0] {
+                    Value::Map(data) => {
+                        let scheduled_at_str = match data.get("scheduled_at") {
+                            Some(Value::String(s)) => s.clone(),
+                            _ => panic!("Expected scheduled_at in job data"),
+                        };
+                        let scheduled_nanos: u128 = scheduled_at_str
+                            .parse()
+                            .expect("scheduled_at should be a valid number");
+                        let min_expected = before_nanos + 60 * 1_000_000_000;
+                        assert!(
+                            scheduled_nanos >= min_expected,
+                            "scheduled_at {} should be >= {}",
+                            scheduled_nanos,
+                            min_expected
+                        );
+                    }
+                    _ => panic!("Expected Map"),
+                },
+                _ => panic!("Expected Ok from job_status"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_enqueue_at_type_errors() {
+        with_clean_runtime(|| {
+            let module = init();
+            let enqueue_at_fn = match module.get("enqueue_at").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+
+            // Wrong arg count
+            let r = enqueue_at_fn(&[Value::String("Job".to_string())]);
+            assert!(r.is_err());
+
+            // Non-integer timestamp
+            let r = enqueue_at_fn(&[
+                Value::String("Job".to_string()),
+                Value::String("not-a-number".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(r.is_err());
+        });
+    }
+
+    #[test]
+    fn test_enqueue_in_type_errors() {
+        with_clean_runtime(|| {
+            let module = init();
+            let enqueue_in_fn = match module.get("enqueue_in").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+
+            // Non-integer delay
+            let r = enqueue_in_fn(&[
+                Value::String("Job".to_string()),
+                Value::Float(1.5),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(r.is_err());
+
+            // Non-map args
+            let r = enqueue_in_fn(&[
+                Value::String("Job".to_string()),
+                Value::Int(10),
+                Value::String("not-a-map".to_string()),
+            ]);
+            assert!(r.is_err());
+        });
+    }
+
+    #[test]
+    fn test_parse_work_opts_defaults() {
+        let (poll, concurrency, queues) = parse_work_opts(&[]).unwrap();
+        assert_eq!(poll, 1000);
+        assert_eq!(concurrency, 1);
+        assert!(queues.is_none());
+    }
+
+    #[test]
+    fn test_parse_work_opts_custom() {
+        let mut opts = HashMap::new();
+        opts.insert("poll_interval".to_string(), Value::Int(500));
+        opts.insert("concurrency".to_string(), Value::Int(4));
+        let mut queues_arr = Vec::new();
+        queues_arr.push(Value::String("emails".to_string()));
+        queues_arr.push(Value::String("payments".to_string()));
+        opts.insert("queues".to_string(), Value::Array(queues_arr));
+
+        let (poll, concurrency, queues) = parse_work_opts(&[Value::Map(opts)]).unwrap();
+        assert_eq!(poll, 500);
+        assert_eq!(concurrency, 4);
+        assert_eq!(
+            queues,
+            Some(vec!["emails".to_string(), "payments".to_string()])
+        );
     }
 }
