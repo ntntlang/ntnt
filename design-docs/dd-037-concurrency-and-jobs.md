@@ -20,6 +20,7 @@
 7. [Lessons Learned](#lessons-learned)
 8. [Competitive Analysis](#competitive-analysis)
 9. [Open Questions](#open-questions)
+10. [std/events — Event Dispatch Layer](#stdevents--event-dispatch-layer)
 
 ---
 
@@ -196,6 +197,7 @@ Phase 3  📋  Job DSL + In-Memory Backend                declarative jobs, stre
 Phase 4  📋  KV Backend + Dashboard                     persistent jobs, real-time UI
 Phase 5  📋  Production Hardening                       simulation, contracts, intent testing
 Phase 6  📋  Observability CLI                          ntnt jobs status/list/tail/replay
+Phase 7  📋  Event Dispatch (std/events)                pub/sub fan-out over the job system
 ```
 
 ### Phase Status Table
@@ -209,6 +211,7 @@ Phase 6  📋  Observability CLI                          ntnt jobs status/list/
 | 4 | KV Backend + Dashboard | 📋 Planned | P0 — production req |
 | 5 | Production Hardening | 📋 Planned | P1 — safety |
 | 6 | Observability CLI | 📋 Planned | P1 — DX |
+| 7 | Event Dispatch (`std/events`) | 📋 Planned | P2 — event-driven DX |
 
 ---
 
@@ -493,6 +496,142 @@ Developer tools for monitoring and debugging jobs from the terminal.
 
 ---
 
+### Phase 7: Event Dispatch (`std/events`) 📋
+
+**Depends on:** Phase 3 + Phase 4 (job system)
+**Estimated effort:** 2-3 days
+
+A thin pub/sub event dispatch layer built *on top of* the job system. This is not a message broker — it's an event router. When you publish an event, `std/events` enqueues all subscribed jobs. Durability, retry, workers, and observability all come for free from the job system underneath.
+
+**The gap `std/events` fills:** right now, if a user signs up and you need to send a welcome email AND update analytics, the call site has to call `enqueue()` twice. It's coupled to the consumer list. `std/events` decouples emitter from consumers — the call site publishes the event, and any number of jobs can subscribe to it independently.
+
+#### Core API
+
+```ntnt
+import { subscribe, publish, unsubscribe, on_event } from "std/events"
+
+// Subscribe a job to an event — any publish fires the job
+subscribe("user.signed_up", "SendWelcomeEmail")
+subscribe("user.signed_up", "UpdateAnalytics")
+subscribe("payment.processed", "SendReceipt")
+
+// Publish — enqueues all subscribed jobs with the payload
+publish("user.signed_up", map { "user_id": "123", "email": "alice@example.com" })
+// → enqueues SendWelcomeEmail + UpdateAnalytics jobs
+
+// Subscribe an inline handler (synchronous, no job overhead — fires in current thread)
+on_event("payment.failed", fn(event) {
+    log_warn("Payment failed", event)
+})
+
+// Unsubscribe a specific job from an event
+unsubscribe("user.signed_up", "UpdateAnalytics")
+
+// Unsubscribe all handlers from an event
+unsubscribe("user.signed_up")
+```
+
+- `subscribe(event, job_name)` — registers a job as a consumer; `publish` calls `enqueue(job_name, payload)` for each
+- `publish(event, payload)` — fan-out: iterates subscribers, enqueues each job
+- `on_event(event, fn)` — synchronous inline handler, runs on the publishing thread (not a job)
+- `unsubscribe(event, job_name?)` — remove one subscriber or all
+
+#### Event Naming Convention
+
+Events use dot-namespaced strings: `"domain.action"` (e.g. `"user.signed_up"`, `"payment.processed"`, `"order.shipped"`). No schema enforcement at this phase — strings are the schema. Convention: past tense (`signed_up`, not `sign_up`).
+
+#### Queue Routing
+
+By default, subscribed jobs run on their own declared queue. No extra configuration needed:
+
+```ntnt
+job SendWelcomeEmail on emails (retry: 3) {
+    perform(user_id, email) { ... }
+}
+
+subscribe("user.signed_up", "SendWelcomeEmail")
+// → publish fires enqueue("SendWelcomeEmail", payload) → runs on the "emails" queue
+```
+
+If you want a specific event's jobs to run on a dedicated queue, define the job that way — events stay out of routing decisions.
+
+#### Backend Configuration
+
+**Memory (default):** Subscription registry is in-process. Works for single-process ntnt apps — the common case.
+
+```ntnt
+// Default — no configuration needed
+subscribe("user.signed_up", "SendWelcomeEmail")
+publish("user.signed_up", payload)
+```
+
+**Redis (cross-process fan-out):** For multi-process deployments where the publisher and consumer run as separate ntnt processes (e.g. a web server and a worker process). Uses Redis pub/sub for the event signal; the receiving process handles `enqueue`.
+
+```ntnt
+import { configure_events } from "std/events"
+
+configure_events(map { "store": "redis://localhost:6379" })
+// Publisher: publish() → Redis PUBLISH
+// Consumer process: subscribes to Redis channel, calls enqueue() on arrival
+```
+
+This is an explicit opt-in. Most apps don't need it — the memory backend is correct when publish and consume happen within the same process.
+
+#### Testing Mode
+
+Events work naturally with the job system's testing mode. Set `configure_queue(map { "mode": "testing" })`, then publish events and assert jobs were enqueued:
+
+```ntnt
+import { configure_queue, assert_enqueued, clear_jobs } from "std/jobs"
+import { subscribe, publish } from "std/events"
+
+configure_queue(map { "mode": "testing" })
+subscribe("user.signed_up", "SendWelcomeEmail")
+subscribe("user.signed_up", "UpdateAnalytics")
+
+publish("user.signed_up", map { "user_id": "123" })
+
+assert_enqueued("SendWelcomeEmail", map { "user_id": "123" })
+assert_enqueued("UpdateAnalytics", map { "user_id": "123" })
+clear_jobs()
+```
+
+For convenience, two additional assertions surface directly in `std/events`:
+
+```ntnt
+import { assert_published, assert_not_published } from "std/events"
+
+// Assert that publish() was called with this event
+assert_published("user.signed_up", map { "user_id": "123" })
+assert_not_published("payment.processed")
+```
+
+These check an in-memory publish log (similar to the job test queue). Useful when you want to verify event emission without caring about which jobs are subscribed.
+
+#### Implementation Notes
+
+- **`src/stdlib/events.rs`** — new module (~200 lines)
+- Event registry: `LazyLock<Mutex<HashMap<String, Vec<EventSubscriber>>>>` where `EventSubscriber` is `Job(String)` or `Handler(fn)`
+- Publish log (testing mode): `LazyLock<Mutex<Option<Vec<PublishedEvent>>>>`
+- `publish()` iterates subscribers, calls `enqueue_internal()` for job subscribers, calls fn directly for `on_event` handlers
+- `configure_events(map { "store": "redis://..." })` sets up a Redis pub/sub listener thread; on receive → `enqueue_internal()`
+- Subscriptions registered at module load time (before the HTTP server starts) — same pattern as job registration
+
+#### Deferred to Later
+
+- **Wildcard subscriptions** — `subscribe("user.*", "AuditLog")` matches all `user.` events. Useful but adds regex overhead.
+- **Event schemas** — typed payloads with compile-time checking. Requires a new type in the type system.
+- **Event sourcing patterns** — event log replay, projections. A different design problem; not blocking the router.
+- **Cross-language event interop** — publishing from a non-ntnt service into the event bus. Probably a Redis pub/sub contract; design when needed.
+
+#### Why Not a Full Message Broker
+
+ntnt's target is single-process apps behind a Cloudflare tunnel. A broker (Kafka, RabbitMQ, NATS) adds: a separate process to run, a protocol to speak, ordering guarantees that need a log, consumer group semantics, offset management. None of that is needed for "when user signs up, fire these jobs." The job system already handles durability, retry, and ordering within a queue. `std/events` is the glue that maps events to jobs — the broker is already there.
+
+If someone needs genuine cross-service distributed pub/sub at scale, that's a Redis pub/sub contract with `configure_events(map { "store": "redis://..." })`. ntnt shouldn't pretend to be Kafka.
+
+---
+
 ## Dashboard Security Model
 
 The job dashboard is a powerful tool that must not become an attack surface.
@@ -611,6 +750,7 @@ For production apps with existing user auth. The dashboard becomes another admin
 | Stuck job recovery | Automatic (heartbeat) | Automatic | Automatic | Automatic | **Manual clearing** |
 | Batch enqueue | `.enqueue_batch()` | `.perform_bulk()` | `Oban.insert_all()` | `.addBulk()` | Custom |
 | Scaling | Same binary, add processes | Separate process | Built into Phoenix | Separate process | Docker containers |
+| Event-driven dispatch | `std/events` subscribe/publish | `ActiveSupport::Notifications` (no durability) | ❌ (pub/sub separate) | ❌ (separate) | Custom event bus |
 
 **ntnt wins on:** job definition simplicity, backend flexibility, simulation mode, job contracts, intent testing, dashboard (free + secure), streaming logs.
 
@@ -668,3 +808,4 @@ For production apps with existing user auth. The dashboard becomes another admin
 | 2026-03-16 | DD-037 v5: Dashboard security model. Simulation, contracts, intent verification promoted. Job chaining via application logic. Streaming logs promoted to core. Batch enqueue added. AI diagnosis cut. Competitive analysis updated with Josh's PHP system. |
 | 2026-03-16 | Copilot review fixes: `c2b2685` — select() busy-loop, consumed task leak, reaper lock discipline, NativeFunction ambiguity, typechecker sigs, doc wording. All 16 comments resolved. |
 | 2026-03-16 | DD-037 v6: Updated Phase 1 with full Copilot review resolution details. Added lessons 11-13. |
+| 2026-03-17 | DD-037 v7: Added Phase 7 — Event Dispatch (`std/events`). Pub/sub fan-out over the job system. Memory + Redis backends. Testing mode integration. |
