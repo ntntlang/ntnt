@@ -4,13 +4,13 @@
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md)
 **Created:** 2026-03-16
 **Target branch:** `feat/job-dsl-v2`
-**Prior work:** `feat/job-dsl` branch (806-line jobs.rs, parser, AST, tests — reference only, needs rewrite for KV backend + std/concurrent integration)
+**Base:** `main` (includes Phase 1 structured concurrency — `TxChannelHandle`/`RxChannelHandle`, `select()`, `try_await` states, `ConcurrencyRuntime`)
 
 ---
 
 ## Guiding Principles
 
-1. **Small PRs.** PR #31 was 25 commits and 7 review rounds. Never again. 3 focused PRs.
+1. **Small PRs.** 3 focused PRs, each independently shippable and reviewable.
 2. **Persistent from day one.** No memory backend. SQLite KV default, Redis/Valkey for prod.
 3. **Build on std/concurrent.** Workers use `spawn()`. No reinventing thread management.
 4. **Build on std/kv.** No raw Redis/SQLite calls. If std/kv is missing an operation, add it to std/kv first.
@@ -93,7 +93,7 @@ PR 2c  📋  DX: Testing Mode + Logs + CLI + Docs   assert_enqueued, streaming l
 **Estimated effort:** 2-3 days
 
 ### Lexer (`src/lexer.rs`)
-- [ ] Add `Job` keyword token (the `feat/job-dsl` branch already has this — cherry-pick)
+- [ ] Add `Job` keyword token
 - [ ] `on` is already a keyword (used by `on_shutdown`, `on_error`) — no change needed
 - [ ] `perform` and `on_failure` are parsed contextually inside `Job` blocks, not keywords
 
@@ -109,28 +109,14 @@ PR 2c  📋  DX: Testing Mode + Logs + CLI + Docs   assert_enqueued, streaming l
       on_failure: Option<(Vec<Parameter>, Block)>,
   }
   ```
-- [ ] The `feat/job-dsl` branch has this exact node — cherry-pick and verify
-
 ### Parser (`src/parser.rs`)
 - [ ] Parse `Job Name on queue { perform(args) { body } }` syntax
 - [ ] Parse optional inline options: `Job Name on queue (retry: 5, timeout: 120) { ... }`
 - [ ] Parse optional `on_failure(error, attempt) { ... }` block
 - [ ] `Job` declarations are top-level statements (like `fn`, `struct`, `enum`)
-- [ ] Reference: `feat/job-dsl` parser has ~98 lines for this — adapt, don't copy blindly
 
 ### Interpreter — Job Registry (`src/interpreter.rs`)
-- [ ] Add `JobDefinition` struct to interpreter state:
-  ```rust
-  struct JobDefinition {
-      name: String,
-      queue: String,
-      options: HashMap<String, Value>,  // evaluated options
-      perform_params: Vec<Parameter>,
-      perform_body: Block,
-      on_failure: Option<(Vec<Parameter>, Block)>,
-  }
-  ```
-- [ ] `eval_statement` for `Statement::Job`: evaluate options, register in `job_registry: HashMap<String, JobDefinition>`
+- [ ] Add `eval_statement` arm for `Statement::Job`: evaluate options, write `JobDefinition` to `JOB_RUNTIME.job_registry` (see Architecture Notes — registry is global, not per-interpreter)
 - [ ] Job names must be unique — error on duplicate registration
 - [ ] Execution mode guards: skip job registration in HotReload worker mode (same pattern as `spawn`)
 
@@ -148,21 +134,19 @@ PR 2c  📋  DX: Testing Mode + Logs + CLI + Docs   assert_enqueued, streaming l
 - [ ] `job_status(job_id)` — read job data from KV, return status map
 - [ ] `cancel_job(job_id)` — set status to "cancelled", remove from queue
 
-### std/kv gaps to resolve before PR 2a
+### std/kv approach for PR 2a
 
-Audit `std/kv` against these specific needs and add missing operations to std/kv **as part of PR 2a** (not as a separate PR):
+**Queue ordering: key-prefix approach (decided).** No sorted set operations needed. Use zero-padded ISO timestamp prefix in the KV key:
 
-**Sorted sets for queue ordering:**
-- SQLite backend: likely needs a `score` column approach — a dedicated `kv_sorted` table with `(namespace, key, score REAL, value TEXT)`. Add `zadd(kv, key, score, value)`, `zrangebyscore(kv, key, min, max, limit?)`, `zrem(kv, key, member)` to std/kv.
-- Redis backend: native `ZADD`/`ZRANGEBYSCORE` — map directly.
-- If adding sorted set ops to std/kv is too heavy for PR 2a scope, use a simpler approach: store `scheduled_at` as a zero-padded ISO timestamp prefix in the KV key (`jobs:pending:<timestamp>:<id>`) — natural lexicographic ordering, scan with prefix range. This avoids sorted sets entirely.
+```
+jobs:pending:<zero-padded-timestamp>:<id>   →  natural lexicographic ordering
+jobs:data:<id>                               →  full job data (status, payload, attempts, etc.)
+jobs:active:<id>                             →  TTL key for visibility timeout (PR 2b)
+```
 
-**Atomic job claiming:**
-- SQLite: wrap claim in `BEGIN IMMEDIATE` transaction — `SELECT ... WHERE status='pending' AND (scheduled_at IS NULL OR scheduled_at <= now) ORDER BY score LIMIT 1`, then `UPDATE ... SET status='active'`. Add an `atomic_claim(kv, queue_name)` operation to std/kv or implement directly in jobs.rs using the KV handle's underlying connection.
-- Redis: `LMOVE` (move from pending list to active list atomically) or `ZPOPMIN` on the sorted set.
-- Single-process workers on SQLite: SQLite's serialized writes mean a `get + set` without explicit transaction is *practically* safe, but don't rely on this — use a transaction.
+`list(kv, "jobs:pending:")` returns keys in lexicographic order — SQLite's `ORDER BY key`, Redis sorts client-side after SCAN. Zero-padded timestamps sort correctly. **No new std/kv operations needed for PR 2a.**
 
-**Decision:** Before writing any jobs.rs code, open std/kv, check what exists, and either add the missing operations or choose the key-prefix approach. Document the decision in a comment in jobs.rs.
+**Atomic claiming (PR 2b concern, not PR 2a):** Deferred. When PR 2b is started, add a `claim(kv, prefix)` operation to std/kv that does `BEGIN IMMEDIATE; SELECT..LIMIT 1; UPDATE; COMMIT` for SQLite and `ZPOPMIN` / Lua script for Redis. Do not implement in PR 2a.
 
 ### Typechecker (`src/typechecker.rs`)
 - [ ] Add `Job` to statement checking (skip body for now, or treat like function body)
@@ -364,33 +348,21 @@ Scheduled ─→ Pending ─→ Active ─→ Completed
 
 ## Pre-Implementation Checklist
 
-Before writing any code, verify these:
-
-- [ ] **std/kv audit**: Run the audit described in "std/kv gaps to resolve" above. Choose sorted set approach (native ops vs key-prefix). Document decision in jobs.rs before anything else.
-- [ ] **Cherry-pick assessment**: Review `feat/job-dsl` branch specifically for: `Job` keyword token (lexer.rs), `Statement::Job` AST node (ast.rs), parser block (~98 lines). These are safe cherry-picks. `jobs.rs` itself is **reference only** — do not cherry-pick; the registry architecture has changed (RUNTIME not per-interpreter).
-- [ ] **Base branch**: `feat/job-dsl-v2` branches from `main`. PR #31 (`feat/concurrency-v2`) is merged — `TxChannelHandle`/`RxChannelHandle`, `select()`, `try_await` states, and `ConcurrencyRuntime` are all in main.
-- [ ] **KV key layout**: Validate the key layout from DD-037 against actual std/kv capabilities — especially the sorted set strategy chosen above.
-- [ ] **enqueue() examples**: Update all examples in this doc and in code comments to use string form `enqueue("SendEmail", args)` before writing any implementation code.
+- [ ] **Branch**: Create `feat/job-dsl-v2` from `main`. Verify `git log main --oneline | head` shows the Phase 1 concurrency commits.
+- [ ] **std/kv approach confirmed**: Key-prefix ordering (decided). No new std/kv operations needed for PR 2a. Document the key layout in a comment at the top of `src/stdlib/jobs.rs` before writing anything else.
+- [ ] **enqueue() API**: String literal — `enqueue("SendEmail", args)`. All examples in code and tests use this form.
 
 ---
 
-## Sub-Agent Notes
+## Implementation Notes
 
-If this work is delegated to a sub-agent (Claude Code, Codex, etc.), include the following in the task prompt:
-
-**Must include:**
-- Full content of `~/.openclaw/skills/ntnt/SKILL.md` (Core Development Workflow section at minimum)
-- The Architecture Notes section from this doc verbatim
-- The std/kv gaps section with chosen approach pre-filled
-
-**Hard rules for the sub-agent:**
-1. Read the ntnt skill before touching any file
+**Hard rules:**
+1. Everything is written fresh from `main`. No external references.
 2. No `eprintln!` — all errors returned via `Err(...)` or `Value::Error`
-3. Complete `// @ntnt` doc blocks on every new public function — CI enforces this
-4. Complete typechecker signatures — partial sigs will get flagged in review
+3. Complete `// @ntnt` doc blocks on every new public function — build fails if missing
+4. Complete typechecker signatures — partial sigs will be flagged in review
 5. Run `cargo build --release --locked && ntnt docs --generate` before every push
-6. Report test count delta: baseline is ~383 `#[test]` functions across the test suite (post PR #31 merge). State final count in completion message.
-7. Post plan before executing, confirm before merging or pushing to main
+6. Test count baseline: ~383 `#[test]` functions (post Phase 1 merge). Report final count on completion.
 
 ## Open Design Questions (resolve during implementation)
 
