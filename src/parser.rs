@@ -148,7 +148,7 @@ impl Parser {
             self.pub_declaration(attributes)
         } else if self.match_token(&[TokenKind::Server]) {
             self.server_declaration()
-        } else if self.match_token(&[TokenKind::Job]) {
+        } else if self.match_identifier_name("job") {
             self.job_declaration()
         } else {
             // statement() already wraps with Located, so return directly
@@ -900,30 +900,32 @@ impl Parser {
 
         self.consume(&TokenKind::LeftParen, "Expected '(' after 'perform'")?;
         let perform_params = self.parse_parameters()?;
-        self.consume(&TokenKind::RightParen, "Expected ')' after perform parameters")?;
+        self.consume(
+            &TokenKind::RightParen,
+            "Expected ')' after perform parameters",
+        )?;
         self.consume(&TokenKind::LeftBrace, "Expected '{' before perform body")?;
         let perform_body = self.block()?;
 
         // Parse optional on_failure block
-        let on_failure =
-            if let Some(token) = self.peek() {
-                if matches!(&token.kind, TokenKind::Identifier(s) if s == "on_failure") {
-                    self.advance(); // consume "on_failure"
-                    self.consume(&TokenKind::LeftParen, "Expected '(' after 'on_failure'")?;
-                    let failure_params = self.parse_parameters()?;
-                    self.consume(
-                        &TokenKind::RightParen,
-                        "Expected ')' after on_failure parameters",
-                    )?;
-                    self.consume(&TokenKind::LeftBrace, "Expected '{' before on_failure body")?;
-                    let failure_body = self.block()?;
-                    Some((failure_params, failure_body))
-                } else {
-                    None
-                }
+        let on_failure = if let Some(token) = self.peek() {
+            if matches!(&token.kind, TokenKind::Identifier(s) if s == "on_failure") {
+                self.advance(); // consume "on_failure"
+                self.consume(&TokenKind::LeftParen, "Expected '(' after 'on_failure'")?;
+                let failure_params = self.parse_parameters()?;
+                self.consume(
+                    &TokenKind::RightParen,
+                    "Expected ')' after on_failure parameters",
+                )?;
+                self.consume(&TokenKind::LeftBrace, "Expected '{' before on_failure body")?;
+                let failure_body = self.block()?;
+                Some((failure_params, failure_body))
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
 
         // Close outer job block
         self.consume(&TokenKind::RightBrace, "Expected '}' to close job block")?;
@@ -3162,9 +3164,7 @@ mod tests {
         .unwrap();
         match unwrap_located(&program.statements[0]) {
             Statement::Job {
-                name,
-                on_failure,
-                ..
+                name, on_failure, ..
             } => {
                 assert_eq!(name, "SendEmail");
                 let (params, _body) = on_failure.as_ref().expect("Expected on_failure block");

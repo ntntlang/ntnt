@@ -128,9 +128,6 @@ pub enum TokenKind {
     Server, // "server"
     Group,  // "group"
 
-    // Job DSL keywords
-    Job, // "job"
-
     // Operators
     Plus,    // +
     Minus,   // -
@@ -1329,9 +1326,6 @@ impl<'a> Lexer<'a> {
             // Server block keywords
             "server" => TokenKind::Server,
             "group" => TokenKind::Group,
-
-            // Job DSL keywords
-            "job" => TokenKind::Job,
 
             // Literals
             "true" => TokenKind::Bool(true),

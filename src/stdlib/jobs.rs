@@ -22,6 +22,7 @@
 //! let status = job_status(id)
 //! ```
 
+use crate::ast::{Block, Parameter};
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
 use crate::stdlib::kv;
@@ -75,6 +76,12 @@ pub struct JobDefinition {
     pub queue: String,
     /// Options: retry count, timeout, etc. (Send + Sync safe).
     pub options: HashMap<String, JobOptionValue>,
+    /// Parameters for the perform block (e.g., [to, body])
+    pub perform_params: Vec<Parameter>,
+    /// Body of the perform block — executed by workers in a fresh interpreter
+    pub perform_body: Block,
+    /// Optional on_failure handler: (params, body)
+    pub on_failure: Option<(Vec<Parameter>, Block)>,
 }
 
 /// An enqueued job stored in the test queue (Send + Sync safe).
@@ -165,9 +172,10 @@ impl JobRuntime {
         }
 
         // Lazy init with default or configured URL
-        let url = self.kv_url.lock().map_err(|e| {
-            IntentError::runtime_error(format!("Job KV URL lock poisoned: {}", e))
-        })?;
+        let url = self
+            .kv_url
+            .lock()
+            .map_err(|e| IntentError::runtime_error(format!("Job KV URL lock poisoned: {}", e)))?;
 
         let kv_handle_value = kv::open_kv(&url)?;
 
@@ -303,9 +311,10 @@ pub fn init() -> HashMap<String, Value> {
 
                 // Update the URL
                 {
-                    let mut url = JOB_RUNTIME.kv_url.lock().map_err(|e| {
-                        IntentError::runtime_error(format!("Lock error: {}", e))
-                    })?;
+                    let mut url = JOB_RUNTIME
+                        .kv_url
+                        .lock()
+                        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
                     *url = store_url.clone();
                 }
 
@@ -313,9 +322,10 @@ pub fn init() -> HashMap<String, Value> {
                 let kv_handle_value = kv::open_kv(&store_url)?;
                 let handle_info = extract_kv_handle_info(&kv_handle_value)?;
                 {
-                    let mut info = JOB_RUNTIME.kv_handle_info.lock().map_err(|e| {
-                        IntentError::runtime_error(format!("Lock error: {}", e))
-                    })?;
+                    let mut info = JOB_RUNTIME
+                        .kv_handle_info
+                        .lock()
+                        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
                     *info = Some(handle_info);
                 }
 
@@ -425,12 +435,18 @@ pub fn init() -> HashMap<String, Value> {
                     job_data.insert(k.clone(), v.to_value());
                 }
 
+                // Build pending key and store it in job data for O(1) cancel_job lookup
+                let pending_key = format!("jobs:pending:{}:{}", ts, job_id);
+                job_data.insert(
+                    "pending_key".to_string(),
+                    Value::String(pending_key.clone()),
+                );
+
                 // Write to KV: jobs:data:<id>
                 let data_key = format!("jobs:data:{}", job_id);
                 kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
 
                 // Write queue ordering key: jobs:pending:<timestamp>:<id>
-                let pending_key = format!("jobs:pending:{}:{}", ts, job_id);
                 kv::kv_set(
                     &kv_handle,
                     &pending_key,
@@ -553,20 +569,19 @@ pub fn init() -> HashMap<String, Value> {
                     return Ok(Value::ok(Value::Bool(false)));
                 }
 
+                // Read pending_key before mutating job_data
+                let pending_key = match job_data.get("pending_key") {
+                    Some(Value::String(s)) => Some(s.clone()),
+                    _ => None,
+                };
+
                 // Update status to cancelled
-                job_data.insert(
-                    "status".to_string(),
-                    Value::String("cancelled".to_string()),
-                );
+                job_data.insert("status".to_string(), Value::String("cancelled".to_string()));
                 kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
 
-                // Remove from pending queue — find and delete the pending key
-                let pending_keys = kv::kv_list(&kv_handle, Some("jobs:pending:"))?;
-                for key in pending_keys {
-                    if key.ends_with(&job_id) {
-                        kv::kv_del(&kv_handle, &key)?;
-                        break;
-                    }
+                // Remove from pending queue — O(1) direct delete via stored pending_key
+                if let Some(pk) = pending_key {
+                    kv::kv_del(&kv_handle, &pk)?;
                 }
 
                 Ok(Value::ok(Value::Bool(true)))
@@ -591,14 +606,37 @@ mod tests {
         f();
     }
 
+    /// Create a minimal JobDefinition for tests (no perform body needed for registry tests).
+    fn test_job_def(name: &str, queue: &str) -> JobDefinition {
+        JobDefinition {
+            name: name.to_string(),
+            queue: queue.to_string(),
+            options: HashMap::new(),
+            perform_params: vec![],
+            perform_body: crate::ast::Block { statements: vec![] },
+            on_failure: None,
+        }
+    }
+
+    fn test_job_def_with_opts(
+        name: &str,
+        queue: &str,
+        options: HashMap<String, JobOptionValue>,
+    ) -> JobDefinition {
+        JobDefinition {
+            name: name.to_string(),
+            queue: queue.to_string(),
+            options,
+            perform_params: vec![],
+            perform_body: crate::ast::Block { statements: vec![] },
+            on_failure: None,
+        }
+    }
+
     #[test]
     fn test_register_job() {
         with_clean_runtime(|| {
-            let result = JOB_RUNTIME.register_job(JobDefinition {
-                name: "TestJob".to_string(),
-                queue: "default".to_string(),
-                options: HashMap::new(),
-            });
+            let result = JOB_RUNTIME.register_job(test_job_def("TestJob", "default"));
             assert!(result.is_ok());
 
             let job = JOB_RUNTIME.get_job("TestJob").unwrap();
@@ -613,18 +651,10 @@ mod tests {
     fn test_duplicate_job_registration() {
         with_clean_runtime(|| {
             JOB_RUNTIME
-                .register_job(JobDefinition {
-                    name: "DupJob".to_string(),
-                    queue: "default".to_string(),
-                    options: HashMap::new(),
-                })
+                .register_job(test_job_def("DupJob", "default"))
                 .unwrap();
 
-            let result = JOB_RUNTIME.register_job(JobDefinition {
-                name: "DupJob".to_string(),
-                queue: "other".to_string(),
-                options: HashMap::new(),
-            });
+            let result = JOB_RUNTIME.register_job(test_job_def("DupJob", "other"));
             assert!(result.is_err());
             let err = format!("{}", result.unwrap_err());
             assert!(err.contains("Duplicate job definition"));
@@ -647,11 +677,7 @@ mod tests {
             options.insert("timeout".to_string(), JobOptionValue::Int(120));
 
             JOB_RUNTIME
-                .register_job(JobDefinition {
-                    name: "OptsJob".to_string(),
-                    queue: "default".to_string(),
-                    options,
-                })
+                .register_job(test_job_def_with_opts("OptsJob", "default", options))
                 .unwrap();
 
             let def = JOB_RUNTIME.get_job("OptsJob").unwrap().unwrap();
@@ -690,11 +716,7 @@ mod tests {
         with_clean_runtime(|| {
             // Register a job
             JOB_RUNTIME
-                .register_job(JobDefinition {
-                    name: "EmailJob".to_string(),
-                    queue: "emails".to_string(),
-                    options: HashMap::new(),
-                })
+                .register_job(test_job_def("EmailJob", "emails"))
                 .unwrap();
 
             // Configure with in-memory SQLite
@@ -720,11 +742,8 @@ mod tests {
                 "to".to_string(),
                 Value::String("alice@example.com".to_string()),
             );
-            let result = enqueue_fn(&[
-                Value::String("EmailJob".to_string()),
-                Value::Map(payload),
-            ])
-            .unwrap();
+            let result =
+                enqueue_fn(&[Value::String("EmailJob".to_string()), Value::Map(payload)]).unwrap();
 
             // Result should be Ok(job_id_string)
             match result {
@@ -740,21 +759,24 @@ mod tests {
                                 Value::NativeFunction { func, .. } => func,
                                 _ => panic!("Expected NativeFunction"),
                             };
-                            let status_result =
-                                status_fn(&[Value::String(id.clone())]).unwrap();
+                            let status_result = status_fn(&[Value::String(id.clone())]).unwrap();
                             match status_result {
                                 Value::EnumValue {
                                     variant, values, ..
-                                } if variant == "Ok" => {
-                                    match &values[0] {
-                                        Value::Map(data) => {
-                                            assert!(matches!(data.get("status"), Some(Value::String(s)) if s == "pending"));
-                                            assert!(matches!(data.get("type"), Some(Value::String(s)) if s == "EmailJob"));
-                                            assert!(matches!(data.get("queue"), Some(Value::String(s)) if s == "emails"));
-                                        }
-                                        _ => panic!("Expected Map in status Ok"),
+                                } if variant == "Ok" => match &values[0] {
+                                    Value::Map(data) => {
+                                        assert!(
+                                            matches!(data.get("status"), Some(Value::String(s)) if s == "pending")
+                                        );
+                                        assert!(
+                                            matches!(data.get("type"), Some(Value::String(s)) if s == "EmailJob")
+                                        );
+                                        assert!(
+                                            matches!(data.get("queue"), Some(Value::String(s)) if s == "emails")
+                                        );
                                     }
-                                }
+                                    _ => panic!("Expected Map in status Ok"),
+                                },
                                 _ => panic!("Expected Ok from job_status"),
                             }
                         }
@@ -771,11 +793,7 @@ mod tests {
         with_clean_runtime(|| {
             // Register and configure
             JOB_RUNTIME
-                .register_job(JobDefinition {
-                    name: "CancelJob".to_string(),
-                    queue: "default".to_string(),
-                    options: HashMap::new(),
-                })
+                .register_job(test_job_def("CancelJob", "default"))
                 .unwrap();
 
             let module = init();
@@ -835,7 +853,9 @@ mod tests {
                     variant, values, ..
                 } if variant == "Ok" => match &values[0] {
                     Value::Map(data) => {
-                        assert!(matches!(data.get("status"), Some(Value::String(s)) if s == "cancelled"));
+                        assert!(
+                            matches!(data.get("status"), Some(Value::String(s)) if s == "cancelled")
+                        );
                     }
                     _ => panic!("Expected Map"),
                 },
