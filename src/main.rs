@@ -1056,14 +1056,16 @@ fn run_worker_command(
             Some(ntnt::interpreter::Value::NativeFunction { func, .. }) => *func,
             _ => anyhow::bail!("work_async not found in std/jobs module"),
         };
-        func(&[ntnt::interpreter::Value::Map(opts)])?;
-
-        // Block until Ctrl-C, then shut down all workers
+        // Register Ctrl-C handler BEFORE spawning workers so shutdown is always reachable
         let (tx, rx) = std::sync::mpsc::channel();
         ctrlc::set_handler(move || {
             let _ = tx.send(());
         })
         .map_err(|e| anyhow::anyhow!("Failed to set Ctrl-C handler: {}", e))?;
+
+        func(&[ntnt::interpreter::Value::Map(opts)])?;
+
+        // Block until Ctrl-C, then shut down all workers
         let _ = rx.recv();
         ntnt::stdlib::concurrent::RUNTIME.shutdown();
         return Ok(());

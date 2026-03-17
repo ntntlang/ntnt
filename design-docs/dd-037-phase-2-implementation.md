@@ -303,7 +303,7 @@ Scheduled ─→ Pending ─→ Active ─→ Completed
 
 ### Streaming Logs
 - [x] Every job event emits a structured JSON log line to stderr
-- [x] `on_job_event(fn(event))` — user hook for custom handling
+- ~~`on_job_event(fn(event))`~~ — removed, deferred to [Phase 3](dd-037-phase-3-implementation.md) (cross-thread closure design needed)
 - [x] Events: `job.enqueued`, `job.started`, `job.completed`, `job.failed`, `job.dead`
 
 ### Deduplication & Expiration

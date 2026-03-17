@@ -629,9 +629,10 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
 
         let exec_result = execute_job_perform(&def, &payload);
 
-        // Check job timeout
+        // Check job timeout (non-negative values only; >= for boundary correctness)
         let timed_out = if let Some(Value::Int(timeout_secs)) = job_data.get("timeout") {
-            start.elapsed().as_secs() > (*timeout_secs as u64)
+            let timeout = (*timeout_secs).max(0) as u64;
+            timeout > 0 && start.elapsed().as_secs() >= timeout
         } else {
             false
         };
@@ -864,11 +865,13 @@ fn emit_job_event(event: &str, fields: &[(&str, Value)]) {
     for (k, v) in fields {
         map.insert(k.to_string(), v.clone());
     }
-    // Write JSON to stderr
+    // Write JSON to stderr — lock for atomic line output across concurrent workers
     if let Ok(json) =
         serde_json::to_string(&crate::stdlib::kv::value_to_json_public(&Value::Map(map)))
     {
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), format!("{}\n", json).as_bytes());
+        let stderr = std::io::stderr();
+        let mut locked = stderr.lock();
+        let _ = std::io::Write::write_all(&mut locked, format!("{}\n", json).as_bytes());
     }
 }
 
@@ -1356,9 +1359,15 @@ pub fn init() -> HashMap<String, Value> {
                 // Set up Ctrl-C cancellation so worker_loop can exit gracefully
                 let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let cancelled_clone = cancelled.clone();
-                let _ = ctrlc::set_handler(move || {
+                ctrlc::set_handler(move || {
                     cancelled_clone.store(true, std::sync::atomic::Ordering::Release);
-                });
+                })
+                .map_err(|e| {
+                    IntentError::runtime_error(format!(
+                        "Failed to set Ctrl-C handler: {}",
+                        e
+                    ))
+                })?;
                 CURRENT_TASK_CANCELLED.with(|cell| {
                     *cell.borrow_mut() = Some(cancelled);
                 });
