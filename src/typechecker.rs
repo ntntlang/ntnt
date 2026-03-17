@@ -1217,8 +1217,52 @@ impl TypeContext {
             | Statement::Module { .. }
             | Statement::Intent { .. }
             | Statement::Defer(_)
-            | Statement::Server { .. }
-            | Statement::Job { .. } => {}
+            | Statement::Server { .. } => {}
+
+            Statement::Job {
+                options,
+                perform_params,
+                perform_body,
+                on_failure,
+                ..
+            } => {
+                // Type-check option expressions
+                for (_opt_name, opt_expr) in options {
+                    self.infer_expression(opt_expr);
+                }
+
+                // Type-check perform body (like a function body)
+                self.push_scope();
+                for param in perform_params {
+                    let typ = param
+                        .type_annotation
+                        .as_ref()
+                        .map(|t| self.resolve_type_expr(t))
+                        .unwrap_or(Type::Any);
+                    self.bind(&param.name, typ);
+                }
+                for stmt in &perform_body.statements {
+                    self.check_statement(stmt);
+                }
+                self.pop_scope();
+
+                // Type-check on_failure body if present
+                if let Some((failure_params, failure_body)) = on_failure {
+                    self.push_scope();
+                    for param in failure_params {
+                        let typ = param
+                            .type_annotation
+                            .as_ref()
+                            .map(|t| self.resolve_type_expr(t))
+                            .unwrap_or(Type::Any);
+                        self.bind(&param.name, typ);
+                    }
+                    for stmt in &failure_body.statements {
+                        self.check_statement(stmt);
+                    }
+                    self.pop_scope();
+                }
+            }
             Statement::Located { stmt, .. } => self.check_statement(stmt),
         }
     }

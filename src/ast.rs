@@ -204,7 +204,7 @@ pub enum Statement {
     /// Job declaration: background job definition with queue and perform body
     ///
     /// ```ntnt
-    /// Job SendEmail on emails (retry: 5, timeout: 120) {
+    /// job SendEmail on emails (retry: 5, timeout: 120) {
     ///     perform(to, body) {
     ///         // send email logic
     ///     }

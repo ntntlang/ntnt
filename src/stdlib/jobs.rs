@@ -67,7 +67,7 @@ impl JobOptionValue {
     }
 }
 
-/// A registered job definition from `Job Name on queue { perform(...) { ... } }`.
+/// A registered job definition from `job Name on queue { perform(...) { ... } }`.
 #[derive(Debug, Clone)]
 pub struct JobDefinition {
     /// Job name (e.g., "SendEmail")
@@ -162,26 +162,43 @@ impl JobRuntime {
     }
 
     /// Get or lazily initialize the KV handle.
+    ///
+    /// Uses double-checked locking to avoid holding locks during I/O:
+    /// 1. Check kv_handle_info (fast path — already initialized)
+    /// 2. Clone URL under kv_url lock, drop it
+    /// 3. Open KV connection (slow I/O, no locks held)
+    /// 4. Store result under kv_handle_info lock (short critical section)
     fn get_or_init_kv(&self) -> Result<Value> {
-        let mut info = self.kv_handle_info.lock().map_err(|e| {
-            IntentError::runtime_error(format!("Job KV handle lock poisoned: {}", e))
-        })?;
+        // Fast path: already initialized
+        {
+            let info = self.kv_handle_info.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Job KV handle lock poisoned: {}", e))
+            })?;
+            if let Some(ref h) = *info {
+                return Ok(h.to_value());
+            }
+        } // drop kv_handle_info lock
 
-        if let Some(ref h) = *info {
-            return Ok(h.to_value());
+        // Clone URL under its own lock, then drop
+        let url = {
+            let url_guard = self.kv_url.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Job KV URL lock poisoned: {}", e))
+            })?;
+            url_guard.clone()
+        }; // drop kv_url lock
+
+        // Open KV connection — no locks held during I/O
+        let kv_handle_value = kv::open_kv(&url)?;
+        let handle_info = extract_kv_handle_info(&kv_handle_value)?;
+
+        // Store result (short critical section)
+        {
+            let mut info = self.kv_handle_info.lock().map_err(|e| {
+                IntentError::runtime_error(format!("Job KV handle lock poisoned: {}", e))
+            })?;
+            *info = Some(handle_info);
         }
 
-        // Lazy init with default or configured URL
-        let url = self
-            .kv_url
-            .lock()
-            .map_err(|e| IntentError::runtime_error(format!("Job KV URL lock poisoned: {}", e)))?;
-
-        let kv_handle_value = kv::open_kv(&url)?;
-
-        // Extract info from the returned Value::Map
-        let handle_info = extract_kv_handle_info(&kv_handle_value)?;
-        *info = Some(handle_info);
         Ok(kv_handle_value)
     }
 
@@ -298,13 +315,14 @@ pub fn init() -> HashMap<String, Value> {
                     None => "sqlite:./jobs.db".to_string(),
                 };
 
-                // Validate URL format
-                if !store_url.starts_with("sqlite:")
+                // Validate URL format — redis/valkey need explicit scheme,
+                // everything else is treated as a SQLite path (consistent with std/kv)
+                if store_url.contains("://")
                     && !store_url.starts_with("redis://")
                     && !store_url.starts_with("valkey://")
                 {
                     return Err(IntentError::runtime_error(format!(
-                        "Invalid store URL '{}'. Expected sqlite:, redis://, or valkey://",
+                        "Invalid store URL '{}'. Use a file path for SQLite, or redis:// / valkey:// for Redis",
                         store_url
                     )));
                 }
@@ -384,7 +402,7 @@ pub fn init() -> HashMap<String, Value> {
                     Some(def) => def,
                     None => {
                         return Err(IntentError::runtime_error(format!(
-                            "Job '{}' is not registered. Define it with: Job {} on <queue> {{ perform(...) {{ ... }} }}",
+                            "Job '{}' is not registered. Define it with: job {} on <queue> {{ perform(...) {{ ... }} }}",
                             job_name, job_name
                         )));
                     }
@@ -401,7 +419,12 @@ pub fn init() -> HashMap<String, Value> {
                         let payload_json = serde_json::to_string(
                             &crate::stdlib::kv::value_to_json_public(&payload),
                         )
-                        .unwrap_or_default();
+                        .map_err(|e| {
+                            IntentError::runtime_error(format!(
+                                "Failed to serialize job payload: {}",
+                                e
+                            ))
+                        })?;
                         queue.push(EnqueuedJob {
                             id: job_id.clone(),
                             job_type: job_name.clone(),
@@ -880,7 +903,7 @@ mod tests {
             let result = configure_fn(&[Value::Map(opts)]);
             assert!(result.is_err());
             let err = format!("{}", result.unwrap_err());
-            assert!(err.contains("Invalid store URL"));
+            assert!(err.contains("Invalid store URL") || err.contains("Use a file path"));
         });
     }
 

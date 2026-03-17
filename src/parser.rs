@@ -843,7 +843,7 @@ impl Parser {
         }
     }
 
-    /// Parse a job declaration: `Job Name on queue (options) { perform(params) { body } on_failure(params) { body } }`
+    /// Parse a job declaration: `job Name on queue (options) { perform(params) { body } on_failure(params) { body } }`
     fn job_declaration(&mut self) -> Result<Statement> {
         let name = self.consume_identifier("Expected job name")?;
 
