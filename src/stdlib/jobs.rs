@@ -637,7 +637,9 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
             false
         };
 
-        let exec_result = if timed_out && exec_result.is_ok() {
+        // Timeout always wins — whether the job succeeded or errored, a timeout
+        // is the root cause and should be the reported failure reason.
+        let exec_result = if timed_out {
             Err(format!(
                 "Job timed out after {}s",
                 start.elapsed().as_secs()
@@ -865,7 +867,9 @@ fn emit_job_event(event: &str, fields: &[(&str, Value)]) {
     for (k, v) in fields {
         map.insert(k.to_string(), v.clone());
     }
-    // Write JSON to stderr — lock for atomic line output across concurrent workers
+    // Write JSON to stderr — lock for atomic line output across concurrent workers.
+    // serde_json::Map uses BTreeMap (no preserve_order feature), so keys are always
+    // alphabetically sorted in the output regardless of HashMap insertion order.
     if let Ok(json) =
         serde_json::to_string(&crate::stdlib::kv::value_to_json_public(&Value::Map(map)))
     {

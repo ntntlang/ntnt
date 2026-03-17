@@ -984,6 +984,9 @@ fn run_worker_command(
     queues: Option<Vec<String>>,
     poll_interval: u64,
 ) -> anyhow::Result<()> {
+    if concurrency == 0 {
+        anyhow::bail!("--concurrency must be at least 1");
+    }
     let source = fs::read_to_string(path)?;
     let mut interpreter = Interpreter::new();
 
