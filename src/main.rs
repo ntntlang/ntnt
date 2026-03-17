@@ -312,6 +312,44 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Start background job workers for jobs defined in a .tnt file
+    ///
+    /// Loads the NTNT source file (registering all job definitions),
+    /// then starts processing jobs from the queue until Ctrl-C.
+    ///
+    /// Examples:
+    ///   ntnt worker server.tnt
+    ///   ntnt worker server.tnt --concurrency 4
+    ///   ntnt worker server.tnt --queues emails,payments
+    Worker {
+        /// The source file containing job definitions
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Number of concurrent worker threads (default: 1)
+        #[arg(long, default_value = "1")]
+        concurrency: usize,
+
+        /// Comma-separated list of queues to process (default: all)
+        #[arg(long, value_delimiter = ',')]
+        queues: Option<Vec<String>>,
+
+        /// Poll interval in milliseconds (default: 1000)
+        #[arg(long, default_value = "1000")]
+        poll_interval: u64,
+    },
+    /// Show job queue status
+    ///
+    /// Loads the NTNT source file to get KV configuration, then
+    /// displays counts of pending, active, completed, failed, and dead jobs.
+    ///
+    /// Examples:
+    ///   ntnt jobs server.tnt
+    Jobs {
+        /// The source file containing job/queue configuration
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
 }
 
 /// Intent-Driven Development subcommands
@@ -577,6 +615,13 @@ fn main() {
             generate_completions(shell);
             Ok(())
         }
+        Some(Commands::Worker {
+            file,
+            concurrency,
+            queues,
+            poll_interval,
+        }) => run_worker_command(&file, concurrency, queues, poll_interval),
+        Some(Commands::Jobs { file }) => run_jobs_status_command(&file),
         None => {
             if let Some(file) = cli.file {
                 run_file(&file, 30)
@@ -928,6 +973,141 @@ fn run_file(path: &PathBuf, timeout: u64) -> anyhow::Result<()> {
     ntnt::stdlib::concurrent::RUNTIME.shutdown();
 
     result?;
+
+    Ok(())
+}
+
+/// Start job workers for a .tnt file
+fn run_worker_command(
+    path: &PathBuf,
+    concurrency: usize,
+    queues: Option<Vec<String>>,
+    poll_interval: u64,
+) -> anyhow::Result<()> {
+    let source = fs::read_to_string(path)?;
+    let mut interpreter = Interpreter::new();
+
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let path_str = canonical_path.to_string_lossy();
+    interpreter.set_current_file(&path_str);
+    interpreter.set_main_source_file(&path_str);
+
+    let lexer = Lexer::new(&source);
+    let tokens: Vec<_> = lexer.collect();
+    let mut parser = IntentParser::new(tokens);
+    let ast = parser.parse()?;
+
+    // Evaluate the file to register all job definitions
+    interpreter.eval(&ast)?;
+
+    // Build opts map for work_jobs
+    let mut opts = std::collections::HashMap::new();
+    opts.insert(
+        "poll_interval".to_string(),
+        ntnt::interpreter::Value::Int(poll_interval as i64),
+    );
+    if let Some(ref q) = queues {
+        let queue_vals: Vec<ntnt::interpreter::Value> = q
+            .iter()
+            .map(|s| ntnt::interpreter::Value::String(s.clone()))
+            .collect();
+        opts.insert(
+            "queues".to_string(),
+            ntnt::interpreter::Value::Array(queue_vals),
+        );
+    }
+
+    // For multi-worker, use work_async + blocking wait
+    if concurrency > 1 {
+        opts.insert(
+            "concurrency".to_string(),
+            ntnt::interpreter::Value::Int(concurrency as i64),
+        );
+        let module = ntnt::stdlib::jobs::init();
+        if let Some(ntnt::interpreter::Value::NativeFunction { func, .. }) =
+            module.get("work_async")
+        {
+            let _handles = func(&[ntnt::interpreter::Value::Map(opts)])?;
+            // Block until Ctrl-C
+            let (tx, rx) = std::sync::mpsc::channel();
+            let _ = ctrlc::set_handler(move || {
+                let _ = tx.send(());
+            });
+            let _ = rx.recv();
+            ntnt::stdlib::concurrent::RUNTIME.shutdown();
+        }
+    } else {
+        // Single worker — use work_jobs (blocks until Ctrl-C)
+        let module = ntnt::stdlib::jobs::init();
+        if let Some(ntnt::interpreter::Value::NativeFunction { func, .. }) = module.get("work_jobs")
+        {
+            let _ = func(&[ntnt::interpreter::Value::Map(opts)]);
+        }
+    }
+
+    ntnt::stdlib::concurrent::RUNTIME.shutdown();
+    Ok(())
+}
+
+/// Show job queue status
+fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
+    let source = fs::read_to_string(path)?;
+    let mut interpreter = Interpreter::new();
+
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let path_str = canonical_path.to_string_lossy();
+    interpreter.set_current_file(&path_str);
+    interpreter.set_main_source_file(&path_str);
+
+    let lexer = Lexer::new(&source);
+    let tokens: Vec<_> = lexer.collect();
+    let mut parser = IntentParser::new(tokens);
+    let ast = parser.parse()?;
+
+    // Evaluate to register jobs and init KV
+    interpreter.eval(&ast)?;
+
+    // Get KV handle and count jobs by status
+    let kv_handle = ntnt::stdlib::jobs::JOB_RUNTIME.get_or_init_kv()?;
+
+    let data_keys = ntnt::stdlib::kv::kv_list(&kv_handle, Some("jobs:data:"))?;
+
+    let mut pending = 0u64;
+    let mut active = 0u64;
+    let mut completed = 0u64;
+    let mut failed = 0u64;
+    let mut dead = 0u64;
+    let mut cancelled = 0u64;
+
+    for key in &data_keys {
+        if let Ok(val) = ntnt::stdlib::kv::kv_get(&kv_handle, key) {
+            if let ntnt::interpreter::Value::Map(data) = val {
+                match data.get("status") {
+                    Some(ntnt::interpreter::Value::String(s)) => match s.as_str() {
+                        "pending" => pending += 1,
+                        "active" => active += 1,
+                        "completed" => completed += 1,
+                        "failed" => failed += 1,
+                        "dead" => dead += 1,
+                        "cancelled" => cancelled += 1,
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    println!("Job Queue Status");
+    println!("================");
+    println!("  Pending:    {}", pending);
+    println!("  Active:     {}", active);
+    println!("  Completed:  {}", completed);
+    println!("  Failed:     {}", failed);
+    println!("  Dead:       {}", dead);
+    println!("  Cancelled:  {}", cancelled);
+    println!("  ────────────────");
+    println!("  Total:      {}", data_keys.len());
 
     Ok(())
 }

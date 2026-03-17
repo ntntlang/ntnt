@@ -130,6 +130,8 @@ pub struct JobRuntime {
     kv_url: Mutex<String>,
     /// Test queue: when Some, enqueue() collects here instead of writing to KV.
     test_queue: Mutex<Option<Vec<EnqueuedJob>>>,
+    /// User callback for job events, set by on_job_event()
+    event_handler: Mutex<Option<fn(&[Value]) -> Result<Value>>>,
 }
 
 impl JobRuntime {
@@ -139,6 +141,7 @@ impl JobRuntime {
             kv_handle_info: Mutex::new(None),
             kv_url: Mutex::new("sqlite:./jobs.db".to_string()),
             test_queue: Mutex::new(None),
+            event_handler: Mutex::new(None),
         }
     }
 
@@ -172,7 +175,7 @@ impl JobRuntime {
     /// 2. Clone URL under kv_url lock, drop it
     /// 3. Open KV connection (slow I/O, no locks held)
     /// 4. Store result under kv_handle_info lock (short critical section)
-    fn get_or_init_kv(&self) -> Result<Value> {
+    pub fn get_or_init_kv(&self) -> Result<Value> {
         // Fast path: already initialized
         {
             let info = self.kv_handle_info.lock().map_err(|e| {
@@ -220,6 +223,9 @@ impl JobRuntime {
         }
         if let Ok(mut tq) = self.test_queue.lock() {
             *tq = None;
+        }
+        if let Ok(mut h) = self.event_handler.lock() {
+            *h = None;
         }
     }
 }
@@ -444,6 +450,15 @@ fn enqueue_internal(
         None,
     )?;
 
+    emit_job_event(
+        "job.enqueued",
+        &[
+            ("job_id", Value::String(job_id.clone())),
+            ("type", Value::String(job_name.to_string())),
+            ("queue", Value::String(job_def.queue.clone())),
+        ],
+    );
+
     Ok(Value::ok(Value::String(job_id)))
 }
 
@@ -590,14 +605,67 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
             _ => 0,
         };
 
+        // Emit job.started event
+        emit_job_event(
+            "job.started",
+            &[
+                ("job_id", Value::String(job_id.clone())),
+                ("type", Value::String(job_type.clone())),
+                (
+                    "queue",
+                    Value::String(
+                        job_data
+                            .get("queue")
+                            .and_then(|v| {
+                                if let Value::String(s) = v {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default(),
+                    ),
+                ),
+                ("attempt", Value::Int(attempts + 1)),
+            ],
+        );
+
+        // Record start time for timeout detection
+        let start = std::time::Instant::now();
+
+        let exec_result = execute_job_perform(&def, &payload);
+
+        // Check job timeout
+        let timed_out = if let Some(Value::Int(timeout_secs)) = job_data.get("timeout") {
+            start.elapsed().as_secs() > (*timeout_secs as u64)
+        } else {
+            false
+        };
+
+        let exec_result = if timed_out && exec_result.is_ok() {
+            Err(format!(
+                "Job timed out after {}s",
+                start.elapsed().as_secs()
+            ))
+        } else {
+            exec_result
+        };
+
         // Execute
-        match execute_job_perform(&def, &payload) {
+        match exec_result {
             Ok(_) => {
                 // Success
                 job_data.insert("status".to_string(), Value::String("completed".to_string()));
                 job_data.insert("completed_at".to_string(), Value::String(timestamp_key()));
                 let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
                 let _ = kv::kv_del(&kv_handle, &active_key);
+                emit_job_event(
+                    "job.completed",
+                    &[
+                        ("job_id", Value::String(job_id.clone())),
+                        ("type", Value::String(job_type.clone())),
+                    ],
+                );
             }
             Err(err_msg) => {
                 let new_attempts = attempts + 1;
@@ -652,11 +720,30 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                         &Value::String(job_id.clone()),
                         None,
                     );
+                    emit_job_event(
+                        "job.failed",
+                        &[
+                            ("job_id", Value::String(job_id.clone())),
+                            ("type", Value::String(job_type.clone())),
+                            ("error", Value::String(err_msg.clone())),
+                            ("attempt", Value::Int(new_attempts)),
+                            ("will_retry", Value::Bool(true)),
+                        ],
+                    );
                 } else {
                     // Exhausted retries — mark as dead
                     job_data.insert("status".to_string(), Value::String("dead".to_string()));
                     job_data.insert("dead_at".to_string(), Value::String(timestamp_key()));
                     let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
+                    emit_job_event(
+                        "job.dead",
+                        &[
+                            ("job_id", Value::String(job_id.clone())),
+                            ("type", Value::String(job_type.clone())),
+                            ("error", Value::String(err_msg.clone())),
+                            ("attempt", Value::Int(new_attempts)),
+                        ],
+                    );
                 }
 
                 let _ = kv::kv_del(&kv_handle, &active_key);
@@ -772,6 +859,32 @@ fn spawn_worker_task(
 }
 
 // ============================================================================
+// Event emission helper
+// ============================================================================
+
+/// Emit a structured job event to stderr as JSON, and call user handler if set.
+fn emit_job_event(event: &str, fields: &[(&str, Value)]) {
+    let mut map = HashMap::new();
+    map.insert("event".to_string(), Value::String(event.to_string()));
+    map.insert("timestamp".to_string(), Value::String(timestamp_key()));
+    for (k, v) in fields {
+        map.insert(k.to_string(), v.clone());
+    }
+    // Write JSON to stderr
+    if let Ok(json) = serde_json::to_string(&crate::stdlib::kv::value_to_json_public(&Value::Map(
+        map.clone(),
+    ))) {
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), format!("{}\n", json).as_bytes());
+    }
+    // Call user handler if set
+    if let Ok(handler) = JOB_RUNTIME.event_handler.lock() {
+        if let Some(func) = *handler {
+            let _ = func(&[Value::Map(map)]);
+        }
+    }
+}
+
+// ============================================================================
 // Module Export
 // ============================================================================
 
@@ -811,6 +924,17 @@ pub fn init() -> HashMap<String, Value> {
                         ))
                     }
                 };
+
+                // Check for testing mode
+                if let Some(Value::String(mode)) = opts.get("mode") {
+                    if mode == "testing" {
+                        let mut tq = JOB_RUNTIME.test_queue.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("Lock error: {}", e))
+                        })?;
+                        *tq = Some(Vec::new());
+                        return Ok(Value::ok(Value::Unit));
+                    }
+                }
 
                 // Extract store URL
                 let store_url = match opts.get("store") {
@@ -1172,10 +1296,10 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt work_async
     // @module std/jobs
-    // @signature work_async(opts?: Map) -> TaskHandle | Array<TaskHandle>
+    // @signature work_async(opts?: Map) -> Array<TaskHandle>
     // Start one or more background worker threads that process jobs from the queue.
     //
-    // Returns a TaskHandle (or Array of TaskHandles when concurrency > 1) that
+    // Always returns an Array of TaskHandles (even for a single worker) that
     // can be used with cancel_task() to stop the workers. Workers run until
     // cancelled. If configure_queue() hasn't been called, auto-initializes
     // with the default SQLite store.
@@ -1183,7 +1307,7 @@ pub fn init() -> HashMap<String, Value> {
     //   - "poll_interval": poll interval in milliseconds (default 1000)
     //   - "concurrency": number of parallel worker threads (default 1)
     //   - "queues": array of queue names to process (default: all queues)
-    // @returns TaskHandle for a single worker, or Array<TaskHandle> for concurrency > 1
+    // @returns Array of TaskHandles (one per worker)
     // @see_also work_jobs, cancel_task
     // @example work_async() ~ "Start a single background worker"
     // @example work_async(map { "concurrency": 4, "poll_interval": 500 }) ~ "Start 4 workers polling every 500ms"
@@ -1197,19 +1321,14 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| {
                 let (poll_interval, concurrency, queues) = parse_work_opts(args)?;
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-
-                if concurrency == 1 {
-                    let handle = spawn_worker_task(kv_handle, poll_interval, queues)?;
-                    Ok(handle)
-                } else {
-                    let mut handles = Vec::new();
-                    for _ in 0..concurrency {
-                        let handle =
-                            spawn_worker_task(kv_handle.clone(), poll_interval, queues.clone())?;
-                        handles.push(handle);
+                let mut handles = Vec::new();
+                for _ in 0..concurrency {
+                    match spawn_worker_task(kv_handle.clone(), poll_interval, queues.clone()) {
+                        Ok(handle) => handles.push(handle),
+                        Err(e) => return Err(e),
                     }
-                    Ok(Value::Array(handles))
                 }
+                Ok(Value::Array(handles))
             },
         },
     );
@@ -1245,8 +1364,343 @@ pub fn init() -> HashMap<String, Value> {
                 }
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
                 let kv_info = extract_kv_handle_info(&kv_handle)?;
+
+                // Set up Ctrl-C cancellation so worker_loop can exit gracefully
+                let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancelled_clone = cancelled.clone();
+                let _ = ctrlc::set_handler(move || {
+                    cancelled_clone.store(true, std::sync::atomic::Ordering::Release);
+                });
+                CURRENT_TASK_CANCELLED.with(|cell| {
+                    *cell.borrow_mut() = Some(cancelled);
+                });
+
                 worker_loop(kv_info, poll_interval, queues);
                 Ok(Value::Unit)
+            },
+        },
+    );
+
+    // @ntnt assert_enqueued
+    // @module std/jobs
+    // @signature assert_enqueued(job_name: String, args?: Map) -> Result<Bool, String>
+    // Assert that a job was enqueued in testing mode.
+    //
+    // Checks the test queue for a job with the given name. If args is provided,
+    // performs a partial match — every key in args must match the corresponding
+    // key in the job's payload. Returns Ok(true) on success, Err with a
+    // descriptive message listing what was actually enqueued on failure.
+    // Must call configure_queue(map { "mode": "testing" }) first.
+    // @param job_name The job name to look for (e.g., "SendEmail")
+    // @param args Optional map of payload keys to match (partial match)
+    // @returns Ok(true) if found and matches, Err with details otherwise
+    // @see_also assert_not_enqueued, drain_jobs, clear_jobs
+    // @example assert_enqueued("SendEmail") ~ "Assert any SendEmail was enqueued"
+    // @example assert_enqueued("SendEmail", map { "to": "alice@example.com" }) ~ "Assert SendEmail with specific args"
+    module.insert(
+        "assert_enqueued".to_string(),
+        Value::NativeFunction {
+            name: "assert_enqueued".to_string(),
+            arity: 1,
+            max_arity: 2,
+            func: |args| {
+                if args.is_empty() {
+                    return Err(IntentError::type_error(
+                        "assert_enqueued() requires at least 1 argument (job_name)".to_string(),
+                    ));
+                }
+                let job_name = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "assert_enqueued() first argument must be a string job name"
+                                .to_string(),
+                        ))
+                    }
+                };
+
+                let expected_args: Option<&HashMap<String, Value>> = if args.len() >= 2 {
+                    match &args[1] {
+                        Value::Map(m) => Some(m),
+                        _ => {
+                            return Err(IntentError::type_error(
+                                "assert_enqueued() second argument must be a map".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let tq = JOB_RUNTIME
+                    .test_queue
+                    .lock()
+                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+
+                let queue = match tq.as_ref() {
+                    Some(q) => q,
+                    None => {
+                        return Err(IntentError::runtime_error(
+                            "assert_enqueued() requires testing mode. Call configure_queue(map { \"mode\": \"testing\" }) first.".to_string(),
+                        ))
+                    }
+                };
+
+                // Collect matching jobs
+                let matching: Vec<&EnqueuedJob> = queue
+                    .iter()
+                    .filter(|j| j.job_type == job_name)
+                    .collect();
+
+                if matching.is_empty() {
+                    let enqueued_types: Vec<String> =
+                        queue.iter().map(|j| j.job_type.clone()).collect();
+                    return Err(IntentError::runtime_error(format!(
+                        "Expected '{}' to be enqueued, but it was not. Enqueued jobs: [{}]",
+                        job_name,
+                        enqueued_types.join(", ")
+                    )));
+                }
+
+                // If args provided, check for partial match
+                if let Some(expected) = expected_args {
+                    for job in &matching {
+                        let payload: serde_json::Value =
+                            serde_json::from_str(&job.payload_json).unwrap_or(serde_json::Value::Null);
+                        let all_match = expected.iter().all(|(k, v)| {
+                            let expected_json =
+                                crate::stdlib::kv::value_to_json_public(v);
+                            payload.get(k).map(|actual| *actual == expected_json).unwrap_or(false)
+                        });
+                        if all_match {
+                            return Ok(Value::ok(Value::Bool(true)));
+                        }
+                    }
+                    // None matched the args
+                    let payloads: Vec<String> =
+                        matching.iter().map(|j| j.payload_json.clone()).collect();
+                    return Err(IntentError::runtime_error(format!(
+                        "Found {} '{}' job(s) enqueued, but none matched the expected args. Payloads: [{}]",
+                        matching.len(),
+                        job_name,
+                        payloads.join(", ")
+                    )));
+                }
+
+                Ok(Value::ok(Value::Bool(true)))
+            },
+        },
+    );
+
+    // @ntnt assert_not_enqueued
+    // @module std/jobs
+    // @signature assert_not_enqueued(job_name: String) -> Result<Bool, String>
+    // Assert that a job was NOT enqueued in testing mode.
+    //
+    // Checks the test queue and returns an error if any job with the given name
+    // is found. Returns Ok(true) if no such job was enqueued.
+    // Must call configure_queue(map { "mode": "testing" }) first.
+    // @param job_name The job name to check (e.g., "SendEmail")
+    // @returns Ok(true) if not enqueued, Err with details if found
+    // @see_also assert_enqueued, drain_jobs, clear_jobs
+    // @example assert_not_enqueued("SendEmail") ~ "Assert no SendEmail was enqueued"
+    module.insert(
+        "assert_not_enqueued".to_string(),
+        Value::NativeFunction {
+            name: "assert_not_enqueued".to_string(),
+            arity: 1,
+            max_arity: 1,
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(IntentError::type_error(
+                        "assert_not_enqueued() requires 1 argument (job_name)".to_string(),
+                    ));
+                }
+                let job_name = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "assert_not_enqueued() argument must be a string job name".to_string(),
+                        ))
+                    }
+                };
+
+                let tq = JOB_RUNTIME
+                    .test_queue
+                    .lock()
+                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+
+                let queue = match tq.as_ref() {
+                    Some(q) => q,
+                    None => {
+                        return Err(IntentError::runtime_error(
+                            "assert_not_enqueued() requires testing mode. Call configure_queue(map { \"mode\": \"testing\" }) first.".to_string(),
+                        ))
+                    }
+                };
+
+                let found: Vec<&EnqueuedJob> =
+                    queue.iter().filter(|j| j.job_type == job_name).collect();
+
+                if !found.is_empty() {
+                    let payloads: Vec<String> =
+                        found.iter().map(|j| j.payload_json.clone()).collect();
+                    return Err(IntentError::runtime_error(format!(
+                        "Expected '{}' NOT to be enqueued, but found {} instance(s). Payloads: [{}]",
+                        job_name,
+                        found.len(),
+                        payloads.join(", ")
+                    )));
+                }
+
+                Ok(Value::ok(Value::Bool(true)))
+            },
+        },
+    );
+
+    // @ntnt drain_jobs
+    // @module std/jobs
+    // @signature drain_jobs() -> Result<Int, String>
+    // Execute all enqueued test jobs synchronously and return the count.
+    //
+    // Takes all jobs from the test queue and executes each via the job's perform
+    // block synchronously in the current thread. Returns the number of jobs
+    // executed. Useful for integration tests that need to verify side effects.
+    // Must call configure_queue(map { "mode": "testing" }) first.
+    // @returns Ok(Int) with count of jobs executed, or Err on failure
+    // @see_also assert_enqueued, clear_jobs
+    // @example drain_jobs() ~ "Execute all pending test jobs"
+    module.insert(
+        "drain_jobs".to_string(),
+        Value::NativeFunction {
+            name: "drain_jobs".to_string(),
+            arity: 0,
+            max_arity: 0,
+            func: |_args| {
+                let jobs: Vec<EnqueuedJob> = {
+                    let mut tq = JOB_RUNTIME
+                        .test_queue
+                        .lock()
+                        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+                    match tq.as_mut() {
+                        Some(q) => std::mem::take(q),
+                        None => {
+                            return Err(IntentError::runtime_error(
+                                "drain_jobs() requires testing mode. Call configure_queue(map { \"mode\": \"testing\" }) first.".to_string(),
+                            ))
+                        }
+                    }
+                };
+
+                let count = jobs.len() as i64;
+                for job in jobs {
+                    let def = match JOB_RUNTIME.get_job(&job.job_type)? {
+                        Some(d) => d,
+                        None => {
+                            return Err(IntentError::runtime_error(format!(
+                                "drain_jobs(): no job definition found for '{}'",
+                                job.job_type
+                            )))
+                        }
+                    };
+
+                    let payload_json: serde_json::Value =
+                        serde_json::from_str(&job.payload_json).unwrap_or(serde_json::Value::Null);
+
+                    // Convert serde_json::Value back to HashMap<String, Value>
+                    let payload: HashMap<String, Value> = match payload_json {
+                        serde_json::Value::Object(obj) => obj
+                            .into_iter()
+                            .map(|(k, v)| (k, crate::stdlib::kv::json_to_value_public(&v)))
+                            .collect(),
+                        _ => HashMap::new(),
+                    };
+
+                    execute_job_perform(&def, &payload).map_err(|e| {
+                        IntentError::runtime_error(format!(
+                            "drain_jobs(): job '{}' failed: {}",
+                            job.job_type, e
+                        ))
+                    })?;
+                }
+
+                Ok(Value::ok(Value::Int(count)))
+            },
+        },
+    );
+
+    // @ntnt clear_jobs
+    // @module std/jobs
+    // @signature clear_jobs() -> Result<Unit, String>
+    // Clear all jobs from the test queue without executing them.
+    //
+    // Empties the test queue. Useful for resetting state between tests.
+    // Must call configure_queue(map { "mode": "testing" }) first.
+    // @returns Ok(Unit) on success, Err if not in testing mode
+    // @see_also assert_enqueued, drain_jobs
+    // @example clear_jobs() ~ "Clear all enqueued test jobs"
+    module.insert(
+        "clear_jobs".to_string(),
+        Value::NativeFunction {
+            name: "clear_jobs".to_string(),
+            arity: 0,
+            max_arity: 0,
+            func: |_args| {
+                let mut tq = JOB_RUNTIME
+                    .test_queue
+                    .lock()
+                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+                match tq.as_mut() {
+                    Some(q) => {
+                        q.clear();
+                        Ok(Value::ok(Value::Unit))
+                    }
+                    None => Err(IntentError::runtime_error(
+                        "clear_jobs() requires testing mode. Call configure_queue(map { \"mode\": \"testing\" }) first.".to_string(),
+                    )),
+                }
+            },
+        },
+    );
+
+    // @ntnt on_job_event
+    // @module std/jobs
+    // @signature on_job_event(handler: Function) -> Result<Unit, String>
+    // Register a callback to receive structured job lifecycle events.
+    //
+    // The handler is called for every job event (job.enqueued, job.started,
+    // job.completed, job.failed, job.dead) with a map containing "event",
+    // "timestamp", "job_id", "type", and event-specific fields. The handler
+    // must be a native function (not a user-defined closure).
+    // @param handler A native function accepting a single map argument
+    // @returns Ok(Unit) on success
+    // @see_also work_jobs, work_async
+    // @example on_job_event(fn(e) { log_info("job event", e) }) ~ "Log all job events"
+    module.insert(
+        "on_job_event".to_string(),
+        Value::NativeFunction {
+            name: "on_job_event".to_string(),
+            arity: 1,
+            max_arity: 1,
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(IntentError::type_error(
+                        "on_job_event() requires 1 argument (handler)".to_string(),
+                    ));
+                }
+                match &args[0] {
+                    Value::NativeFunction { func, .. } => {
+                        let handler_fn = *func;
+                        let mut h = JOB_RUNTIME.event_handler.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("Lock error: {}", e))
+                        })?;
+                        *h = Some(handler_fn);
+                        Ok(Value::ok(Value::Unit))
+                    }
+                    _ => Err(IntentError::type_error(
+                        "on_job_event() requires a native function handler".to_string(),
+                    )),
+                }
             },
         },
     );
@@ -1938,6 +2392,260 @@ mod tests {
             assert!(result.is_err());
             let err = format!("{}", result.unwrap_err());
             assert!(err.contains("non-negative"));
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Testing mode / DX helpers
+    // -----------------------------------------------------------------------
+
+    fn get_fn<'a>(module: &'a HashMap<String, Value>, name: &str) -> fn(&[Value]) -> Result<Value> {
+        match module.get(name).unwrap() {
+            Value::NativeFunction { func, .. } => *func,
+            _ => panic!("Expected NativeFunction for {}", name),
+        }
+    }
+
+    fn activate_testing_mode(module: &HashMap<String, Value>) {
+        let configure_fn = get_fn(module, "configure_queue");
+        let mut opts = HashMap::new();
+        opts.insert("mode".to_string(), Value::String("testing".to_string()));
+        configure_fn(&[Value::Map(opts)]).unwrap();
+    }
+
+    #[test]
+    fn test_testing_mode_activation() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("TmJob", "default"))
+                .unwrap();
+            let module = init();
+            activate_testing_mode(&module);
+
+            // Enqueue should go to test queue, not KV
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let result = enqueue_fn(&[
+                Value::String("TmJob".to_string()),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "Expected Ok from enqueue in testing mode"
+            );
+
+            // Verify it ended up in test_queue
+            let tq = JOB_RUNTIME.test_queue.lock().unwrap();
+            let queue = tq.as_ref().unwrap();
+            assert_eq!(queue.len(), 1);
+            assert_eq!(queue[0].job_type, "TmJob");
+        });
+    }
+
+    #[test]
+    fn test_assert_enqueued_found() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("AeJob", "default"))
+                .unwrap();
+            let module = init();
+            activate_testing_mode(&module);
+
+            let enqueue_fn = get_fn(&module, "enqueue");
+            enqueue_fn(&[
+                Value::String("AeJob".to_string()),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+
+            let assert_fn = get_fn(&module, "assert_enqueued");
+            let result = assert_fn(&[Value::String("AeJob".to_string())]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "assert_enqueued should succeed"
+            );
+        });
+    }
+
+    #[test]
+    fn test_assert_enqueued_partial_match() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("EmailJob2", "emails"))
+                .unwrap();
+            let module = init();
+            activate_testing_mode(&module);
+
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let mut payload = HashMap::new();
+            payload.insert(
+                "to".to_string(),
+                Value::String("alice@example.com".to_string()),
+            );
+            payload.insert("subject".to_string(), Value::String("Hello".to_string()));
+            enqueue_fn(&[Value::String("EmailJob2".to_string()), Value::Map(payload)]).unwrap();
+
+            let assert_fn = get_fn(&module, "assert_enqueued");
+
+            // Partial match: only check "to"
+            let mut expected = HashMap::new();
+            expected.insert(
+                "to".to_string(),
+                Value::String("alice@example.com".to_string()),
+            );
+            let result =
+                assert_fn(&[Value::String("EmailJob2".to_string()), Value::Map(expected)]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "Partial match should succeed"
+            );
+        });
+    }
+
+    #[test]
+    fn test_assert_enqueued_not_found() {
+        with_clean_runtime(|| {
+            let module = init();
+            activate_testing_mode(&module);
+
+            let assert_fn = get_fn(&module, "assert_enqueued");
+            let result = assert_fn(&[Value::String("MissingJob".to_string())]);
+            assert!(
+                result.is_err(),
+                "assert_enqueued should fail when not found"
+            );
+            let err = format!("{}", result.unwrap_err());
+            assert!(err.contains("MissingJob"), "Error should mention job name");
+        });
+    }
+
+    #[test]
+    fn test_assert_not_enqueued_pass() {
+        with_clean_runtime(|| {
+            let module = init();
+            activate_testing_mode(&module);
+
+            let assert_fn = get_fn(&module, "assert_not_enqueued");
+            let result = assert_fn(&[Value::String("NeverEnqueued".to_string())]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "assert_not_enqueued should succeed when nothing enqueued"
+            );
+        });
+    }
+
+    #[test]
+    fn test_assert_not_enqueued_fail() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("AnJob", "default"))
+                .unwrap();
+            let module = init();
+            activate_testing_mode(&module);
+
+            let enqueue_fn = get_fn(&module, "enqueue");
+            enqueue_fn(&[
+                Value::String("AnJob".to_string()),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+
+            let assert_fn = get_fn(&module, "assert_not_enqueued");
+            let result = assert_fn(&[Value::String("AnJob".to_string())]);
+            assert!(
+                result.is_err(),
+                "assert_not_enqueued should fail when job is found"
+            );
+            let err = format!("{}", result.unwrap_err());
+            assert!(err.contains("AnJob"));
+        });
+    }
+
+    #[test]
+    fn test_drain_jobs() {
+        with_clean_runtime(|| {
+            // Register a job with empty perform body
+            JOB_RUNTIME
+                .register_job(test_job_def("DrainJob", "default"))
+                .unwrap();
+            let module = init();
+            activate_testing_mode(&module);
+
+            let enqueue_fn = get_fn(&module, "enqueue");
+            enqueue_fn(&[
+                Value::String("DrainJob".to_string()),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+            enqueue_fn(&[
+                Value::String("DrainJob".to_string()),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+
+            let drain_fn = get_fn(&module, "drain_jobs");
+            let result = drain_fn(&[]).unwrap();
+
+            match result {
+                Value::EnumValue {
+                    ref variant,
+                    ref values,
+                    ..
+                } if variant == "Ok" => {
+                    assert!(
+                        matches!(values[0], Value::Int(2)),
+                        "Should drain 2 jobs, got {:?}",
+                        values[0]
+                    );
+                }
+                _ => panic!("Expected Ok(2) from drain_jobs"),
+            }
+
+            // Queue should now be empty
+            let tq = JOB_RUNTIME.test_queue.lock().unwrap();
+            assert!(
+                tq.as_ref().unwrap().is_empty(),
+                "Queue should be empty after drain"
+            );
+        });
+    }
+
+    #[test]
+    fn test_clear_jobs() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ClearJob", "default"))
+                .unwrap();
+            let module = init();
+            activate_testing_mode(&module);
+
+            let enqueue_fn = get_fn(&module, "enqueue");
+            enqueue_fn(&[
+                Value::String("ClearJob".to_string()),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+
+            // Verify something is in the queue
+            {
+                let tq = JOB_RUNTIME.test_queue.lock().unwrap();
+                assert_eq!(tq.as_ref().unwrap().len(), 1);
+            }
+
+            let clear_fn = get_fn(&module, "clear_jobs");
+            let result = clear_fn(&[]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "clear_jobs should return Ok"
+            );
+
+            // Queue should be empty
+            let tq = JOB_RUNTIME.test_queue.lock().unwrap();
+            assert!(
+                tq.as_ref().unwrap().is_empty(),
+                "Queue should be empty after clear"
+            );
         });
     }
 }
