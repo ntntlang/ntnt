@@ -201,6 +201,33 @@ pub enum Statement {
         groups: Vec<ServerGroup>,
     },
 
+    /// Job declaration: background job definition with queue and perform body
+    ///
+    /// ```ntnt
+    /// Job SendEmail on emails (retry: 5, timeout: 120) {
+    ///     perform(to, body) {
+    ///         // send email logic
+    ///     }
+    ///     on_failure(error, attempt) {
+    ///         // handle failure
+    ///     }
+    /// }
+    /// ```
+    Job {
+        /// Job name (e.g., "SendEmail")
+        name: String,
+        /// Queue name (e.g., "emails")
+        queue: String,
+        /// Inline options: retry, timeout, etc.
+        options: Vec<(String, Expression)>,
+        /// Parameters for the perform block
+        perform_params: Vec<Parameter>,
+        /// Body of the perform block
+        perform_body: Block,
+        /// Optional on_failure handler: (params, body)
+        on_failure: Option<(Vec<Parameter>, Block)>,
+    },
+
     /// Source location wrapper — annotates a statement with its file/line/col.
     /// Emitted by the parser for every top-level and block statement so the
     /// interpreter can report accurate positions in runtime error messages.

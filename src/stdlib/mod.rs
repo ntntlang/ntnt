@@ -16,6 +16,7 @@ pub mod fs;
 pub mod http;
 pub mod http_bridge;
 pub mod http_server;
+pub mod jobs;
 pub mod http_server_async;
 pub mod json;
 pub mod kv;
@@ -60,6 +61,7 @@ pub fn init_all_modules() -> HashMap<String, StdlibModule> {
     modules.insert("std/log".to_string(), log::init());
     modules.insert("std/markdown".to_string(), markdown::init());
     modules.insert("std/kv".to_string(), kv::create_kv_module());
+    modules.insert("std/jobs".to_string(), jobs::init());
     modules.insert("std/auth".to_string(), auth::init());
 
     modules

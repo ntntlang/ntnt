@@ -1217,7 +1217,8 @@ impl TypeContext {
             | Statement::Module { .. }
             | Statement::Intent { .. }
             | Statement::Defer(_)
-            | Statement::Server { .. } => {}
+            | Statement::Server { .. }
+            | Statement::Job { .. } => {}
             Statement::Located { stmt, .. } => self.check_statement(stmt),
         }
     }
@@ -3500,6 +3501,12 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             // Utilities
             sig!("sleep_ms", ["ms" => Type::Int], Type::Unit);
             sig!("thread_count", [], Type::Int);
+        }
+        "std/jobs" => {
+            sig!("configure_queue", ["opts" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Unit, Type::String] });
+            sig!("enqueue", ["job_name" => Type::String, "args" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::String, Type::String] });
+            sig!("job_status", ["job_id" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
+            sig!("cancel_job", ["job_id" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Bool, Type::String] });
         }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));
