@@ -622,6 +622,7 @@ impl RedisKV {
 
         // Sort to get lexicographically first (FIFO by timestamp)
         all_keys.sort_unstable();
+        all_keys.dedup();
         // Filter out internal type keys
         all_keys.retain(|k| !k.ends_with(":__type"));
 
