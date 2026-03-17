@@ -79,7 +79,7 @@ The 0.4.2 async connection pool and worker pool performance gains are unaffected
 ```
 PR 2a  ✅  Parser + Registry + Enqueue MVP       parse Job syntax, store in KV, basic enqueue           (#32, merged 2026-03-17)
 PR 2b  ✅  Workers + Lifecycle + Retry            claim jobs, run via spawn(), retry on failure          (#33, merged 2026-03-17)
-PR 2c  ✅  DX: Testing Mode + Logs + CLI + Docs   assert_enqueued, streaming logs, ntnt worker    (#34, merged 2026-03-17)
+PR 2c  ✅  DX: Testing Mode + Logs + CLI + Docs   assert_enqueued, streaming logs, ntnt worker    (#34, merged 2026-03-17, Greptile review fixes applied)
 ```
 
 ### Estimated total: 6-8 days across 3 PRs

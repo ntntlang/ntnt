@@ -743,4 +743,5 @@ For production apps with existing user auth. The dashboard becomes another admin
 | 2026-03-16 | DD-037 v6: Updated Phase 1 with full Copilot review resolution details. Added lessons 11-13. |
 | 2026-03-17 | Phase 2 complete: Job DSL shipped across PRs #32, #33, #34. Roadmap renumbered — old Phase 3/4 consolidated into Phase 2 (Job DSL + KV Backend). Phase 3 = advanced features (deferred items). Phase 4 = composition layer. Phase 5 = dashboard + hardening. |
 | 2026-03-17 | DD-037 v7: Added Phase 7 — Event Dispatch (`std/events`). Pub/sub fan-out over the job system. Memory + Redis backends. Testing mode integration. |
+| 2026-03-17 | PR #34 merged: Greptile review fixes — drain_jobs collects all errors (no silent job loss), timeout always overrides exec error, --concurrency 0 rejected, stderr JSON key order documented. Phase 2 fully complete. |
 | 2026-03-17 | Phase 2 merged: PR #34 merged after Greptile review fixes (drain_jobs fail-fast, timeout-wins-over-error, --concurrency 0 guard). All 3 Phase 2 PRs now on main. |
