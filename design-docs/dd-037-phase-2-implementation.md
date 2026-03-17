@@ -293,6 +293,7 @@ These were identified during PR 2b review and deferred to 2c:
 - [ ] **`work_jobs()` cooperative cancellation** — currently `work_jobs()` doesn't register a ConcurrencyRuntime task, so `is_current_task_cancelled()` always returns false. Add Ctrl-C signal handler or register a task so it can be cancelled.
 - [ ] **`work_async(concurrency > 1)` partial spawn cleanup** — if `spawn_worker_task` fails mid-loop (e.g., task limit), already-spawned workers are leaked without accessible handles. Cancel previously spawned workers on failure.
 - [ ] **`work_async` return type consistency** — returns `TaskHandle` for concurrency=1 but `Array<TaskHandle>` for >1. Consider always returning `Array<TaskHandle>` for a uniform API.
+- [ ] **Scheduled job claim optimization** — worker currently claims all pending keys including future-scheduled ones, then re-enqueues if not ready (KV churn). Use prefix-aware claiming (`jobs:pending:<now_ts_prefix>`) or timestamp comparison in the claim query to skip not-ready jobs without the claim+re-enqueue cycle.
 
 ### Testing Mode
 - [ ] `configure_queue(map { "mode": "testing" })` — jobs collected in memory, nothing runs
