@@ -5935,14 +5935,72 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 
 | Function | Description |
 |----------|-------------|
+| [`assert_enqueued`](#assertenqueued) | Assert that a job was enqueued in testing mode. |
+| [`assert_not_enqueued`](#assertnotenqueued) | Assert that a job was NOT enqueued in testing mode. |
 | [`cancel_job`](#canceljob) | Cancel a pending job by its ID. |
+| [`clear_jobs`](#clearjobs) | Clear all jobs from the test queue without executing them. |
 | [`configure_queue`](#configurequeue) | Configure the job queue storage backend. |
+| [`drain_jobs`](#drainjobs) | Execute all enqueued test jobs synchronously and return the count. |
 | [`enqueue`](#enqueue) | Enqueue a background job for processing. |
 | [`enqueue_at`](#enqueueat) | Enqueue a job to run at a specific future time. |
 | [`enqueue_in`](#enqueuein) | Enqueue a job to run after a delay in seconds. |
 | [`job_status`](#jobstatus) | Get the current status and data for a job by its ID. |
 | [`work_async`](#workasync) | Start one or more background worker threads that process jobs from the queue. |
 | [`work_jobs`](#workjobs) | Run a blocking worker loop that processes jobs from the queue. |
+
+#### `assert_enqueued`
+
+```ntnt
+assert_enqueued(job_name: String, args?: Map) -> Result<Bool, String>
+```
+
+Assert that a job was enqueued in testing mode.
+
+Checks the test queue for a job with the given name. If args is provided, performs a partial match — every key in args must match the corresponding key in the job's payload. Returns Ok(true) on success, Err with a descriptive message listing what was actually enqueued on failure. Must call configure_queue(map { "mode": "testing" }) first.
+
+**Parameters:**
+
+- `job_name` — The job name to look for (e.g., "SendEmail")
+- `args` — Optional map of payload keys to match (partial match)
+
+**Returns:** Ok(true) if found and matches, Err with details otherwise
+
+**Examples:**
+
+```ntnt
+assert_enqueued("SendEmail")  // Assert any SendEmail was enqueued
+assert_enqueued("SendEmail", map { "to": "alice@example.com" })  // Assert SendEmail with specific args
+```
+
+**See also:** `assert_not_enqueued`, `drain_jobs`, `clear_jobs`
+
+---
+
+#### `assert_not_enqueued`
+
+```ntnt
+assert_not_enqueued(job_name: String) -> Result<Bool, String>
+```
+
+Assert that a job was NOT enqueued in testing mode.
+
+Checks the test queue and returns an error if any job with the given name is found. Returns Ok(true) if no such job was enqueued. Must call configure_queue(map { "mode": "testing" }) first.
+
+**Parameters:**
+
+- `job_name` — The job name to check (e.g., "SendEmail")
+
+**Returns:** Ok(true) if not enqueued, Err with details if found
+
+**Examples:**
+
+```ntnt
+assert_not_enqueued("SendEmail")  // Assert no SendEmail was enqueued
+```
+
+**See also:** `assert_enqueued`, `drain_jobs`, `clear_jobs`
+
+---
 
 #### `cancel_job`
 
@@ -5968,6 +6026,28 @@ cancel_job("abc-123")  // Cancel a pending job
 
 ---
 
+#### `clear_jobs`
+
+```ntnt
+clear_jobs() -> Result<Unit, String>
+```
+
+Clear all jobs from the test queue without executing them.
+
+Empties the test queue. Useful for resetting state between tests. Must call configure_queue(map { "mode": "testing" }) first.
+
+**Returns:** Ok(Unit) on success, Err if not in testing mode
+
+**Examples:**
+
+```ntnt
+clear_jobs()  // Clear all enqueued test jobs
+```
+
+**See also:** `assert_enqueued`, `drain_jobs`
+
+---
+
 #### `configure_queue`
 
 ```ntnt
@@ -5990,6 +6070,28 @@ Pass a map with a "store" key to set the KV backend for job storage. If never ca
 configure_queue(map { "store": "sqlite:./jobs.db" })  // Use SQLite for job storage
 configure_queue(map { "store": "redis://localhost:6379" })  // Use Redis for job storage
 ```
+
+---
+
+#### `drain_jobs`
+
+```ntnt
+drain_jobs() -> Result<Int, String>
+```
+
+Execute all enqueued test jobs synchronously and return the count.
+
+Takes all jobs from the test queue and executes each via the job's perform block synchronously in the current thread. Returns the number of jobs executed. Useful for integration tests that need to verify side effects. Must call configure_queue(map { "mode": "testing" }) first.
+
+**Returns:** Ok(Int) with count of jobs executed, or Err on failure
+
+**Examples:**
+
+```ntnt
+drain_jobs()  // Execute all pending test jobs
+```
+
+**See also:** `assert_enqueued`, `clear_jobs`
 
 ---
 
@@ -6103,18 +6205,18 @@ job_status("abc-123")  // Check job status
 #### `work_async`
 
 ```ntnt
-work_async(opts?: Map) -> TaskHandle | Array<TaskHandle>
+work_async(opts?: Map) -> Array<TaskHandle>
 ```
 
 Start one or more background worker threads that process jobs from the queue.
 
-Returns a TaskHandle (or Array of TaskHandles when concurrency > 1) that can be used with cancel_task() to stop the workers. Workers run until cancelled. If configure_queue() hasn't been called, auto-initializes with the default SQLite store.   - "poll_interval": poll interval in milliseconds (default 1000)   - "concurrency": number of parallel worker threads (default 1)   - "queues": array of queue names to process (default: all queues)
+Always returns an Array of TaskHandles (even for a single worker) that can be used with cancel_task() to stop the workers. Workers run until cancelled. If configure_queue() hasn't been called, auto-initializes with the default SQLite store.   - "poll_interval": poll interval in milliseconds (default 1000)   - "concurrency": number of parallel worker threads (default 1)   - "queues": array of queue names to process (default: all queues)
 
 **Parameters:**
 
 - `opts` — Optional configuration map:
 
-**Returns:** TaskHandle for a single worker, or Array<TaskHandle> for concurrency > 1
+**Returns:** Array of TaskHandles (one per worker)
 
 **Examples:**
 

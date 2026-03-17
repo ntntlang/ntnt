@@ -1664,6 +1664,135 @@ let cpus = thread_count()  // Available CPU threads
 
 ---
 
+## Background Jobs (`std/jobs`)
+
+Persistent background job processing with retry, backoff, and scheduled execution.
+
+### Defining Jobs
+
+```ntnt
+job SendEmail on emails (retry: 5, backoff: "exponential") {
+    perform(to, subject) {
+        print("Sending to #{to}: #{subject}")
+    }
+    on_failure(error, attempt) {
+        print("Failed (attempt #{attempt}): #{error}")
+    }
+}
+```
+
+**Syntax:** `job Name on queue_name (options) { perform(params) { body } on_failure(params) { body } }`
+
+- `on queue_name` — assigns the job to a named queue
+- Options: `retry: N` (default 3), `backoff: "exponential"|"linear"|"constant"`, `timeout: N` (seconds, post-execution check — does not preemptively interrupt)
+- `on_failure` block is optional — called on each failure with error message and attempt count
+
+### Enqueueing Jobs
+
+```ntnt
+import { enqueue, enqueue_in, enqueue_at } from "std/jobs"
+
+// Immediate
+let id = unwrap(enqueue("SendEmail", map { "to": "alice@example.com", "subject": "Hello" }))
+
+// Delayed (seconds)
+enqueue_in("SendEmail", 3600, map { "to": "bob@example.com", "subject": "Reminder" })
+
+// At specific time (nanosecond timestamp)
+enqueue_at("SendEmail", future_nanos, map { "to": "eve@example.com", "subject": "Scheduled" })
+```
+
+### Running Workers
+
+```ntnt
+import { work_async, work_jobs } from "std/jobs"
+
+// Background workers (returns Array<TaskHandle>)
+let workers = work_async(map { "concurrency": 4, "poll_interval": 500 })
+
+// Blocking worker (for CLI scripts — exits on Ctrl-C)
+work_jobs()
+```
+
+**CLI:**
+```bash
+ntnt worker server.tnt                          # Single worker
+ntnt worker server.tnt --concurrency 4          # 4 parallel workers
+ntnt worker server.tnt --queues emails,payments # Specific queues
+ntnt jobs server.tnt                            # Show queue status
+```
+
+### Job Status & Control
+
+```ntnt
+import { job_status, cancel_job } from "std/jobs"
+
+let status = unwrap(job_status(id))   // Map with status, attempts, timestamps
+cancel_job(id)                         // Cancel a pending job
+```
+
+### Testing Mode
+
+```ntnt
+import { configure_queue, enqueue, assert_enqueued, assert_not_enqueued, drain_jobs, clear_jobs } from "std/jobs"
+
+configure_queue(map { "mode": "testing" })  // No KV writes — jobs collected in memory
+
+enqueue("SendEmail", map { "to": "test@example.com" })
+
+// Assertions (partial match — extra keys OK)
+assert_enqueued("SendEmail", map { "to": "test@example.com" })
+assert_not_enqueued("ProcessPayment")
+
+// Execute all queued jobs synchronously
+let count = unwrap(drain_jobs())
+
+// Reset between tests
+clear_jobs()
+```
+
+### Queue Configuration
+
+```ntnt
+import { configure_queue } from "std/jobs"
+
+// SQLite (default, zero-config)
+configure_queue(map { "store": "sqlite:./jobs.db" })
+
+// Redis (production)
+configure_queue(map { "store": "redis://localhost:6379" })
+
+// Testing mode (in-memory, no persistence)
+configure_queue(map { "mode": "testing" })
+```
+
+### Lifecycle & Retry
+
+Jobs follow this state machine:
+```
+Pending → Active → Completed
+              ├→ Failed (retries left) → Pending (retry with backoff)
+              └→ Dead (retries exhausted)
+```
+
+Backoff strategies:
+- `"exponential"` (default): 5s base, doubles each retry, capped at 1 hour
+- `"linear"`: 5s × attempt
+- `"constant"`: 5s fixed
+
+### Streaming Logs
+
+Workers emit structured JSON events to stderr:
+```json
+{"event":"job.started","job_id":"abc","type":"SendEmail","queue":"emails","attempt":1,"timestamp":"..."}
+{"event":"job.completed","job_id":"abc","type":"SendEmail","timestamp":"..."}
+{"event":"job.failed","job_id":"abc","type":"SendEmail","error":"...","attempt":1,"will_retry":true,"timestamp":"..."}
+```
+
+Custom event handling via `on_job_event(handler)` is planned for a future release.
+
+---
+
 ## CSV (`std/csv`)
 
 ```ntnt

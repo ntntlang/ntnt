@@ -128,6 +128,10 @@ pub fn value_to_json_public(value: &Value) -> serde_json::Value {
     value_to_json(value)
 }
 
+pub fn json_to_value_public(json: &serde_json::Value) -> Value {
+    json_to_value(json.clone())
+}
+
 fn value_to_json(value: &Value) -> serde_json::Value {
     match value {
         Value::Unit => serde_json::Value::Null,

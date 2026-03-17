@@ -1,6 +1,6 @@
 # DD-037 Phase 2: Job DSL + KV Backend — Implementation Plan
 
-**Status:** In Progress (PR 2a ✅ merged, PR 2b 🔄 in review, PR 2c 📋 planned)
+**Status:** PR 2a ✅ merged, PR 2b ✅ merged, PR 2c 🔄 in review
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md)
 **Created:** 2026-03-16
 **Target branch:** `feat/job-dsl-v2`
@@ -78,8 +78,8 @@ The 0.4.2 async connection pool and worker pool performance gains are unaffected
 
 ```
 PR 2a  ✅  Parser + Registry + Enqueue MVP       parse Job syntax, store in KV, basic enqueue           (#32, merged 2026-03-17)
-PR 2b  🔄  Workers + Lifecycle + Retry            claim jobs, run via spawn(), retry on failure          (#33, in review)
-PR 2c  📋  DX: Testing Mode + Logs + CLI + Docs   assert_enqueued, streaming logs, ntnt worker
+PR 2b  ✅  Workers + Lifecycle + Retry            claim jobs, run via spawn(), retry on failure          (#33, merged 2026-03-17)
+PR 2c  🔄  DX: Testing Mode + Logs + CLI + Docs   assert_enqueued, streaming logs, ntnt worker    (#34, in review)
 ```
 
 ### Estimated total: 6-8 days across 3 PRs
@@ -284,83 +284,63 @@ Scheduled ─→ Pending ─→ Active ─→ Completed
 
 ### Items deferred from PR 2b
 
-These were identified during PR 2b review and deferred to 2c:
-
-- [ ] **Redis atomic claim via Lua script** — current Redis `claim()` uses SCAN+GET+DEL which is not atomic under concurrent workers. Replace with a Lua script (`EVAL`) for multi-worker Redis deployments. Document the caveat until then.
-- [ ] **Job timeout** — `timeout` option: `job X on q (timeout: 30) { ... }`. Worker checks elapsed time after execution; treat timeout as failure (triggers retry).
-- [ ] **Worker heartbeat refresh** — periodically refresh the `jobs:active:<id>` TTL during long-running jobs (e.g., every 30s). Currently TTL is set once on claim (300s).
-- [ ] **Graceful shutdown drain timeout** — configurable drain timeout (default 30s) for `work_jobs()`. After timeout, in-flight jobs are abandoned and become re-claimable via visibility timeout expiry.
-- [ ] **`work_jobs()` cooperative cancellation** — currently `work_jobs()` doesn't register a ConcurrencyRuntime task, so `is_current_task_cancelled()` always returns false. Add Ctrl-C signal handler or register a task so it can be cancelled.
-- [ ] **`work_async(concurrency > 1)` partial spawn cleanup** — if `spawn_worker_task` fails mid-loop (e.g., task limit), already-spawned workers are leaked without accessible handles. Cancel previously spawned workers on failure.
-- [ ] **`work_async` return type consistency** — returns `TaskHandle` for concurrency=1 but `Array<TaskHandle>` for >1. Consider always returning `Array<TaskHandle>` for a uniform API.
-- [ ] **Scheduled job claim optimization** — worker currently claims all pending keys including future-scheduled ones, then re-enqueues if not ready (KV churn). Use prefix-aware claiming (`jobs:pending:<now_ts_prefix>`) or timestamp comparison in the claim query to skip not-ready jobs without the claim+re-enqueue cycle.
+- [x] **Job timeout** — worker checks elapsed time after execution; treat timeout as failure
+- [x] **`work_jobs()` cooperative cancellation** — Ctrl-C signal handler via `ctrlc` crate sets `CURRENT_TASK_CANCELLED`
+- [x] **`work_async` return type consistency** — always returns `Array<TaskHandle>`
+- [ ] ~~**Redis atomic claim via Lua script**~~ → deferred to [Phase 3](dd-037-phase-3-implementation.md)
+- [ ] ~~**Worker heartbeat refresh**~~ → deferred to [Phase 3](dd-037-phase-3-implementation.md)
+- [ ] ~~**Graceful shutdown drain timeout**~~ → deferred to [Phase 3](dd-037-phase-3-implementation.md)
+- [ ] ~~**`work_async` partial spawn cleanup**~~ → deferred to [Phase 3](dd-037-phase-3-implementation.md) (edge case, task limit rarely hit)
+- [ ] ~~**Scheduled job claim optimization**~~ → deferred to [Phase 3](dd-037-phase-3-implementation.md)
 
 ### Testing Mode
-- [ ] `configure_queue(map { "mode": "testing" })` — jobs collected in memory, nothing runs
-- [ ] `assert_enqueued(JobName, args)` — verify a job was enqueued
-  - Partial match: `assert_enqueued(SendEmail, map { "email": "alice@example.com" })` matches if those keys exist in the job's args (extra keys OK)
-- [ ] `assert_not_enqueued(JobName)` — verify no jobs of this type were enqueued
-- [ ] `drain_jobs()` — run all collected jobs synchronously in current thread (for integration tests)
-- [ ] `clear_jobs()` — reset test queue between tests
-- [ ] Testing mode intercepts `enqueue()` — no KV writes happen
+- [x] `configure_queue(map { "mode": "testing" })` — jobs collected in memory, nothing runs
+- [x] `assert_enqueued(job_name, args?)` — verify a job was enqueued (partial match on args)
+- [x] `assert_not_enqueued(job_name)` — verify no jobs of this type were enqueued
+- [x] `drain_jobs()` — run all collected jobs synchronously in current thread
+- [x] `clear_jobs()` — reset test queue between tests
+- [x] Testing mode intercepts `enqueue()` — no KV writes happen (already worked in PR 2a via test_queue)
 
 ### Streaming Logs
-- [ ] Every job event emits a structured JSON log line to stderr:
-  ```json
-  {"event": "job.started", "job_id": "abc123", "type": "SendEmail", "queue": "emails", "attempt": 1, "timestamp": "..."}
-  {"event": "job.completed", "job_id": "abc123", "type": "SendEmail", "duration_ms": 142, "timestamp": "..."}
-  {"event": "job.failed", "job_id": "abc123", "type": "SendEmail", "error": "...", "attempt": 1, "will_retry": true, "timestamp": "..."}
-  ```
-- [ ] `on_job_event(fn(event))` — user hook for custom handling
-- [ ] Events: `job.enqueued`, `job.started`, `job.completed`, `job.failed`, `job.retried`, `job.dead`, `job.cancelled`
+- [x] Every job event emits a structured JSON log line to stderr
+- ~~`on_job_event(fn(event))`~~ — removed, deferred to [Phase 3](dd-037-phase-3-implementation.md) (cross-thread closure design needed)
+- [x] Events: `job.enqueued`, `job.started`, `job.completed`, `job.failed`, `job.dead`
 
 ### Deduplication & Expiration
-- [ ] `unique: 3600` option — skip enqueue if identical job (same type + SHA256 of args) was enqueued within N seconds
-- [ ] Dedup key in KV: `jobs:unique:<sha256>` with TTL = unique duration
-- [ ] `expires: 300` option — discard jobs that have been pending for longer than N seconds
+- ~~deferred to [Phase 3](dd-037-phase-3-implementation.md)~~
 
 ### Batch Enqueue
-- [ ] `enqueue_batch(JobName, array_of_args)` — enqueue N jobs in one call
-- [ ] Single KV round-trip where possible
+- ~~deferred to [Phase 3](dd-037-phase-3-implementation.md)~~
 
 ### Priority Queues
-- [ ] Job-level priority: `job X on q (priority: 1) { ... }` (lower = higher priority)
-- [ ] Priority encoded in sorted set score (priority * 1e12 + scheduled_at)
+- ~~deferred to [Phase 3](dd-037-phase-3-implementation.md)~~
 
 ### CLI: `ntnt worker`
-- [ ] `ntnt worker server.tnt` — start workers for jobs defined in server.tnt
-- [ ] `--concurrency N` — number of concurrent workers (default: 1)
-- [ ] `--queues emails,payments` — which queues to process
-- [ ] Loads the .tnt file (registers jobs), then calls `work_jobs()` in blocking mode
-- [ ] Ctrl+C → graceful shutdown
+- [x] `ntnt worker server.tnt` — start workers for jobs defined in server.tnt
+- [x] `--concurrency N` — number of concurrent workers (default: 1)
+- [x] `--queues emails,payments` — which queues to process
+- [x] `--poll-interval N` — poll interval in milliseconds
+- [x] Loads the .tnt file (registers jobs), then calls `work_jobs()` in blocking mode
+- [x] Ctrl+C → graceful shutdown via `ctrlc` handler
 
-### CLI: `ntnt jobs` (basic — full observability is Phase 6)
-- [ ] `ntnt jobs status server.tnt` — summary of all queues (pending/active/completed/failed/dead counts)
-- [ ] `ntnt jobs list server.tnt --queue=emails --status=failed` — list jobs with filters
-- [ ] Loads the .tnt file to get KV config, then queries KV directly
+### CLI: `ntnt jobs`
+- [x] `ntnt jobs server.tnt` — summary of all queues (pending/active/completed/failed/dead counts)
+- [ ] ~~`ntnt jobs list`~~ → deferred to [Phase 3](dd-037-phase-3-implementation.md)
 
 ### Documentation
-- [ ] `// @ntnt` doc blocks on all new functions in `src/stdlib/jobs.rs`
-- [ ] Typechecker signatures for all functions
-- [ ] `cargo build --release` + `ntnt docs --generate`
-- [ ] `docs/AI_AGENT_GUIDE.md` — Job DSL section with examples
-- [ ] CLAUDE.md + copilot-instructions.md auto-synced
-- [ ] Example: `examples/job_demo.tnt`
-- [ ] Update DD-037 Phase 2 checkboxes
+- [x] `// @ntnt` doc blocks on all new functions in `src/stdlib/jobs.rs`
+- [x] Typechecker signatures for all functions (5 new)
+- [x] `cargo build --release` + `ntnt docs --generate` — 378 total functions
+- [x] `docs/AI_AGENT_GUIDE.md` — Background Jobs section with full syntax reference
+- [x] CLAUDE.md + copilot-instructions.md auto-synced
+- [x] Example: `examples/job_demo.tnt`
+- [x] Update DD-037 Phase 2 checkboxes
 
 ### Tests
-- [ ] Testing mode: assert_enqueued, assert_not_enqueued, drain_jobs, clear_jobs
-- [ ] Streaming logs: verify event format
-- [ ] Dedup: enqueue same job twice within unique window → second is skipped
-- [ ] Expiration: enqueue with expires → job discarded after timeout
-- [ ] Batch: enqueue_batch creates N jobs
-- [ ] Priority: higher-priority jobs claimed first
-- [ ] CLI: `ntnt worker` starts and processes jobs (integration test)
-- [ ] CLI: `ntnt jobs status` shows correct counts
-- [ ] Integration: job fails → retries N times → eventually dead (subprocess test)
-- [ ] Integration: job fails → on_failure handler called (subprocess test)
-- [ ] Integration: enqueue_in → job doesn't run until delay passes (subprocess test)
-- [ ] Integration: graceful shutdown → in-flight jobs complete, no new claims
+- [x] Testing mode: assert_enqueued (found, partial match, not found), assert_not_enqueued (pass, fail), drain_jobs, clear_jobs — 8 new tests
+- [ ] ~~Dedup, expiration, batch, priority~~ → deferred to Phase 3
+- [ ] CLI subprocess tests → deferred (requires test infrastructure for long-running processes)
+- [ ] Integration subprocess tests (retries → dead, on_failure, enqueue_in delay, graceful shutdown) → deferred
 
 ---
 

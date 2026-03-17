@@ -1,10 +1,9 @@
 # DD-037: Concurrency & Job System
 
-**Status:** In Progress  
-**Author:** Larri  
-**Created:** 2026-03-15  
-**Last Updated:** 2026-03-16  
-**Branch:** `feat/concurrency-v2` (current work)  
+**Status:** Phases 0-2 Complete, Phases 3-7 Planned
+**Author:** Larri
+**Created:** 2026-03-15
+**Last Updated:** 2026-03-17
 **Supersedes:** `background_jobs.md`, `dd-037-structured-tasks.md`
 
 ---
@@ -190,188 +189,114 @@ Single global instance (`LazyLock<ConcurrencyRuntime>`) owns all state:
 ### Overview
 
 ```
-Phase 0  ✅  Concurrency Primitives                    DONE
-Phase 1  ✅  Primitive Hardening                        DONE
-Phase 2  📋  Composition Layer                          parallel, race, task groups
-Phase 3  📋  Job DSL + In-Memory Backend                declarative jobs, streaming logs
-Phase 4  📋  KV Backend + Dashboard                     persistent jobs, real-time UI
-Phase 5  📋  Production Hardening                       simulation, contracts, intent testing
-Phase 6  📋  Observability CLI                          ntnt jobs status/list/tail/replay
+Phase 0  ✅  Concurrency Primitives                    spawn, channels, schedules
+Phase 1  ✅  Primitive Hardening                        handle types, select(), reaper
+Phase 2  ✅  Job DSL + KV Backend                       PR 2a/2b/2c — declarative jobs, workers, testing, CLI
+Phase 3  📋  Job System Advanced Features               dedup, batch, priority, Lua claim, on_job_event
+Phase 4  📋  Composition Layer                          parallel, race, task groups
+Phase 5  📋  Dashboard + Production Hardening            real-time UI, simulation, contracts
+Phase 6  📋  Observability CLI                          ntnt jobs list/tail/replay
 Phase 7  📋  Event Dispatch (std/events)                pub/sub fan-out over the job system
 ```
 
 ### Phase Status Table
 
-| Phase | Name | Status | Priority |
-|-------|------|--------|----------|
-| 0 | Concurrency Primitives | ✅ Done | — |
-| 1 | Primitive Hardening | ✅ Done (2 Copilot reviews, 16/16 resolved) | — |
-| 2 | Composition Layer | 📋 Planned | P1 |
-| 3 | Job DSL + In-Memory Backend | 📋 Planned | P0 — core feature |
-| 4 | KV Backend + Dashboard | 📋 Planned | P0 — production req |
-| 5 | Production Hardening | 📋 Planned | P1 — safety |
-| 6 | Observability CLI | 📋 Planned | P1 — DX |
-| 7 | Event Dispatch (`std/events`) | 📋 Planned | P2 — event-driven DX |
+| Phase | Name | Status | Details |
+|-------|------|--------|---------|
+| 0 | Concurrency Primitives | ✅ Done | PR #31 merged |
+| 1 | Primitive Hardening | ✅ Done | 2 Copilot reviews, 16/16 resolved |
+| 2 | Job DSL + KV Backend | ✅ Done | PR #32 (parser/registry), #33 (workers/retry), #34 (DX/CLI/docs). See [dd-037-phase-2-implementation.md](dd-037-phase-2-implementation.md) |
+| 3 | Job System Advanced Features | 📋 Planned | See [dd-037-phase-3-implementation.md](dd-037-phase-3-implementation.md) |
+| 4 | Composition Layer | 📋 Planned | parallel, race, task groups |
+| 5 | Dashboard + Production Hardening | 📋 Planned | Dashboard, simulation, contracts, intent testing |
+| 6 | Observability CLI | 📋 Planned | ntnt jobs list/tail/inspect/replay |
+| 7 | Event Dispatch (`std/events`) | 📋 Planned | pub/sub fan-out over the job system |
 
 ---
 
 ## Phase Details
 
-### Phase 2: Composition Layer 📋
+### Phase 2: Job DSL + KV Backend ✅
 
-**Depends on:** Phase 1 ✅  
+**Status:** Complete. Implemented across 3 PRs.
+**Implementation doc:** [dd-037-phase-2-implementation.md](dd-037-phase-2-implementation.md)
+
+| PR | Title | Status |
+|----|-------|--------|
+| #32 | Parser + Registry + Enqueue MVP | ✅ Merged |
+| #33 | Workers + Lifecycle + Retry | ✅ Merged |
+| #34 | Testing Mode + Logs + CLI + Docs | ✅ In review |
+
+**What shipped:**
+- [x] `job Name on queue (options) { perform(params) { body } on_failure(...) { body } }` parser syntax
+- [x] `enqueue(name, args)`, `enqueue_at()`, `enqueue_in()` — immediate and scheduled enqueueing
+- [x] `job_status(id)`, `cancel_job(id)` — status and cancellation
+- [x] `work_async(opts?)`, `work_jobs(opts?)` — background and blocking workers
+- [x] Retry with exponential/linear/constant backoff, `on_failure` handler
+- [x] `configure_queue(map { "store": "..." })` — SQLite or Redis/Valkey backend via std/kv
+- [x] Atomic job claiming (`kv_claim` — SQLite `BEGIN IMMEDIATE` transaction)
+- [x] Visibility timeout (`jobs:active:<id>` with TTL)
+- [x] Testing mode: `assert_enqueued`, `assert_not_enqueued`, `drain_jobs`, `clear_jobs`
+- [x] Streaming JSON logs to stderr (job.enqueued, started, completed, failed, dead)
+- [x] `ntnt worker` CLI command with --concurrency, --queues, --poll-interval
+- [x] `ntnt jobs` CLI command — queue status summary
+- [x] Ctrl-C graceful shutdown for `work_jobs()` and `ntnt worker`
+- [x] Job timeout (post-execution elapsed check)
+- [x] Full documentation: AI_AGENT_GUIDE.md, STDLIB_REFERENCE.md, examples/job_demo.tnt
+
+**API (free functions, not methods — consistent with ntnt design):**
+- `enqueue("JobName", args)` — string lookup, not `JobName.enqueue(args)`
+- `configure_queue(map { "store": "..." })` — not `Queue.configure()`
+- `work_async()` / `work_jobs()` — not `Queue.work()`
+
+---
+
+### Phase 3: Job System Advanced Features 📋
+
+**Status:** Planned
+**Implementation doc:** [dd-037-phase-3-implementation.md](dd-037-phase-3-implementation.md)
+
+Deferred from Phase 2 reviews. Each item is independently implementable:
+- [ ] Redis atomic claim via Lua script
+- [ ] `on_job_event(handler)` — user callback for job events (cross-thread closure design needed)
+- [ ] Deduplication (`unique: N` option)
+- [ ] Job expiration (`expires: N` option)
+- [ ] Batch enqueue (`enqueue_batch`)
+- [ ] Priority queues
+- [ ] Worker heartbeat refresh
+- [ ] Graceful shutdown drain timeout
+- [ ] Scheduled job claim optimization
+- [ ] `ntnt jobs list` with filters
+
+---
+
+### Phase 4: Composition Layer 📋
+
+**Depends on:** Phase 1 ✅
 **Estimated effort:** 2-3 days
 
 - [ ] `parallel(fns) -> Array` — run N functions, collect all results, cancel on first error
 - [ ] `race(fns) -> Value` — run N functions, return first result, cancel others
 - [ ] `task_group(fn(group))` — structured scope, all tasks cancelled when scope exits
-- [ ] Tests for each composition primitive
-- [ ] Documentation in STDLIB_REFERENCE.md + agent guide
-
-```ntnt
-// parallel — fan-out, fan-in
-let [users, posts] = parallel([
-    fn() { db.query("SELECT * FROM users") },
-    fn() { db.query("SELECT * FROM posts") },
-])
-
-// race — first wins
-let fastest = race([
-    fn() { fetch("https://api1.example.com/data") },
-    fn() { fetch("https://api2.example.com/data") },
-])
-
-// task_group — structured concurrency scope
-task_group(fn(group) {
-    group.spawn(fn() { process_a() })
-    group.spawn(fn() { process_b() })
-    // All tasks cancelled when this block exits
-})
-```
 
 ---
 
-### Phase 3: Job DSL + In-Memory Backend 📋
+### Phase 5: Dashboard + Production Hardening 📋
 
-**Depends on:** Phase 1 ✅  
-**Estimated effort:** 4-5 days  
-**Source:** `feat/job-dsl` branch (preserved code to cherry-pick from)
+**Depends on:** Phase 2 ✅, Phase 3 (some items)
+**Estimated effort:** 5-7 days
 
-The core job system. Declarative syntax, streaming logs, batch operations.
-
-#### Job Declaration & Registry
-- [ ] `Job Name on queue { perform(args) { ... } }` parser syntax
-- [ ] `Job Name on queue (retry: N, timeout: Xs, unique: N) { ... }` — inline options
-- [ ] `on_failure(error, attempt) { ... }` hook
-- [ ] Doc comment metadata (`/// Triggers:`, `/// Affects:`, `/// Side effects:`)
-- [ ] Parser auto-registers jobs — no manual registry needed
-
-#### In-Memory Backend
-- [ ] `Queue.configure(map { "backend": "memory" })` — default, zero-config
-- [ ] Job lifecycle: Scheduled → Pending → Active → Completed/Failed/Dead
-- [ ] Retry with configurable backoff (exponential, linear, constant)
-- [ ] Dead letter queue (jobs that exhaust retries)
-- [ ] Job cancellation and timeout enforcement
-- [ ] Priority queues (job-level and queue-level)
-- [ ] Deduplication — `unique: 3600` skips if identical job already queued (SHA256)
-- [ ] Job expiration — `expires: 5m` discards stale jobs
-- [ ] Graceful shutdown (drain in-flight jobs)
-
-#### Enqueue API
-- [ ] `JobName.enqueue(args)` — immediate enqueue
-- [ ] `JobName.enqueue_at(timestamp, args)` — schedule for specific time
-- [ ] `JobName.enqueue_in(delay_seconds, args)` — schedule with delay
-- [ ] `JobName.enqueue_batch(array_of_args)` — bulk enqueue (one round-trip)
-- [ ] `Queue.cancel(job_id)` — cancel a pending job
-- [ ] `Queue.status(job_id)` — check job status
-
-#### Worker Modes
-- [ ] `Queue.work_async()` — in-process alongside HTTP server
-- [ ] `Queue.work(opts)` — blocking worker mode (separate process: `ntnt worker`)
-- [ ] Configurable concurrency: `Queue.work(map { "concurrency": 10 })`
-- [ ] Queue selection: `Queue.work(map { "queues": ["emails", "payments"] })`
-- [ ] Weighted queues: `map { "critical": 5, "default": 3, "low": 1 }`
-
-#### Streaming Logs (Core — not deferred)
-- [ ] Workers emit structured JSON logs for every job event (enqueued, started, completed, failed, retried)
-- [ ] `Queue.on_event(fn(event))` — hook for custom log handling
-- [ ] Log format includes: job_id, job_type, queue, status, duration, error, attempt, timestamp
-- [ ] Logs are streamable — foundation for `ntnt jobs tail` in Phase 6
-
-#### Tests & Docs
-- [ ] Tests for each feature
-- [ ] STDLIB_REFERENCE.md updated
-- [ ] Agent guide updated
-- [ ] `ntnt docs --generate` passing
-
----
-
-### Phase 4: KV Backend + Dashboard 📋
-
-**Depends on:** Phase 3  
-**Estimated effort:** 4-5 days
-
-Persistent job storage and real-time visibility.
-
-#### KV Backend
-- [ ] `Queue.configure(map { "backend": "kv", "kv_url": env("KV_URL") })`
-- [ ] Key layout implementation (see below)
-- [ ] Job claiming via atomic KV operations (sorted set pop or set-if-not-exists)
-- [ ] Worker heartbeats via KV TTL keys — auto-requeue on worker death (solves stuck jobs)
-- [ ] Visibility timeout — configurable, default 5 minutes
-- [ ] Delayed/scheduled jobs via sorted set (sorted by scheduled_at)
-- [ ] Job history with automatic expiry (completed: 24h TTL, dead: 180 days)
-- [ ] Distributed locking for cron via set-if-not-exists + TTL
-- [ ] Automatic pruning of old completed/cancelled jobs
-- [ ] Batch enqueue — single KV round-trip for N jobs
-- [ ] Tests with both Redis and SQLite KV backends
-
-#### KV Key Layout
-```
-jobs:queue:<queue>          = sorted set of job_ids (by priority + scheduled_at)
-jobs:data:<job_id>          = { type, payload, status, attempts, created_at, ... }
-jobs:active:<job_id>        = claimed job (TTL = visibility_timeout)
-jobs:heartbeat:<worker_id>  = worker alive signal (TTL = 30s, refreshed continuously)
-jobs:dead:<job_id>          = failed job (TTL = 180 days, capped at 10K)
-jobs:completed:<job_id>     = completed job + result (TTL = 24h)
-jobs:unique:<sha256>        = dedup key (TTL = unique duration)
-jobs:lock:cron:<name>       = distributed lock for cron (TTL = interval)
-jobs:stats:<queue>          = { pending, active, completed, failed, dead }
-jobs:stats:ts:<queue>:<ts>  = time-bucketed stats (5-min buckets, 7-day retention)
-```
+Real-time dashboard and safety features that make jobs production-ready.
 
 #### Real-Time Dashboard
-- [ ] `Queue.configure(map { "dashboard": true })` — adds `/jobs` routes
+- [ ] `configure_queue(map { "dashboard": true })` — adds `/jobs` routes
 - [ ] Dashboard shows: pending/active/completed/failed/dead counts by queue
 - [ ] Per-job-type breakdown with average duration
-- [ ] Time-series charts (jobs/minute, error rate, queue depth over time)
 - [ ] Live-updating (SSE or polling)
 - [ ] Job detail view (payload, attempts, error, duration)
 - [ ] Retry/cancel actions from dashboard
 - [ ] **Security: localhost-only by default** (see [Dashboard Security Model](#dashboard-security-model))
 - [ ] API key auth option for remote access
-- [ ] App auth middleware integration option
-
-#### Worker Health
-- [ ] Worker registration in KV (worker_id, started_at, queues, last_heartbeat)
-- [ ] `/jobs/workers` endpoint — which workers are alive, what they're processing
-- [ ] Automatic dead worker detection (heartbeat TTL expiry)
-- [ ] Stats: jobs processed per worker, average processing time
-
-#### Time-Series Stats
-- [ ] 5-minute bucketed stats per queue (jobs_completed, jobs_failed, avg_duration)
-- [ ] 7-day retention with automatic pruning
-- [ ] `Queue.stats(map { "period": "1h" })` — aggregated stats over time window
-- [ ] Foundation for dashboard charts
-
----
-
-### Phase 5: Production Hardening 📋
-
-**Depends on:** Phase 3 (some items), Phase 4 (others)  
-**Estimated effort:** 3-4 days
-
-Safety features that make jobs production-ready and developer-friendly.
 
 #### Simulation Mode (dry-run)
 - [ ] `JobName.simulate(args)` — run the job without side effects
@@ -466,12 +391,12 @@ Feature: Welcome Email Job
 
 ### Phase 6: Observability CLI 📋
 
-**Depends on:** Phase 3 (streaming logs), Phase 4 (KV backend)  
+**Depends on:** Phase 2 ✅ (streaming logs, `ntnt jobs status` already shipped)
 **Estimated effort:** 2-3 days
 
-Developer tools for monitoring and debugging jobs from the terminal.
+Extends the basic `ntnt jobs` CLI (shipped in Phase 2c) with full observability tools.
 
-- [ ] `ntnt jobs status` — summary of all queues (pending/active/completed/failed/dead)
+- [x] `ntnt jobs status` — shipped in Phase 2c (PR #34)
 - [ ] `ntnt jobs list [--pending|--failed|--dead|--queue=<name>]` — filter jobs by status/queue
 - [ ] `ntnt jobs inspect <job-id>` — full job details (payload, attempts, error, duration, history)
 - [ ] `ntnt jobs retry <job-id>` — retry a failed/dead job
@@ -782,16 +707,24 @@ For production apps with existing user auth. The dashboard becomes another admin
 | Handle serialization? | Capturable at spawn time (closure capture). NOT sendable through channels. | 2026-03-16 |
 | Shutdown on eval error? | Unconditional. Capture result, shutdown, then propagate. | 2026-03-16 |
 
+### Resolved (Phase 2)
+
+| Question | Decision | Date |
+|----------|----------|------|
+| Job API style? | Free functions (`enqueue("Name", args)`), not methods (`Name.enqueue(args)`) | 2026-03-17 |
+| `job` as keyword or contextual? | Contextual identifier — avoids breaking existing code using `job` as variable | 2026-03-17 |
+| KV claiming strategy? | `kv_claim()` — SQLite `BEGIN IMMEDIATE` transaction; Redis SCAN+GET+DEL (Lua planned Phase 3) | 2026-03-17 |
+| Job workers: thread-per-task or pool? | Thread-per-task via `std::thread::spawn` + ConcurrencyRuntime integration | 2026-03-17 |
+| In-memory or persistent backend? | Persistent from day one via std/kv (SQLite default, Redis for prod) | 2026-03-17 |
+| `on_job_event` handler storage? | Deferred to Phase 3 — user closures (Rc) are not Send, need captured bindings or channel design | 2026-03-17 |
+
 ### Open
 
 | Question | Options | Notes |
 |----------|---------|-------|
 | Reaper TTL configurable? | Env var, runtime config, or hardcoded | Currently 5min hardcoded |
-| Job workers: thread-per-task or pool? | Pool (for throughput) | Phase 3+ decision |
-| KV claiming strategy? | Sorted set pop vs set-if-not-exists vs BRPOP | Backend-dependent |
 | Where do composition functions live? | Rust (fast) vs ntnt stdlib (extensible) | Probably both |
 | Dashboard SSE vs polling? | SSE (real-time) vs polling (simpler) | Leaning SSE |
-| Time-series bucket size? | 1min vs 5min vs configurable | Leaning 5min default |
 | `effect` block implementation? | Compile-time flag vs runtime flag | Needs design |
 
 ---
@@ -808,4 +741,5 @@ For production apps with existing user auth. The dashboard becomes another admin
 | 2026-03-16 | DD-037 v5: Dashboard security model. Simulation, contracts, intent verification promoted. Job chaining via application logic. Streaming logs promoted to core. Batch enqueue added. AI diagnosis cut. Competitive analysis updated with Josh's PHP system. |
 | 2026-03-16 | Copilot review fixes: `c2b2685` — select() busy-loop, consumed task leak, reaper lock discipline, NativeFunction ambiguity, typechecker sigs, doc wording. All 16 comments resolved. |
 | 2026-03-16 | DD-037 v6: Updated Phase 1 with full Copilot review resolution details. Added lessons 11-13. |
+| 2026-03-17 | Phase 2 complete: Job DSL shipped across PRs #32, #33, #34. Roadmap renumbered — old Phase 3/4 consolidated into Phase 2 (Job DSL + KV Backend). Phase 3 = advanced features (deferred items). Phase 4 = composition layer. Phase 5 = dashboard + hardening. |
 | 2026-03-17 | DD-037 v7: Added Phase 7 — Event Dispatch (`std/events`). Pub/sub fan-out over the job system. Memory + Redis backends. Testing mode integration. |

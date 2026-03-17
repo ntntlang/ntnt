@@ -1,0 +1,50 @@
+// Job DSL Demo — background job processing with NTNT
+//
+// Run this file to register jobs, then start workers:
+//   ntnt run examples/job_demo.tnt
+//
+// Or start workers separately:
+//   ntnt worker examples/job_demo.tnt --concurrency 2
+
+import { configure_queue, enqueue, enqueue_in, job_status } from "std/jobs"
+
+// Configure job storage (defaults to sqlite:./jobs.db if omitted)
+configure_queue(map { "store": "sqlite:./demo_jobs.db" })
+
+// Define a job with retry and failure handling
+job SendEmail on emails (retry: 5, backoff: "exponential") {
+    perform(to, subject, body) {
+        print("Sending email to #{to}: #{subject}")
+        // In a real app: fetch("https://api.sendgrid.com/...", ...)
+    }
+    on_failure(error, attempt) {
+        print("Email failed (attempt #{attempt}): #{error}")
+    }
+}
+
+// Define a simple job with no failure handler
+job CleanupExpiredSessions on maintenance {
+    perform(older_than_days) {
+        print("Cleaning sessions older than #{older_than_days} days")
+    }
+}
+
+// Enqueue some jobs
+let email_id = unwrap(enqueue("SendEmail", map {
+    "to": "alice@example.com",
+    "subject": "Welcome!",
+    "body": "Thanks for signing up."
+}))
+print("Enqueued email job: #{email_id}")
+
+// Enqueue a delayed job (run in 60 seconds)
+let cleanup_id = unwrap(enqueue_in("CleanupExpiredSessions", 60, map {
+    "older_than_days": 30
+}))
+print("Enqueued cleanup job (delayed 60s): #{cleanup_id}")
+
+// Check job status
+let status = unwrap(job_status(email_id))
+print("Email job status: #{status["status"]}")
+
+print("Jobs enqueued. Run 'ntnt worker examples/job_demo.tnt' to process them.")
