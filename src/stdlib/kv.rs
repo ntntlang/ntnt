@@ -1252,16 +1252,16 @@ pub fn kv_set(handle: &Value, key: &str, value: &Value, ttl: Option<i64>) -> Res
     match backend {
         KVBackend::SQLite => {
             let kv_arc = get_sqlite_kv(handle)?;
-            let kv = kv_arc.lock().map_err(|e| {
-                IntentError::runtime_error(format!("KV lock error: {}", e))
-            })?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
             kv.set(key, value, ttl)?;
         }
         KVBackend::Redis => {
             let kv_arc = get_redis_kv(handle)?;
-            let mut kv = kv_arc.lock().map_err(|e| {
-                IntentError::runtime_error(format!("KV lock error: {}", e))
-            })?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
             kv.set(key, value, ttl)?;
         }
     }
@@ -1274,16 +1274,16 @@ pub fn kv_get(handle: &Value, key: &str) -> Result<Value> {
     let result = match backend {
         KVBackend::SQLite => {
             let kv_arc = get_sqlite_kv(handle)?;
-            let kv = kv_arc.lock().map_err(|e| {
-                IntentError::runtime_error(format!("KV lock error: {}", e))
-            })?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
             kv.get(key)?
         }
         KVBackend::Redis => {
             let kv_arc = get_redis_kv(handle)?;
-            let mut kv = kv_arc.lock().map_err(|e| {
-                IntentError::runtime_error(format!("KV lock error: {}", e))
-            })?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
             kv.get(key)?
         }
     };
@@ -1296,16 +1296,16 @@ pub fn kv_del(handle: &Value, key: &str) -> Result<bool> {
     match backend {
         KVBackend::SQLite => {
             let kv_arc = get_sqlite_kv(handle)?;
-            let kv = kv_arc.lock().map_err(|e| {
-                IntentError::runtime_error(format!("KV lock error: {}", e))
-            })?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
             kv.del(key)
         }
         KVBackend::Redis => {
             let kv_arc = get_redis_kv(handle)?;
-            let mut kv = kv_arc.lock().map_err(|e| {
-                IntentError::runtime_error(format!("KV lock error: {}", e))
-            })?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
             kv.del(key)
         }
     }
@@ -1317,16 +1317,16 @@ pub fn kv_list(handle: &Value, prefix: Option<&str>) -> Result<Vec<String>> {
     match backend {
         KVBackend::SQLite => {
             let kv_arc = get_sqlite_kv(handle)?;
-            let kv = kv_arc.lock().map_err(|e| {
-                IntentError::runtime_error(format!("KV lock error: {}", e))
-            })?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
             kv.list(prefix)
         }
         KVBackend::Redis => {
             let kv_arc = get_redis_kv(handle)?;
-            let mut kv = kv_arc.lock().map_err(|e| {
-                IntentError::runtime_error(format!("KV lock error: {}", e))
-            })?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
             kv.list(prefix)
         }
     }
