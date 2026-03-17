@@ -1333,7 +1333,10 @@ fn jobs_load_kv(path: &PathBuf) -> anyhow::Result<ntnt::interpreter::Value> {
         std::process::exit(1);
     }
 
-    interpreter.eval(&ast)?;
+    let eval_result = interpreter.eval(&ast);
+    // Shutdown concurrency runtime to prevent leaked tasks/schedules from eval
+    ntnt::stdlib::concurrent::RUNTIME.shutdown();
+    eval_result?;
     let kv_handle = ntnt::stdlib::jobs::JOB_RUNTIME.get_or_init_kv()?;
     Ok(kv_handle)
 }
@@ -1424,10 +1427,19 @@ fn run_jobs_list_command(
             let status = jobs_str_field(job, "status");
             let attempts = jobs_int_field(job, "attempts");
             let created_at = jobs_str_field(job, "created_at");
+            let json_obj = serde_json::json!({
+                "id": id,
+                "type": jtype,
+                "queue": queue,
+                "status": status,
+                "attempts": attempts,
+                "created_at": created_at,
+            });
             let comma = if i + 1 < n { "," } else { "" };
             println!(
-                "  {{\"id\":\"{}\",\"type\":\"{}\",\"queue\":\"{}\",\"status\":\"{}\",\"attempts\":{},\"created_at\":\"{}\"}}{}",
-                id, jtype, queue, status, attempts, created_at, comma
+                "  {}{}",
+                serde_json::to_string(&json_obj).unwrap_or_default(),
+                comma
             );
         }
         println!("]");
@@ -1448,18 +1460,18 @@ fn run_jobs_list_command(
         println!("{}", "─".repeat(82).dimmed());
         for job in &jobs {
             let id = jobs_str_field(job, "id");
-            let id_short = if id.len() > 8 { &id[..8] } else { id.as_str() };
+            let id_short: String = id.chars().take(8).collect();
             let id_col = format!("{:<10}", id_short);
             let jtype = jobs_str_field(job, "type");
-            let type_trunc = if jtype.len() > 20 {
-                format!("{}…", &jtype[..19])
+            let type_trunc = if jtype.chars().count() > 20 {
+                format!("{}…", jtype.chars().take(19).collect::<String>())
             } else {
                 jtype.clone()
             };
             let type_col = format!("{:<20}", type_trunc);
             let queue = jobs_str_field(job, "queue");
-            let queue_trunc = if queue.len() > 15 {
-                format!("{}…", &queue[..14])
+            let queue_trunc = if queue.chars().count() > 15 {
+                format!("{}…", queue.chars().take(14).collect::<String>())
             } else {
                 queue.clone()
             };
@@ -1624,6 +1636,7 @@ fn run_jobs_retry_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
     };
 
     job_data.insert("status".to_string(), Value::String("pending".to_string()));
+    job_data.insert("attempts".to_string(), Value::Int(0));
     job_data.insert(
         "pending_key".to_string(),
         Value::String(new_pending_key.clone()),
@@ -1669,9 +1682,9 @@ fn run_jobs_cancel_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
     };
 
     let status = jobs_str_field(&job_data, "status");
-    if status != "pending" && status != "scheduled" {
+    if status != "pending" {
         eprintln!(
-            "{}: Job '{}' has status '{}' — only pending or scheduled jobs can be cancelled",
+            "{}: Job '{}' has status '{}' — only pending jobs can be cancelled",
             "error".red().bold(),
             job_id,
             status
@@ -1831,15 +1844,29 @@ fn print_job_field(label: &str, value: &str) {
 fn jobs_pretty_value(v: &ntnt::interpreter::Value, indent: usize) -> String {
     use ntnt::interpreter::Value;
     let pad = " ".repeat(indent);
+    let inner_pad = " ".repeat(indent + 2);
     match v {
         Value::Map(m) => {
             if m.is_empty() {
                 return format!("{}{{}}", pad);
             }
-            let mut lines = vec![format!("{}{{", pad)];
-            for (k, val) in m {
-                lines.push(format!("{}  \"{}\": {}", pad, k, jobs_pretty_value(val, 0)));
+            let mut entries: Vec<String> = m
+                .iter()
+                .map(|(k, val)| {
+                    format!(
+                        "{}\"{}\": {}",
+                        inner_pad,
+                        k,
+                        jobs_pretty_value(val, indent + 2)
+                    )
+                })
+                .collect();
+            // Add commas to all but the last entry
+            for i in 0..entries.len().saturating_sub(1) {
+                entries[i].push(',');
             }
+            let mut lines = vec![format!("{}{{", pad)];
+            lines.extend(entries);
             lines.push(format!("{}}}", pad));
             lines.join("\n")
         }
@@ -1849,7 +1876,7 @@ fn jobs_pretty_value(v: &ntnt::interpreter::Value, indent: usize) -> String {
             }
             let items: Vec<String> = arr
                 .iter()
-                .map(|item| format!("{}  {}", pad, jobs_pretty_value(item, 0)))
+                .map(|item| format!("{}{}", inner_pad, jobs_pretty_value(item, indent + 2)))
                 .collect();
             format!("{}[\n{}\n{}]", pad, items.join(",\n"), pad)
         }
@@ -1868,7 +1895,7 @@ fn jobs_pretty_value(v: &ntnt::interpreter::Value, indent: usize) -> String {
 fn format_ns_timestamp(ns_str: &str) -> String {
     let nanos: u128 = match ns_str.parse() {
         Ok(n) => n,
-        Err(_) => return ns_str[..ns_str.len().min(20)].to_string(),
+        Err(_) => return ns_str.chars().take(20).collect(),
     };
     let secs = (nanos / 1_000_000_000) as u64;
     let secs_in_day = secs % 86400;
