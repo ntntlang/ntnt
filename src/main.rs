@@ -997,10 +997,37 @@ fn run_worker_command(
     let mut parser = IntentParser::new(tokens);
     let ast = parser.parse()?;
 
+    // Strict type checking (same gate as run_file)
+    if let Some(errors) = ntnt::typechecker::strict_check_with_file(&ast, &source, Some(&path_str))
+    {
+        for diag in &errors {
+            let location = if diag.line > 0 {
+                format!(" (line {})", diag.line)
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "{}: {}{}",
+                "type error".red().bold(),
+                diag.message,
+                location
+            );
+            if let Some(hint) = &diag.hint {
+                eprintln!("  {}: {}", "hint".cyan(), hint);
+            }
+        }
+        eprintln!(
+            "\n{}: {} type error(s) found. Fix them or unset NTNT_STRICT to run anyway.",
+            "blocked".red().bold(),
+            errors.len()
+        );
+        std::process::exit(1);
+    }
+
     // Evaluate the file to register all job definitions
     interpreter.eval(&ast)?;
 
-    // Build opts map for work_jobs
+    // Build opts map
     let mut opts = std::collections::HashMap::new();
     opts.insert(
         "poll_interval".to_string(),
@@ -1017,34 +1044,37 @@ fn run_worker_command(
         );
     }
 
+    let module = ntnt::stdlib::jobs::init();
+
     // For multi-worker, use work_async + blocking wait
     if concurrency > 1 {
         opts.insert(
             "concurrency".to_string(),
             ntnt::interpreter::Value::Int(concurrency as i64),
         );
-        let module = ntnt::stdlib::jobs::init();
-        if let Some(ntnt::interpreter::Value::NativeFunction { func, .. }) =
-            module.get("work_async")
-        {
-            let _handles = func(&[ntnt::interpreter::Value::Map(opts)])?;
-            // Block until Ctrl-C
-            let (tx, rx) = std::sync::mpsc::channel();
-            let _ = ctrlc::set_handler(move || {
-                let _ = tx.send(());
-            });
-            let _ = rx.recv();
-            ntnt::stdlib::concurrent::RUNTIME.shutdown();
-        }
-    } else {
-        // Single worker — use work_jobs (blocks until Ctrl-C)
-        let module = ntnt::stdlib::jobs::init();
-        if let Some(ntnt::interpreter::Value::NativeFunction { func, .. }) = module.get("work_jobs")
-        {
-            let _ = func(&[ntnt::interpreter::Value::Map(opts)]);
-        }
+        let func = match module.get("work_async") {
+            Some(ntnt::interpreter::Value::NativeFunction { func, .. }) => *func,
+            _ => anyhow::bail!("work_async not found in std/jobs module"),
+        };
+        func(&[ntnt::interpreter::Value::Map(opts)])?;
+
+        // Block until Ctrl-C, then shut down all workers
+        let (tx, rx) = std::sync::mpsc::channel();
+        ctrlc::set_handler(move || {
+            let _ = tx.send(());
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to set Ctrl-C handler: {}", e))?;
+        let _ = rx.recv();
+        ntnt::stdlib::concurrent::RUNTIME.shutdown();
+        return Ok(());
     }
 
+    // Single worker — use work_jobs (blocks until Ctrl-C)
+    let func = match module.get("work_jobs") {
+        Some(ntnt::interpreter::Value::NativeFunction { func, .. }) => *func,
+        _ => anyhow::bail!("work_jobs not found in std/jobs module"),
+    };
+    func(&[ntnt::interpreter::Value::Map(opts)])?;
     ntnt::stdlib::concurrent::RUNTIME.shutdown();
     Ok(())
 }
@@ -1063,6 +1093,25 @@ fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
     let tokens: Vec<_> = lexer.collect();
     let mut parser = IntentParser::new(tokens);
     let ast = parser.parse()?;
+
+    // Strict type checking (same gate as run_file)
+    if let Some(errors) = ntnt::typechecker::strict_check_with_file(&ast, &source, Some(&path_str))
+    {
+        for diag in &errors {
+            let location = if diag.line > 0 {
+                format!(" (line {})", diag.line)
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "{}: {}{}",
+                "type error".red().bold(),
+                diag.message,
+                location
+            );
+        }
+        std::process::exit(1);
+    }
 
     // Evaluate to register jobs and init KV
     interpreter.eval(&ast)?;

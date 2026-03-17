@@ -130,8 +130,6 @@ pub struct JobRuntime {
     kv_url: Mutex<String>,
     /// Test queue: when Some, enqueue() collects here instead of writing to KV.
     test_queue: Mutex<Option<Vec<EnqueuedJob>>>,
-    /// User callback for job events, set by on_job_event()
-    event_handler: Mutex<Option<fn(&[Value]) -> Result<Value>>>,
 }
 
 impl JobRuntime {
@@ -141,7 +139,6 @@ impl JobRuntime {
             kv_handle_info: Mutex::new(None),
             kv_url: Mutex::new("sqlite:./jobs.db".to_string()),
             test_queue: Mutex::new(None),
-            event_handler: Mutex::new(None),
         }
     }
 
@@ -223,9 +220,6 @@ impl JobRuntime {
         }
         if let Ok(mut tq) = self.test_queue.lock() {
             *tq = None;
-        }
-        if let Ok(mut h) = self.event_handler.lock() {
-            *h = None;
         }
     }
 }
@@ -862,7 +856,7 @@ fn spawn_worker_task(
 // Event emission helper
 // ============================================================================
 
-/// Emit a structured job event to stderr as JSON, and call user handler if set.
+/// Emit a structured job event to stderr as JSON.
 fn emit_job_event(event: &str, fields: &[(&str, Value)]) {
     let mut map = HashMap::new();
     map.insert("event".to_string(), Value::String(event.to_string()));
@@ -871,16 +865,10 @@ fn emit_job_event(event: &str, fields: &[(&str, Value)]) {
         map.insert(k.to_string(), v.clone());
     }
     // Write JSON to stderr
-    if let Ok(json) = serde_json::to_string(&crate::stdlib::kv::value_to_json_public(&Value::Map(
-        map.clone(),
-    ))) {
+    if let Ok(json) =
+        serde_json::to_string(&crate::stdlib::kv::value_to_json_public(&Value::Map(map)))
+    {
         let _ = std::io::Write::write_all(&mut std::io::stderr(), format!("{}\n", json).as_bytes());
-    }
-    // Call user handler if set
-    if let Ok(handler) = JOB_RUNTIME.event_handler.lock() {
-        if let Some(func) = *handler {
-            let _ = func(&[Value::Map(map)]);
-        }
     }
 }
 
@@ -1657,48 +1645,6 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     None => Err(IntentError::runtime_error(
                         "clear_jobs() requires testing mode. Call configure_queue(map { \"mode\": \"testing\" }) first.".to_string(),
-                    )),
-                }
-            },
-        },
-    );
-
-    // @ntnt on_job_event
-    // @module std/jobs
-    // @signature on_job_event(handler: Function) -> Result<Unit, String>
-    // Register a callback to receive structured job lifecycle events.
-    //
-    // The handler is called for every job event (job.enqueued, job.started,
-    // job.completed, job.failed, job.dead) with a map containing "event",
-    // "timestamp", "job_id", "type", and event-specific fields. The handler
-    // must be a native function (not a user-defined closure).
-    // @param handler A native function accepting a single map argument
-    // @returns Ok(Unit) on success
-    // @see_also work_jobs, work_async
-    // @example on_job_event(fn(e) { log_info("job event", e) }) ~ "Log all job events"
-    module.insert(
-        "on_job_event".to_string(),
-        Value::NativeFunction {
-            name: "on_job_event".to_string(),
-            arity: 1,
-            max_arity: 1,
-            func: |args| {
-                if args.len() != 1 {
-                    return Err(IntentError::type_error(
-                        "on_job_event() requires 1 argument (handler)".to_string(),
-                    ));
-                }
-                match &args[0] {
-                    Value::NativeFunction { func, .. } => {
-                        let handler_fn = *func;
-                        let mut h = JOB_RUNTIME.event_handler.lock().map_err(|e| {
-                            IntentError::runtime_error(format!("Lock error: {}", e))
-                        })?;
-                        *h = Some(handler_fn);
-                        Ok(Value::ok(Value::Unit))
-                    }
-                    _ => Err(IntentError::type_error(
-                        "on_job_event() requires a native function handler".to_string(),
                     )),
                 }
             },

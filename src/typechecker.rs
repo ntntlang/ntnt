@@ -3573,7 +3573,6 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     args: vec![Type::Unit, Type::String]
                 }
             );
-            sig!("on_job_event", ["handler" => Type::Any], Type::Unit);
         }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));

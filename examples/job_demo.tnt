@@ -45,6 +45,6 @@ print("Enqueued cleanup job (delayed 60s): #{cleanup_id}")
 
 // Check job status
 let status = unwrap(job_status(email_id))
-print("Email job status: #{status}")
+print("Email job status: #{status["status"]}")
 
 print("Jobs enqueued. Run 'ntnt worker examples/job_demo.tnt' to process them.")

@@ -5945,7 +5945,6 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`enqueue_at`](#enqueueat) | Enqueue a job to run at a specific future time. |
 | [`enqueue_in`](#enqueuein) | Enqueue a job to run after a delay in seconds. |
 | [`job_status`](#jobstatus) | Get the current status and data for a job by its ID. |
-| [`on_job_event`](#onjobevent) | Register a callback to receive structured job lifecycle events. |
 | [`work_async`](#workasync) | Start one or more background worker threads that process jobs from the queue. |
 | [`work_jobs`](#workjobs) | Run a blocking worker loop that processes jobs from the queue. |
 
@@ -6200,32 +6199,6 @@ Returns the full job data map including status, type, queue, payload, attempts, 
 ```ntnt
 job_status("abc-123")  // Check job status
 ```
-
----
-
-#### `on_job_event`
-
-```ntnt
-on_job_event(handler: Function) -> Result<Unit, String>
-```
-
-Register a callback to receive structured job lifecycle events.
-
-The handler is called for every job event (job.enqueued, job.started, job.completed, job.failed, job.dead) with a map containing "event", "timestamp", "job_id", "type", and event-specific fields. The handler must be a native function (not a user-defined closure).
-
-**Parameters:**
-
-- `handler` — A native function accepting a single map argument
-
-**Returns:** Ok(Unit) on success
-
-**Examples:**
-
-```ntnt
-on_job_event(fn(e) { log_info("job event", e) })  // Log all job events
-```
-
-**See also:** `work_jobs`, `work_async`
 
 ---
 

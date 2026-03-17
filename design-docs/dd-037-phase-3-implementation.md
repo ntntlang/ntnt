@@ -114,6 +114,18 @@ Configurable drain timeout (default 30s) for `work_jobs()`. After timeout, in-fl
 **File:** `src/main.rs`
 **Priority:** Low — `ntnt jobs status` (Phase 2c) covers the basic observability need
 
+### `on_job_event(handler)` — User Event Hook
+
+`on_job_event(fn(e) { ... })` for custom job event handling. Deferred from Phase 2c because `Value::Function` (user closures) contains `Rc<RefCell<Environment>>` which is not `Send` — cannot be stored in the global `JOB_RUNTIME` for worker threads to call.
+
+**Design options:**
+1. **Capture bindings** — same pattern as `spawn()` in std/concurrent: extract `CapturedBindings` from the closure, store those (Send-safe), reconstruct in the worker thread. Requires `validate_and_capture()` to be made `pub(crate)`.
+2. **Main-thread-only hook** — store handler in a `thread_local!` instead of `JOB_RUNTIME`. Only fires for events on the calling thread (works for `work_jobs()`, not `work_async()`).
+3. **Channel-based** — worker threads send events through a channel, main thread dispatches to the handler. Cleanest separation of concerns.
+
+**File:** `src/stdlib/jobs.rs`
+**Priority:** Medium — stderr JSON logs provide basic observability; the hook adds programmatic integration
+
 ---
 
 ## Implementation Notes

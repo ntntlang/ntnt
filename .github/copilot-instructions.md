@@ -1654,7 +1654,7 @@ job SendEmail on emails (retry: 5, backoff: "exponential") {
 **Syntax:** `job Name on queue_name (options) { perform(params) { body } on_failure(params) { body } }`
 
 - `on queue_name` — assigns the job to a named queue
-- Options: `retry: N` (default 3), `backoff: "exponential"|"linear"|"constant"`, `timeout: N` (seconds)
+- Options: `retry: N` (default 3), `backoff: "exponential"|"linear"|"constant"`, `timeout: N` (seconds, post-execution check — does not preemptively interrupt)
 - `on_failure` block is optional — called on each failure with error message and attempt count
 
 ### Enqueueing Jobs
@@ -1759,7 +1759,7 @@ Workers emit structured JSON events to stderr:
 {"event":"job.failed","job_id":"abc","type":"SendEmail","error":"...","attempt":1,"will_retry":true,"timestamp":"..."}
 ```
 
-Use `on_job_event(handler)` for custom event handling.
+Custom event handling via `on_job_event(handler)` is planned for a future release.
 
 ---
 
