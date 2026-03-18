@@ -1,6 +1,6 @@
 # DD-037: Concurrency & Job System
 
-**Status:** Phases 0-2 Complete, Phases 3-8 Planned
+**Status:** Phases 0-2, 6 Complete, Phases 3-5, 7-8 Planned
 **Author:** Larri
 **Created:** 2026-03-15
 **Last Updated:** 2026-03-17
@@ -195,7 +195,7 @@ Phase 2  ✅  Job DSL + KV Backend                       PR 2a/2b/2c — declara
 Phase 3  📋  Job System Advanced Features               dedup, batch, priority, Lua claim, on_job_event
 Phase 4  📋  Composition Layer                          parallel, race, task groups
 Phase 5  📋  Dashboard + Production Hardening            real-time UI, simulation, contracts
-Phase 6  📋  Observability CLI                          ntnt jobs list/tail/replay
+Phase 6  ✅  Observability CLI                          PR #35 — list/inspect/retry/cancel/clear + dedup refactor
 Phase 7  📋  Event Dispatch (std/events)                pub/sub fan-out over the job system
 Phase 8  📋  Job Audit Log & Observability Pipeline    structured logs, sinks, webhooks, web viewer
 ```
@@ -210,7 +210,7 @@ Phase 8  📋  Job Audit Log & Observability Pipeline    structured logs, sinks,
 | 3 | Job System Advanced Features | 📋 Planned | See [dd-037-phase-3-implementation.md](dd-037-phase-3-implementation.md) |
 | 4 | Composition Layer | 📋 Planned | parallel, race, task groups |
 | 5 | Dashboard + Production Hardening | 📋 Planned | Dashboard, simulation, contracts, intent testing |
-| 6 | Observability CLI | 📋 Planned | ntnt jobs list/tail/inspect/replay |
+| 6 | Observability CLI | ✅ Done | PR #35 merged. list/inspect/retry/cancel/clear + CLI/stdlib dedup refactor. `tail`, `replay`, `workers` deferred. |
 | 7 | Event Dispatch (`std/events`) | 📋 Planned | pub/sub fan-out over the job system |
 | 8 | Job Audit Log & Observability Pipeline | 📋 Planned | See [dd-042-job-audit-log.md](dd-042-job-audit-log.md) |
 
@@ -391,21 +391,30 @@ Feature: Welcome Email Job
 
 ---
 
-### Phase 6: Observability CLI 📋
+### Phase 6: Observability CLI ✅
 
 **Depends on:** Phase 2 ✅ (streaming logs, `ntnt jobs status` already shipped)
-**Estimated effort:** 2-3 days
+**Status:** Complete. Implemented in PR #35 (merged 2026-03-18).
 
 Extends the basic `ntnt jobs` CLI (shipped in Phase 2c) with full observability tools.
 
+**Shipped:**
 - [x] `ntnt jobs status` — shipped in Phase 2c (PR #34)
-- [ ] `ntnt jobs list [--pending|--failed|--dead|--queue=<name>]` — filter jobs by status/queue
-- [ ] `ntnt jobs inspect <job-id>` — full job details (payload, attempts, error, duration, history)
-- [ ] `ntnt jobs retry <job-id>` — retry a failed/dead job
-- [ ] `ntnt jobs cancel <job-id>` — cancel a pending/scheduled job
-- [ ] `ntnt jobs tail [--queue=<name>] [--status=failed] [--since=1h]` — streaming log view with filters
-- [ ] `ntnt jobs replay <job-id> [--dry-run]` — re-run with same inputs (dry-run uses simulation mode)
-- [ ] `ntnt jobs clear --dead [--older-than=7d]` — clear old dead/completed jobs
+- [x] `ntnt jobs list [--status=X] [--queue=X] [--limit=N] [--format=json]` — filter and list jobs
+- [x] `ntnt jobs inspect <job-id>` — full job details (payload, attempts, error, timestamps)
+- [x] `ntnt jobs retry <job-id>` — re-queue a retrying/dead/failed job (resets attempts)
+- [x] `ntnt jobs cancel <job-id> [--force]` — cancel pending/scheduled/retrying; force-cancel active
+- [x] `ntnt jobs clear --status=X [--older-than=DURATION] [--yes]` — bulk delete by status with age filter
+- [x] Stdlib parity: `retry_job()`, `cancel_job()`, `list_jobs()`, `delete_jobs()` — same logic as CLI
+- [x] CLI/stdlib deduplication refactor: public API functions (`retry_job_by_id`, `cancel_job_by_id`, `list_jobs_filtered`, `delete_jobs_filtered`, `job_status_counts`) — both CLI and stdlib are thin wrappers
+- [x] New job statuses: `"retrying"` (mid-backoff, replaces `"failed"`), `"scheduled"` (enqueue_at/enqueue_in), `"dead"` (terminal failure)
+- [x] Backward compat: `"failed"` accepted in retry/cancel for pre-v0.4.6 data
+- [x] RUNTIME_REFERENCE.md, AI_AGENT_GUIDE.md, CLAUDE.md, copilot-instructions.md all updated
+- [x] Greptile review: strict filter matching (corrupt records rejected), CLI/stdlib `"failed"` parity
+
+**Deferred (follow-up, not blocking):**
+- [ ] `ntnt jobs tail [--queue=X] [--status=X] [--since=1h]` — streaming log view with filters
+- [ ] `ntnt jobs replay <job-id> [--dry-run]` — re-run with same inputs
 - [ ] `ntnt jobs workers` — list active workers with health status
 - [ ] `--format=agent` option for LLM-optimized compact output
 
