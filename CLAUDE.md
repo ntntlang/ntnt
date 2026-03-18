@@ -1714,21 +1714,40 @@ let workers = work_async(map { "concurrency": 4, "poll_interval": 500 })
 work_jobs()
 ```
 
-**CLI:**
+**CLI — Workers:**
 ```bash
 ntnt worker server.tnt                          # Single worker
 ntnt worker server.tnt --concurrency 4          # 4 parallel workers
 ntnt worker server.tnt --queues emails,payments # Specific queues
-ntnt jobs server.tnt                            # Show queue status
+```
+
+**CLI — Observability & Management:**
+```bash
+ntnt jobs status server.tnt                              # Counts by status
+ntnt jobs list server.tnt                                # List all jobs (newest first)
+ntnt jobs list server.tnt --status=dead --limit=20       # Filter by status
+ntnt jobs list server.tnt --queue=emails --format=json   # Filter by queue, JSON output
+ntnt jobs inspect server.tnt <JOB_ID>                    # Full job details
+ntnt jobs retry server.tnt <JOB_ID>                      # Re-queue a dead/retrying job
+ntnt jobs cancel server.tnt <JOB_ID>                     # Cancel pending/scheduled job
+ntnt jobs cancel server.tnt <JOB_ID> --force             # Force-cancel active job
+ntnt jobs clear server.tnt --status=completed            # Bulk delete by status
+ntnt jobs clear server.tnt --status=dead --older-than=7d --yes  # Age filter, skip prompt
 ```
 
 ### Job Status & Control
 
 ```ntnt
-import { job_status, cancel_job } from "std/jobs"
+import { job_status, cancel_job, retry_job, list_jobs, delete_jobs } from "std/jobs"
 
 let status = unwrap(job_status(id))   // Map with status, attempts, timestamps
-cancel_job(id)                         // Cancel a pending job
+cancel_job(id)                         // Cancel a pending/scheduled/retrying job
+cancel_job(id, map { "force": true })  // Force-cancel an active (running) job
+retry_job(id)                          // Re-queue a dead or retrying job
+list_jobs()                            // List all jobs (up to 100)
+list_jobs(map { "status": "dead", "queue": "emails", "limit": 10 })
+delete_jobs(map { "status": "completed" })              // Bulk delete
+delete_jobs(map { "status": "dead", "older_than_secs": 604800 })  // 7 days
 ```
 
 ### Testing Mode

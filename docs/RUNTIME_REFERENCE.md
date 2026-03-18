@@ -387,6 +387,142 @@ Generate shell completions
 ntnt completions zsh >> ~/.zshrc
 ```
 
+### Worker
+
+```
+ntnt worker <FILE>
+```
+
+Start background job workers for jobs defined in a .tnt file. Loads the source file (registering all job definitions), then starts processing jobs from the queue until interrupted with Ctrl-C.
+
+**Options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--concurrency` | number | 1 | Number of concurrent worker threads |
+| `--queues` | STRING | - | Comma-separated list of queues to process (default: all) |
+| `--poll-interval` | number | 1000 | Poll interval in milliseconds |
+
+**Examples:**
+```bash
+ntnt worker server.tnt
+ntnt worker server.tnt --concurrency 4
+ntnt worker server.tnt --queues emails,payments
+```
+
+### Jobs
+
+```
+ntnt jobs <SUBCOMMAND> <FILE> [OPTIONS]
+```
+
+Manage and inspect the job queue. All subcommands take the .tnt file that has the queue configuration as the first argument.
+
+### Jobs Status
+
+```
+ntnt jobs status <FILE>
+```
+
+Show job queue status with counts by status (pending, scheduled, active, completed, retrying, dead, cancelled).
+
+**Example:**
+```bash
+ntnt jobs status server.tnt
+```
+
+### Jobs List
+
+```
+ntnt jobs list <FILE>
+```
+
+List individual jobs with optional status and queue filters. Results are sorted newest-first.
+
+**Options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--status` | STRING | - | Filter by status (pending/scheduled/active/completed/retrying/dead/cancelled) |
+| `--queue` | STRING | - | Filter by queue name |
+| `--limit` | number | 50 | Maximum number of jobs to show |
+| `--format` | STRING | - | Output format: json (default: table) |
+
+**Examples:**
+```bash
+ntnt jobs list server.tnt
+ntnt jobs list server.tnt --status=dead --limit=20
+ntnt jobs list server.tnt --queue=emails --format=json
+```
+
+### Jobs Inspect
+
+```
+ntnt jobs inspect <FILE> <JOB_ID>
+```
+
+Show full details of a single job: id, type, queue, status, payload, attempts, retry config, timestamps, and error message if any.
+
+**Example:**
+```bash
+ntnt jobs inspect server.tnt abc12345
+```
+
+### Jobs Retry
+
+```
+ntnt jobs retry <FILE> <JOB_ID>
+```
+
+Re-queue a failed or dead job for another attempt. Resets attempts to 0, clears error fields, and creates a new pending key. Accepts jobs with status 'retrying', 'dead', or 'failed' (backward compat).
+
+**Example:**
+```bash
+ntnt jobs retry server.tnt abc12345
+```
+
+### Jobs Cancel
+
+```
+ntnt jobs cancel <FILE> <JOB_ID>
+```
+
+Cancel a job. By default, only pending, scheduled, retrying, or failed jobs can be cancelled. Use --force to cancel an active (running) job — the worker will discard the result when it finishes.
+
+**Options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--force` | flag | - | Force-cancel an active (running) job. The worker may still be executing, but the result will be discarded. |
+
+**Examples:**
+```bash
+ntnt jobs cancel server.tnt abc12345
+ntnt jobs cancel server.tnt abc12345 --force
+```
+
+### Jobs Clear
+
+```
+ntnt jobs clear <FILE> --status=<STATUS>
+```
+
+Bulk delete jobs by status. Requires --status to prevent accidental wipe-all. Cannot clear active jobs (workers hold references). Use --older-than to only clear jobs older than a given duration.
+
+**Options:**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--status` | STRING | - | Status of jobs to clear (required) |
+| `--older-than` | DURATION | - | Only clear jobs older than this duration (e.g., 7d, 24h, 30m) |
+| `--yes` | flag | - | Skip confirmation prompt |
+
+**Examples:**
+```bash
+ntnt jobs clear server.tnt --status=completed
+ntnt jobs clear server.tnt --status=dead --older-than=7d --yes
+```
+
 ### Intent Check
 
 ```
