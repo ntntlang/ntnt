@@ -559,6 +559,8 @@ fn guess_mime_type(path: &str) -> &'static str {
         "gif" => "image/gif",
         "svg" => "image/svg+xml",
         "ico" => "image/x-icon",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
         "woff" => "font/woff",
         "woff2" => "font/woff2",
         "ttf" => "font/ttf",
