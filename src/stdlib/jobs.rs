@@ -651,7 +651,28 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
             exec_result
         };
 
-        // Execute
+        // Check if job was force-cancelled while we were executing —
+        // re-read status from KV and discard our result if cancelled.
+        if let Ok(Value::Map(fresh_data)) = kv::kv_get(&kv_handle, &data_key) {
+            if let Some(Value::String(current_status)) = fresh_data.get("status") {
+                if current_status == "cancelled" {
+                    emit_job_event(
+                        "job.cancelled",
+                        &[
+                            ("job_id", Value::String(job_id.clone())),
+                            ("type", Value::String(job_type.clone())),
+                            (
+                                "reason",
+                                Value::String("force-cancelled during execution".to_string()),
+                            ),
+                        ],
+                    );
+                    continue;
+                }
+            }
+        }
+
+        // Execute result handling
         match exec_result {
             Ok(_) => {
                 // Success
@@ -1085,24 +1106,31 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt cancel_job
     // @module std/jobs
-    // @signature cancel_job(job_id: String) -> Result<Bool, String>
-    // Cancel a pending job by its ID.
+    // @module_description Background job queue with persistent storage
+    // @signature cancel_job(job_id: String, opts?: Map) -> Result<Bool, String>
+    // Cancel a job by its ID.
     //
-    // Sets the job status to "cancelled" and removes it from the pending queue.
+    // By default, only pending, scheduled, retrying, or failed jobs can be cancelled.
+    // Pass `map { "force": true }` to cancel an active (running) job — this marks it
+    // as cancelled and removes its visibility timeout key. The worker thread may still
+    // be executing, but the result will be discarded when it checks the status.
     // Returns true if the job was cancelled, false if it was not in a cancellable state.
     // @param job_id The job ID returned by enqueue()
+    // @param opts Optional map. Pass `map { "force": true }` to force-cancel active jobs.
     // @returns Result containing true if cancelled, false if not cancellable
     // @example cancel_job("abc-123") ~ "Cancel a pending job"
+    // @example cancel_job("abc-123", map { "force": true }) ~ "Force-cancel a stuck active job"
+    // @see_also retry_job, job_status
     module.insert(
         "cancel_job".to_string(),
         Value::NativeFunction {
             name: "cancel_job".to_string(),
             arity: 1,
-            max_arity: 1,
+            max_arity: 2,
             func: |args| {
-                if args.len() != 1 {
+                if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::type_error(
-                        "cancel_job() requires 1 argument (job_id)".to_string(),
+                        "cancel_job() requires 1-2 arguments (job_id, opts?)".to_string(),
                     ));
                 }
 
@@ -1110,9 +1138,18 @@ pub fn init() -> HashMap<String, Value> {
                     Value::String(s) => s.clone(),
                     _ => {
                         return Err(IntentError::type_error(
-                            "cancel_job() requires a string job ID".to_string(),
+                            "cancel_job() first argument must be a string job ID".to_string(),
                         ))
                     }
+                };
+
+                let force = if args.len() > 1 {
+                    match &args[1] {
+                        Value::Map(opts) => matches!(opts.get("force"), Some(Value::Bool(true))),
+                        _ => false,
+                    }
+                } else {
+                    false
                 };
 
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
@@ -1136,17 +1173,23 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                // Check if cancellable (only pending jobs)
                 let status = match job_data.get("status") {
                     Some(Value::String(s)) => s.clone(),
                     _ => "unknown".to_string(),
                 };
 
-                if status != "pending"
+                // Without force: only allow cancelling non-active jobs
+                if !force
+                    && status != "pending"
                     && status != "scheduled"
                     && status != "retrying"
                     && status != "failed"
                 {
+                    return Ok(Value::ok(Value::Bool(false)));
+                }
+
+                // With force: allow active jobs too, but reject completed/dead/cancelled
+                if force && (status == "completed" || status == "dead" || status == "cancelled") {
                     return Ok(Value::ok(Value::Bool(false)));
                 }
 
@@ -1158,11 +1201,17 @@ pub fn init() -> HashMap<String, Value> {
 
                 // Update status to cancelled
                 job_data.insert("status".to_string(), Value::String("cancelled".to_string()));
+                job_data.insert("cancelled_at".to_string(), Value::String(timestamp_key()));
                 kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
 
-                // Remove from pending queue — O(1) direct delete via stored pending_key
+                // Remove from pending queue
                 if let Some(pk) = pending_key {
-                    kv::kv_del(&kv_handle, &pk)?;
+                    let _ = kv::kv_del(&kv_handle, &pk);
+                }
+
+                // If force-cancelling an active job, remove the visibility timeout key
+                if status == "active" {
+                    let _ = kv::kv_del(&kv_handle, &format!("jobs:active:{}", job_id));
                 }
 
                 Ok(Value::ok(Value::Bool(true)))

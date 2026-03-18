@@ -528,12 +528,15 @@ enum JobsCommands {
         #[arg(value_name = "JOB_ID")]
         job_id: String,
     },
-    /// Cancel a pending job
+    /// Cancel a job
     ///
-    /// Removes the job from the pending queue and marks it as cancelled.
+    /// By default, only pending, scheduled, or retrying jobs can be cancelled.
+    /// Use --force to cancel an active (running) job — the worker will discard
+    /// the result when it finishes. Use this for stuck or deadlocked jobs.
     ///
     /// Examples:
     ///   ntnt jobs cancel server.tnt abc12345
+    ///   ntnt jobs cancel server.tnt abc12345 --force
     Cancel {
         /// The source file containing job/queue configuration
         #[arg(value_name = "FILE")]
@@ -542,6 +545,10 @@ enum JobsCommands {
         /// Job ID to cancel
         #[arg(value_name = "JOB_ID")]
         job_id: String,
+
+        /// Force-cancel an active (running) job
+        #[arg(long)]
+        force: bool,
     },
     /// Bulk delete jobs by status
     ///
@@ -1363,7 +1370,11 @@ fn run_jobs_command(cmd: JobsCommands) -> anyhow::Result<()> {
         ),
         JobsCommands::Inspect { file, job_id } => run_jobs_inspect_command(&file, &job_id),
         JobsCommands::Retry { file, job_id } => run_jobs_retry_command(&file, &job_id),
-        JobsCommands::Cancel { file, job_id } => run_jobs_cancel_command(&file, &job_id),
+        JobsCommands::Cancel {
+            file,
+            job_id,
+            force,
+        } => run_jobs_cancel_command(&file, &job_id, force),
         JobsCommands::Clear {
             file,
             status,
@@ -1678,7 +1689,7 @@ fn run_jobs_retry_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
 }
 
 /// Cancel a pending job by removing it from the queue
-fn run_jobs_cancel_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
+fn run_jobs_cancel_command(path: &PathBuf, job_id: &str, force: bool) -> anyhow::Result<()> {
     use ntnt::interpreter::Value;
 
     let kv_handle = jobs_load_kv(path)?;
@@ -1695,9 +1706,31 @@ fn run_jobs_cancel_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
     };
 
     let status = jobs_str_field(&job_data, "status");
-    if status != "pending" && status != "scheduled" && status != "retrying" {
+
+    // Without --force: only non-active, non-terminal jobs
+    if !force && status != "pending" && status != "scheduled" && status != "retrying" {
+        if status == "active" {
+            eprintln!(
+                "{}: Job '{}' is currently active. Use {} to force-cancel a running job.",
+                "error".red().bold(),
+                job_id,
+                "--force".yellow().bold()
+            );
+        } else {
+            eprintln!(
+                "{}: Job '{}' has status '{}' — only pending, scheduled, or retrying jobs can be cancelled",
+                "error".red().bold(),
+                job_id,
+                status
+            );
+        }
+        std::process::exit(1);
+    }
+
+    // With --force: reject terminal states (completed/dead/cancelled)
+    if force && (status == "completed" || status == "dead" || status == "cancelled") {
         eprintln!(
-            "{}: Job '{}' has status '{}' — only pending, scheduled, or retrying jobs can be cancelled",
+            "{}: Job '{}' has status '{}' — cannot cancel a job in a terminal state",
             "error".red().bold(),
             job_id,
             status
@@ -1711,10 +1744,32 @@ fn run_jobs_cancel_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
         let _ = ntnt::stdlib::kv::kv_del(&kv_handle, &pk_owned);
     }
 
+    // If force-cancelling an active job, remove the visibility timeout key
+    if status == "active" {
+        let _ = ntnt::stdlib::kv::kv_del(&kv_handle, &format!("jobs:active:{}", job_id));
+    }
+
     job_data.insert("status".to_string(), Value::String("cancelled".to_string()));
+    job_data.insert(
+        "cancelled_at".to_string(),
+        Value::String({
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            format!("{:020}", now.as_nanos())
+        }),
+    );
     ntnt::stdlib::kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
 
-    println!("{} Job {} cancelled", "✓".green().bold(), job_id.cyan());
+    if status == "active" {
+        println!(
+            "{} Job {} force-cancelled (worker will discard result)",
+            "✓".green().bold(),
+            job_id.cyan()
+        );
+    } else {
+        println!("{} Job {} cancelled", "✓".green().bold(), job_id.cyan());
+    }
 
     Ok(())
 }

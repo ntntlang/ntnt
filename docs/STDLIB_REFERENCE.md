@@ -5937,7 +5937,7 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 |----------|-------------|
 | [`assert_enqueued`](#assertenqueued) | Assert that a job was enqueued in testing mode. |
 | [`assert_not_enqueued`](#assertnotenqueued) | Assert that a job was NOT enqueued in testing mode. |
-| [`cancel_job`](#canceljob) | Cancel a pending job by its ID. |
+| [`cancel_job`](#canceljob) | Cancel a job by its ID. |
 | [`clear_jobs`](#clearjobs) | Clear all jobs from the test queue without executing them. |
 | [`configure_queue`](#configurequeue) | Configure the job queue storage backend. |
 | [`delete_jobs`](#deletejobs) | Bulk delete jobs by status. |
@@ -6008,16 +6008,17 @@ assert_not_enqueued("SendEmail")  // Assert no SendEmail was enqueued
 #### `cancel_job`
 
 ```ntnt
-cancel_job(job_id: String) -> Result<Bool, String>
+cancel_job(job_id: String, opts?: Map) -> Result<Bool, String>
 ```
 
-Cancel a pending job by its ID.
+Cancel a job by its ID.
 
-Sets the job status to "cancelled" and removes it from the pending queue. Returns true if the job was cancelled, false if it was not in a cancellable state.
+By default, only pending, scheduled, retrying, or failed jobs can be cancelled. Pass `map { "force": true }` to cancel an active (running) job — this marks it as cancelled and removes its visibility timeout key. The worker thread may still be executing, but the result will be discarded when it checks the status. Returns true if the job was cancelled, false if it was not in a cancellable state.
 
 **Parameters:**
 
 - `job_id` — The job ID returned by enqueue()
+- `opts` — Optional map. Pass `map { "force": true }` to force-cancel active jobs.
 
 **Returns:** Result containing true if cancelled, false if not cancellable
 
@@ -6025,7 +6026,10 @@ Sets the job status to "cancelled" and removes it from the pending queue. Return
 
 ```ntnt
 cancel_job("abc-123")  // Cancel a pending job
+cancel_job("abc-123", map { "force": true })  // Force-cancel a stuck active job
 ```
+
+**See also:** `retry_job`, `job_status`
 
 ---
 
