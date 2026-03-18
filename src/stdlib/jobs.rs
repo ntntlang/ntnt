@@ -1140,7 +1140,7 @@ pub fn init() -> HashMap<String, Value> {
                     _ => "unknown".to_string(),
                 };
 
-                if status != "pending" {
+                if status != "pending" && status != "scheduled" && status != "failed" {
                     return Ok(Value::ok(Value::Bool(false)));
                 }
 
@@ -1676,6 +1676,284 @@ pub fn init() -> HashMap<String, Value> {
                         "clear_jobs() requires testing mode. Call configure_queue(map { \"mode\": \"testing\" }) first.".to_string(),
                     )),
                 }
+            },
+        },
+    );
+
+    // @ntnt retry_job
+    // @module std/jobs
+    // @module_description Background job queue with persistent storage
+    // @signature retry_job(job_id: String) -> Result<Bool, String>
+    // Re-queue a failed or dead job for another attempt.
+    //
+    // Resets the job's status to pending, clears its attempts counter and
+    // error fields, and creates a new pending key so the worker picks it up.
+    // Returns Ok(true) on success, Ok(false) if the job's current status
+    // does not allow retry (only "failed" and "dead" are retryable).
+    // @param job_id The ID of the job to retry
+    // @returns Ok(true) if the job was re-queued, Ok(false) if the status is not retryable
+    // @example retry_job("abc123") ~ "Re-queue a failed job"
+    // @see_also cancel_job, job_status
+    module.insert(
+        "retry_job".to_string(),
+        Value::NativeFunction {
+            name: "retry_job".to_string(),
+            arity: 1,
+            max_arity: 1,
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(IntentError::type_error(
+                        "retry_job() requires 1 argument (job_id)".to_string(),
+                    ));
+                }
+                let job_id = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "retry_job() requires a string job ID".to_string(),
+                        ))
+                    }
+                };
+
+                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                let data_key = format!("jobs:data:{}", job_id);
+
+                let current = kv::kv_get(&kv_handle, &data_key)?;
+                let mut job_data = match current {
+                    Value::Map(m) => m,
+                    Value::Unit => {
+                        return Err(IntentError::runtime_error(format!(
+                            "Job '{}' not found",
+                            job_id
+                        )));
+                    }
+                    _ => {
+                        return Err(IntentError::runtime_error(format!(
+                            "Corrupt job data for '{}'",
+                            job_id
+                        )));
+                    }
+                };
+
+                let status = match job_data.get("status") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => "unknown".to_string(),
+                };
+
+                if status != "failed" && status != "dead" {
+                    return Ok(Value::ok(Value::Bool(false)));
+                }
+
+                // Generate a new pending timestamp
+                let pending_ts = format!(
+                    "{:020}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+                let new_pending_key = format!("jobs:pending:{}:{}", pending_ts, job_id);
+
+                // Track manual retries
+                let retry_manually = match job_data.get("retry_manually") {
+                    Some(Value::Int(n)) => n + 1,
+                    _ => 1,
+                };
+
+                job_data.insert("status".to_string(), Value::String("pending".to_string()));
+                job_data.insert("attempts".to_string(), Value::Int(0));
+                job_data.insert(
+                    "pending_key".to_string(),
+                    Value::String(new_pending_key.clone()),
+                );
+                job_data.insert("retry_manually".to_string(), Value::Int(retry_manually));
+                job_data.remove("error");
+                job_data.remove("failed_at");
+                job_data.remove("dead_at");
+
+                kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
+                kv::kv_set(&kv_handle, &new_pending_key, &Value::String(job_id), None)?;
+
+                Ok(Value::ok(Value::Bool(true)))
+            },
+        },
+    );
+
+    // @ntnt list_jobs
+    // @module std/jobs
+    // @module_description Background job queue with persistent storage
+    // @signature list_jobs(opts?: Map) -> Result<Array<Map>, String>
+    // List jobs with optional status and queue filters.
+    //
+    // Returns an array of job data maps. Pass a map with optional "status"
+    // and/or "queue" keys to filter. Pass "limit" to cap the result count
+    // (default 100).
+    // @param opts Optional filter map with "status", "queue", "limit" keys
+    // @returns Ok(Array of job data Maps)
+    // @example list_jobs() ~ "List all jobs (up to 100)"
+    // @example list_jobs(map { "status": "failed" }) ~ "List failed jobs"
+    // @example list_jobs(map { "status": "dead", "limit": 10 }) ~ "List up to 10 dead jobs"
+    // @see_also job_status, retry_job
+    module.insert(
+        "list_jobs".to_string(),
+        Value::NativeFunction {
+            name: "list_jobs".to_string(),
+            arity: 0,
+            max_arity: 1,
+            func: |args| {
+                let (status_filter, queue_filter, limit) = if !args.is_empty() {
+                    match &args[0] {
+                        Value::Map(opts) => {
+                            let sf = match opts.get("status") {
+                                Some(Value::String(s)) => Some(s.clone()),
+                                _ => None,
+                            };
+                            let qf = match opts.get("queue") {
+                                Some(Value::String(s)) => Some(s.clone()),
+                                _ => None,
+                            };
+                            let lim = match opts.get("limit") {
+                                Some(Value::Int(n)) => (*n).max(1) as usize,
+                                _ => 100,
+                            };
+                            (sf, qf, lim)
+                        }
+                        _ => (None, None, 100),
+                    }
+                } else {
+                    (None, None, 100)
+                };
+
+                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                let data_keys = kv::kv_list(&kv_handle, Some("jobs:data:"))?;
+
+                let mut results = Vec::new();
+                for key in &data_keys {
+                    if results.len() >= limit {
+                        break;
+                    }
+                    if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
+                        if let Some(ref sf) = status_filter {
+                            if let Some(Value::String(s)) = data.get("status") {
+                                if s != sf {
+                                    continue;
+                                }
+                            }
+                        }
+                        if let Some(ref qf) = queue_filter {
+                            if let Some(Value::String(q)) = data.get("queue") {
+                                if q != qf {
+                                    continue;
+                                }
+                            }
+                        }
+                        results.push(Value::Map(data));
+                    }
+                }
+
+                Ok(Value::ok(Value::Array(results)))
+            },
+        },
+    );
+
+    // @ntnt delete_jobs
+    // @module std/jobs
+    // @module_description Background job queue with persistent storage
+    // @signature delete_jobs(opts: Map) -> Result<Int, String>
+    // Bulk delete jobs by status.
+    //
+    // Requires a "status" key in the options map to prevent accidental
+    // deletion of all jobs. Returns the number of jobs deleted.
+    // @param opts Map with required "status" key and optional "older_than_secs" (Int)
+    // @returns Ok(Int) — count of deleted jobs
+    // @example delete_jobs(map { "status": "completed" }) ~ "Delete all completed jobs"
+    // @example delete_jobs(map { "status": "dead", "older_than_secs": 604800 }) ~ "Delete dead jobs older than 7 days"
+    // @see_also list_jobs, clear_jobs
+    module.insert(
+        "delete_jobs".to_string(),
+        Value::NativeFunction {
+            name: "delete_jobs".to_string(),
+            arity: 1,
+            max_arity: 1,
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(IntentError::type_error(
+                        "delete_jobs() requires 1 argument (opts map with 'status' key)"
+                            .to_string(),
+                    ));
+                }
+                let opts = match &args[0] {
+                    Value::Map(m) => m,
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "delete_jobs() argument must be a map".to_string(),
+                        ))
+                    }
+                };
+
+                let status_filter = match opts.get("status") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => {
+                        return Err(IntentError::runtime_error(
+                            "delete_jobs() requires a 'status' key in the options map".to_string(),
+                        ))
+                    }
+                };
+
+                let older_than_secs = match opts.get("older_than_secs") {
+                    Some(Value::Int(n)) => Some(*n as u64),
+                    _ => None,
+                };
+
+                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                let data_keys = kv::kv_list(&kv_handle, Some("jobs:data:"))?;
+
+                let now_nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+
+                let mut deleted = 0i64;
+                for key in &data_keys {
+                    if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
+                        let status = match data.get("status") {
+                            Some(Value::String(s)) => s.clone(),
+                            _ => continue,
+                        };
+                        if status != status_filter {
+                            continue;
+                        }
+
+                        // Apply older_than_secs filter if present
+                        if let Some(threshold_secs) = older_than_secs {
+                            let created_nanos: u128 = match data.get("created_at") {
+                                Some(Value::String(s)) => s.parse().unwrap_or(0),
+                                _ => 0,
+                            };
+                            let age_secs =
+                                (now_nanos.saturating_sub(created_nanos)) / 1_000_000_000;
+                            if age_secs < threshold_secs as u128 {
+                                continue;
+                            }
+                        }
+
+                        // Delete pending key if present
+                        if let Some(Value::String(pk)) = data.get("pending_key") {
+                            let _ = kv::kv_del(&kv_handle, pk);
+                        }
+                        // Delete active key if present
+                        let job_id = match data.get("id") {
+                            Some(Value::String(s)) => s.clone(),
+                            _ => continue,
+                        };
+                        let _ = kv::kv_del(&kv_handle, &format!("jobs:active:{}", job_id));
+                        // Delete data key
+                        let _ = kv::kv_del(&kv_handle, key);
+                        deleted += 1;
+                    }
+                }
+
+                Ok(Value::ok(Value::Int(deleted)))
             },
         },
     );

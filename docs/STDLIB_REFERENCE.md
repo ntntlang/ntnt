@@ -5940,11 +5940,14 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`cancel_job`](#canceljob) | Cancel a pending job by its ID. |
 | [`clear_jobs`](#clearjobs) | Clear all jobs from the test queue without executing them. |
 | [`configure_queue`](#configurequeue) | Configure the job queue storage backend. |
+| [`delete_jobs`](#deletejobs) | Bulk delete jobs by status. |
 | [`drain_jobs`](#drainjobs) | Execute all enqueued test jobs synchronously and return the count. |
 | [`enqueue`](#enqueue) | Enqueue a background job for processing. |
 | [`enqueue_at`](#enqueueat) | Enqueue a job to run at a specific future time. |
 | [`enqueue_in`](#enqueuein) | Enqueue a job to run after a delay in seconds. |
 | [`job_status`](#jobstatus) | Get the current status and data for a job by its ID. |
+| [`list_jobs`](#listjobs) | List jobs with optional status and queue filters. |
+| [`retry_job`](#retryjob) | Re-queue a failed or dead job for another attempt. |
 | [`work_async`](#workasync) | Start one or more background worker threads that process jobs from the queue. |
 | [`work_jobs`](#workjobs) | Run a blocking worker loop that processes jobs from the queue. |
 
@@ -6070,6 +6073,33 @@ Pass a map with a "store" key to set the KV backend for job storage. If never ca
 configure_queue(map { "store": "sqlite:./jobs.db" })  // Use SQLite for job storage
 configure_queue(map { "store": "redis://localhost:6379" })  // Use Redis for job storage
 ```
+
+---
+
+#### `delete_jobs`
+
+```ntnt
+delete_jobs(opts: Map) -> Result<Int, String>
+```
+
+Bulk delete jobs by status.
+
+Requires a "status" key in the options map to prevent accidental deletion of all jobs. Returns the number of jobs deleted.
+
+**Parameters:**
+
+- `opts` — Map with required "status" key and optional "older_than_secs" (Int)
+
+**Returns:** Ok(Int) — count of deleted jobs
+
+**Examples:**
+
+```ntnt
+delete_jobs(map { "status": "completed" })  // Delete all completed jobs
+delete_jobs(map { "status": "dead", "older_than_secs": 604800 })  // Delete dead jobs older than 7 days
+```
+
+**See also:** `list_jobs`, `clear_jobs`
 
 ---
 
@@ -6199,6 +6229,60 @@ Returns the full job data map including status, type, queue, payload, attempts, 
 ```ntnt
 job_status("abc-123")  // Check job status
 ```
+
+---
+
+#### `list_jobs`
+
+```ntnt
+list_jobs(opts?: Map) -> Result<Array<Map>, String>
+```
+
+List jobs with optional status and queue filters.
+
+Returns an array of job data maps. Pass a map with optional "status" and/or "queue" keys to filter. Pass "limit" to cap the result count (default 100).
+
+**Parameters:**
+
+- `opts` — Optional filter map with "status", "queue", "limit" keys
+
+**Returns:** Ok(Array of job data Maps)
+
+**Examples:**
+
+```ntnt
+list_jobs()  // List all jobs (up to 100)
+list_jobs(map { "status": "failed" })  // List failed jobs
+list_jobs(map { "status": "dead", "limit": 10 })  // List up to 10 dead jobs
+```
+
+**See also:** `job_status`, `retry_job`
+
+---
+
+#### `retry_job`
+
+```ntnt
+retry_job(job_id: String) -> Result<Bool, String>
+```
+
+Re-queue a failed or dead job for another attempt.
+
+Resets the job's status to pending, clears its attempts counter and error fields, and creates a new pending key so the worker picks it up. Returns Ok(true) on success, Ok(false) if the job's current status does not allow retry (only "failed" and "dead" are retryable).
+
+**Parameters:**
+
+- `job_id` — The ID of the job to retry
+
+**Returns:** Ok(true) if the job was re-queued, Ok(false) if the status is not retryable
+
+**Examples:**
+
+```ntnt
+retry_job("abc123")  // Re-queue a failed job
+```
+
+**See also:** `cancel_job`, `job_status`
 
 ---
 
