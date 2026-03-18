@@ -706,10 +706,12 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                     let future_ts = format!("{:020}", future_nanos);
                     let new_pending_key = format!("jobs:pending:{}:{}", future_ts, job_id);
 
-                    // Use "failed" status (not "pending") so CLI can distinguish
-                    // retry-waiting jobs from ready-to-run ones. The pending key in KV
-                    // still drives worker claiming — status is for display/filtering.
-                    job_data.insert("status".to_string(), Value::String("failed".to_string()));
+                    // Use "retrying" status so CLI can distinguish retry-waiting
+                    // jobs from permanently failed or ready-to-run ones. "retrying"
+                    // means the runtime will auto-retry after backoff — clearing these
+                    // would be data loss. The pending key in KV still drives worker
+                    // claiming — status is for display/filtering only.
+                    job_data.insert("status".to_string(), Value::String("retrying".to_string()));
                     job_data.insert(
                         "pending_key".to_string(),
                         Value::String(new_pending_key.clone()),
@@ -1140,7 +1142,7 @@ pub fn init() -> HashMap<String, Value> {
                     _ => "unknown".to_string(),
                 };
 
-                if status != "pending" && status != "scheduled" && status != "failed" {
+                if status != "pending" && status != "scheduled" && status != "retrying" {
                     return Ok(Value::ok(Value::Bool(false)));
                 }
 
@@ -1740,8 +1742,15 @@ pub fn init() -> HashMap<String, Value> {
                     _ => "unknown".to_string(),
                 };
 
-                if status != "failed" && status != "dead" {
+                if status != "retrying" && status != "dead" {
                     return Ok(Value::ok(Value::Bool(false)));
+                }
+
+                // Delete the old pending key to prevent double execution —
+                // a "retrying" job has a future-dated pending key from backoff
+                if let Some(Value::String(old_pk)) = job_data.get("pending_key") {
+                    let old_pk = old_pk.clone();
+                    let _ = kv::kv_del(&kv_handle, &old_pk);
                 }
 
                 // Generate a new pending timestamp
@@ -1827,11 +1836,10 @@ pub fn init() -> HashMap<String, Value> {
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
                 let data_keys = kv::kv_list(&kv_handle, Some("jobs:data:"))?;
 
+                // Collect all matching jobs first, then sort newest-first,
+                // then truncate — matches the CLI list command behaviour.
                 let mut results = Vec::new();
                 for key in &data_keys {
-                    if results.len() >= limit {
-                        break;
-                    }
                     if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
                         if let Some(ref sf) = status_filter {
                             if let Some(Value::String(s)) = data.get("status") {
@@ -1850,6 +1858,20 @@ pub fn init() -> HashMap<String, Value> {
                         results.push(Value::Map(data));
                     }
                 }
+
+                // Sort newest-first by created_at (zero-padded nanos → lexicographic = chronological)
+                results.sort_by(|a, b| {
+                    let ts = |v: &Value| -> String {
+                        if let Value::Map(m) = v {
+                            if let Some(Value::String(s)) = m.get("created_at") {
+                                return s.clone();
+                            }
+                        }
+                        String::new()
+                    };
+                    ts(b).cmp(&ts(a))
+                });
+                results.truncate(limit);
 
                 Ok(Value::ok(Value::Array(results)))
             },

@@ -1735,15 +1735,15 @@ Jobs follow this state machine:
 ```
 Pending   → Active → Completed
 Scheduled → Active → Completed
-                 ├→ Failed (retries left, waiting for backoff) → Active (retry)
+                 ├→ Retrying (retries left, waiting for backoff) → Active (retry)
                  └→ Dead (retries exhausted)
 ```
 - `pending` — ready to run immediately
 - `scheduled` — enqueued for the future (`enqueue_at`/`enqueue_in`)
 - `active` — currently being processed by a worker
 - `completed` — finished successfully
-- `failed` — execution failed, waiting for retry backoff
-- `dead` — all retries exhausted
+- `retrying` — execution failed, waiting for retry backoff (will auto-retry)
+- `dead` — all retries exhausted (final failure state)
 - `cancelled` — manually cancelled via `cancel_job()` or `ntnt jobs cancel`
 
 Backoff strategies:

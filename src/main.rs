@@ -1255,7 +1255,7 @@ fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
     let mut pending = 0u64;
     let mut active = 0u64;
     let mut completed = 0u64;
-    let mut failed = 0u64;
+    let mut retrying = 0u64;
     let mut dead = 0u64;
     let mut scheduled = 0u64;
     let mut cancelled = 0u64;
@@ -1269,7 +1269,7 @@ fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
                         "scheduled" => scheduled += 1,
                         "active" => active += 1,
                         "completed" => completed += 1,
-                        "failed" => failed += 1,
+                        "retrying" => retrying += 1,
                         "dead" => dead += 1,
                         "cancelled" => cancelled += 1,
                         _ => {}
@@ -1286,7 +1286,7 @@ fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
     println!("  Scheduled:  {}", scheduled);
     println!("  Active:     {}", active);
     println!("  Completed:  {}", completed);
-    println!("  Failed:     {}", failed);
+    println!("  Retrying:   {}", retrying);
     println!("  Dead:       {}", dead);
     println!("  Cancelled:  {}", cancelled);
     println!("  ────────────────");
@@ -1486,7 +1486,7 @@ fn run_jobs_list_command(
                 "scheduled" => status_padded.blue().to_string(),
                 "active" => status_padded.cyan().to_string(),
                 "completed" => status_padded.green().to_string(),
-                "failed" => status_padded.red().to_string(),
+                "retrying" => status_padded.red().to_string(),
                 "dead" => status_padded.red().bold().to_string(),
                 "cancelled" => status_padded.dimmed().to_string(),
                 _ => status_padded,
@@ -1529,7 +1529,7 @@ fn run_jobs_inspect_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> 
         "scheduled" => status.blue().to_string(),
         "active" => status.cyan().to_string(),
         "completed" => status.green().to_string(),
-        "failed" => status.red().to_string(),
+        "retrying" => status.red().to_string(),
         "dead" => status.red().bold().to_string(),
         "cancelled" => status.dimmed().to_string(),
         _ => status.clone(),
@@ -1613,9 +1613,9 @@ fn run_jobs_retry_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
     };
 
     let status = jobs_str_field(&job_data, "status");
-    if status != "failed" && status != "dead" {
+    if status != "retrying" && status != "dead" {
         eprintln!(
-            "{}: Job '{}' has status '{}' — only failed or dead jobs can be retried",
+            "{}: Job '{}' has status '{}' — only retrying or dead jobs can be retried",
             "error".red().bold(),
             job_id,
             status
@@ -1624,6 +1624,13 @@ fn run_jobs_retry_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
     }
 
     let queue = jobs_str_field(&job_data, "queue");
+
+    // Delete old pending key to prevent double execution (retrying jobs
+    // have a future-dated pending key from backoff that must be cleaned up)
+    if let Some(Value::String(old_pk)) = job_data.get("pending_key") {
+        let old_pk = old_pk.clone();
+        let _ = ntnt::stdlib::kv::kv_del(&kv_handle, &old_pk);
+    }
 
     // Generate a new pending timestamp and queue key
     let pending_ts = {
@@ -1687,9 +1694,9 @@ fn run_jobs_cancel_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
     };
 
     let status = jobs_str_field(&job_data, "status");
-    if status != "pending" && status != "scheduled" && status != "failed" {
+    if status != "pending" && status != "scheduled" && status != "retrying" {
         eprintln!(
-            "{}: Job '{}' has status '{}' — only pending, scheduled, or failed jobs can be cancelled",
+            "{}: Job '{}' has status '{}' — only pending, scheduled, or retrying jobs can be cancelled",
             "error".red().bold(),
             job_id,
             status
