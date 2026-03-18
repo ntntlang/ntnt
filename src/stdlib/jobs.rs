@@ -260,7 +260,7 @@ fn extract_kv_handle_info(handle: &Value) -> Result<KvHandleInfo> {
 
 /// Returns a zero-padded nanosecond timestamp string for KV key ordering.
 /// Format: 20-digit zero-padded Unix timestamp in nanoseconds.
-fn timestamp_key() -> String {
+pub fn timestamp_key() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -909,6 +909,312 @@ fn emit_job_event(event: &str, fields: &[(&str, Value)]) {
 }
 
 // ============================================================================
+// Public API — shared logic for CLI and stdlib bindings
+// ============================================================================
+
+/// Result of a retry_job operation
+pub enum RetryResult {
+    /// Job was re-queued. Contains the queue name.
+    Requeued(String),
+    /// Job status doesn't allow retry (not retrying/failed/dead).
+    NotRetryable(String),
+}
+
+/// Result of a cancel_job operation
+pub enum CancelResult {
+    /// Job was cancelled. Bool indicates if it was an active (force) cancel.
+    Cancelled { was_active: bool },
+    /// Job status doesn't allow cancellation.
+    NotCancellable(String),
+}
+
+/// Options for listing jobs
+pub struct ListJobsOpts {
+    pub status: Option<String>,
+    pub queue: Option<String>,
+    pub limit: usize,
+}
+
+/// Options for deleting jobs
+pub struct DeleteJobsOpts {
+    pub status: String,
+    pub older_than_secs: Option<u64>,
+}
+
+/// Job status counts for the status summary
+pub struct JobStatusCounts {
+    pub pending: u64,
+    pub scheduled: u64,
+    pub active: u64,
+    pub completed: u64,
+    pub retrying: u64,
+    pub dead: u64,
+    pub cancelled: u64,
+    pub total: u64,
+}
+
+/// Retry a failed/retrying/dead job by ID. Resets attempts, clears errors, re-enqueues.
+pub fn retry_job_by_id(job_id: &str) -> Result<RetryResult> {
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+    let data_key = format!("jobs:data:{}", job_id);
+
+    let current = kv::kv_get(&kv_handle, &data_key)?;
+    let mut job_data = match current {
+        Value::Map(m) => m,
+        Value::Unit => {
+            return Err(IntentError::runtime_error(format!(
+                "Job '{}' not found",
+                job_id
+            )));
+        }
+        _ => {
+            return Err(IntentError::runtime_error(format!(
+                "Corrupt job data for '{}'",
+                job_id
+            )));
+        }
+    };
+
+    let status = match job_data.get("status") {
+        Some(Value::String(s)) => s.clone(),
+        _ => "unknown".to_string(),
+    };
+
+    // Accept "failed" for backward compat with pre-v0.4.6 job data
+    if status != "retrying" && status != "failed" && status != "dead" {
+        return Ok(RetryResult::NotRetryable(status));
+    }
+
+    let queue = match job_data.get("queue") {
+        Some(Value::String(s)) => s.clone(),
+        _ => "default".to_string(),
+    };
+
+    // Delete old pending key to prevent double execution
+    if let Some(Value::String(old_pk)) = job_data.get("pending_key") {
+        let old_pk = old_pk.clone();
+        let _ = kv::kv_del(&kv_handle, &old_pk);
+    }
+
+    let pending_ts = timestamp_key();
+    let new_pending_key = format!("jobs:pending:{}:{}", pending_ts, job_id);
+
+    let retry_manually = match job_data.get("retry_manually") {
+        Some(Value::Int(n)) => n + 1,
+        _ => 1,
+    };
+
+    job_data.insert("status".to_string(), Value::String("pending".to_string()));
+    job_data.insert("attempts".to_string(), Value::Int(0));
+    job_data.insert(
+        "pending_key".to_string(),
+        Value::String(new_pending_key.clone()),
+    );
+    job_data.insert("retry_manually".to_string(), Value::Int(retry_manually));
+    job_data.remove("error");
+    job_data.remove("failed_at");
+    job_data.remove("dead_at");
+
+    kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
+    kv::kv_set(
+        &kv_handle,
+        &new_pending_key,
+        &Value::String(job_id.to_string()),
+        None,
+    )?;
+
+    Ok(RetryResult::Requeued(queue))
+}
+
+/// Cancel a job by ID. Returns NotCancellable if status doesn't allow it.
+pub fn cancel_job_by_id(job_id: &str, force: bool) -> Result<CancelResult> {
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+    let data_key = format!("jobs:data:{}", job_id);
+
+    let current = kv::kv_get(&kv_handle, &data_key)?;
+    let mut job_data = match current {
+        Value::Map(m) => m,
+        Value::Unit => {
+            return Err(IntentError::runtime_error(format!(
+                "Job '{}' not found",
+                job_id
+            )));
+        }
+        _ => {
+            return Err(IntentError::runtime_error(format!(
+                "Corrupt job data for '{}'",
+                job_id
+            )));
+        }
+    };
+
+    let status = match job_data.get("status") {
+        Some(Value::String(s)) => s.clone(),
+        _ => "unknown".to_string(),
+    };
+
+    // Without force: only non-active, non-terminal jobs
+    if !force
+        && status != "pending"
+        && status != "scheduled"
+        && status != "retrying"
+        && status != "failed"
+    {
+        return Ok(CancelResult::NotCancellable(status));
+    }
+
+    // With force: reject terminal states
+    if force && (status == "completed" || status == "dead" || status == "cancelled") {
+        return Ok(CancelResult::NotCancellable(status));
+    }
+
+    let was_active = status == "active";
+
+    // Remove pending key
+    if let Some(Value::String(pk)) = job_data.get("pending_key") {
+        let pk = pk.clone();
+        let _ = kv::kv_del(&kv_handle, &pk);
+    }
+
+    // If force-cancelling active job, remove visibility timeout key
+    if was_active {
+        let _ = kv::kv_del(&kv_handle, &format!("jobs:active:{}", job_id));
+    }
+
+    job_data.insert("status".to_string(), Value::String("cancelled".to_string()));
+    job_data.insert("cancelled_at".to_string(), Value::String(timestamp_key()));
+    kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
+
+    Ok(CancelResult::Cancelled { was_active })
+}
+
+/// List jobs with optional filters, sorted newest-first.
+pub fn list_jobs_filtered(opts: ListJobsOpts) -> Result<Vec<HashMap<String, Value>>> {
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+    let data_keys = kv::kv_list(&kv_handle, Some("jobs:data:"))?;
+
+    let mut results = Vec::new();
+    for key in &data_keys {
+        if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
+            if let Some(ref sf) = opts.status {
+                match data.get("status") {
+                    Some(Value::String(s)) if s == sf.as_str() => {}
+                    _ => continue,
+                }
+            }
+            if let Some(ref qf) = opts.queue {
+                match data.get("queue") {
+                    Some(Value::String(q)) if q == qf.as_str() => {}
+                    _ => continue,
+                }
+            }
+            results.push(data);
+        }
+    }
+
+    // Sort newest-first by created_at
+    results.sort_by(|a, b| {
+        let ts = |m: &HashMap<String, Value>| -> String {
+            match m.get("created_at") {
+                Some(Value::String(s)) => s.clone(),
+                _ => String::new(),
+            }
+        };
+        ts(b).cmp(&ts(a))
+    });
+    results.truncate(opts.limit);
+
+    Ok(results)
+}
+
+/// Bulk delete jobs by status. Returns count of deleted jobs.
+pub fn delete_jobs_filtered(opts: DeleteJobsOpts) -> Result<i64> {
+    if opts.status == "active" {
+        return Err(IntentError::runtime_error(
+            "Cannot delete active jobs — workers are currently processing them. Stop workers first."
+                .to_string(),
+        ));
+    }
+
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+    let data_keys = kv::kv_list(&kv_handle, Some("jobs:data:"))?;
+
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    let mut deleted = 0i64;
+    for key in &data_keys {
+        if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
+            match data.get("status") {
+                Some(Value::String(s)) if s == &opts.status => {}
+                _ => continue,
+            }
+
+            if let Some(threshold_secs) = opts.older_than_secs {
+                let created_nanos: u128 = match data.get("created_at") {
+                    Some(Value::String(s)) => s.parse().unwrap_or(0),
+                    _ => 0,
+                };
+                let age_secs = (now_nanos.saturating_sub(created_nanos)) / 1_000_000_000;
+                if age_secs < threshold_secs as u128 {
+                    continue;
+                }
+            }
+
+            // Clean up associated keys
+            if let Some(Value::String(pk)) = data.get("pending_key") {
+                let _ = kv::kv_del(&kv_handle, pk);
+            }
+            if let Some(Value::String(id)) = data.get("id") {
+                let _ = kv::kv_del(&kv_handle, &format!("jobs:active:{}", id));
+            }
+            let _ = kv::kv_del(&kv_handle, key);
+            deleted += 1;
+        }
+    }
+
+    Ok(deleted)
+}
+
+/// Get job status counts across all jobs.
+pub fn job_status_counts() -> Result<JobStatusCounts> {
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+    let data_keys = kv::kv_list(&kv_handle, Some("jobs:data:"))?;
+
+    let mut counts = JobStatusCounts {
+        pending: 0,
+        scheduled: 0,
+        active: 0,
+        completed: 0,
+        retrying: 0,
+        dead: 0,
+        cancelled: 0,
+        total: data_keys.len() as u64,
+    };
+
+    for key in &data_keys {
+        if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
+            if let Some(Value::String(s)) = data.get("status") {
+                match s.as_str() {
+                    "pending" => counts.pending += 1,
+                    "scheduled" => counts.scheduled += 1,
+                    "active" => counts.active += 1,
+                    "completed" => counts.completed += 1,
+                    "retrying" => counts.retrying += 1,
+                    "dead" => counts.dead += 1,
+                    "cancelled" => counts.cancelled += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(counts)
+}
+
+// ============================================================================
 // Module Export
 // ============================================================================
 
@@ -1133,7 +1439,6 @@ pub fn init() -> HashMap<String, Value> {
                         "cancel_job() requires 1-2 arguments (job_id, opts?)".to_string(),
                     ));
                 }
-
                 let job_id = match &args[0] {
                     Value::String(s) => s.clone(),
                     _ => {
@@ -1142,7 +1447,6 @@ pub fn init() -> HashMap<String, Value> {
                         ))
                     }
                 };
-
                 let force = if args.len() > 1 {
                     match &args[1] {
                         Value::Map(opts) => matches!(opts.get("force"), Some(Value::Bool(true))),
@@ -1151,70 +1455,10 @@ pub fn init() -> HashMap<String, Value> {
                 } else {
                     false
                 };
-
-                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-                let data_key = format!("jobs:data:{}", job_id);
-
-                // Read current job data
-                let current = kv::kv_get(&kv_handle, &data_key)?;
-                let mut job_data = match current {
-                    Value::Map(m) => m,
-                    Value::Unit => {
-                        return Err(IntentError::runtime_error(format!(
-                            "Job '{}' not found",
-                            job_id
-                        )));
-                    }
-                    _ => {
-                        return Err(IntentError::runtime_error(format!(
-                            "Corrupt job data for '{}'",
-                            job_id
-                        )));
-                    }
-                };
-
-                let status = match job_data.get("status") {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => "unknown".to_string(),
-                };
-
-                // Without force: only allow cancelling non-active jobs
-                if !force
-                    && status != "pending"
-                    && status != "scheduled"
-                    && status != "retrying"
-                    && status != "failed"
-                {
-                    return Ok(Value::ok(Value::Bool(false)));
+                match cancel_job_by_id(&job_id, force)? {
+                    CancelResult::Cancelled { .. } => Ok(Value::ok(Value::Bool(true))),
+                    CancelResult::NotCancellable(_) => Ok(Value::ok(Value::Bool(false))),
                 }
-
-                // With force: allow active jobs too, but reject completed/dead/cancelled
-                if force && (status == "completed" || status == "dead" || status == "cancelled") {
-                    return Ok(Value::ok(Value::Bool(false)));
-                }
-
-                // Read pending_key before mutating job_data
-                let pending_key = match job_data.get("pending_key") {
-                    Some(Value::String(s)) => Some(s.clone()),
-                    _ => None,
-                };
-
-                // Update status to cancelled
-                job_data.insert("status".to_string(), Value::String("cancelled".to_string()));
-                job_data.insert("cancelled_at".to_string(), Value::String(timestamp_key()));
-                kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
-
-                // Remove from pending queue
-                if let Some(pk) = pending_key {
-                    let _ = kv::kv_del(&kv_handle, &pk);
-                }
-
-                // If force-cancelling an active job, remove the visibility timeout key
-                if status == "active" {
-                    let _ = kv::kv_del(&kv_handle, &format!("jobs:active:{}", job_id));
-                }
-
-                Ok(Value::ok(Value::Bool(true)))
             },
         },
     );
@@ -1769,75 +2013,10 @@ pub fn init() -> HashMap<String, Value> {
                         ))
                     }
                 };
-
-                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-                let data_key = format!("jobs:data:{}", job_id);
-
-                let current = kv::kv_get(&kv_handle, &data_key)?;
-                let mut job_data = match current {
-                    Value::Map(m) => m,
-                    Value::Unit => {
-                        return Err(IntentError::runtime_error(format!(
-                            "Job '{}' not found",
-                            job_id
-                        )));
-                    }
-                    _ => {
-                        return Err(IntentError::runtime_error(format!(
-                            "Corrupt job data for '{}'",
-                            job_id
-                        )));
-                    }
-                };
-
-                let status = match job_data.get("status") {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => "unknown".to_string(),
-                };
-
-                // Accept "failed" for backward compat with pre-v0.4.6 job data
-                if status != "retrying" && status != "failed" && status != "dead" {
-                    return Ok(Value::ok(Value::Bool(false)));
+                match retry_job_by_id(&job_id)? {
+                    RetryResult::Requeued(_) => Ok(Value::ok(Value::Bool(true))),
+                    RetryResult::NotRetryable(_) => Ok(Value::ok(Value::Bool(false))),
                 }
-
-                // Delete the old pending key to prevent double execution —
-                // a "retrying" job has a future-dated pending key from backoff
-                if let Some(Value::String(old_pk)) = job_data.get("pending_key") {
-                    let old_pk = old_pk.clone();
-                    let _ = kv::kv_del(&kv_handle, &old_pk);
-                }
-
-                // Generate a new pending timestamp
-                let pending_ts = format!(
-                    "{:020}",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos()
-                );
-                let new_pending_key = format!("jobs:pending:{}:{}", pending_ts, job_id);
-
-                // Track manual retries
-                let retry_manually = match job_data.get("retry_manually") {
-                    Some(Value::Int(n)) => n + 1,
-                    _ => 1,
-                };
-
-                job_data.insert("status".to_string(), Value::String("pending".to_string()));
-                job_data.insert("attempts".to_string(), Value::Int(0));
-                job_data.insert(
-                    "pending_key".to_string(),
-                    Value::String(new_pending_key.clone()),
-                );
-                job_data.insert("retry_manually".to_string(), Value::Int(retry_manually));
-                job_data.remove("error");
-                job_data.remove("failed_at");
-                job_data.remove("dead_at");
-
-                kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
-                kv::kv_set(&kv_handle, &new_pending_key, &Value::String(job_id), None)?;
-
-                Ok(Value::ok(Value::Bool(true)))
             },
         },
     );
@@ -1864,7 +2043,7 @@ pub fn init() -> HashMap<String, Value> {
             arity: 0,
             max_arity: 1,
             func: |args| {
-                let (status_filter, queue_filter, limit) = if !args.is_empty() {
+                let (status, queue, limit) = if !args.is_empty() {
                     match &args[0] {
                         Value::Map(opts) => {
                             let sf = match opts.get("status") {
@@ -1886,46 +2065,14 @@ pub fn init() -> HashMap<String, Value> {
                 } else {
                     (None, None, 100)
                 };
-
-                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-                let data_keys = kv::kv_list(&kv_handle, Some("jobs:data:"))?;
-
-                // Collect all matching jobs first, then sort newest-first,
-                // then truncate — matches the CLI list command behaviour.
-                let mut results = Vec::new();
-                for key in &data_keys {
-                    if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
-                        if let Some(ref sf) = status_filter {
-                            match data.get("status") {
-                                Some(Value::String(s)) if s == sf.as_str() => {}
-                                _ => continue,
-                            }
-                        }
-                        if let Some(ref qf) = queue_filter {
-                            match data.get("queue") {
-                                Some(Value::String(q)) if q == qf.as_str() => {}
-                                _ => continue,
-                            }
-                        }
-                        results.push(Value::Map(data));
-                    }
-                }
-
-                // Sort newest-first by created_at (zero-padded nanos → lexicographic = chronological)
-                results.sort_by(|a, b| {
-                    let ts = |v: &Value| -> String {
-                        if let Value::Map(m) = v {
-                            if let Some(Value::String(s)) = m.get("created_at") {
-                                return s.clone();
-                            }
-                        }
-                        String::new()
-                    };
-                    ts(b).cmp(&ts(a))
-                });
-                results.truncate(limit);
-
-                Ok(Value::ok(Value::Array(results)))
+                let results = list_jobs_filtered(ListJobsOpts {
+                    status,
+                    queue,
+                    limit,
+                })?;
+                Ok(Value::ok(Value::Array(
+                    results.into_iter().map(Value::Map).collect(),
+                )))
             },
         },
     );
@@ -1964,8 +2111,7 @@ pub fn init() -> HashMap<String, Value> {
                         ))
                     }
                 };
-
-                let status_filter = match opts.get("status") {
+                let status = match opts.get("status") {
                     Some(Value::String(s)) => s.clone(),
                     _ => {
                         return Err(IntentError::runtime_error(
@@ -1973,67 +2119,14 @@ pub fn init() -> HashMap<String, Value> {
                         ))
                     }
                 };
-
-                // Guard against deleting active jobs — workers hold references
-                if status_filter == "active" {
-                    return Err(IntentError::runtime_error(
-                        "delete_jobs() cannot delete active jobs — workers are currently processing them. Stop workers first.".to_string(),
-                    ));
-                }
-
                 let older_than_secs = match opts.get("older_than_secs") {
                     Some(Value::Int(n)) => Some(*n as u64),
                     _ => None,
                 };
-
-                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-                let data_keys = kv::kv_list(&kv_handle, Some("jobs:data:"))?;
-
-                let now_nanos = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-
-                let mut deleted = 0i64;
-                for key in &data_keys {
-                    if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
-                        let status = match data.get("status") {
-                            Some(Value::String(s)) => s.clone(),
-                            _ => continue,
-                        };
-                        if status != status_filter {
-                            continue;
-                        }
-
-                        // Apply older_than_secs filter if present
-                        if let Some(threshold_secs) = older_than_secs {
-                            let created_nanos: u128 = match data.get("created_at") {
-                                Some(Value::String(s)) => s.parse().unwrap_or(0),
-                                _ => 0,
-                            };
-                            let age_secs =
-                                (now_nanos.saturating_sub(created_nanos)) / 1_000_000_000;
-                            if age_secs < threshold_secs as u128 {
-                                continue;
-                            }
-                        }
-
-                        // Delete pending key if present
-                        if let Some(Value::String(pk)) = data.get("pending_key") {
-                            let _ = kv::kv_del(&kv_handle, pk);
-                        }
-                        // Delete active key if present
-                        let job_id = match data.get("id") {
-                            Some(Value::String(s)) => s.clone(),
-                            _ => continue,
-                        };
-                        let _ = kv::kv_del(&kv_handle, &format!("jobs:active:{}", job_id));
-                        // Delete data key
-                        let _ = kv::kv_del(&kv_handle, key);
-                        deleted += 1;
-                    }
-                }
-
+                let deleted = delete_jobs_filtered(DeleteJobsOpts {
+                    status,
+                    older_than_secs,
+                })?;
                 Ok(Value::ok(Value::Int(deleted)))
             },
         },
