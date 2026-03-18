@@ -1,6 +1,6 @@
 <!-- NTNT coding guide sections are sourced from docs/AI_AGENT_GUIDE.md -->
 <!-- To update NTNT coding instructions, edit AI_AGENT_GUIDE.md and copy to all agent files -->
-<!-- Last synced: 2026-03-17 -->
+<!-- Last synced: 2026-03-18 -->
 
 # NTNT Language - Claude Code Instructions
 
@@ -1770,10 +1770,18 @@ configure_queue(map { "mode": "testing" })
 
 Jobs follow this state machine:
 ```
-Pending → Active → Completed
-              ├→ Failed (retries left) → Pending (retry with backoff)
-              └→ Dead (retries exhausted)
+Pending   → Active → Completed
+Scheduled → Active → Completed
+                 ├→ Failed (retries left, waiting for backoff) → Active (retry)
+                 └→ Dead (retries exhausted)
 ```
+- `pending` — ready to run immediately
+- `scheduled` — enqueued for the future (`enqueue_at`/`enqueue_in`)
+- `active` — currently being processed by a worker
+- `completed` — finished successfully
+- `failed` — execution failed, waiting for retry backoff
+- `dead` — all retries exhausted
+- `cancelled` — manually cancelled via `cancel_job()` or `ntnt jobs cancel`
 
 Backoff strategies:
 - `"exponential"` (default): 5s base, doubles each retry, capped at 1 hour

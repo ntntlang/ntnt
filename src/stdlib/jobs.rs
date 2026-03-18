@@ -420,9 +420,12 @@ fn enqueue_internal(
         job_data.insert(k.clone(), v.to_value());
     }
 
-    // Store scheduled_at if provided
+    // Store scheduled_at if provided, and set status to "scheduled" (not "pending")
+    // so the CLI can distinguish between ready-to-run and future-dated jobs.
+    // The worker claims by scanning jobs:pending:* keys — the status field is for display only.
     if let Some(sat) = scheduled_at {
         job_data.insert("scheduled_at".to_string(), Value::String(sat.to_string()));
+        job_data.insert("status".to_string(), Value::String("scheduled".to_string()));
     }
 
     // Build pending key and store it in job data for O(1) cancel_job lookup
@@ -703,7 +706,10 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                     let future_ts = format!("{:020}", future_nanos);
                     let new_pending_key = format!("jobs:pending:{}:{}", future_ts, job_id);
 
-                    job_data.insert("status".to_string(), Value::String("pending".to_string()));
+                    // Use "failed" status (not "pending") so CLI can distinguish
+                    // retry-waiting jobs from ready-to-run ones. The pending key in KV
+                    // still drives worker claiming — status is for display/filtering.
+                    job_data.insert("status".to_string(), Value::String("failed".to_string()));
                     job_data.insert(
                         "pending_key".to_string(),
                         Value::String(new_pending_key.clone()),
@@ -2088,9 +2094,9 @@ mod tests {
                         };
                         let expected_ts = format!("{:020}", future_nanos);
                         assert_eq!(scheduled_at, expected_ts);
-                        // Status should be pending
+                        // Status should be "scheduled" for future-dated jobs
                         assert!(
-                            matches!(data.get("status"), Some(Value::String(s)) if s == "pending")
+                            matches!(data.get("status"), Some(Value::String(s)) if s == "scheduled")
                         );
                     }
                     _ => panic!("Expected Map"),

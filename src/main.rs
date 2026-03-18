@@ -1257,6 +1257,7 @@ fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
     let mut completed = 0u64;
     let mut failed = 0u64;
     let mut dead = 0u64;
+    let mut scheduled = 0u64;
     let mut cancelled = 0u64;
 
     for key in &data_keys {
@@ -1265,6 +1266,7 @@ fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
                 match data.get("status") {
                     Some(ntnt::interpreter::Value::String(s)) => match s.as_str() {
                         "pending" => pending += 1,
+                        "scheduled" => scheduled += 1,
                         "active" => active += 1,
                         "completed" => completed += 1,
                         "failed" => failed += 1,
@@ -1281,6 +1283,7 @@ fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
     println!("Job Queue Status");
     println!("================");
     println!("  Pending:    {}", pending);
+    println!("  Scheduled:  {}", scheduled);
     println!("  Active:     {}", active);
     println!("  Completed:  {}", completed);
     println!("  Failed:     {}", failed);
@@ -1480,6 +1483,7 @@ fn run_jobs_list_command(
             let status_padded = format!("{:<12}", &status);
             let status_col = match status.as_str() {
                 "pending" => status_padded.yellow().to_string(),
+                "scheduled" => status_padded.blue().to_string(),
                 "active" => status_padded.cyan().to_string(),
                 "completed" => status_padded.green().to_string(),
                 "failed" => status_padded.red().to_string(),
@@ -1522,6 +1526,7 @@ fn run_jobs_inspect_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> 
     let status = jobs_str_field(&job_data, "status");
     let status_colored = match status.as_str() {
         "pending" => status.yellow().to_string(),
+        "scheduled" => status.blue().to_string(),
         "active" => status.cyan().to_string(),
         "completed" => status.green().to_string(),
         "failed" => status.red().to_string(),
@@ -1682,9 +1687,9 @@ fn run_jobs_cancel_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
     };
 
     let status = jobs_str_field(&job_data, "status");
-    if status != "pending" {
+    if status != "pending" && status != "scheduled" && status != "failed" {
         eprintln!(
-            "{}: Job '{}' has status '{}' — only pending jobs can be cancelled",
+            "{}: Job '{}' has status '{}' — only pending, scheduled, or failed jobs can be cancelled",
             "error".red().bold(),
             job_id,
             status
