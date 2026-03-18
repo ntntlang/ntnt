@@ -1142,7 +1142,11 @@ pub fn init() -> HashMap<String, Value> {
                     _ => "unknown".to_string(),
                 };
 
-                if status != "pending" && status != "scheduled" && status != "retrying" {
+                if status != "pending"
+                    && status != "scheduled"
+                    && status != "retrying"
+                    && status != "failed"
+                {
                     return Ok(Value::ok(Value::Bool(false)));
                 }
 
@@ -1742,7 +1746,8 @@ pub fn init() -> HashMap<String, Value> {
                     _ => "unknown".to_string(),
                 };
 
-                if status != "retrying" && status != "dead" {
+                // Accept "failed" for backward compat with pre-v0.4.6 job data
+                if status != "retrying" && status != "failed" && status != "dead" {
                     return Ok(Value::ok(Value::Bool(false)));
                 }
 
@@ -1921,6 +1926,13 @@ pub fn init() -> HashMap<String, Value> {
                         ))
                     }
                 };
+
+                // Guard against deleting active jobs — workers hold references
+                if status_filter == "active" {
+                    return Err(IntentError::runtime_error(
+                        "delete_jobs() cannot delete active jobs — workers are currently processing them. Stop workers first.".to_string(),
+                    ));
+                }
 
                 let older_than_secs = match opts.get("older_than_secs") {
                     Some(Value::Int(n)) => Some(*n as u64),

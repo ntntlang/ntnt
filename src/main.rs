@@ -1613,7 +1613,8 @@ fn run_jobs_retry_command(path: &PathBuf, job_id: &str) -> anyhow::Result<()> {
     };
 
     let status = jobs_str_field(&job_data, "status");
-    if status != "retrying" && status != "dead" {
+    // Accept "failed" for backward compat with pre-v0.4.6 job data
+    if status != "retrying" && status != "failed" && status != "dead" {
         eprintln!(
             "{}: Job '{}' has status '{}' — only retrying or dead jobs can be retried",
             "error".red().bold(),
@@ -1737,6 +1738,15 @@ fn run_jobs_clear_command(
     } else {
         None
     };
+
+    // Guard against clearing active jobs — workers hold references to these
+    if status_arg == "active" {
+        eprintln!(
+            "{}: Clearing active jobs is not safe — workers are currently processing them.\n  Stop all workers first, then retry.",
+            "error".red().bold()
+        );
+        std::process::exit(1);
+    }
 
     let kv_handle = jobs_load_kv(path)?;
     let data_keys = ntnt::stdlib::kv::kv_list(&kv_handle, Some("jobs:data:"))?;
