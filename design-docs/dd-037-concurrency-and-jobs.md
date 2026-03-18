@@ -1,6 +1,6 @@
 # DD-037: Concurrency & Job System
 
-**Status:** Phases 0-2 Complete, Phases 3-7 Planned
+**Status:** Phases 0-2 Complete, Phases 3-8 Planned
 **Author:** Larri
 **Created:** 2026-03-15
 **Last Updated:** 2026-03-17
@@ -197,6 +197,7 @@ Phase 4  📋  Composition Layer                          parallel, race, task g
 Phase 5  📋  Dashboard + Production Hardening            real-time UI, simulation, contracts
 Phase 6  📋  Observability CLI                          ntnt jobs list/tail/replay
 Phase 7  📋  Event Dispatch (std/events)                pub/sub fan-out over the job system
+Phase 8  📋  Job Audit Log & Observability Pipeline    structured logs, sinks, webhooks, web viewer
 ```
 
 ### Phase Status Table
@@ -211,6 +212,7 @@ Phase 7  📋  Event Dispatch (std/events)                pub/sub fan-out over t
 | 5 | Dashboard + Production Hardening | 📋 Planned | Dashboard, simulation, contracts, intent testing |
 | 6 | Observability CLI | 📋 Planned | ntnt jobs list/tail/inspect/replay |
 | 7 | Event Dispatch (`std/events`) | 📋 Planned | pub/sub fan-out over the job system |
+| 8 | Job Audit Log & Observability Pipeline | 📋 Planned | See [dd-042-job-audit-log.md](dd-042-job-audit-log.md) |
 
 ---
 
@@ -744,4 +746,5 @@ For production apps with existing user auth. The dashboard becomes another admin
 | 2026-03-17 | Phase 2 complete: Job DSL shipped across PRs #32, #33, #34. Roadmap renumbered — old Phase 3/4 consolidated into Phase 2 (Job DSL + KV Backend). Phase 3 = advanced features (deferred items). Phase 4 = composition layer. Phase 5 = dashboard + hardening. |
 | 2026-03-17 | DD-037 v7: Added Phase 7 — Event Dispatch (`std/events`). Pub/sub fan-out over the job system. Memory + Redis backends. Testing mode integration. |
 | 2026-03-17 | PR #34 merged: Greptile review fixes — drain_jobs collects all errors (no silent job loss), timeout always overrides exec error, --concurrency 0 rejected, stderr JSON key order documented. Phase 2 fully complete. |
+| 2026-03-18 | Phase 8 added: Job Audit Log & Observability Pipeline (DD-042). Structured logs with KV/file/stderr/webhook sinks, configurable verbosity, TTL, CLI tail, programmatic API. |
 | 2026-03-17 | Phase 2 merged: PR #34 merged after Greptile review fixes (drain_jobs fail-fast, timeout-wins-over-error, --concurrency 0 guard). All 3 Phase 2 PRs now on main. |

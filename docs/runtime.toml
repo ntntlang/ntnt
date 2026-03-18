@@ -375,6 +375,86 @@ options = [
 ]
 example = "ntnt intent studio server.intent"
 
+# --- Worker ---
+[cli.worker]
+command = "ntnt worker <FILE>"
+description = "Start background job workers for jobs defined in a .tnt file. Loads the source file (registering all job definitions), then starts processing jobs from the queue until interrupted with Ctrl-C."
+options = [
+    { name = "--concurrency", short = "", type = "number", default = "1", description = "Number of concurrent worker threads" },
+    { name = "--queues", short = "", type = "STRING", description = "Comma-separated list of queues to process (default: all)" },
+    { name = "--poll-interval", short = "", type = "number", default = "1000", description = "Poll interval in milliseconds" }
+]
+examples = [
+    "ntnt worker server.tnt",
+    "ntnt worker server.tnt --concurrency 4",
+    "ntnt worker server.tnt --queues emails,payments"
+]
+
+# --- Jobs ---
+[cli.jobs]
+command = "ntnt jobs <SUBCOMMAND> <FILE> [OPTIONS]"
+description = "Manage and inspect the job queue. All subcommands take the .tnt file that has the queue configuration as the first argument."
+
+# --- Jobs Status ---
+[cli.jobs_status]
+command = "ntnt jobs status <FILE>"
+description = "Show job queue status with counts by status (pending, scheduled, active, completed, retrying, dead, cancelled)."
+example = "ntnt jobs status server.tnt"
+
+# --- Jobs List ---
+[cli.jobs_list]
+command = "ntnt jobs list <FILE>"
+description = "List individual jobs with optional status and queue filters. Results are sorted newest-first."
+options = [
+    { name = "--status", short = "", type = "STRING", description = "Filter by status (pending/scheduled/active/completed/retrying/dead/cancelled)" },
+    { name = "--queue", short = "", type = "STRING", description = "Filter by queue name" },
+    { name = "--limit", short = "", type = "number", default = "50", description = "Maximum number of jobs to show" },
+    { name = "--format", short = "", type = "STRING", description = "Output format: json (default: table)" }
+]
+examples = [
+    "ntnt jobs list server.tnt",
+    "ntnt jobs list server.tnt --status=dead --limit=20",
+    "ntnt jobs list server.tnt --queue=emails --format=json"
+]
+
+# --- Jobs Inspect ---
+[cli.jobs_inspect]
+command = "ntnt jobs inspect <FILE> <JOB_ID>"
+description = "Show full details of a single job: id, type, queue, status, payload, attempts, retry config, timestamps, and error message if any."
+example = "ntnt jobs inspect server.tnt abc12345"
+
+# --- Jobs Retry ---
+[cli.jobs_retry]
+command = "ntnt jobs retry <FILE> <JOB_ID>"
+description = "Re-queue a failed or dead job for another attempt. Resets attempts to 0, clears error fields, and creates a new pending key. Accepts jobs with status 'retrying', 'dead', or 'failed' (backward compat)."
+example = "ntnt jobs retry server.tnt abc12345"
+
+# --- Jobs Cancel ---
+[cli.jobs_cancel]
+command = "ntnt jobs cancel <FILE> <JOB_ID>"
+description = "Cancel a job. By default, only pending, scheduled, retrying, or failed jobs can be cancelled. Use --force to cancel an active (running) job — the worker will discard the result when it finishes."
+options = [
+    { name = "--force", short = "", type = "flag", description = "Force-cancel an active (running) job. The worker may still be executing, but the result will be discarded." }
+]
+examples = [
+    "ntnt jobs cancel server.tnt abc12345",
+    "ntnt jobs cancel server.tnt abc12345 --force"
+]
+
+# --- Jobs Clear ---
+[cli.jobs_clear]
+command = "ntnt jobs clear <FILE> --status=<STATUS>"
+description = "Bulk delete jobs by status. Requires --status to prevent accidental wipe-all. Cannot clear active jobs (workers hold references). Use --older-than to only clear jobs older than a given duration."
+options = [
+    { name = "--status", short = "", type = "STRING", description = "Status of jobs to clear (required)" },
+    { name = "--older-than", short = "", type = "DURATION", description = "Only clear jobs older than this duration (e.g., 7d, 24h, 30m)" },
+    { name = "--yes", short = "", type = "flag", description = "Skip confirmation prompt" }
+]
+examples = [
+    "ntnt jobs clear server.tnt --status=completed",
+    "ntnt jobs clear server.tnt --status=dead --older-than=7d --yes"
+]
+
 # --- Parse (debug) ---
 [cli.parse]
 command = "ntnt parse <FILE>"
