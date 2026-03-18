@@ -1707,8 +1707,13 @@ fn run_jobs_cancel_command(path: &PathBuf, job_id: &str, force: bool) -> anyhow:
 
     let status = jobs_str_field(&job_data, "status");
 
-    // Without --force: only non-active, non-terminal jobs
-    if !force && status != "pending" && status != "scheduled" && status != "retrying" {
+    // Without --force: only non-active, non-terminal jobs (accept "failed" for backward compat)
+    if !force
+        && status != "pending"
+        && status != "scheduled"
+        && status != "retrying"
+        && status != "failed"
+    {
         if status == "active" {
             eprintln!(
                 "{}: Job '{}' is currently active. Use {} to force-cancel a running job.",

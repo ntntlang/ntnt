@@ -1896,17 +1896,15 @@ pub fn init() -> HashMap<String, Value> {
                 for key in &data_keys {
                     if let Ok(Value::Map(data)) = kv::kv_get(&kv_handle, key) {
                         if let Some(ref sf) = status_filter {
-                            if let Some(Value::String(s)) = data.get("status") {
-                                if s != sf {
-                                    continue;
-                                }
+                            match data.get("status") {
+                                Some(Value::String(s)) if s == sf.as_str() => {}
+                                _ => continue,
                             }
                         }
                         if let Some(ref qf) = queue_filter {
-                            if let Some(Value::String(q)) = data.get("queue") {
-                                if q != qf {
-                                    continue;
-                                }
+                            match data.get("queue") {
+                                Some(Value::String(q)) if q == qf.as_str() => {}
+                                _ => continue,
                             }
                         }
                         results.push(Value::Map(data));
