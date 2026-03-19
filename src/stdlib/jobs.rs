@@ -398,7 +398,7 @@ fn enqueue_internal(
         let mut hasher = Sha256::new();
         hasher.update(format!("{}:{}", job_name, pjson).as_bytes());
         let full_hash = format!("{:x}", hasher.finalize());
-        Some(format!("jobs:unique:{}:{}", job_name, &full_hash[..16]))
+        Some(format!("jobs:unique:{}:{}", job_name, &full_hash[..32]))
     } else {
         None
     };
