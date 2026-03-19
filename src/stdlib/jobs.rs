@@ -2393,7 +2393,8 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                // Validate job exists in registry before any writes
+                // Fast-fail: validate job exists before any KV writes.
+                // enqueue_internal also re-validates per call (acquires read lock again).
                 let job_def = JOB_RUNTIME.get_job(&job_name)?;
                 if job_def.is_none() {
                     return Err(IntentError::runtime_error(format!(
@@ -2419,9 +2420,15 @@ pub fn init() -> HashMap<String, Value> {
                 }
 
                 // Enqueue each item using enqueue_internal (handles dedup, test mode, etc.)
+                // Use base timestamp + per-item offset to preserve FIFO ordering within
+                // the batch — wall-clock resolution is too coarse for tight loops.
+                let base_nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
                 let mut ids = Vec::with_capacity(items.len());
-                for item in items {
-                    let ts = timestamp_key();
+                for (i, item) in items.into_iter().enumerate() {
+                    let ts = format!("{:020}", base_nanos + i as u128);
                     let result = enqueue_internal(&job_name, item, &ts, None)?;
                     // enqueue_internal returns Value::EnumValue { variant: "Ok", values: [String(id)] }
                     match result {
@@ -3732,6 +3739,7 @@ mod tests {
                             .collect();
                         assert_ne!(id_strs[0], id_strs[1]);
                         assert_ne!(id_strs[1], id_strs[2]);
+                        assert_ne!(id_strs[0], id_strs[2]);
                     }
                     _ => panic!("Expected Array in Ok"),
                 },
