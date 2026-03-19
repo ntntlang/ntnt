@@ -29,6 +29,7 @@ use crate::stdlib::concurrent::{
     check_task_limit, finalize_task, is_current_task_cancelled, CURRENT_TASK_CANCELLED, RUNTIME,
 };
 use crate::stdlib::kv;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
@@ -377,6 +378,58 @@ fn enqueue_internal(
         }
     };
 
+    // Dedup: if job has `unique` option, compute deterministic hash and check for existing job.
+    // Hash determinism: value_to_json_public converts HashMap to serde_json::Map backed by
+    // BTreeMap (no `preserve_order` feature), so keys are sorted automatically.
+    // Race condition note: dedup check (kv_get) and write (kv_set) are not atomic.
+    // Best-effort dedup under concurrent enqueues, same as Sidekiq's unique_for.
+    let unique_secs = match job_def.options.get("unique") {
+        Some(JobOptionValue::Int(n)) if *n > 0 => Some(*n),
+        _ => None,
+    };
+    let dedup_key = if unique_secs.is_some() {
+        let pjson = serde_json::to_string(&crate::stdlib::kv::value_to_json_public(&payload))
+            .map_err(|e| {
+                IntentError::runtime_error(format!(
+                    "Failed to serialize payload for dedup hash: {}",
+                    e
+                ))
+            })?;
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{}:{}", job_name, pjson).as_bytes());
+        let full_hash = format!("{:x}", hasher.finalize());
+        Some(format!("jobs:unique:{}:{}", job_name, &full_hash[..16]))
+    } else {
+        None
+    };
+
+    // Check dedup before generating ID (skip in test mode)
+    let in_test_mode = JOB_RUNTIME
+        .test_queue
+        .lock()
+        .map(|tq| tq.is_some())
+        .unwrap_or(false);
+    if let (Some(ref dk), false) = (&dedup_key, in_test_mode) {
+        let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+        if let Value::String(existing_id) = kv::kv_get(&kv_handle, dk)? {
+            let data_key = format!("jobs:data:{}", existing_id);
+            let is_terminal = match kv::kv_get(&kv_handle, &data_key) {
+                Ok(Value::Map(data)) => match data.get("status") {
+                    Some(Value::String(s)) => {
+                        matches!(s.as_str(), "cancelled" | "dead" | "expired" | "failed")
+                    }
+                    _ => true,
+                },
+                Ok(Value::Unit) => true,
+                _ => true,
+            };
+            if !is_terminal {
+                return Ok(Value::ok(Value::String(existing_id)));
+            }
+            let _ = kv::kv_del(&kv_handle, dk);
+        }
+    }
+
     let job_id = Uuid::new_v4().to_string();
 
     // Check test mode
@@ -428,6 +481,10 @@ fn enqueue_internal(
         job_data.insert("status".to_string(), Value::String("scheduled".to_string()));
     }
 
+    if let Some(ref dk) = dedup_key {
+        job_data.insert("dedup_key".to_string(), Value::String(dk.clone()));
+    }
+
     // Build pending key and store it in job data for O(1) cancel_job lookup
     let pending_key = format!("jobs:pending:{}:{}", pending_ts, job_id);
     job_data.insert(
@@ -446,6 +503,22 @@ fn enqueue_internal(
         &Value::String(job_id.clone()),
         None,
     )?;
+
+    if let (Some(ref dk), Some(ttl)) = (&dedup_key, unique_secs) {
+        if let Err(e) = kv::kv_set(&kv_handle, dk, &Value::String(job_id.clone()), Some(ttl)) {
+            emit_job_event(
+                "job.dedup_warning",
+                &[
+                    ("job_id", Value::String(job_id.clone())),
+                    ("dedup_key", Value::String(dk.clone())),
+                    (
+                        "error",
+                        Value::String(format!("Failed to write dedup key: {}", e)),
+                    ),
+                ],
+            );
+        }
+    }
 
     emit_job_event(
         "job.enqueued",
@@ -567,6 +640,92 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                 let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
                 std::thread::sleep(poll_duration);
                 continue;
+            }
+        }
+
+        // Expiration check: if job has `expires_after` option, check if it has exceeded
+        // its maximum wait time (time between creation and now). If so, mark as expired
+        // and clean up dedup key.
+        if let Some(Value::Int(expires_after_secs)) = job_data.get("expires_after") {
+            let expires_after = *expires_after_secs;
+            if expires_after > 0 {
+                let now_nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                match job_data.get("created_at") {
+                    Some(Value::String(created_str)) => {
+                        match created_str.parse::<u128>() {
+                            Ok(created_nanos) => {
+                                let age_secs =
+                                    (now_nanos.saturating_sub(created_nanos)) / 1_000_000_000;
+                                if age_secs >= expires_after as u128 {
+                                    // Extract type before mutations
+                                    let expired_job_type = match job_data.get("type") {
+                                        Some(Value::String(s)) => s.clone(),
+                                        _ => String::new(),
+                                    };
+                                    // Clean up dedup key before expiring
+                                    if let Some(Value::String(dk)) = job_data.get("dedup_key") {
+                                        let _ = kv::kv_del(&kv_handle, dk);
+                                    }
+                                    job_data.insert(
+                                        "status".to_string(),
+                                        Value::String("expired".to_string()),
+                                    );
+                                    job_data.insert(
+                                        "expired_at".to_string(),
+                                        Value::String(timestamp_key()),
+                                    );
+                                    let _ = kv::kv_set(
+                                        &kv_handle,
+                                        &data_key,
+                                        &Value::Map(job_data.clone()),
+                                        None,
+                                    );
+                                    emit_job_event(
+                                        "job.expired",
+                                        &[
+                                            ("job_id", Value::String(job_id.clone())),
+                                            ("type", Value::String(expired_job_type)),
+                                            ("age_secs", Value::Int(age_secs as i64)),
+                                        ],
+                                    );
+                                    continue;
+                                }
+                            }
+                            Err(_) => {
+                                emit_job_event(
+                                    "job.expire_warning",
+                                    &[
+                                        ("job_id", Value::String(job_id.clone())),
+                                        (
+                                            "error",
+                                            Value::String(format!(
+                                                "Could not parse created_at '{}' for expiration check",
+                                                created_str
+                                            )),
+                                        ),
+                                    ],
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        emit_job_event(
+                            "job.expire_warning",
+                            &[
+                                ("job_id", Value::String(job_id.clone())),
+                                (
+                                    "error",
+                                    Value::String(
+                                        "Missing created_at field for expiration check".to_string(),
+                                    ),
+                                ),
+                            ],
+                        );
+                    }
+                }
             }
         }
 
@@ -775,6 +934,10 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                     );
                 } else {
                     // Exhausted retries — mark as dead
+                    // Clean up dedup key on death
+                    if let Some(Value::String(dk)) = job_data.get("dedup_key") {
+                        let _ = kv::kv_del(&kv_handle, dk);
+                    }
                     job_data.insert("status".to_string(), Value::String("dead".to_string()));
                     job_data.insert("dead_at".to_string(), Value::String(timestamp_key()));
                     let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
@@ -967,6 +1130,7 @@ pub struct JobStatusCounts {
     pub retrying: u64,
     pub dead: u64,
     pub cancelled: u64,
+    pub expired: u64,
     pub total: u64,
 }
 
@@ -1081,7 +1245,12 @@ pub fn cancel_job_by_id(job_id: &str, force: bool) -> Result<CancelResult> {
     }
 
     // With force: reject terminal states
-    if force && (status == "completed" || status == "dead" || status == "cancelled") {
+    if force
+        && (status == "completed"
+            || status == "dead"
+            || status == "cancelled"
+            || status == "expired")
+    {
         return Ok(CancelResult::NotCancellable(status));
     }
 
@@ -1096,6 +1265,11 @@ pub fn cancel_job_by_id(job_id: &str, force: bool) -> Result<CancelResult> {
     // If force-cancelling active job, remove visibility timeout key
     if was_active {
         let _ = kv::kv_del(&kv_handle, &format!("jobs:active:{}", job_id));
+    }
+
+    // Clean up dedup key on cancellation
+    if let Some(Value::String(dk)) = job_data.get("dedup_key") {
+        let _ = kv::kv_del(&kv_handle, dk);
     }
 
     job_data.insert("status".to_string(), Value::String("cancelled".to_string()));
@@ -1187,6 +1361,9 @@ pub fn delete_jobs_filtered(opts: DeleteJobsOpts) -> Result<i64> {
             if let Some(Value::String(id)) = data.get("id") {
                 let _ = kv::kv_del(&kv_handle, &format!("jobs:active:{}", id));
             }
+            if let Some(Value::String(dk)) = data.get("dedup_key") {
+                let _ = kv::kv_del(&kv_handle, dk);
+            }
             let _ = kv::kv_del(&kv_handle, key);
             deleted += 1;
         }
@@ -1208,6 +1385,7 @@ pub fn job_status_counts() -> Result<JobStatusCounts> {
         retrying: 0,
         dead: 0,
         cancelled: 0,
+        expired: 0,
         total: data_keys.len() as u64,
     };
 
@@ -1222,6 +1400,7 @@ pub fn job_status_counts() -> Result<JobStatusCounts> {
                     "retrying" => counts.retrying += 1,
                     "dead" => counts.dead += 1,
                     "cancelled" => counts.cancelled += 1,
+                    "expired" => counts.expired += 1,
                     _ => {}
                 }
             }
@@ -3091,6 +3270,175 @@ mod tests {
             assert!(
                 tq.as_ref().unwrap().is_empty(),
                 "Queue should be empty after clear"
+            );
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Dedup tests
+    // -----------------------------------------------------------------------
+
+    fn test_job_def_with_unique(name: &str, queue: &str, unique_secs: i64) -> JobDefinition {
+        let mut options = HashMap::new();
+        options.insert("unique".to_string(), JobOptionValue::Int(unique_secs));
+        test_job_def_with_opts(name, queue, options)
+    }
+
+    fn configure_in_memory(module: &HashMap<String, Value>) {
+        let configure_fn = get_fn(module, "configure_queue");
+        let mut opts = HashMap::new();
+        opts.insert(
+            "store".to_string(),
+            Value::String("sqlite::memory:".to_string()),
+        );
+        configure_fn(&[Value::Map(opts)]).unwrap();
+    }
+
+    fn enqueue_job(
+        module: &HashMap<String, Value>,
+        job_name: &str,
+        payload: HashMap<String, Value>,
+    ) -> String {
+        let enqueue_fn = get_fn(module, "enqueue");
+        let result =
+            enqueue_fn(&[Value::String(job_name.to_string()), Value::Map(payload)]).unwrap();
+        match result {
+            Value::EnumValue { values, .. } => match &values[0] {
+                Value::String(s) => s.clone(),
+                _ => panic!("Expected string job ID"),
+            },
+            _ => panic!("Expected Ok from enqueue"),
+        }
+    }
+
+    /// Two enqueues of the same job with the same payload should return the same ID.
+    #[test]
+    fn test_dedup_same_payload() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def_with_unique("DedupJob", "default", 3600))
+                .unwrap();
+            let module = init();
+            configure_in_memory(&module);
+
+            let mut payload = HashMap::new();
+            payload.insert("key".to_string(), Value::String("value".to_string()));
+
+            let id1 = enqueue_job(&module, "DedupJob", payload.clone());
+            let id2 = enqueue_job(&module, "DedupJob", payload.clone());
+
+            assert_eq!(id1, id2, "Same payload should return same job ID (dedup)");
+        });
+    }
+
+    /// Two enqueues with different payloads should return different IDs.
+    #[test]
+    fn test_dedup_different_payload() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def_with_unique("DedupJobDiff", "default", 3600))
+                .unwrap();
+            let module = init();
+            configure_in_memory(&module);
+
+            let mut payload1 = HashMap::new();
+            payload1.insert("key".to_string(), Value::String("value1".to_string()));
+            let mut payload2 = HashMap::new();
+            payload2.insert("key".to_string(), Value::String("value2".to_string()));
+
+            let id1 = enqueue_job(&module, "DedupJobDiff", payload1);
+            let id2 = enqueue_job(&module, "DedupJobDiff", payload2);
+
+            assert_ne!(
+                id1, id2,
+                "Different payloads should produce different job IDs"
+            );
+        });
+    }
+
+    /// Jobs without `unique` option should always get new IDs.
+    #[test]
+    fn test_no_dedup_without_unique() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("NoDedupJob", "default"))
+                .unwrap();
+            let module = init();
+            configure_in_memory(&module);
+
+            let id1 = enqueue_job(&module, "NoDedupJob", HashMap::new());
+            let id2 = enqueue_job(&module, "NoDedupJob", HashMap::new());
+
+            assert_ne!(
+                id1, id2,
+                "Without unique option, two enqueues should get different IDs"
+            );
+        });
+    }
+
+    /// Dedup key should be cleared when a job is cancelled, allowing re-enqueue.
+    #[test]
+    fn test_dedup_cleared_on_cancel() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def_with_unique("DedupCancelJob", "default", 3600))
+                .unwrap();
+            let module = init();
+            configure_in_memory(&module);
+
+            let mut payload = HashMap::new();
+            payload.insert("task".to_string(), Value::String("send".to_string()));
+
+            let id1 = enqueue_job(&module, "DedupCancelJob", payload.clone());
+
+            // Cancel the job
+            let cancel_fn = get_fn(&module, "cancel_job");
+            let result = cancel_fn(&[Value::String(id1.clone())]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "Cancel should succeed"
+            );
+
+            // Re-enqueue — should get a new ID since dedup key was cleared
+            let id2 = enqueue_job(&module, "DedupCancelJob", payload.clone());
+            assert_ne!(id1, id2, "After cancel, re-enqueue should get a new job ID");
+        });
+    }
+
+    /// If the existing job under a dedup key is in a terminal state (e.g., from
+    /// a previous run with a stale key), re-enqueue should succeed with a new ID.
+    #[test]
+    fn test_dedup_stale_terminal_job() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def_with_unique(
+                    "DedupTerminalJob",
+                    "default",
+                    3600,
+                ))
+                .unwrap();
+            let module = init();
+            configure_in_memory(&module);
+
+            let mut payload = HashMap::new();
+            payload.insert("msg".to_string(), Value::String("hello".to_string()));
+
+            // Enqueue first
+            let id1 = enqueue_job(&module, "DedupTerminalJob", payload.clone());
+
+            // Manually set the job to "dead" status to simulate a terminal job
+            let kv_handle = JOB_RUNTIME.get_or_init_kv().unwrap();
+            let data_key = format!("jobs:data:{}", id1);
+            if let Ok(Value::Map(mut data)) = kv::kv_get(&kv_handle, &data_key) {
+                data.insert("status".to_string(), Value::String("dead".to_string()));
+                kv::kv_set(&kv_handle, &data_key, &Value::Map(data), None).unwrap();
+            }
+
+            // Re-enqueue — the dedup check should see the terminal status and allow a new job
+            let id2 = enqueue_job(&module, "DedupTerminalJob", payload.clone());
+            assert_ne!(
+                id1, id2,
+                "Dedup should allow new job when existing job is in terminal state"
             );
         });
     }
