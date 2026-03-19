@@ -2354,6 +2354,8 @@ pub fn init() -> HashMap<String, Value> {
     // Validates the job name and all payload types upfront before any writes.
     // Then enqueues each payload map from the array. Respects dedup (unique
     // option) and test mode. Returns an array of job IDs.
+    // If the job has `unique` set and two items have identical payloads, the
+    // same job ID is returned for both — no duplicate job is created.
     // Note: if a KV error occurs mid-batch, earlier jobs are already enqueued
     // (no rollback). This matches the behavior of calling enqueue() in a loop.
     // @param job_name The registered job name (e.g., "SendEmail")
@@ -3847,6 +3849,63 @@ mod tests {
                 2,
                 "Test queue should have 2 items"
             );
+        });
+    }
+
+    #[test]
+    fn test_enqueue_batch_dedup() {
+        with_clean_runtime(|| {
+            let mut opts = HashMap::new();
+            opts.insert("unique".to_string(), JobOptionValue::Int(3600));
+            JOB_RUNTIME
+                .register_job(test_job_def_with_opts("BatchDedupJob", "default", opts))
+                .unwrap();
+            setup_memory_kv();
+
+            let module = init();
+            let batch_fn = get_fn(&module, "enqueue_batch");
+
+            // Two identical payloads — dedup should return same ID for both
+            let same_payload = || {
+                let mut m = HashMap::new();
+                m.insert(
+                    "email".to_string(),
+                    Value::String("alice@test.com".to_string()),
+                );
+                Value::Map(m)
+            };
+
+            let result = batch_fn(&[
+                Value::String("BatchDedupJob".to_string()),
+                Value::Array(vec![same_payload(), same_payload()]),
+            ])
+            .unwrap();
+
+            match result {
+                Value::EnumValue {
+                    ref variant,
+                    ref values,
+                    ..
+                } if variant == "Ok" => match &values[0] {
+                    Value::Array(ids) => {
+                        assert_eq!(ids.len(), 2, "Should return 2 IDs");
+                        let id0 = match &ids[0] {
+                            Value::String(s) => s.clone(),
+                            _ => panic!("Expected string"),
+                        };
+                        let id1 = match &ids[1] {
+                            Value::String(s) => s.clone(),
+                            _ => panic!("Expected string"),
+                        };
+                        assert_eq!(
+                            id0, id1,
+                            "Identical payloads with unique should return same ID (deduped)"
+                        );
+                    }
+                    _ => panic!("Expected Array"),
+                },
+                _ => panic!("Expected Ok"),
+            }
         });
     }
 }
