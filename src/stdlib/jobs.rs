@@ -2362,6 +2362,8 @@ pub fn init() -> HashMap<String, Value> {
     // @param args Array of payload maps — one job created per element
     // @returns Result containing array of job IDs, or error
     // @see_also enqueue, enqueue_at, enqueue_in
+    // @error TypeError ~ "enqueue_batch() args[N] must be a map" fix: "Ensure every array element is a map"
+    // @error RuntimeError ~ "Job 'X' is not registered" fix: "Define the job with: job X on queue { perform(...) { ... } }"
     // @example enqueue_batch("SendEmail", [map { "to": "alice@test.com" }, map { "to": "bob@test.com" }]) ~ "Enqueue 2 email jobs"
     // @example enqueue_batch("ProcessOrder", []) ~ "Empty array returns Ok([])"
     module.insert(
@@ -2410,7 +2412,9 @@ pub fn init() -> HashMap<String, Value> {
                     return Ok(Value::ok(Value::Array(vec![])));
                 }
 
-                // Validate all items are maps before any writes
+                // Validate all items are maps before any writes (intentional double iteration:
+                // first pass validates types, second pass writes to KV — ensures no partial
+                // writes on type errors)
                 for (i, item) in items.iter().enumerate() {
                     if !matches!(item, Value::Map(_)) {
                         return Err(IntentError::type_error(format!(
@@ -2442,18 +2446,25 @@ pub fn init() -> HashMap<String, Value> {
                             ids.push(values[0].clone());
                         }
                         Value::EnumValue {
-                            variant, values, ..
+                            variant: _, values, ..
                         } => {
+                            let msg = values
+                                .first()
+                                .map(|v| match v {
+                                    Value::String(s) => s.clone(),
+                                    _ => format!("{:?}", v),
+                                })
+                                .unwrap_or_default();
                             return Err(IntentError::runtime_error(format!(
-                                "enqueue_batch: enqueue returned {}: {:?}",
-                                variant, values
+                                "enqueue_batch: item {} failed: {}",
+                                i, msg
                             )));
                         }
                         _ => {
-                            return Err(IntentError::runtime_error(
-                                "enqueue_batch: unexpected return from enqueue_internal"
-                                    .to_string(),
-                            ));
+                            return Err(IntentError::runtime_error(format!(
+                                "enqueue_batch: unexpected return type for item {}",
+                                i
+                            )));
                         }
                     }
                 }
