@@ -474,8 +474,11 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
             break;
         }
 
-        // Attempt to claim a pending job
-        let claimed = match kv::kv_claim(&kv_handle, "jobs:pending:") {
+        // Attempt to claim a pending job — ceiling filters out future-scheduled jobs
+        // at the KV layer so we never claim+re-enqueue them (no KV churn)
+        // Use '~' (0x7E) as suffix — lexicographically after all UUID chars (0-9, a-f, '-')
+        let now_ceiling = format!("jobs:pending:{}:~", timestamp_key());
+        let claimed = match kv::kv_claim(&kv_handle, "jobs:pending:", Some(&now_ceiling)) {
             Ok(Some((_pending_key, value))) => value,
             Ok(None) => {
                 // Queue empty — sleep and try again
@@ -537,21 +540,8 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
             }
         }
 
-        // Check scheduled_at: if the job isn't ready yet, re-enqueue it
-        let now_ts = timestamp_key();
-        if let Some(Value::String(scheduled_at)) = job_data.get("scheduled_at") {
-            if scheduled_at.as_str() > now_ts.as_str() {
-                // Not ready — restore pending key with the scheduled timestamp
-                let scheduled_ts = scheduled_at.clone();
-                let pk = format!("jobs:pending:{}:{}", scheduled_ts, job_id);
-                let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
-                // Update stored pending_key to the rescheduled key
-                job_data.insert("pending_key".to_string(), Value::String(pk.clone()));
-                let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
-                std::thread::sleep(poll_duration);
-                continue;
-            }
-        }
+        // Note: scheduled_at filtering is handled at the KV layer via the ceiling
+        // parameter — future-scheduled jobs are never claimed, so no re-enqueue needed.
 
         // Write visibility timeout key: jobs:active:<id> with TTL 300s
         let active_key = format!("jobs:active:{}", job_id);
@@ -2144,7 +2134,9 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_clean_runtime<F: FnOnce()>(f: F) {
-        let _guard = TEST_LOCK.lock().unwrap();
+        // unwrap_or_else recovers from poisoned mutex (a previous test panicked
+        // while holding the lock — we still need to run subsequent tests)
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         JOB_RUNTIME.reset();
         f();
     }
@@ -3073,6 +3065,93 @@ mod tests {
                 tq.as_ref().unwrap().is_empty(),
                 "Queue should be empty after clear"
             );
+        });
+    }
+
+    #[test]
+    fn test_scheduled_job_not_claimed_by_worker() {
+        with_clean_runtime(|| {
+            // Register a job
+            JOB_RUNTIME
+                .register_job(test_job_def("FutureJob", "default"))
+                .unwrap();
+
+            // Configure in-memory SQLite
+            let module = init();
+            let configure_fn = match module.get("configure_queue").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+            let mut opts = HashMap::new();
+            opts.insert(
+                "store".to_string(),
+                Value::String("sqlite::memory:".to_string()),
+            );
+            configure_fn(&[Value::Map(opts)]).unwrap();
+
+            // Enqueue a job far in the future (year 2099)
+            let enqueue_at_fn = match module.get("enqueue_at").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+            let future_ts: i64 = 4_102_444_800_000_000_000; // ~2099
+            let result = enqueue_at_fn(&[
+                Value::String("FutureJob".to_string()),
+                Value::Int(future_ts),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+            let job_id = match result {
+                Value::EnumValue { values, .. } => match &values[0] {
+                    Value::String(s) => s.clone(),
+                    _ => panic!("Expected string ID"),
+                },
+                _ => panic!("Expected Ok"),
+            };
+
+            // Run worker for a short time — it should NOT claim the future job
+            let kv_handle = JOB_RUNTIME.get_or_init_kv().unwrap();
+            let kv_info = extract_kv_handle_info(&kv_handle).unwrap();
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel_clone = cancel.clone();
+            let handle = std::thread::spawn(move || {
+                crate::stdlib::concurrent::CURRENT_TASK_CANCELLED.with(|cell| {
+                    *cell.borrow_mut() = Some(cancel_clone);
+                });
+                worker_loop(kv_info, 50, None);
+            });
+
+            // Let worker poll a few times
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+            handle.join().unwrap();
+
+            // Job should still be pending (not claimed, not completed)
+            let status_fn = match module.get("job_status").unwrap() {
+                Value::NativeFunction { func, .. } => func,
+                _ => panic!("Expected NativeFunction"),
+            };
+            let status = status_fn(&[Value::String(job_id)]).unwrap();
+            match status {
+                Value::EnumValue {
+                    variant, values, ..
+                } if variant == "Ok" => match &values[0] {
+                    Value::Map(data) => {
+                        // enqueue_at sets status to "scheduled" (not "pending")
+                        let job_status = match data.get("status") {
+                            Some(Value::String(s)) => s.as_str(),
+                            _ => "unknown",
+                        };
+                        assert!(
+                            job_status == "pending" || job_status == "scheduled",
+                            "Future job should still be pending/scheduled, got {:?}",
+                            data.get("status")
+                        );
+                    }
+                    _ => panic!("Expected Map"),
+                },
+                _ => panic!("Expected Ok from job_status"),
+            }
         });
     }
 }
