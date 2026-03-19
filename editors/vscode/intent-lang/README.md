@@ -107,7 +107,7 @@ cd editors/vscode/intent-lang
 npx vsce package
 
 # Install locally
-code --install-extension ntnt-lang-0.1.0.vsix
+code --install-extension ntnt-lang-*.vsix
 ```
 
 ## Grammar
