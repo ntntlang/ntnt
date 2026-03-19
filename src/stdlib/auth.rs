@@ -1303,7 +1303,7 @@ impl InMemoryStore {
             .get(token)
             .and_then(|(session_id, created_at)| {
                 let now = chrono::Utc::now().timestamp();
-                if now - created_at < 60 {
+                if now - created_at < EXCHANGE_TOKEN_TTL {
                     Some(session_id)
                 } else {
                     None
@@ -1313,6 +1313,14 @@ impl InMemoryStore {
 
     fn delete_exchange_token(&mut self, token: &str) {
         self.exchange_tokens.remove(token);
+    }
+
+    fn cleanup_expired_exchange_tokens(&mut self, now: i64) -> usize {
+        let cutoff = now - EXCHANGE_TOKEN_TTL;
+        let before = self.exchange_tokens.len();
+        self.exchange_tokens
+            .retain(|_, (_, created_at)| *created_at >= cutoff);
+        before - self.exchange_tokens.len()
     }
 
     fn cleanup_expired(&mut self, now: i64) -> usize {
@@ -1434,6 +1442,7 @@ pub fn init_auth(config: AuthConfig) {
                     let now = chrono::Utc::now().timestamp();
                     let removed = s.cleanup_expired(now);
                     s.cleanup_expired_oauth_states(now - 600);
+                    s.cleanup_expired_exchange_tokens(now);
                     if removed > 0 {
                         eprintln!("[auth] Cleaned up {} expired session(s)", removed);
                     }
@@ -1989,9 +1998,13 @@ fn consume_oauth_state_redis(state: &str) -> std::result::Result<Option<OAuthSta
 // Exchange Token Store/Consume (Safari ITP workaround)
 // ============================================================================
 
+/// Maximum lifetime of an exchange token in seconds.
+/// Tokens older than this are considered expired and will not be consumed.
+const EXCHANGE_TOKEN_TTL: i64 = 60;
+
 /// Store an exchange token mapping to a session ID.
 /// Used to break the OAuth redirect chain for Safari ITP cookie persistence.
-pub fn store_exchange_token(token: &str, session_id: &str) {
+fn store_exchange_token(token: &str, session_id: &str) {
     let config = get_auth_config();
     let store_type = config.as_ref().map(|c| &c.session_store);
 
@@ -2086,7 +2099,7 @@ fn store_exchange_token_redis(token: &str, session_id: &str) -> std::result::Res
     let key = format!("ntnt:auth_exchange:{}", token);
     redis::cmd("SETEX")
         .arg(&key)
-        .arg(60)
+        .arg(EXCHANGE_TOKEN_TTL)
         .arg(session_id)
         .query::<()>(&mut conn)
         .map_err(|e| format!("Redis SETEX error: {}", e))?;
@@ -2096,7 +2109,7 @@ fn store_exchange_token_redis(token: &str, session_id: &str) -> std::result::Res
 
 /// Consume an exchange token, returning the associated session ID.
 /// The token is deleted after retrieval (one-time use).
-pub fn consume_exchange_token(token: &str) -> Option<String> {
+fn consume_exchange_token(token: &str) -> Option<String> {
     let config = get_auth_config();
     let store_type = config.as_ref().map(|c| &c.session_store);
 
@@ -2151,19 +2164,18 @@ fn consume_exchange_token_sqlite(token: &str) -> std::result::Result<Option<Stri
     let conn_guard = SQLITE_CONN.lock().unwrap();
     let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
     let now = chrono::Utc::now().timestamp();
-    let min_created = now - 60;
+    let min_created = now - EXCHANGE_TOKEN_TTL;
 
+    // Atomic delete-and-return: DELETE the token and return session_id in one statement.
+    // This prevents race conditions where two concurrent requests could both consume the same token.
+    // SQLite's RETURNING clause requires 3.35.0+ (2021-03-12).
+    // Fallback: use a transaction for older versions.
     let result = conn.query_row(
-        "SELECT session_id FROM auth_exchange_tokens
-         WHERE token = ?1 AND created_at > ?2",
+        "DELETE FROM auth_exchange_tokens
+         WHERE token = ?1 AND created_at > ?2
+         RETURNING session_id",
         rusqlite::params![token, min_created],
         |row| row.get::<_, String>(0),
-    );
-
-    // Delete the token (consume it)
-    let _ = conn.execute(
-        "DELETE FROM auth_exchange_tokens WHERE token = ?1",
-        rusqlite::params![token],
     );
 
     match result {
@@ -2177,23 +2189,20 @@ fn consume_exchange_token_postgres(token: &str) -> std::result::Result<Option<St
     let url_guard = POSTGRES_URL.lock().unwrap();
     let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
     let now = chrono::Utc::now().timestamp();
-    let min_created = now - 60;
+    let min_created = now - EXCHANGE_TOKEN_TTL;
 
     let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
 
+    // Atomic delete-and-return: DELETE the token and return session_id in one statement.
+    // This prevents race conditions where two concurrent requests could both consume the same token.
     let rows = client
         .query(
-            "SELECT session_id FROM auth_exchange_tokens
-         WHERE token = $1 AND created_at > $2",
+            "DELETE FROM auth_exchange_tokens
+             WHERE token = $1 AND created_at > $2
+             RETURNING session_id",
             &[&token, &min_created],
         )
         .map_err(|e| e.to_string())?;
-
-    // Delete the token (consume it)
-    let _ = client.execute(
-        "DELETE FROM auth_exchange_tokens WHERE token = $1",
-        &[&token],
-    );
 
     if let Some(row) = rows.first() {
         Ok(Some(row.get::<_, String>(0)))
@@ -3281,6 +3290,61 @@ fn cleanup_expired_oauth_states_postgres(cutoff: i64) -> std::result::Result<u64
     Ok(count)
 }
 
+/// Clean up expired exchange tokens from all backends.
+/// Called by `sessions_cleanup` and the background cleanup thread.
+pub fn cleanup_expired_exchange_tokens() -> std::result::Result<u64, String> {
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - EXCHANGE_TOKEN_TTL;
+
+    let config = get_auth_config();
+    let store_type = config.as_ref().map(|c| &c.session_store);
+
+    match store_type {
+        Some(SessionStore::Sqlite(_)) => cleanup_expired_exchange_tokens_sqlite(cutoff),
+        Some(SessionStore::Postgres(_)) => cleanup_expired_exchange_tokens_postgres(cutoff),
+        Some(SessionStore::Redis(_)) => {
+            // Redis exchange tokens use SETEX TTL, so they expire automatically
+            Ok(0)
+        }
+        _ => {
+            // Memory backend
+            let mut store = SESSION_STORE.lock().unwrap();
+            let count = store.cleanup_expired_exchange_tokens(now);
+            Ok(count as u64)
+        }
+    }
+}
+
+fn cleanup_expired_exchange_tokens_sqlite(cutoff: i64) -> std::result::Result<u64, String> {
+    let conn_guard = SQLITE_CONN.lock().unwrap();
+    let conn = conn_guard.as_ref().ok_or("SQLite not initialized")?;
+
+    let count = conn
+        .execute(
+            "DELETE FROM auth_exchange_tokens WHERE created_at < ?1",
+            rusqlite::params![cutoff],
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(count as u64)
+}
+
+fn cleanup_expired_exchange_tokens_postgres(cutoff: i64) -> std::result::Result<u64, String> {
+    let url_guard = POSTGRES_URL.lock().unwrap();
+    let url = url_guard.as_ref().ok_or("PostgreSQL not initialized")?;
+
+    let mut client = postgres::Client::connect(url, postgres::NoTls).map_err(|e| e.to_string())?;
+
+    let count = client
+        .execute(
+            "DELETE FROM auth_exchange_tokens WHERE created_at < $1",
+            &[&cutoff],
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(count)
+}
+
 /// Get all sessions for a user
 pub fn get_sessions_for_user(
     user_id: &str,
@@ -3824,12 +3888,18 @@ fn redirect_response(url: &str, cookies: Option<&str>) -> Value {
     Value::Map(response)
 }
 
-/// Helper to create HTML response
+/// Helper to create HTML response with no-cache headers.
+/// Used for the OAuth exchange intermediate page — must never be cached
+/// because it contains a single-use exchange token.
 fn html_response(body: &str) -> Value {
     let mut headers = HashMap::new();
     headers.insert(
         "Content-Type".to_string(),
         Value::String("text/html; charset=utf-8".to_string()),
+    );
+    headers.insert(
+        "Cache-Control".to_string(),
+        Value::String("no-store".to_string()),
     );
 
     let mut response = HashMap::new();
@@ -4108,8 +4178,8 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
                 // Verify the session still exists
                 if let Some(_session) = get_session_by_id(&session_id) {
                     eprintln!(
-                        "[auth] Session exchange token consumed for session {}",
-                        session_id
+                        "[auth] Session exchange token consumed for session {}...",
+                        &session_id[..8]
                     );
 
                     // Sign the session ID with HMAC for tamper protection
@@ -4243,17 +4313,24 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
     let exchange_token = generate_session_id();
     store_exchange_token(&exchange_token, &session_id);
 
-    // Return intermediate HTML page that does a same-origin redirect
+    // Return intermediate HTML page that does a same-origin redirect.
     // This breaks the cross-site redirect chain so Safari ITP treats the
     // subsequent Set-Cookie as first-party (full lifetime instead of ~1 hour).
+    // Uses meta-refresh as primary (works without JS, unaffected by CSP),
+    // JS redirect as fast-path, and a clickable link as final fallback.
+    let callback_url = format!(
+        "/auth/{}/callback?exchange={}",
+        provider_name, exchange_token
+    );
     let html = format!(
         r#"<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Completing login...</title></head>
+<html><head><meta charset="utf-8"><title>Completing login...</title>
+<meta http-equiv="refresh" content="0;url={url}"></head>
 <body><p>Completing login...</p>
-<script>window.location.href="/auth/{}/callback?exchange={}";</script>
-<noscript><a href="/auth/{}/callback?exchange={}">Click here to continue</a></noscript>
+<script>window.location.replace("{url}");</script>
+<noscript><a href="{url}">Click here to continue</a></noscript>
 </body></html>"#,
-        provider_name, exchange_token, provider_name, exchange_token
+        url = callback_url
     );
 
     Ok(html_response(&html))
@@ -5447,12 +5524,12 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt sessions_cleanup
     // @module std/auth
     // @signature sessions_cleanup() -> Result<Int, String>
-    // Clean up expired sessions and OAuth states from the session store.
+    // Clean up expired sessions, OAuth states, and exchange tokens from the session store.
     //
     // Call this periodically (e.g., via a cron job or scheduled task) to remove
-    // expired sessions and OAuth states from the database. For Redis, sessions
-    // use TTL so they expire automatically, but this will scan for any orphaned entries.
-    // @returns Result containing the number of expired sessions removed, or error
+    // expired sessions, OAuth states, and exchange tokens from the database. For Redis,
+    // these use TTL so they expire automatically, but this will scan for any orphaned entries.
+    // @returns Result containing the number of expired entries removed, or error
     // @see_also enable_auth
     // @since v0.3.11
     // @tags #auth, #maintenance
@@ -5483,6 +5560,17 @@ pub fn init() -> HashMap<String, Value> {
                     Err(e) => {
                         return Ok(make_err(Value::String(format!(
                             "OAuth state cleanup failed: {}",
+                            e
+                        ))))
+                    }
+                }
+
+                // Clean up expired exchange tokens
+                match cleanup_expired_exchange_tokens() {
+                    Ok(count) => total += count,
+                    Err(e) => {
+                        return Ok(make_err(Value::String(format!(
+                            "Exchange token cleanup failed: {}",
                             e
                         ))))
                     }
@@ -6976,45 +7064,58 @@ mod tests {
 
     #[test]
     fn test_exchange_token_store_consume_memory() {
-        // Use in-memory store directly
         let mut store = InMemoryStore::new();
 
-        // Store an exchange token
         store.set_exchange_token("test-token-123".to_string(), "session-abc".to_string());
 
-        // Consume it — should return the session_id
+        // Should return the session_id
         let result = store.get_exchange_token("test-token-123");
-        assert_eq!(result, Some(&"session-abc".to_string()));
+        assert_eq!(result.map(|s| s.as_str()), Some("session-abc"));
 
         // Delete it (simulating consume)
         store.delete_exchange_token("test-token-123");
 
-        // Second consume — should return None
-        let result = store.get_exchange_token("test-token-123");
-        assert_eq!(result, None);
+        // Second consume — should return None (one-time use)
+        assert_eq!(store.get_exchange_token("test-token-123"), None);
     }
 
     #[test]
     fn test_exchange_token_expired() {
         let mut store = InMemoryStore::new();
 
-        // Manually insert a token with a past created_at (> 60 seconds ago)
+        // Insert with created_at=0 (far in the past, well beyond EXCHANGE_TOKEN_TTL)
         store
             .exchange_tokens
             .insert("expired-token".to_string(), ("session-xyz".to_string(), 0));
 
-        // Should return None because it's expired
-        let result = store.get_exchange_token("expired-token");
-        assert_eq!(result, None);
+        assert_eq!(store.get_exchange_token("expired-token"), None);
     }
 
     #[test]
     fn test_exchange_token_not_found() {
         let store = InMemoryStore::new();
+        assert_eq!(store.get_exchange_token("nonexistent"), None);
+    }
 
-        // Non-existent token should return None
-        let result = store.get_exchange_token("nonexistent");
-        assert_eq!(result, None);
+    #[test]
+    fn test_exchange_token_cleanup() {
+        let mut store = InMemoryStore::new();
+
+        // One fresh token, one expired
+        store.set_exchange_token("fresh".to_string(), "session-1".to_string());
+        store
+            .exchange_tokens
+            .insert("stale".to_string(), ("session-2".to_string(), 0));
+
+        let now = chrono::Utc::now().timestamp();
+        let removed = store.cleanup_expired_exchange_tokens(now);
+
+        assert_eq!(removed, 1);
+        assert_eq!(
+            store.get_exchange_token("fresh").map(|s| s.as_str()),
+            Some("session-1")
+        );
+        assert_eq!(store.get_exchange_token("stale"), None);
     }
 
     #[test]
@@ -7022,21 +7123,21 @@ mod tests {
         let resp = html_response("<p>Hello</p>");
 
         if let Value::Map(map) = resp {
-            match map.get("status") {
-                Some(Value::Int(200)) => {}
-                other => panic!("Expected status 200, got {:?}", other),
-            }
+            assert!(matches!(map.get("status"), Some(Value::Int(200))));
+
             match map.get("body") {
-                Some(Value::String(s)) if s == "<p>Hello</p>" => {}
-                other => panic!("Expected body '<p>Hello</p>', got {:?}", other),
+                Some(Value::String(s)) => assert_eq!(s, "<p>Hello</p>"),
+                other => panic!("Expected body string, got {:?}", other),
             }
+
             if let Some(Value::Map(headers)) = map.get("headers") {
                 match headers.get("Content-Type") {
-                    Some(Value::String(s)) if s == "text/html; charset=utf-8" => {}
-                    other => panic!(
-                        "Expected Content-Type 'text/html; charset=utf-8', got {:?}",
-                        other
-                    ),
+                    Some(Value::String(s)) => assert_eq!(s, "text/html; charset=utf-8"),
+                    other => panic!("Expected Content-Type header, got {:?}", other),
+                }
+                match headers.get("Cache-Control") {
+                    Some(Value::String(s)) => assert_eq!(s, "no-store"),
+                    other => panic!("Expected Cache-Control: no-store, got {:?}", other),
                 }
             } else {
                 panic!("Expected headers map");
@@ -7044,5 +7145,12 @@ mod tests {
         } else {
             panic!("Expected response map");
         }
+    }
+
+    #[test]
+    fn test_exchange_token_ttl_constant() {
+        // Ensure the TTL constant is sensible (between 10s and 300s)
+        assert!(EXCHANGE_TOKEN_TTL >= 10);
+        assert!(EXCHANGE_TOKEN_TTL <= 300);
     }
 }

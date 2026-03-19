@@ -1468,7 +1468,7 @@ import { oauth, oauth_discover, oauth_m2m } from "std/auth"
 | [`oauth_start`](#oauthstart) | Generate an OAuth authorization URL for manual flow control. |
 | [`oauth_validate`](#oauthvalidate) | Validate an incoming bearer token (for APIs acting as resource servers). |
 | [`session_data`](#sessiondata) | Get custom data stored in the current session. |
-| [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions and OAuth states from the session store. |
+| [`sessions_cleanup`](#sessionscleanup) | Clean up expired sessions, OAuth states, and exchange tokens from the session store. |
 | [`set_session`](#setsession) | Store custom data in the current session. |
 | [`totp_secret`](#totpsecret) | Generate a new TOTP secret for MFA setup. |
 | [`totp_uri`](#totpuri) | Generate an otpauth:// URI for QR codes. |
@@ -2218,11 +2218,11 @@ session_data(req)  // Get user roles and preferences
 sessions_cleanup() -> Result<Int, String>
 ```
 
-Clean up expired sessions and OAuth states from the session store.
+Clean up expired sessions, OAuth states, and exchange tokens from the session store.
 
-Call this periodically (e.g., via a cron job or scheduled task) to remove expired sessions and OAuth states from the database. For Redis, sessions use TTL so they expire automatically, but this will scan for any orphaned entries.
+Call this periodically (e.g., via a cron job or scheduled task) to remove expired sessions, OAuth states, and exchange tokens from the database. For Redis, these use TTL so they expire automatically, but this will scan for any orphaned entries.
 
-**Returns:** Result containing the number of expired sessions removed, or error
+**Returns:** Result containing the number of expired entries removed, or error
 
 **Examples:**
 
