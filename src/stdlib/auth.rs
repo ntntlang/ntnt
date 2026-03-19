@@ -2168,8 +2168,7 @@ fn consume_exchange_token_sqlite(token: &str) -> std::result::Result<Option<Stri
 
     // Atomic delete-and-return: DELETE the token and return session_id in one statement.
     // This prevents race conditions where two concurrent requests could both consume the same token.
-    // SQLite's RETURNING clause requires 3.35.0+ (2021-03-12).
-    // Fallback: use a transaction for older versions.
+    // Requires SQLite 3.35.0+ (2021-03-12) — always available since ntnt bundles SQLite via rusqlite.
     let result = conn.query_row(
         "DELETE FROM auth_exchange_tokens
          WHERE token = ?1 AND created_at > ?2
@@ -4172,7 +4171,15 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
     // Phase 2: Exchange token flow (same-origin redirect from intermediate page)
     // This breaks the cross-site redirect chain so Safari ITP doesn't cap cookie lifetime.
     if let Some(exchange_token) = exchange {
-        if code.is_none() {
+        if code.is_some() {
+            // Both `exchange` and `code` in the same request is not a legitimate flow.
+            // Consume the exchange token to prevent it lingering, then fall through
+            // to Phase 1 (which will fail on missing state — correct behavior).
+            let _ = consume_exchange_token(&exchange_token);
+            eprintln!(
+                "[auth] Ignoring exchange token — OAuth code also present (crafted request?)"
+            );
+        } else {
             // Consume the exchange token to get the session ID
             if let Some(session_id) = consume_exchange_token(&exchange_token) {
                 // Verify the session still exists
@@ -4318,9 +4325,23 @@ pub fn handle_auth_callback(args: &[Value]) -> Result<Value> {
     // subsequent Set-Cookie as first-party (full lifetime instead of ~1 hour).
     // Uses meta-refresh as primary (works without JS, unaffected by CSP),
     // JS redirect as fast-path, and a clickable link as final fallback.
+    //
+    // URL-encode provider name defensively — provider names are typically
+    // alphanumeric (e.g. "google") but encoding prevents JS string breakage
+    // if a name ever contains quotes or special chars. Exchange token is a UUID.
+    let safe_provider: String = provider_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_string()
+            } else {
+                format!("%{:02X}", c as u32)
+            }
+        })
+        .collect();
     let callback_url = format!(
         "/auth/{}/callback?exchange={}",
-        provider_name, exchange_token
+        safe_provider, exchange_token
     );
     let html = format!(
         r#"<!DOCTYPE html>
