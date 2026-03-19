@@ -2346,6 +2346,114 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt enqueue_batch
+    // @module std/jobs
+    // @signature enqueue_batch(job_name: String, args: Array<Map>) -> Result<Array<String>, String>
+    // Enqueue multiple jobs of the same type in one call.
+    //
+    // Validates the job name and all payload types upfront before any writes.
+    // Then enqueues each payload map from the array. Respects dedup (unique
+    // option) and test mode. Returns an array of job IDs.
+    // Note: if a KV error occurs mid-batch, earlier jobs are already enqueued
+    // (no rollback). This matches the behavior of calling enqueue() in a loop.
+    // @param job_name The registered job name (e.g., "SendEmail")
+    // @param args Array of payload maps — one job created per element
+    // @returns Result containing array of job IDs, or error
+    // @see_also enqueue, enqueue_at, enqueue_in
+    // @example enqueue_batch("SendEmail", [map { "to": "alice@test.com" }, map { "to": "bob@test.com" }]) ~ "Enqueue 2 email jobs"
+    // @example enqueue_batch("ProcessOrder", []) ~ "Empty array returns Ok([])"
+    module.insert(
+        "enqueue_batch".to_string(),
+        Value::NativeFunction {
+            name: "enqueue_batch".to_string(),
+            arity: 2,
+            max_arity: 2,
+            func: |args| {
+                if args.len() != 2 {
+                    return Err(IntentError::type_error(
+                        "enqueue_batch() requires 2 arguments (job_name, args_array)".to_string(),
+                    ));
+                }
+
+                let job_name = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "enqueue_batch() first argument must be a string job name".to_string(),
+                        ))
+                    }
+                };
+
+                let items = match &args[1] {
+                    Value::Array(arr) => arr.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "enqueue_batch() second argument must be an array of maps".to_string(),
+                        ))
+                    }
+                };
+
+                // Validate job exists in registry before any writes
+                let job_def = JOB_RUNTIME.get_job(&job_name)?;
+                if job_def.is_none() {
+                    return Err(IntentError::runtime_error(format!(
+                        "Job '{}' is not registered. Define it with: job {} on <queue> {{ perform(...) {{ ... }} }}",
+                        job_name, job_name
+                    )));
+                }
+
+                // Empty array — return immediately
+                if items.is_empty() {
+                    return Ok(Value::ok(Value::Array(vec![])));
+                }
+
+                // Validate all items are maps before any writes
+                for (i, item) in items.iter().enumerate() {
+                    if !matches!(item, Value::Map(_)) {
+                        return Err(IntentError::type_error(format!(
+                            "enqueue_batch() args[{}] must be a map, got {}",
+                            i,
+                            item.type_name()
+                        )));
+                    }
+                }
+
+                // Enqueue each item using enqueue_internal (handles dedup, test mode, etc.)
+                let mut ids = Vec::with_capacity(items.len());
+                for item in items {
+                    let ts = timestamp_key();
+                    let result = enqueue_internal(&job_name, item, &ts, None)?;
+                    // enqueue_internal returns Value::EnumValue { variant: "Ok", values: [String(id)] }
+                    match result {
+                        Value::EnumValue {
+                            ref variant,
+                            ref values,
+                            ..
+                        } if variant == "Ok" && !values.is_empty() => {
+                            ids.push(values[0].clone());
+                        }
+                        Value::EnumValue {
+                            variant, values, ..
+                        } => {
+                            return Err(IntentError::runtime_error(format!(
+                                "enqueue_batch: enqueue returned {}: {:?}",
+                                variant, values
+                            )));
+                        }
+                        _ => {
+                            return Err(IntentError::runtime_error(
+                                "enqueue_batch: unexpected return from enqueue_internal"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                Ok(Value::ok(Value::Array(ids)))
+            },
+        },
+    );
+
     module
 }
 
@@ -3049,6 +3157,17 @@ mod tests {
         }
     }
 
+    fn setup_memory_kv() {
+        let module = init();
+        let configure_fn = get_fn(&module, "configure_queue");
+        let mut opts = HashMap::new();
+        opts.insert(
+            "store".to_string(),
+            Value::String("sqlite::memory:".to_string()),
+        );
+        configure_fn(&[Value::Map(opts)]).unwrap();
+    }
+
     fn activate_testing_mode(module: &HashMap<String, Value>) {
         let configure_fn = get_fn(module, "configure_queue");
         let mut opts = HashMap::new();
@@ -3554,6 +3673,172 @@ mod tests {
                 },
                 _ => panic!("Expected Ok from job_status"),
             }
+        });
+    }
+
+    #[test]
+    fn test_enqueue_batch_basic() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("BatchJob", "default"))
+                .unwrap();
+            setup_memory_kv();
+
+            let module = init();
+            let batch_fn = get_fn(&module, "enqueue_batch");
+
+            let items = vec![
+                Value::Map({
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "to".to_string(),
+                        Value::String("alice@test.com".to_string()),
+                    );
+                    m
+                }),
+                Value::Map({
+                    let mut m = HashMap::new();
+                    m.insert("to".to_string(), Value::String("bob@test.com".to_string()));
+                    m
+                }),
+                Value::Map({
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "to".to_string(),
+                        Value::String("carol@test.com".to_string()),
+                    );
+                    m
+                }),
+            ];
+
+            let result =
+                batch_fn(&[Value::String("BatchJob".to_string()), Value::Array(items)]).unwrap();
+
+            match result {
+                Value::EnumValue {
+                    ref variant,
+                    ref values,
+                    ..
+                } if variant == "Ok" => match &values[0] {
+                    Value::Array(ids) => {
+                        assert_eq!(ids.len(), 3, "Should create 3 jobs");
+                        // All IDs should be unique strings
+                        let id_strs: Vec<String> = ids
+                            .iter()
+                            .map(|v| match v {
+                                Value::String(s) => s.clone(),
+                                _ => panic!("Expected string ID"),
+                            })
+                            .collect();
+                        assert_ne!(id_strs[0], id_strs[1]);
+                        assert_ne!(id_strs[1], id_strs[2]);
+                    }
+                    _ => panic!("Expected Array in Ok"),
+                },
+                _ => panic!("Expected Ok from enqueue_batch: {:?}", result),
+            }
+        });
+    }
+
+    #[test]
+    fn test_enqueue_batch_empty() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("BatchEmpty", "default"))
+                .unwrap();
+            setup_memory_kv();
+
+            let module = init();
+            let batch_fn = get_fn(&module, "enqueue_batch");
+
+            let result = batch_fn(&[
+                Value::String("BatchEmpty".to_string()),
+                Value::Array(vec![]),
+            ])
+            .unwrap();
+
+            match result {
+                Value::EnumValue {
+                    ref variant,
+                    ref values,
+                    ..
+                } if variant == "Ok" => match &values[0] {
+                    Value::Array(ids) => assert!(ids.is_empty(), "Empty input → empty output"),
+                    _ => panic!("Expected Array"),
+                },
+                _ => panic!("Expected Ok"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_enqueue_batch_unregistered() {
+        with_clean_runtime(|| {
+            setup_memory_kv();
+
+            let module = init();
+            let batch_fn = get_fn(&module, "enqueue_batch");
+
+            let result = batch_fn(&[
+                Value::String("NoSuchJob".to_string()),
+                Value::Array(vec![Value::Map(HashMap::new())]),
+            ]);
+            assert!(result.is_err(), "Unregistered job should error");
+            let err = format!("{}", result.unwrap_err());
+            assert!(err.contains("not registered"));
+        });
+    }
+
+    #[test]
+    fn test_enqueue_batch_bad_item() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("BatchBad", "default"))
+                .unwrap();
+            setup_memory_kv();
+
+            let module = init();
+            let batch_fn = get_fn(&module, "enqueue_batch");
+
+            // Second item is a string, not a map
+            let result = batch_fn(&[
+                Value::String("BatchBad".to_string()),
+                Value::Array(vec![
+                    Value::Map(HashMap::new()),
+                    Value::String("not a map".to_string()),
+                ]),
+            ]);
+            assert!(result.is_err(), "Non-map item should error");
+            let err = format!("{}", result.unwrap_err());
+            assert!(err.contains("args[1]"), "Error should identify index");
+        });
+    }
+
+    #[test]
+    fn test_enqueue_batch_test_mode() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("BatchTest", "default"))
+                .unwrap();
+
+            // Enable test mode
+            let module = init();
+            let configure_fn = get_fn(&module, "configure_queue");
+            let mut opts = HashMap::new();
+            opts.insert("mode".to_string(), Value::String("testing".to_string()));
+            configure_fn(&[Value::Map(opts)]).unwrap();
+
+            let batch_fn = get_fn(&module, "enqueue_batch");
+            let items = vec![Value::Map(HashMap::new()), Value::Map(HashMap::new())];
+            batch_fn(&[Value::String("BatchTest".to_string()), Value::Array(items)]).unwrap();
+
+            // Check test queue has 2 items
+            let tq = JOB_RUNTIME.test_queue.lock().unwrap();
+            assert_eq!(
+                tq.as_ref().unwrap().len(),
+                2,
+                "Test queue should have 2 items"
+            );
         });
     }
 }

@@ -1,6 +1,6 @@
 # DD-037 Phase 3: Implementation Plan
 
-**Status:** PR A ✅ in review (#36), PR B ✅ in review (#38), PR C 📋 planned
+**Status:** PR A ✅ merged (#36), PR B ✅ merged (#38), PR C 🔄 in progress
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md) · [Phase 3 Design](dd-037-phase-3-implementation.md)
 **Created:** 2026-03-18
 **Depends on:** Phase 2 ✅, Phase 6 ✅
@@ -9,7 +9,7 @@
 
 ## Completed PRs
 
-### PR A — Atomic Claim + Scheduled Optimization (#36, in review)
+### PR A — Atomic Claim + Scheduled Optimization (#36, merged)
 
 **What shipped:**
 - [x] Redis `claim()` rewritten as atomic Lua `EVAL` script (KEYS+sort+GET+DEL in one operation)
@@ -24,7 +24,7 @@
 
 **Review rounds:** 5 (Greptile + Copilot), all resolved
 
-### PR B — Dedup + Expiration (#38, in review)
+### PR B — Dedup + Expiration (#38, merged)
 
 **What shipped:**
 - [x] `unique: N` job option — SHA-256 hash dedup with TTL
