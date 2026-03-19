@@ -620,8 +620,9 @@ impl RedisKV {
         let ceil = ceiling.unwrap_or("");
 
         // Lua script runs atomically in Redis — KEYS+sort+GET+DEL in one operation.
-        // KEYS is acceptable here because the key space is scoped to the prefix
-        // (e.g., "jobs:pending:*") which is bounded by queue depth.
+        // Note: KEYS scans the entire Redis keyspace (O(total keys), not O(matching keys)).
+        // This is acceptable for typical job queue sizes. For very large Redis instances
+        // with millions of non-job keys, consider a sorted-set approach instead.
         let lua_script = r#"
             local keys = redis.call('KEYS', ARGV[1])
             if #keys == 0 then return nil end
@@ -634,10 +635,18 @@ impl RedisKV {
                     if ceiling == '' or key <= ceiling then
                         local val = redis.call('GET', key)
                         if val then
+                            -- Read legacy type hint before deleting
+                            local type_hint = redis.call('GET', key .. ':__type')
                             redis.call('DEL', key)
                             redis.call('DEL', key .. ':__type')
+                            if type_hint then
+                                return {key, val, type_hint}
+                            end
                             return {key, val}
                         end
+                    else
+                        -- Keys are sorted: if this key exceeds ceiling, all remaining do too
+                        break
                     end
                 end
             end
@@ -653,7 +662,7 @@ impl RedisKV {
             .map_err(|e| IntentError::runtime_error(format!("Redis claim error: {}", e)))?;
 
         match result {
-            redis::Value::Array(ref items) if items.len() == 2 => {
+            redis::Value::Array(ref items) if items.len() >= 2 => {
                 let key = match &items[0] {
                     redis::Value::BulkString(bytes) => {
                         String::from_utf8(bytes.clone()).unwrap_or_default()
@@ -668,7 +677,16 @@ impl RedisKV {
                     redis::Value::SimpleString(s) => s.clone(),
                     _ => return Ok(None),
                 };
-                Ok(Some((key, deserialize_value_envelope(&data, None))))
+                // Third element is the legacy type hint (if the key had one)
+                let legacy_hint = items.get(2).and_then(|v| match v {
+                    redis::Value::BulkString(bytes) => String::from_utf8(bytes.clone()).ok(),
+                    redis::Value::SimpleString(s) => Some(s.clone()),
+                    _ => None,
+                });
+                Ok(Some((
+                    key,
+                    deserialize_value_envelope(&data, legacy_hint.as_deref()),
+                )))
             }
             redis::Value::Nil => Ok(None),
             _ => Ok(None),
