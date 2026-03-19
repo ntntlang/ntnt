@@ -2,17 +2,40 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "NTNT",
   "scopeName": "source.ntnt",
+  "fileTypes": [
+    "tnt"
+  ],
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#strings" },
-    { "include": "#numbers" },
-    { "include": "#keywords" },
-    { "include": "#contracts" },
-    { "include": "#types" },
-    { "include": "#functions" },
-    { "include": "#operators" },
-    { "include": "#punctuation" },
-    { "include": "#variables" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#contracts"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#functions"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    },
+    {
+      "include": "#variables"
+    }
   ],
   "repository": {
     "comments": {
@@ -31,7 +54,11 @@
           "name": "comment.block.ntnt",
           "begin": "/\\*",
           "end": "\\*/",
-          "patterns": [{ "include": "#comments" }]
+          "patterns": [
+            {
+              "include": "#comments"
+            }
+          ]
         },
         {
           "name": "comment.block.documentation.ntnt",
@@ -78,8 +105,12 @@
               "begin": "\\{",
               "end": "\\}",
               "patterns": [
-                { "include": "#variables" },
-                { "include": "#functions" }
+                {
+                  "include": "#variables"
+                },
+                {
+                  "include": "#functions"
+                }
               ]
             }
           ]

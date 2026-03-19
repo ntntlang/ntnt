@@ -8,6 +8,10 @@
     "type": "git",
     "url": "https://github.com/ntntlang/ntnt"
   },
+  "grammar": {
+    "type": "git",
+    "url": "https://github.com/ntntlang/ntnt-grammar"
+  },
   "engines": {
     "vscode": "^1.75.0"
   },
