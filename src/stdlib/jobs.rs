@@ -2412,6 +2412,16 @@ pub fn init() -> HashMap<String, Value> {
                     return Ok(Value::ok(Value::Array(vec![])));
                 }
 
+                // Guard against pathological batch sizes — each item is a KV write
+                const MAX_BATCH_SIZE: usize = 10_000;
+                if items.len() > MAX_BATCH_SIZE {
+                    return Err(IntentError::runtime_error(format!(
+                        "enqueue_batch() batch size {} exceeds maximum of {}",
+                        items.len(),
+                        MAX_BATCH_SIZE
+                    )));
+                }
+
                 // Validate all items are maps before any writes (intentional double iteration:
                 // first pass validates types, second pass writes to KV — ensures no partial
                 // writes on type errors)
@@ -2435,8 +2445,14 @@ pub fn init() -> HashMap<String, Value> {
                 let mut ids = Vec::with_capacity(items.len());
                 for (i, item) in items.into_iter().enumerate() {
                     let ts = format!("{:020}", base_nanos + i as u128);
-                    let result = enqueue_internal(&job_name, item, &ts, None)?;
-                    // enqueue_internal returns Value::EnumValue { variant: "Ok", values: [String(id)] }
+                    // Wrap errors with item index so callers know which item failed
+                    let result = enqueue_internal(&job_name, item, &ts, None).map_err(|e| {
+                        IntentError::runtime_error(format!(
+                            "enqueue_batch: item {} failed: {}",
+                            i, e
+                        ))
+                    })?;
+                    // enqueue_internal returns Value::ok(Value::String(job_id))
                     match result {
                         Value::EnumValue {
                             ref variant,
@@ -2444,21 +2460,6 @@ pub fn init() -> HashMap<String, Value> {
                             ..
                         } if variant == "Ok" && !values.is_empty() => {
                             ids.push(values[0].clone());
-                        }
-                        Value::EnumValue {
-                            variant: _, values, ..
-                        } => {
-                            let msg = values
-                                .first()
-                                .map(|v| match v {
-                                    Value::String(s) => s.clone(),
-                                    _ => format!("{:?}", v),
-                                })
-                                .unwrap_or_default();
-                            return Err(IntentError::runtime_error(format!(
-                                "enqueue_batch: item {} failed: {}",
-                                i, msg
-                            )));
                         }
                         _ => {
                             return Err(IntentError::runtime_error(format!(
