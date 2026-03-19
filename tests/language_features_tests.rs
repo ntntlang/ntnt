@@ -4936,22 +4936,6 @@ print(info["modified"] > 0)
 }
 
 #[test]
-fn test_file_stat_on_directory() {
-    let temp_dir = std::env::temp_dir().to_string_lossy().replace('\\', "/");
-    let code = format!(
-        r##"
-import {{ file_stat }} from "std/fs"
-
-let result = file_stat("{path}")
-if is_err(result) {{ print("STAT_FAILED") }}
-let info = unwrap(result)
-print(info["is_file"])
-print(info["is_dir"])
-"##,
-        path = temp_dir
-    );
-    let (stdout, stderr, exit) = run_ntnt_code(&code);
-    let lines: Vec<&str> = stdout.trim().lines().collect();
     assert_eq!(
         exit, 0,
         "file_stat on directory should succeed — stdout: {:?}, stderr: {}",
@@ -4963,9 +4947,13 @@ print(info["is_dir"])
         lines.len(),
         lines
     );
+    assert!(
+        lines[0] != "STAT_FAILED",
+        "file_stat on directory failed — stdout: {:?}",
+        lines
+    );
     assert_eq!(lines[0], "false", "is_file should be false for directory");
     assert_eq!(lines[1], "true", "is_dir should be true for directory");
-}
 
 #[test]
 fn test_file_stat_nonexistent() {
