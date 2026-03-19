@@ -540,15 +540,31 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
             }
         }
 
-        // scheduled_at filtering is handled at the KV layer via the ceiling parameter.
-        // Debug-assert the invariant so misbehaving enqueue paths are caught early.
+        // Defense-in-depth: the ceiling filter should prevent future jobs from being
+        // claimed, but verify at runtime in case the invariant is violated (manual KV
+        // edit, clock skew, enqueue bug). Re-enqueue and skip rather than execute early.
         if let Some(Value::String(scheduled_at)) = job_data.get("scheduled_at") {
             let now_ts = timestamp_key();
-            debug_assert!(
-                scheduled_at.as_str() <= now_ts.as_str(),
-                "Claimed job {} has future scheduled_at {} (now {}); ceiling filter may have been bypassed",
-                job_id, scheduled_at, now_ts
-            );
+            if scheduled_at.as_str() > now_ts.as_str() {
+                emit_job_event(
+                    "job.skipped",
+                    &[
+                        ("job_id", Value::String(job_id.clone())),
+                        (
+                            "reason",
+                            Value::String(format!(
+                                "future scheduled_at {} (now {}); ceiling filter bypassed",
+                                scheduled_at, now_ts
+                            )),
+                        ),
+                    ],
+                );
+                if let Some(Value::String(pk)) = job_data.get("pending_key") {
+                    let pk = pk.clone();
+                    let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
+                }
+                continue;
+            }
         }
 
         // Write visibility timeout key: jobs:active:<id> with TTL 300s

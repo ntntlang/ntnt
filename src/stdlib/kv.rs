@@ -673,7 +673,12 @@ impl RedisKV {
                         })?
                     }
                     redis::Value::SimpleString(s) => s.clone(),
-                    _ => return Ok(None),
+                    other => {
+                        return Err(IntentError::runtime_error(format!(
+                            "Redis claim: unexpected key type in Lua response: {:?}",
+                            other
+                        )))
+                    }
                 };
                 let data = match &items[1] {
                     redis::Value::BulkString(bytes) => {
@@ -685,7 +690,12 @@ impl RedisKV {
                         })?
                     }
                     redis::Value::SimpleString(s) => s.clone(),
-                    _ => return Ok(None),
+                    other => {
+                        return Err(IntentError::runtime_error(format!(
+                            "Redis claim: unexpected data type in Lua response: {:?}",
+                            other
+                        )))
+                    }
                 };
                 // Third element is the legacy type hint (if the key had one)
                 let legacy_hint = items.get(2).and_then(|v| match v {
