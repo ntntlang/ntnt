@@ -420,8 +420,26 @@ fn enqueue_internal(
                     }
                     _ => true,
                 },
-                Ok(Value::Unit) => true,
-                _ => true,
+                Ok(Value::Unit) => true, // job deleted — stale reference
+                Ok(_) => true,           // unexpected data shape — treat as stale
+                Err(_) => {
+                    // KV error — fail-closed: assume job is still live to prevent duplicates.
+                    // A transient timeout should not cause re-enqueue.
+                    emit_job_event(
+                        "job.dedup_warning",
+                        &[
+                            ("job_id", Value::String(existing_id.clone())),
+                            (
+                                "reason",
+                                Value::String(
+                                    "KV error checking existing job status; assuming live"
+                                        .to_string(),
+                                ),
+                            ),
+                        ],
+                    );
+                    false
+                }
             };
             if !is_terminal {
                 return Ok(Value::ok(Value::String(existing_id)));
@@ -643,11 +661,11 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
             }
         }
 
-        // Expiration check: if job has `expires_after` option, check if it has exceeded
+        // Expiration check: if job has `expires` option, check if it has exceeded
         // its maximum wait time (time between creation and now). If so, mark as expired
         // and clean up dedup key.
-        if let Some(Value::Int(expires_after_secs)) = job_data.get("expires_after") {
-            let expires_after = *expires_after_secs;
+        if let Some(Value::Int(expires_secs)) = job_data.get("expires") {
+            let expires_after = *expires_secs;
             if expires_after > 0 {
                 let now_nanos = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -3303,11 +3321,20 @@ mod tests {
         let result =
             enqueue_fn(&[Value::String(job_name.to_string()), Value::Map(payload)]).unwrap();
         match result {
-            Value::EnumValue { values, .. } => match &values[0] {
+            Value::EnumValue {
+                ref variant,
+                ref values,
+                ..
+            } if variant == "Ok" => match &values[0] {
                 Value::String(s) => s.clone(),
-                _ => panic!("Expected string job ID"),
+                _ => panic!("Expected string job ID in Ok variant"),
             },
-            _ => panic!("Expected Ok from enqueue"),
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                panic!("Expected Ok from enqueue, got {}: {:?}", variant, values)
+            }
+            _ => panic!("Expected EnumValue from enqueue"),
         }
     }
 
