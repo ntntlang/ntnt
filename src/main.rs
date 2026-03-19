@@ -1224,6 +1224,7 @@ fn run_jobs_status_command(path: &PathBuf) -> anyhow::Result<()> {
     println!("  Retrying:   {}", counts.retrying);
     println!("  Dead:       {}", counts.dead);
     println!("  Cancelled:  {}", counts.cancelled);
+    println!("  Expired:    {}", counts.expired);
     println!("  ────────────────");
     println!("  Total:      {}", counts.total);
 
