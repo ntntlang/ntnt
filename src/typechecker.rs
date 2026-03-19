@@ -3439,6 +3439,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("remove", ["path" => Type::String], Type::Unit);
             sig!("copy", ["src" => Type::String, "dst" => Type::String], Type::Unit);
             sig!("rename", ["src" => Type::String, "dst" => Type::String], Type::Unit);
+            sig!("file_stat", ["path" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
         }
         "std/env" => {
             sig!("get_env", ["name" => Type::String], Type::Optional(Box::new(Type::String)));

@@ -4874,3 +4874,129 @@ print(result["name"])
         stderr
     );
 }
+
+// ═══════════════════════════════════════════
+// std/fs :: file_stat
+// ═══════════════════════════════════════════
+
+#[test]
+fn test_file_stat_returns_metadata() {
+    // Use forward slashes on all platforms — ntnt lexer treats backslashes as escapes
+    let test_path = std::env::temp_dir()
+        .join("ntnt_stat_test.txt")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let code = format!(
+        r##"
+import {{ write_file, file_stat }} from "std/fs"
+
+let w = write_file("{path}", "hello world")
+if is_err(w) {{ print("WRITE_FAILED") }}
+let result = file_stat("{path}")
+if is_err(result) {{ print("STAT_FAILED") }}
+let info = unwrap(result)
+print(info["size"])
+print(info["is_file"])
+print(info["is_dir"])
+print(info["modified"] > 0)
+"##,
+        path = test_path
+    );
+    let (stdout, stderr, exit) = run_ntnt_code(&code);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(
+        exit, 0,
+        "file_stat should succeed — stdout: {:?}, stderr: {}",
+        lines, stderr
+    );
+    assert!(
+        lines.is_empty() || (lines[0] != "WRITE_FAILED" && lines[0] != "STAT_FAILED"),
+        "setup failed: {:?}",
+        lines
+    );
+    assert!(
+        lines.len() >= 4,
+        "expected 4 output lines, got {}: {:?}",
+        lines.len(),
+        lines
+    );
+    assert!(
+        lines[0]
+            .parse::<u64>()
+            .expect("size should be a valid integer")
+            >= 11,
+        "size should be at least 11 bytes, got {}",
+        lines[0]
+    );
+    assert_eq!(lines[1], "true", "is_file should be true");
+    assert_eq!(lines[2], "false", "is_dir should be false");
+    assert_eq!(lines[3], "true", "modified should be a positive timestamp");
+    // cleanup — convert back to platform path for fs::remove_file
+    let _ = std::fs::remove_file(test_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+}
+
+#[test]
+fn test_file_stat_on_directory() {
+    let temp_dir = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+    let code = format!(
+        r##"
+import {{ file_stat }} from "std/fs"
+
+let result = file_stat("{path}")
+if is_err(result) {{ print("STAT_FAILED") }}
+let info = unwrap(result)
+print(info["is_file"])
+print(info["is_dir"])
+"##,
+        path = temp_dir
+    );
+    let (stdout, stderr, exit) = run_ntnt_code(&code);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(
+        exit, 0,
+        "file_stat on directory should succeed — stdout: {:?}, stderr: {}",
+        lines, stderr
+    );
+    assert!(
+        lines.is_empty() || lines[0] != "STAT_FAILED",
+        "file_stat on directory failed — stdout: {:?}",
+        lines
+    );
+    assert!(
+        lines.len() >= 2,
+        "expected 2 output lines, got {}: {:?}",
+        lines.len(),
+        lines
+    );
+    assert_eq!(lines[0], "false", "is_file should be false for directory");
+    assert_eq!(lines[1], "true", "is_dir should be true for directory");
+}
+
+#[test]
+fn test_file_stat_nonexistent() {
+    // Use process ID to avoid collisions with parallel test runs or leftover files
+    let missing_path = std::env::temp_dir()
+        .join(format!(
+            "ntnt_nonexistent_{}_{}.txt",
+            std::process::id(),
+            "file_stat_test"
+        ))
+        .to_string_lossy()
+        .replace('\\', "/");
+    let code = format!(
+        r##"
+import {{ file_stat }} from "std/fs"
+
+let result = file_stat("{path}")
+print(is_err(result))
+"##,
+        path = missing_path
+    );
+    let (stdout, _stderr, exit) = run_ntnt_code(&code);
+    assert_eq!(exit, 0);
+    assert_eq!(
+        stdout.trim(),
+        "true",
+        "file_stat on missing file should return Err"
+    );
+}
