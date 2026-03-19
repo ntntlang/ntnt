@@ -1,270 +1,121 @@
 # DD-037 Phase 3: Implementation Plan
 
-**Status:** Planning
+**Status:** PR A ✅ in review (#36), PR B ✅ in review (#38), PR C 📋 planned
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md) · [Phase 3 Design](dd-037-phase-3-implementation.md)
 **Created:** 2026-03-18
 **Depends on:** Phase 2 ✅, Phase 6 ✅
 
 ---
 
-## Prioritized Feature List
+## Completed PRs
 
-Ordered by production impact — each can ship as its own commit, tested independently.
+### PR A — Atomic Claim + Scheduled Optimization (#36, in review)
 
-### Tier 1: Ship First (production correctness)
+**What shipped:**
+- [x] Redis `claim()` rewritten as atomic Lua `EVAL` script (KEYS+sort+GET+DEL in one operation)
+- [x] SQLite `claim()` verified already atomic (`BEGIN IMMEDIATE`)
+- [x] `ceiling` parameter on both backends — workers skip future-scheduled jobs at KV layer
+- [x] Removed `scheduled_at` re-enqueue block from `worker_loop` (replaced by ceiling filter)
+- [x] Runtime defense-in-depth: if ceiling filter bypassed, log + re-enqueue + sleep
+- [x] Legacy type hint preserved in Lua script (returned as 3rd element)
+- [x] UTF-8 errors propagated (not `unwrap_or_default`)
+- [x] Unexpected Redis response types return `Err` (not `Ok(None)`)
+- [x] `KEYS` performance trade-off documented accurately
 
-#### 1. Atomic Claim Audit — Ensure All Backends Are Safe
+**Review rounds:** 5 (Greptile + Copilot), all resolved
 
-**Why first:** Job claiming must be atomic across all KV backends. Two concurrent workers calling `claim()` must never receive the same job. This is a correctness requirement, not a feature.
+### PR B — Dedup + Expiration (#38, in review)
 
-**Backend audit:**
+**What shipped:**
+- [x] `unique: N` job option — SHA-256 hash dedup with TTL
+- [x] `expires: N` job option — worker skips stale jobs, marks "expired"
+- [x] Dedup validates existing job is still live (not cancelled/dead/expired/failed)
+- [x] Dedup key stored in job data for O(1) cleanup
+- [x] Dedup key cleaned up on: cancel, dead, expired, bulk delete
+- [x] Dedup write failure emits `job.dedup_warning` event
+- [x] Hash serialization failure propagated (not `unwrap_or_default`)
+- [x] Hash determinism documented (serde_json BTreeMap sorts keys)
+- [x] Race condition documented (best-effort, like Sidekiq)
+- [x] `expired` status recognized in JobStatusCounts, force-cancel, CLI
+- [x] `failed` legacy status included in terminal check
 
-| Backend | Current implementation | Atomic? | Action needed |
-|---------|----------------------|---------|---------------|
-| **SQLite** | `BEGIN IMMEDIATE` + `SELECT ... ORDER BY key LIMIT 1` + `DELETE` + `COMMIT` | ✅ Yes | None — `BEGIN IMMEDIATE` acquires exclusive write lock for the transaction |
-| **Redis / Valkey / Dragonfly** | `SCAN` → `GET` → `DEL` (3 separate commands) | ❌ No | Replace with single `EVAL` Lua script |
+**Review rounds:** 2 (Greptile + Copilot), all resolved. 5 tests total.
 
-**SQLite** is already correct. `BEGIN IMMEDIATE` prevents any other connection from writing between the SELECT and DELETE — the claim is fully atomic even with multiple worker threads sharing the same database file.
+---
 
-**Redis** is the bug. Two workers can SCAN the same key, both GET the value, and both proceed — only one DEL actually removes the key, but both workers think they claimed it. This causes duplicate job execution.
+## PR C — Batch Enqueue (planned)
 
-**Fix — Redis `EVAL` Lua script:**
+**Goal:** `enqueue_batch(job_name, args_array)` — enqueue N jobs in one call with fewer KV round-trips.
 
-Replace `RedisKV::claim()` SCAN→GET→DEL (`src/stdlib/kv.rs` ~line 601) with:
+### What it does
 
-```lua
-local keys = redis.call('KEYS', ARGV[1])
-if #keys == 0 then return nil end
-table.sort(keys)
-local val = redis.call('GET', keys[1])
-if val then
-  redis.call('DEL', keys[1])
-  local type_key = keys[1] .. ':__type'
-  redis.call('DEL', type_key)
-end
-return {keys[1], val}
+```ntnt
+import { enqueue_batch } from "std/jobs"
+
+let ids = unwrap(enqueue_batch("SendEmail", [
+    map { "to": "alice@example.com" },
+    map { "to": "bob@example.com" },
+    map { "to": "carol@example.com" },
+]))
+// ids = ["uuid-1", "uuid-2", "uuid-3"]
 ```
 
-Lua scripts execute atomically in Redis — no other command can interleave. This gives the same guarantee as SQLite's `BEGIN IMMEDIATE`.
+### Implementation
 
-> Note: `KEYS` is acceptable here because the key space is scoped to `jobs:pending:*` which is bounded by queue depth. For very high-volume queues (>10K pending), switching to iterative SCAN inside the Lua script would avoid blocking Redis — but that's an optimization, not a correctness issue.
+**`src/stdlib/jobs.rs`:**
+- New `enqueue_batch(job_name, args_array)` function
+- Validates job exists in registry once, then loops over args
+- For each arg: generate UUID, build job data map, compute dedup key (if `unique` set)
+- SQLite: wrap all KV writes in a single transaction (one `get_or_init_kv`, reuse handle)
+- Redis: sequential writes (pipeline optimization is a future enhancement)
+- Returns `Result<Array<String>, String>` — array of job IDs (deduped entries return existing ID)
+- Respects test mode: writes to test queue if active
+- `// @ntnt` doc block required (new stdlib function)
 
-**Implementation:**
-- [ ] Replace `RedisKV::claim()` with `EVAL` Lua script
-- [ ] Delete type hint key (`keys[1] .. ':__type'`) in same Lua call
-- [ ] Verify SQLite `claim()` is unchanged (already atomic)
-
-**Tests:**
-- [ ] Verify existing `test_worker_loop_end_to_end` still passes (SQLite path)
-- [ ] Unit test: Lua script returns correct key/value pair, returns nil on empty
-- [ ] If Redis test infrastructure available: two threads claim concurrently, verify no double-claim
-
-**Effort:** ~0.5 day
-
----
-
-#### 2. Scheduled Job Claim Optimization
-**Why second:** Current behavior wastes KV round-trips — every poll cycle claims future-dated jobs then re-enqueues them. With many scheduled jobs this is O(scheduled_jobs) per poll per worker.
-
-**Implementation:**
-- [ ] `SqliteKV::claim()` (~line 384): add `WHERE key < ?` bound using `format!("jobs:pending:{:020}:", now_nanos)` as upper bound
-- [ ] `RedisKV::claim()` Lua script: add timestamp ceiling — only consider keys where timestamp portion ≤ now
-- [ ] `worker_loop()` (~line 555): remove the `scheduled_at` re-enqueue block (unreachable after KV-level filtering)
-- [ ] Update `kv_claim` signature to accept optional `ceiling` parameter:
-
-```rust
-pub fn kv_claim(handle: &Value, prefix: &str) -> Result<Option<(String, Value)>>
-// becomes:
-pub fn kv_claim(handle: &Value, prefix: &str, ceiling: Option<&str>) -> Result<Option<(String, Value)>>
-```
-
-Worker passes `Some(&timestamp_key())` to filter at the KV layer. Existing callers pass `None` (no behavior change).
+**`src/typechecker.rs`:**
+- Add signature: `enqueue_batch(job_name: String, args: Array<Map>) -> Result<Array<String>, String>`
 
 **Tests:**
-- [ ] Test: `enqueue_at` with future timestamp → worker poll → job NOT claimed (stays pending)
-- [ ] Test: `enqueue_at` with past timestamp → worker poll → job claimed and executed
-- [ ] Test: mix of ready and future jobs → only ready ones claimed
-
-**Effort:** ~0.5 day
-
----
-
-### Tier 2: High-Value Features
-
-#### 3. Job Deduplication (`unique: N`)
-**Why:** Prevents duplicate work from retry storms, double-clicks, or idempotency-unaware callers. This is the single most-requested feature for production job systems.
-
-**Implementation:**
-- [ ] `enqueue_internal()` (~line 362): if job def has `unique` option (seconds):
-  1. Compute SHA-256 of `format!("{}:{}", job_name, payload_json)`
-  2. Check KV for `jobs:unique:<type>:<sha256>`
-  3. If exists → return `Ok(Value::ok(existing_job_id))` (skip enqueue)
-  4. If not → set dedup key with TTL = unique seconds, proceed with enqueue
-- [ ] Add `unique` to `JobOptions` struct: `unique_secs: Option<u64>`
-- [ ] Parser: extract from `job X on q (unique: 3600) { ... }`
-- [ ] On job completion/death: optionally clear dedup key early (allow re-enqueue before TTL)
-
-**KV key format:** `jobs:unique:<type>:<sha256_first_16_chars>`
-- 16 hex chars = 64 bits of collision resistance — more than enough for dedup within a TTL window
-
-**Tests:**
-- [ ] Enqueue same job twice within unique window → second returns existing ID
-- [ ] Enqueue same job after unique window → new job created
-- [ ] Enqueue different payload → always new job (different hash)
-- [ ] Test mode respects dedup (test queue dedup)
-
-**Typechecker:** No new function signatures — `unique` is a job option parsed in the DSL.
-
-**Effort:** ~1 day
-
----
-
-#### 4. Job Expiration (`expires: N`)
-**Why:** Jobs stuck in pending for too long are usually stale. Without expiration they either execute with outdated data or pile up forever.
-
-**Implementation:**
-- [ ] `worker_loop()` (~line 468): after claiming, before execution — check `created_at + expires_secs < now`
-- [ ] If expired: set status → `"expired"`, emit `job.expired` event, skip execution
-- [ ] Add `expires` to `JobOptions`: `expires_secs: Option<u64>`
-- [ ] `list_jobs_filtered` / CLI: `"expired"` as a recognized status (display only — never enters retry loop)
-
-**Status flow:** `pending → expired` (terminal, like `cancelled`)
-
-**Tests:**
-- [ ] Enqueue job with `expires: 1`, sleep 2s, worker claims → status is "expired", handler NOT called
-- [ ] Enqueue job with `expires: 300`, claim immediately → handler called normally
-- [ ] `ntnt jobs list --status=expired` shows expired jobs
-
-**Effort:** ~0.5 day
-
----
-
-#### 5. Batch Enqueue (`enqueue_batch`)
-**Why:** Enqueueing N jobs in a loop is N KV round-trips. Batch enqueue wraps them in a single SQLite transaction or Redis pipeline.
-
-**Implementation:**
-- [ ] New function `enqueue_batch(job_name, args_array)` in `src/stdlib/jobs.rs`
-- [ ] Validate all args upfront, then write in one batch
-- [ ] SQLite: single `BEGIN IMMEDIATE` / `COMMIT` wrapping N inserts
-- [ ] Redis: `PIPELINE` with N SET pairs
-- [ ] Returns `Result<Array<String>, String>` (array of job IDs)
-- [ ] Add `enqueue_batch` to typechecker (`src/typechecker.rs`)
-- [ ] Auto-generate doc blocks / stdlib reference
-
-**Tests:**
-- [ ] `enqueue_batch` with 10 items → 10 jobs created, all IDs returned
+- [ ] `enqueue_batch` with 3 items → 3 jobs created, 3 IDs returned
 - [ ] `enqueue_batch` with empty array → returns `Ok([])`
-- [ ] `enqueue_batch` in test mode → all 10 appear in test queue
-- [ ] `enqueue_batch` with dedup active → duplicates skipped, non-dupes enqueued
+- [ ] `enqueue_batch` in test mode → all items in test queue
+- [ ] `enqueue_batch` with dedup → duplicates return existing IDs, new ones created
+- [ ] `enqueue_batch` with unregistered job name → error
+
+**Docs:**
+- `// @ntnt` doc block on new function
+- `ntnt docs --generate` to sync
 
 **Effort:** ~0.5 day
 
----
-
-### Tier 3: Nice-to-Have (lower urgency)
-
-#### 6. Priority Queues (`priority: N`)
-**Why:** Some jobs are more important than others. But most systems don't need this until scale.
-
-**Implementation:**
-- [ ] Change pending key format from `jobs:pending:<timestamp>:<id>` to `jobs:pending:<priority>:<timestamp>:<id>`
-- [ ] Default priority: 5 (middle of 0-9 range, lower = higher priority)
-- [ ] `enqueue_internal()`: include priority in pending key
-- [ ] Backward compat: detect old-format keys (2 segments after `jobs:pending:`) and treat as priority 5
-- [ ] Handle both key formats during transition period
-
-**Effort:** ~1 day (mostly migration handling)
+### What it does NOT include
+- No SQLite transaction wrapping (would require new KV operation — `kv_batch_set`)
+- No Redis pipeline — sequential writes for now
+- These optimizations can come later when profiling shows they matter
 
 ---
 
-#### 7. Worker Heartbeat Refresh
-**Why:** Jobs running >5 minutes lose visibility timeout protection. Only matters for long-running jobs.
+## Remaining Tier 3 (on demand, not planned)
 
-**Implementation:**
-- [ ] `worker_loop()`: spawn a timer thread per job execution that refreshes `jobs:active:<id>` TTL every 30s
-- [ ] Cancel timer when job completes/fails
-- [ ] Configurable refresh interval: `work_async(map { "heartbeat_interval": 30 })`
+| Item | Description | Priority |
+|------|-------------|----------|
+| Priority queues | `priority: N` option, key layout change | Low |
+| Worker heartbeat refresh | TTL refresh every 30s during long jobs | Low |
+| Graceful shutdown drain | Configurable drain timeout on Ctrl-C | Low |
+| `on_job_event` user hook | Channel-based event dispatch to user closures | Medium |
+| Atomic dedup (SET NX) | True atomic dedup under concurrent enqueues | Medium |
+| Redis SCAN in Lua | Replace KEYS with cursor-based SCAN for large keyspaces | Low |
 
-**Effort:** ~0.5 day
-
----
-
-#### 8. Graceful Shutdown Drain Timeout
-**Why:** Currently Ctrl-C immediately stops workers. With drain timeout, in-flight jobs finish before shutdown.
-
-**Implementation:**
-- [ ] `work_jobs(map { "drain_timeout": 30 })` option
-- [ ] On cancellation signal: stop claiming, wait up to N seconds for in-flight
-- [ ] After timeout: exit anyway (jobs become re-claimable via visibility timeout)
-
-**Effort:** ~0.5 day
+These can be addressed based on user demand / production usage patterns.
 
 ---
 
-#### 9. `on_job_event` User Hook
-**Why:** Programmatic integration — trigger custom logic on job lifecycle events. Currently only stderr JSON.
+## What Phase 3 Unlocks (after PR A + B + C)
 
-**Implementation (channel-based approach):**
-- [ ] Worker threads send `JobEvent` structs through a `crossbeam::channel`
-- [ ] Main thread runs a dispatcher that calls the user's handler function
-- [ ] Clean separation: workers never touch user closures (no Send problem)
-
-**Effort:** ~1 day
-
----
-
-## Suggested PR Grouping
-
-**PR A — Correctness & Optimization (Tier 1):**
-- [ ] Items 1 + 2 (Redis atomic claim + scheduled claim optimization)
-- Tightly coupled (both modify `kv_claim`)
-- Pure infrastructure, no new user-facing API
-- ~1 day
-
-**PR B — Dedup + Expiration (Tier 2 core):**
-- [ ] Items 3 + 4 (unique + expires)
-- Both are job options parsed from the DSL
-- Both affect `enqueue_internal` and `worker_loop`
-- Natural pairing
-- ~1.5 days
-
-**PR C — Batch Enqueue (Tier 2 convenience):**
-- [ ] Item 5 alone
-- New stdlib function + typechecker entry
-- Independent of everything else
-- ~0.5 day
-
-**PR D — Priority + Polish (Tier 3):**
-- [ ] Items 6-9 as needed, based on demand
-- Each independently shippable
-- Can wait for real usage patterns
-
----
-
-## Total Estimated Effort
-
-| PR | Items | Effort | Priority |
-|----|-------|--------|----------|
-| A  | Redis claim + scheduled optimization | ~1 day | Ship first |
-| B  | Dedup + expiration | ~1.5 days | Ship second |
-| C  | Batch enqueue | ~0.5 day | Ship third |
-| D  | Priority, heartbeat, drain, events | ~3 days | On demand |
-
-**Tier 1+2 total: ~3 days.** Tier 3 is an additional ~3 days but none of it is urgent.
-
----
-
-## What This Unlocks
-
-After Phase 3 (Tier 1+2), the ntnt job system has:
-- ✅ Declarative job definitions with DSL
-- ✅ Multi-worker concurrent processing (correct under Redis)
-- ✅ Automatic retry with exponential backoff
+- ✅ Atomic multi-worker job claiming (Redis + SQLite)
+- ✅ Efficient scheduled job polling (no KV churn)
 - ✅ Deduplication (prevent double-work)
 - ✅ Job expiration (prevent stale execution)
 - ✅ Batch enqueue (efficient bulk operations)
-- ✅ Full observability CLI (list/inspect/retry/cancel/clear)
-- ✅ Testing mode with assertions
-- ✅ Streaming JSON logs
 
-That's a complete, production-ready job system. Most frameworks (Sidekiq, Bull, Celery) ship with roughly this feature set at their core.
+Combined with Phase 2, this is a complete production-ready job system matching the core feature set of Sidekiq, Bull, and Celery.
