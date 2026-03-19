@@ -4910,14 +4910,14 @@ print(info["modified"] > 0)
         lines, stderr
     );
     assert!(
-        lines.len() >= 4,
-        "expected 4 output lines, got {}: {:?}",
-        lines.len(),
+        lines.is_empty() || (lines[0] != "WRITE_FAILED" && lines[0] != "STAT_FAILED"),
+        "setup failed: {:?}",
         lines
     );
     assert!(
-        lines[0] != "WRITE_FAILED" && lines[0] != "STAT_FAILED",
-        "setup failed: {:?}",
+        lines.len() >= 4,
+        "expected 4 output lines, got {}: {:?}",
+        lines.len(),
         lines
     );
     assert!(
@@ -4958,14 +4958,14 @@ print(info["is_dir"])
         lines, stderr
     );
     assert!(
-        lines.len() >= 2,
-        "expected 2 output lines, got {}: {:?}",
-        lines.len(),
+        lines.is_empty() || lines[0] != "STAT_FAILED",
+        "file_stat on directory failed — stdout: {:?}",
         lines
     );
     assert!(
-        lines[0] != "STAT_FAILED",
-        "file_stat on directory failed — stdout: {:?}",
+        lines.len() >= 2,
+        "expected 2 output lines, got {}: {:?}",
+        lines.len(),
         lines
     );
     assert_eq!(lines[0], "false", "is_file should be false for directory");
