@@ -665,14 +665,24 @@ impl RedisKV {
             redis::Value::Array(ref items) if items.len() >= 2 => {
                 let key = match &items[0] {
                     redis::Value::BulkString(bytes) => {
-                        String::from_utf8(bytes.clone()).unwrap_or_default()
+                        String::from_utf8(bytes.clone()).map_err(|e| {
+                            IntentError::runtime_error(format!(
+                                "Redis claim key UTF-8 error: {}",
+                                e
+                            ))
+                        })?
                     }
                     redis::Value::SimpleString(s) => s.clone(),
                     _ => return Ok(None),
                 };
                 let data = match &items[1] {
                     redis::Value::BulkString(bytes) => {
-                        String::from_utf8(bytes.clone()).unwrap_or_default()
+                        String::from_utf8(bytes.clone()).map_err(|e| {
+                            IntentError::runtime_error(format!(
+                                "Redis claim data UTF-8 error: {}",
+                                e
+                            ))
+                        })?
                     }
                     redis::Value::SimpleString(s) => s.clone(),
                     _ => return Ok(None),
