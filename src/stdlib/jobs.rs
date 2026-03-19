@@ -559,10 +559,13 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                         ),
                     ],
                 );
-                if let Some(Value::String(pk)) = job_data.get("pending_key") {
-                    let pk = pk.clone();
-                    let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
-                }
+                // Re-enqueue: use stored pending_key, or reconstruct from scheduled_at
+                let pk = match job_data.get("pending_key") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => format!("jobs:pending:{}:{}", scheduled_at, job_id),
+                };
+                let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
+                std::thread::sleep(poll_duration);
                 continue;
             }
         }
