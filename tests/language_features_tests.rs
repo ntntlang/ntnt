@@ -4969,8 +4969,13 @@ print(info["is_dir"])
 
 #[test]
 fn test_file_stat_nonexistent() {
+    // Use process ID to avoid collisions with parallel test runs or leftover files
     let missing_path = std::env::temp_dir()
-        .join("ntnt_this_does_not_exist_12345.txt")
+        .join(format!(
+            "ntnt_nonexistent_{}_{}.txt",
+            std::process::id(),
+            "file_stat_test"
+        ))
         .to_string_lossy()
         .replace('\\', "/");
     let code = format!(
