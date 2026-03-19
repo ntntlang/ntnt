@@ -97,16 +97,65 @@ let ids = unwrap(enqueue_batch("SendEmail", [
 
 ## Remaining Tier 3 (on demand, not planned)
 
-| Item | Description | Priority |
-|------|-------------|----------|
-| Priority queues | `priority: N` option, key layout change | Low |
-| Worker heartbeat refresh | TTL refresh every 30s during long jobs | Low |
-| Graceful shutdown drain | Configurable drain timeout on Ctrl-C | Low |
-| `on_job_event` user hook | Channel-based event dispatch to user closures | Medium |
-| Atomic dedup (SET NX) | True atomic dedup under concurrent enqueues | Medium |
-| Redis SCAN in Lua | Replace KEYS with cursor-based SCAN for large keyspaces | Low |
+Each item is independently shippable. Can wait for real usage patterns.
 
-These can be addressed based on user demand / production usage patterns.
+### Priority Queues (`priority: N`)
+**Why:** Some jobs are more important than others. But most systems don't need this until scale.
+
+- [ ] Change pending key format from `jobs:pending:<timestamp>:<id>` to `jobs:pending:<priority>:<timestamp>:<id>`
+- [ ] Default priority: 5 (middle of 0-9 range, lower = higher priority)
+- [ ] `enqueue_internal()`: include priority in pending key
+- [ ] Backward compat: detect old-format keys (2 segments after `jobs:pending:`) and treat as priority 5
+- [ ] Handle both key formats during transition period
+
+**Effort:** ~1 day (mostly migration handling)
+
+### Worker Heartbeat Refresh
+**Why:** Jobs running >5 minutes lose visibility timeout protection. Only matters for long-running jobs.
+
+- [ ] `worker_loop()`: spawn a timer thread per job execution that refreshes `jobs:active:<id>` TTL every 30s
+- [ ] Cancel timer when job completes/fails
+- [ ] Configurable refresh interval: `work_async(map { "heartbeat_interval": 30 })`
+
+**Effort:** ~0.5 day
+
+### Graceful Shutdown Drain Timeout
+**Why:** Currently Ctrl-C immediately stops workers. With drain timeout, in-flight jobs finish before shutdown.
+
+- [ ] `work_jobs(map { "drain_timeout": 30 })` option
+- [ ] On cancellation signal: stop claiming, wait up to N seconds for in-flight
+- [ ] After timeout: exit anyway (jobs become re-claimable via visibility timeout)
+
+**Effort:** ~0.5 day
+
+### `on_job_event` User Hook
+**Why:** Programmatic integration — trigger custom logic on job lifecycle events. Currently only stderr JSON.
+
+**Recommended approach:** Channel-based (cleanest separation of concerns)
+- [ ] Worker threads send `JobEvent` structs through a `crossbeam::channel`
+- [ ] Main thread runs a dispatcher that calls the user's handler function
+- [ ] Workers never touch user closures (no Send problem)
+
+See [dd-037-phase-3-implementation.md](dd-037-phase-3-implementation.md) for 3 design options.
+
+**Effort:** ~1 day
+
+### Atomic Dedup (SET NX)
+**Why:** Current dedup is best-effort (kv_get then kv_set). Under high-concurrency identical enqueues, two callers can both miss and create separate jobs.
+
+- [ ] Add `kv_set_nx` (set-if-not-exists) to `std/kv` — `SET NX EX` for Redis, `INSERT OR IGNORE` for SQLite
+- [ ] Use in dedup check instead of separate get+set
+- [ ] Returns whether the key was actually set (true = we won the race)
+
+**Effort:** ~0.5 day
+
+### Redis SCAN in Lua
+**Why:** `KEYS` scans the entire Redis keyspace (O(total keys)). For Redis instances with millions of non-job keys, this blocks the event loop.
+
+- [ ] Replace `KEYS` with cursor-based `SCAN` inside the Lua script
+- [ ] Or switch to a Redis Sorted Set for the pending queue (O(log N) claim)
+
+**Effort:** ~0.5 day
 
 ---
 
