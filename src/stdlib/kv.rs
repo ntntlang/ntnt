@@ -629,24 +629,23 @@ impl RedisKV {
             table.sort(keys)
             local ceiling = ARGV[2]
             for _, key in ipairs(keys) do
+                -- Early exit: if this key (type hint or not) exceeds the ceiling,
+                -- all remaining keys do too (keys are sorted ascending)
+                if ceiling ~= '' and key > ceiling then
+                    break
+                end
                 -- Skip internal type metadata keys
                 if not string.find(key, ':__type$') then
-                    -- Apply ceiling filter if provided
-                    if ceiling == '' or key <= ceiling then
-                        local val = redis.call('GET', key)
-                        if val then
-                            -- Read legacy type hint before deleting
-                            local type_hint = redis.call('GET', key .. ':__type')
-                            redis.call('DEL', key)
-                            redis.call('DEL', key .. ':__type')
-                            if type_hint then
-                                return {key, val, type_hint}
-                            end
-                            return {key, val}
+                    local val = redis.call('GET', key)
+                    if val then
+                        -- Read legacy type hint before deleting
+                        local type_hint = redis.call('GET', key .. ':__type')
+                        redis.call('DEL', key)
+                        redis.call('DEL', key .. ':__type')
+                        if type_hint then
+                            return {key, val, type_hint}
                         end
-                    else
-                        -- Keys are sorted: if this key exceeds ceiling, all remaining do too
-                        break
+                        return {key, val}
                     end
                 end
             end
@@ -709,7 +708,10 @@ impl RedisKV {
                 )))
             }
             redis::Value::Nil => Ok(None),
-            _ => Ok(None),
+            other => Err(IntentError::runtime_error(format!(
+                "Redis claim: unexpected Lua response type: {:?}",
+                other
+            ))),
         }
     }
 }
