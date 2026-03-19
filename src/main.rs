@@ -2276,7 +2276,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
                 "std/collections": ["push", "pop", "map", "filter", "reduce", "first", "last"],
                 "std/http": ["fetch", "post", "put", "delete", "get_json", "post_json"],
                 "std/http_server": ["listen", "get", "post", "json", "html", "text", "redirect", "serve_static"],
-                "std/fs": ["read_file", "write_file", "exists", "mkdir", "readdir"],
+                "std/fs": ["read_file", "write_file", "exists", "mkdir", "readdir", "file_stat"],
                 "std/json": ["parse", "stringify", "stringify_pretty"],
                 "std/time": ["now", "format", "add_days"],
                 "std/concurrent": ["channel", "send", "recv", "sleep_ms"]

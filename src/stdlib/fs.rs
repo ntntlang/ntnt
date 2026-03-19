@@ -548,5 +548,65 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt file_stat
+    // @module std/fs
+    // @signature file_stat(path: String) -> Result<Map, String>
+    // Get filesystem metadata for a file or directory.
+    //
+    // Returns a map with size (bytes), modified (unix timestamp, 0 if unavailable),
+    // created (unix timestamp, 0 if unavailable), is_file, and is_dir fields.
+    // Useful for cache busting, conditional processing, and file management.
+    // @param path The filesystem path to query.
+    // @returns Result<Map, String> Ok with metadata map, or Err with error message.
+    // @see_also file_size, exists, is_file, is_dir
+    // @since v0.4.6
+    // @tags #filesystem
+    // @example file_stat("styles.css") => Ok(map { "size": 1234, "modified": 1773882626, "created": 1773800000, "is_file": true, "is_dir": false }) ~ "Get file metadata"
+    // @error TypeError ~ "file_stat() requires a string path" fix: "Pass a String argument"
+    module.insert(
+        "file_stat".to_string(),
+        Value::NativeFunction {
+            name: "file_stat".to_string(),
+            arity: 1,
+            max_arity: 1,
+            func: |args| match &args[0] {
+                Value::String(path) => match fs::metadata(path) {
+                    Ok(meta) => {
+                        let mut map = HashMap::new();
+                        map.insert(
+                            "size".to_string(),
+                            Value::Int(meta.len().min(i64::MAX as u64) as i64),
+                        );
+                        map.insert("is_file".to_string(), Value::Bool(meta.is_file()));
+                        map.insert("is_dir".to_string(), Value::Bool(meta.is_dir()));
+
+                        // modified/created: 0 if unavailable (some platforms don't support these)
+                        let modified = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs().min(i64::MAX as u64) as i64)
+                            .unwrap_or(0);
+                        map.insert("modified".to_string(), Value::Int(modified));
+
+                        let created = meta
+                            .created()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs().min(i64::MAX as u64) as i64)
+                            .unwrap_or(0);
+                        map.insert("created".to_string(), Value::Int(created));
+
+                        Ok(Value::ok(Value::Map(map)))
+                    }
+                    Err(e) => Ok(Value::err(Value::String(e.to_string()))),
+                },
+                _ => Err(IntentError::type_error(
+                    "file_stat() requires a string path".to_string(),
+                )),
+            },
+        },
+    );
+
     module
 }

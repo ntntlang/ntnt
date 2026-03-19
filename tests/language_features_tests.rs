@@ -4874,3 +4874,83 @@ print(result["name"])
         stderr
     );
 }
+
+// ═══════════════════════════════════════════
+// std/fs :: file_stat
+// ═══════════════════════════════════════════
+
+#[test]
+fn test_file_stat_returns_metadata() {
+    let test_path = std::env::temp_dir()
+        .join("ntnt_stat_test.txt")
+        .to_string_lossy()
+        .to_string();
+    let code = format!(
+        r##"
+import {{ write_file, file_stat }} from "std/fs"
+
+write_file("{path}", "hello world")
+let result = file_stat("{path}")
+let info = unwrap(result)
+print(info["size"])
+print(info["is_file"])
+print(info["is_dir"])
+print(info["modified"] > 0)
+"##,
+        path = test_path
+    );
+    let (stdout, _stderr, exit) = run_ntnt_code(&code);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(exit, 0, "file_stat should succeed");
+    assert_eq!(lines[0], "11", "size should be 11 bytes");
+    assert_eq!(lines[1], "true", "is_file should be true");
+    assert_eq!(lines[2], "false", "is_dir should be false");
+    assert_eq!(lines[3], "true", "modified should be a positive timestamp");
+    // cleanup
+    let _ = std::fs::remove_file(&test_path);
+}
+
+#[test]
+fn test_file_stat_on_directory() {
+    let temp_dir = std::env::temp_dir().to_string_lossy().to_string();
+    let code = format!(
+        r##"
+import {{ file_stat }} from "std/fs"
+
+let result = file_stat("{path}")
+let info = unwrap(result)
+print(info["is_file"])
+print(info["is_dir"])
+"##,
+        path = temp_dir
+    );
+    let (stdout, _stderr, exit) = run_ntnt_code(&code);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(exit, 0, "file_stat on directory should succeed");
+    assert_eq!(lines[0], "false", "is_file should be false for directory");
+    assert_eq!(lines[1], "true", "is_dir should be true for directory");
+}
+
+#[test]
+fn test_file_stat_nonexistent() {
+    let missing_path = std::env::temp_dir()
+        .join("ntnt_this_does_not_exist_12345.txt")
+        .to_string_lossy()
+        .to_string();
+    let code = format!(
+        r##"
+import {{ file_stat }} from "std/fs"
+
+let result = file_stat("{path}")
+print(is_err(result))
+"##,
+        path = missing_path
+    );
+    let (stdout, _stderr, exit) = run_ntnt_code(&code);
+    assert_eq!(exit, 0);
+    assert_eq!(
+        stdout.trim(),
+        "true",
+        "file_stat on missing file should return Err"
+    );
+}

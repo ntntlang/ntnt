@@ -4428,6 +4428,7 @@ import { read_file, read_bytes, write_file } from "std/fs"
 | [`copy`](#copy) | Copy a file to a new location, returning the number of bytes copied. |
 | [`exists`](#exists) | Check whether a file or directory exists at the given path. |
 | [`file_size`](#filesize) | Get the size of a file in bytes. |
+| [`file_stat`](#filestat) | Get filesystem metadata for a file or directory. |
 | [`is_dir`](#isdir) | Check whether the path points to a directory. |
 | [`is_file`](#isfile) | Check whether the path points to a regular file. |
 | [`mkdir`](#mkdir) | Create a single directory. |
@@ -4568,6 +4569,38 @@ file_size("data.txt")  // => Ok(256)  // Get file size in bytes
 **See also:** `exists`, `is_file`, `read_file`
 
 *Since v0.1.0*
+
+---
+
+#### `file_stat`
+
+```ntnt
+file_stat(path: String) -> Result<Map, String>
+```
+
+Get filesystem metadata for a file or directory.
+
+Returns a map with size (bytes), modified (unix timestamp, 0 if unavailable), created (unix timestamp, 0 if unavailable), is_file, and is_dir fields. Useful for cache busting, conditional processing, and file management.
+
+**Parameters:**
+
+- `path` — The filesystem path to query.
+
+**Returns:** Result<Map, String> Ok with metadata map, or Err with error message.
+
+**Examples:**
+
+```ntnt
+file_stat("styles.css")  // => Ok(map { "size": 1234, "modified": 1773882626, "created": 1773800000, "is_file": true, "is_dir": false })  // Get file metadata
+```
+
+**Errors:**
+
+- **TypeError**: file_stat() requires a string path — *Fix: Pass a String argument*
+
+**See also:** `file_size`, `exists`, `is_file`, `is_dir`
+
+*Since v0.4.6*
 
 ---
 

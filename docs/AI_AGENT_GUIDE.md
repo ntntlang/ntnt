@@ -1313,6 +1313,38 @@ Template paths are relative to the `.tnt` file.
 
 **Important:** External template files (`.html`) are rendered internally by wrapping their content in `"""..."""` triple quotes. This means template HTML **must not contain literal `"""`** anywhere in the content — the lexer will interpret it as the closing delimiter and truncate the output. If you need to display triple quotes (e.g., in code examples showing Elixir's `@doc """`), use HTML entities `&quot;&quot;&quot;` instead. They render identically in the browser.
 
+### Cache Busting for Static Assets
+
+Use `file_stat` to automatically bust browser/CDN caches based on actual file modification time. Compute it once at module load in your layout lib, then pass it to templates:
+
+```ntnt
+// lib/layout.tnt
+import { file_stat } from "std/fs"
+import { now } from "std/time"
+
+// Computed once at server start — changes only when the file actually changes
+// Falls back to startup timestamp if file is missing
+let stat_result = file_stat("public/css/styles.css")
+let CACHE_BUST = stat_result["modified"] ?? int(now())
+
+fn render_page(options) {
+    // ... build nav, footer, etc.
+    return template("views/layout.html", map {
+        "title": options["title"] ?? "My App",
+        "content": options["content"] ?? "",
+        "cache_bust": CACHE_BUST
+    })
+}
+```
+
+```html
+<!-- views/layout.html -->
+<link rel="stylesheet" href="/assets/css/styles.css?v={{cache_bust}}">
+<script src="/assets/js/app.js?v={{cache_bust}}"></script>
+```
+
+This eliminates manual `?v=N` bumping. In Docker deployments, the mtime changes on every build since files are copied fresh.
+
 ---
 
 ## File-Based Routing
