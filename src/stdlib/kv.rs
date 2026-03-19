@@ -381,7 +381,10 @@ impl SQLiteKV {
 
     /// Atomically claim the first key matching a prefix: SELECT + DELETE in one transaction.
     /// Returns the key and its raw (value, type) pair, or None if no matching key exists.
-    pub fn claim(&self, prefix: &str) -> Result<Option<(String, Value)>> {
+    ///
+    /// `ceiling`: if provided, only claim keys where `key <= ceiling`. This filters
+    /// future-scheduled jobs at the SQL level — no claim+re-enqueue cycle needed.
+    pub fn claim(&self, prefix: &str, ceiling: Option<&str>) -> Result<Option<(String, Value)>> {
         let now = now_unix();
         let pattern = format!("{}%", prefix);
 
@@ -390,12 +393,18 @@ impl SQLiteKV {
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| IntentError::runtime_error(format!("KV claim begin error: {}", e)))?;
 
-        let row: std::result::Result<(String, String, String), rusqlite::Error> =
-            self.conn.query_row(
+        let row: std::result::Result<(String, String, String), rusqlite::Error> = match ceiling {
+            Some(ceil) => self.conn.query_row(
+                "SELECT key, value, type FROM _kv WHERE key LIKE ? AND key <= ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT 1",
+                params![pattern, ceil, now],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ),
+            None => self.conn.query_row(
                 "SELECT key, value, type FROM _kv WHERE key LIKE ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT 1",
                 params![pattern, now],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            );
+            ),
+        };
 
         match row {
             Ok((key, value, type_hint)) => {
@@ -597,68 +606,112 @@ impl RedisKV {
     }
 
     /// Atomically claim the first key matching a prefix (sorted lexicographically).
-    /// Uses SCAN to find keys, sorts them, then DEL the first one.
-    pub fn claim(&mut self, prefix: &str) -> Result<Option<(String, Value)>> {
+    /// Uses a Lua script executed via EVAL for atomicity — no other Redis command
+    /// can interleave, preventing double-claim under concurrent workers.
+    ///
+    /// `ceiling`: if provided, only claim keys where `key <= ceiling`. This filters
+    /// future-scheduled jobs at the Redis level.
+    pub fn claim(
+        &mut self,
+        prefix: &str,
+        ceiling: Option<&str>,
+    ) -> Result<Option<(String, Value)>> {
         let pattern = format!("{}*", prefix);
-        let mut all_keys: Vec<String> = Vec::new();
-        let mut cursor: u64 = 0;
+        let ceil = ceiling.unwrap_or("");
 
-        loop {
-            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                .cursor_arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(100)
-                .query(&mut self.conn)
-                .map_err(|e| IntentError::runtime_error(format!("Redis scan error: {}", e)))?;
+        // Lua script runs atomically in Redis — KEYS+sort+GET+DEL in one operation.
+        // Note: KEYS scans the entire Redis keyspace (O(total keys), not O(matching keys)).
+        // This is acceptable for typical job queue sizes. For very large Redis instances
+        // with millions of non-job keys, consider a sorted-set approach instead.
+        let lua_script = r#"
+            local keys = redis.call('KEYS', ARGV[1])
+            if #keys == 0 then return nil end
+            table.sort(keys)
+            local ceiling = ARGV[2]
+            for _, key in ipairs(keys) do
+                -- Early exit: if this key (type hint or not) exceeds the ceiling,
+                -- all remaining keys do too (keys are sorted ascending)
+                if ceiling ~= '' and key > ceiling then
+                    break
+                end
+                -- Skip internal type metadata keys
+                if not string.find(key, ':__type$') then
+                    local val = redis.call('GET', key)
+                    if val then
+                        -- Read legacy type hint before deleting
+                        local type_hint = redis.call('GET', key .. ':__type')
+                        redis.call('DEL', key)
+                        redis.call('DEL', key .. ':__type')
+                        if type_hint then
+                            return {key, val, type_hint}
+                        end
+                        return {key, val}
+                    end
+                end
+            end
+            return nil
+        "#;
 
-            all_keys.extend(batch);
-            cursor = next_cursor;
-            if cursor == 0 {
-                break;
-            }
-        }
+        let result: redis::Value = redis::cmd("EVAL")
+            .arg(lua_script)
+            .arg(0) // no KEYS args, using ARGV only
+            .arg(&pattern)
+            .arg(ceil)
+            .query(&mut self.conn)
+            .map_err(|e| IntentError::runtime_error(format!("Redis claim error: {}", e)))?;
 
-        if all_keys.is_empty() {
-            return Ok(None);
-        }
-
-        // Sort to get lexicographically first (FIFO by timestamp)
-        all_keys.sort_unstable();
-        all_keys.dedup();
-        // Filter out internal type keys
-        all_keys.retain(|k| !k.ends_with(":__type"));
-
-        if all_keys.is_empty() {
-            return Ok(None);
-        }
-
-        let key = &all_keys[0];
-
-        // GET then DEL — not perfectly atomic but sufficient for single-worker setups.
-        // Multi-worker Redis deployments should use Lua scripting (future enhancement).
-        let value: Option<String> = self
-            .conn
-            .get(key)
-            .map_err(|e| IntentError::runtime_error(format!("Redis get error: {}", e)))?;
-
-        let _: i32 = self
-            .conn
-            .del(key)
-            .map_err(|e| IntentError::runtime_error(format!("Redis del error: {}", e)))?;
-
-        match value {
-            Some(data) => {
-                let type_key = format!("{}:__type", key);
-                let legacy_hint: Option<String> = self.conn.get(&type_key).ok();
-                let _: std::result::Result<i32, _> = self.conn.del(&type_key);
+        match result {
+            redis::Value::Array(ref items) if items.len() >= 2 => {
+                let key = match &items[0] {
+                    redis::Value::BulkString(bytes) => {
+                        String::from_utf8(bytes.clone()).map_err(|e| {
+                            IntentError::runtime_error(format!(
+                                "Redis claim key UTF-8 error: {}",
+                                e
+                            ))
+                        })?
+                    }
+                    redis::Value::SimpleString(s) => s.clone(),
+                    other => {
+                        return Err(IntentError::runtime_error(format!(
+                            "Redis claim: unexpected key type in Lua response: {:?}",
+                            other
+                        )))
+                    }
+                };
+                let data = match &items[1] {
+                    redis::Value::BulkString(bytes) => {
+                        String::from_utf8(bytes.clone()).map_err(|e| {
+                            IntentError::runtime_error(format!(
+                                "Redis claim data UTF-8 error: {}",
+                                e
+                            ))
+                        })?
+                    }
+                    redis::Value::SimpleString(s) => s.clone(),
+                    other => {
+                        return Err(IntentError::runtime_error(format!(
+                            "Redis claim: unexpected data type in Lua response: {:?}",
+                            other
+                        )))
+                    }
+                };
+                // Third element is the legacy type hint (if the key had one)
+                let legacy_hint = items.get(2).and_then(|v| match v {
+                    redis::Value::BulkString(bytes) => String::from_utf8(bytes.clone()).ok(),
+                    redis::Value::SimpleString(s) => Some(s.clone()),
+                    _ => None,
+                });
                 Ok(Some((
-                    key.clone(),
+                    key,
                     deserialize_value_envelope(&data, legacy_hint.as_deref()),
                 )))
             }
-            None => Ok(None), // Key was deleted between SCAN and GET (race)
+            redis::Value::Nil => Ok(None),
+            other => Err(IntentError::runtime_error(format!(
+                "Redis claim: unexpected Lua response type: {:?}",
+                other
+            ))),
         }
     }
 }
@@ -1452,10 +1505,16 @@ pub fn kv_list(handle: &Value, prefix: Option<&str>) -> Result<Vec<String>> {
 /// Returns Some((key, value)) or None if no matching key exists.
 /// The claimed key is deleted from the store.
 ///
+/// `ceiling`: if provided, only claim keys where `key <= ceiling`. Used by the
+/// job worker to skip future-scheduled jobs without claiming and re-enqueuing.
+///
 /// Atomicity: SQLite uses `BEGIN IMMEDIATE` for full transaction safety.
-/// Redis uses SCAN+GET+DEL which is not atomic under concurrent workers —
-/// a Lua-script backend is planned for multi-worker Redis deployments.
-pub fn kv_claim(handle: &Value, prefix: &str) -> Result<Option<(String, Value)>> {
+/// Redis/Valkey uses an atomic Lua script via EVAL (KEYS+sort+GET+DEL in one operation).
+pub fn kv_claim(
+    handle: &Value,
+    prefix: &str,
+    ceiling: Option<&str>,
+) -> Result<Option<(String, Value)>> {
     let backend = get_backend_type(handle)?;
     match backend {
         KVBackend::SQLite => {
@@ -1463,14 +1522,14 @@ pub fn kv_claim(handle: &Value, prefix: &str) -> Result<Option<(String, Value)>>
             let kv = kv_arc
                 .lock()
                 .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
-            kv.claim(prefix)
+            kv.claim(prefix, ceiling)
         }
         KVBackend::Redis => {
             let kv_arc = get_redis_kv(handle)?;
             let mut kv = kv_arc
                 .lock()
                 .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
-            kv.claim(prefix)
+            kv.claim(prefix, ceiling)
         }
     }
 }
@@ -1614,5 +1673,98 @@ mod tests {
             // Cleanup
             kv.del("test:key1").unwrap();
         }
+    }
+
+    #[test]
+    fn test_sqlite_claim_no_ceiling() {
+        let kv = SQLiteKV::new(":memory:").unwrap();
+
+        // Seed 3 keys with lexicographic ordering
+        kv.set("prefix:aaa", &Value::String("first".to_string()), None)
+            .unwrap();
+        kv.set("prefix:bbb", &Value::String("second".to_string()), None)
+            .unwrap();
+        kv.set("prefix:ccc", &Value::String("third".to_string()), None)
+            .unwrap();
+
+        // Claim without ceiling — should get lexicographically first
+        let result = kv.claim("prefix:", None).unwrap();
+        assert!(result.is_some());
+        let (key, val) = result.unwrap();
+        assert_eq!(key, "prefix:aaa");
+        assert!(matches!(val, Value::String(s) if s == "first"));
+
+        // Key should be deleted — second claim gets next key
+        let result = kv.claim("prefix:", None).unwrap();
+        assert!(result.is_some());
+        let (key, _) = result.unwrap();
+        assert_eq!(key, "prefix:bbb");
+
+        // Third claim
+        let result = kv.claim("prefix:", None).unwrap();
+        assert!(result.is_some());
+        let (key, _) = result.unwrap();
+        assert_eq!(key, "prefix:ccc");
+
+        // Empty — nothing left
+        let result = kv.claim("prefix:", None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_sqlite_claim_with_ceiling() {
+        let kv = SQLiteKV::new(":memory:").unwrap();
+
+        // Simulate job pending keys with timestamps:
+        // "now" jobs and "future" jobs
+        kv.set(
+            "jobs:pending:00000000000000001000:id-1",
+            &Value::String("id-1".to_string()),
+            None,
+        )
+        .unwrap();
+        kv.set(
+            "jobs:pending:00000000000000002000:id-2",
+            &Value::String("id-2".to_string()),
+            None,
+        )
+        .unwrap();
+        kv.set(
+            "jobs:pending:00000000000000009000:id-future",
+            &Value::String("id-future".to_string()),
+            None,
+        )
+        .unwrap();
+
+        // Ceiling at timestamp 3000 — should only claim jobs at or before 3000
+        let ceiling = "jobs:pending:00000000000000003000:~";
+        let result = kv.claim("jobs:pending:", Some(ceiling)).unwrap();
+        assert!(result.is_some());
+        let (key, _) = result.unwrap();
+        assert!(key.contains("id-1"));
+
+        // Second claim — id-2 is still before ceiling
+        let result = kv.claim("jobs:pending:", Some(ceiling)).unwrap();
+        assert!(result.is_some());
+        let (key, _) = result.unwrap();
+        assert!(key.contains("id-2"));
+
+        // Third claim — id-future is AFTER ceiling, should not be claimed
+        let result = kv.claim("jobs:pending:", Some(ceiling)).unwrap();
+        assert!(result.is_none());
+
+        // Verify future job is still in the store
+        let keys = kv.list(Some("jobs:pending:")).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(keys[0].contains("id-future"));
+    }
+
+    #[test]
+    fn test_sqlite_claim_ceiling_empty_store() {
+        let kv = SQLiteKV::new(":memory:").unwrap();
+        let result = kv
+            .claim("jobs:pending:", Some("jobs:pending:99999:~"))
+            .unwrap();
+        assert!(result.is_none());
     }
 }
