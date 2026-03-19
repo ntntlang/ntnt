@@ -17,18 +17,17 @@ These items were identified during PR 2b/2c review as "not blocking shippable" a
 
 ## Items Deferred from Phase 2
 
-### Redis Atomic Claim via Lua Script
+### Atomic Claim Audit — All Backends
 
-Current Redis `claim()` uses SCAN+GET+DEL which is not atomic under concurrent workers — two workers can claim the same job. Replace with a Lua script (`EVAL`) that atomically finds and deletes the first matching key.
+Job claiming must be atomic across all KV backends. Two concurrent workers must never claim the same job.
 
-```lua
--- Atomic claim: find first key matching pattern, GET+DEL in one operation
-local keys = redis.call('SCAN', 0, 'MATCH', ARGV[1], 'COUNT', 100)
--- ... sort, GET first, DEL, return
-```
+**SQLite:** Already atomic — `BEGIN IMMEDIATE` acquires exclusive write lock. No changes needed.
+
+**Redis / Valkey / Dragonfly:** Current `claim()` uses SCAN+GET+DEL (3 separate commands) which is not atomic. Two workers can double-claim. Replace with a single `EVAL` Lua script that atomically finds and deletes the first matching key.
 
 **File:** `src/stdlib/kv.rs` — `RedisKV::claim()`
 **Priority:** High — needed before anyone runs multi-worker Redis in production
+**See:** [dd-037-phase-3-plan.md](dd-037-phase-3-plan.md) for full Lua script and implementation details
 
 ### Scheduled Job Claim Optimization
 

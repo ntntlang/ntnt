@@ -13,15 +13,25 @@ Ordered by production impact — each can ship as its own commit, tested indepen
 
 ### Tier 1: Ship First (production correctness)
 
-#### 1. Redis Atomic Claim via Lua Script
-**Why first:** Without this, multi-worker Redis deployments can double-claim jobs. It's a correctness bug, not a feature.
+#### 1. Atomic Claim Audit — Ensure All Backends Are Safe
 
-**Implementation:**
-- [ ] Replace `RedisKV::claim()` SCAN→GET→DEL with single `EVAL` Lua script (`src/stdlib/kv.rs` ~line 601)
-- [ ] Lua script: SCAN for matching keys, sort lexicographically, GET+DEL first match atomically
-- [ ] Delete type hint key (`keys[1] .. ':__type'`) in same Lua call
+**Why first:** Job claiming must be atomic across all KV backends. Two concurrent workers calling `claim()` must never receive the same job. This is a correctness requirement, not a feature.
 
-**Lua script:**
+**Backend audit:**
+
+| Backend | Current implementation | Atomic? | Action needed |
+|---------|----------------------|---------|---------------|
+| **SQLite** | `BEGIN IMMEDIATE` + `SELECT ... ORDER BY key LIMIT 1` + `DELETE` + `COMMIT` | ✅ Yes | None — `BEGIN IMMEDIATE` acquires exclusive write lock for the transaction |
+| **Redis / Valkey / Dragonfly** | `SCAN` → `GET` → `DEL` (3 separate commands) | ❌ No | Replace with single `EVAL` Lua script |
+
+**SQLite** is already correct. `BEGIN IMMEDIATE` prevents any other connection from writing between the SELECT and DELETE — the claim is fully atomic even with multiple worker threads sharing the same database file.
+
+**Redis** is the bug. Two workers can SCAN the same key, both GET the value, and both proceed — only one DEL actually removes the key, but both workers think they claimed it. This causes duplicate job execution.
+
+**Fix — Redis `EVAL` Lua script:**
+
+Replace `RedisKV::claim()` SCAN→GET→DEL (`src/stdlib/kv.rs` ~line 601) with:
+
 ```lua
 local keys = redis.call('KEYS', ARGV[1])
 if #keys == 0 then return nil end
@@ -35,12 +45,19 @@ end
 return {keys[1], val}
 ```
 
-> Note: `KEYS` is acceptable here because the key space is scoped to `jobs:pending:*` which is bounded. For very high-volume queues (>10K pending), we'd switch to SCAN with COUNT. But that's an optimization, not a correctness issue.
+Lua scripts execute atomically in Redis — no other command can interleave. This gives the same guarantee as SQLite's `BEGIN IMMEDIATE`.
+
+> Note: `KEYS` is acceptable here because the key space is scoped to `jobs:pending:*` which is bounded by queue depth. For very high-volume queues (>10K pending), switching to iterative SCAN inside the Lua script would avoid blocking Redis — but that's an optimization, not a correctness issue.
+
+**Implementation:**
+- [ ] Replace `RedisKV::claim()` with `EVAL` Lua script
+- [ ] Delete type hint key (`keys[1] .. ':__type'`) in same Lua call
+- [ ] Verify SQLite `claim()` is unchanged (already atomic)
 
 **Tests:**
-- [ ] Verify existing `test_worker_loop_end_to_end` still passes (SQLite)
-- [ ] Add integration test: two threads claim concurrently from Redis, verify no double-claim
+- [ ] Verify existing `test_worker_loop_end_to_end` still passes (SQLite path)
 - [ ] Unit test: Lua script returns correct key/value pair, returns nil on empty
+- [ ] If Redis test infrastructure available: two threads claim concurrently, verify no double-claim
 
 **Effort:** ~0.5 day
 
