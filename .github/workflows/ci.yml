@@ -10,8 +10,41 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      examples: ${{ steps.filter.outputs.examples }}
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'src/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'build.rs'
+              - '.github/workflows/ci.yml'
+            examples:
+              - 'examples/**'
+              - 'src/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            docs:
+              - 'docs/**'
+              - 'stdlib.toml'
+              - 'src/**'
+
   test:
-    name: Test
+    name: Test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -41,12 +74,12 @@ jobs:
       - name: Run tests
         run: cargo test --locked
         env:
-          # macOS aarch64 has smaller default thread stack (512KB vs 8MB on Linux).
-          # Increase to 8MB to prevent stack overflow in recursive interpreter tests.
           RUST_MIN_STACK: 8388608
 
   lint:
     name: Lint
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +94,8 @@ jobs:
 
   examples:
     name: Validate Examples
+    needs: changes
+    if: needs.changes.outputs.examples == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,6 +123,8 @@ jobs:
 
   docs:
     name: Validate Documentation
+    needs: changes
+    if: needs.changes.outputs.docs == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -127,3 +164,22 @@ jobs:
           if [ "$DRIFT" = "1" ]; then
             exit 1
           fi
+
+  # Summary job — use this as the single required status check in branch protection.
+  # Always runs. Passes when all non-skipped jobs passed.
+  ci-status:
+    name: CI Status
+    if: always()
+    needs: [test, lint, examples, docs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CI results
+        run: |
+          results=("${{ needs.test.result }}" "${{ needs.lint.result }}" "${{ needs.examples.result }}" "${{ needs.docs.result }}")
+          for result in "${results[@]}"; do
+            if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
+              echo "::error::CI job failed or was cancelled: $result"
+              exit 1
+            fi
+          done
+          echo "✅ CI passed (skipped jobs are OK — no relevant file changes)"
