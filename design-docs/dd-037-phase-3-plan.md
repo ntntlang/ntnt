@@ -1,8 +1,9 @@
 # DD-037 Phase 3: Implementation Plan
 
-**Status:** PR A ✅ merged (#36), PR B ✅ merged (#38), PR C 🔄 in progress
+**Status:** ✅ Complete — All 3 PRs merged
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md) · [Phase 3 Design](dd-037-phase-3-implementation.md)
 **Created:** 2026-03-18
+**Last Updated:** 2026-03-20
 **Depends on:** Phase 2 ✅, Phase 6 ✅
 
 ---
@@ -43,55 +44,25 @@
 
 ---
 
-## PR C — Batch Enqueue (planned)
+## PR C — Batch Enqueue (#39, merged)
 
-**Goal:** `enqueue_batch(job_name, args_array)` — enqueue N jobs in one call with fewer KV round-trips.
+**What shipped:**
+- [x] `enqueue_batch(job_name, args_array)` — enqueue N jobs in one call
+- [x] Validates job name exists in registry once (fast-fail before any writes)
+- [x] Validates all items are maps upfront before any KV writes
+- [x] Calls `enqueue_internal` per item — reuses all existing logic (dedup, test mode, events)
+- [x] FIFO ordering via base timestamp + per-item offset (wall-clock too coarse for tight loops)
+- [x] MAX_BATCH_SIZE (10,000) guard against pathological batches
+- [x] Error messages include item index (`enqueue_batch: item 3 failed: ...`)
+- [x] Dedup behavior documented and tested (identical payloads → same job ID)
+- [x] Empty array returns `Ok([])` immediately
+- [x] Partial-success documented (no rollback — matches loop semantics)
+- [x] Typechecker signature registered
+- [x] Full `@ntnt` doc block with `@error` directives
+- [x] STDLIB_REFERENCE.md updated (382 → 383 functions)
 
-### What it does
-
-```ntnt
-import { enqueue_batch } from "std/jobs"
-
-let ids = unwrap(enqueue_batch("SendEmail", [
-    map { "to": "alice@example.com" },
-    map { "to": "bob@example.com" },
-    map { "to": "carol@example.com" },
-]))
-// ids = ["uuid-1", "uuid-2", "uuid-3"]
-```
-
-### Implementation
-
-**`src/stdlib/jobs.rs`:**
-- New `enqueue_batch(job_name, args_array)` function
-- Validates job exists in registry once, then loops over args
-- For each arg: generate UUID, build job data map, compute dedup key (if `unique` set)
-- SQLite: wrap all KV writes in a single transaction (one `get_or_init_kv`, reuse handle)
-- Redis: sequential writes (pipeline optimization is a future enhancement)
-- Returns `Result<Array<String>, String>` — array of job IDs (deduped entries return existing ID)
-- Respects test mode: writes to test queue if active
-- `// @ntnt` doc block required (new stdlib function)
-
-**`src/typechecker.rs`:**
-- Add signature: `enqueue_batch(job_name: String, args: Array<Map>) -> Result<Array<String>, String>`
-
-**Tests:**
-- [ ] `enqueue_batch` with 3 items → 3 jobs created, 3 IDs returned
-- [ ] `enqueue_batch` with empty array → returns `Ok([])`
-- [ ] `enqueue_batch` in test mode → all items in test queue
-- [ ] `enqueue_batch` with dedup → duplicates return existing IDs, new ones created
-- [ ] `enqueue_batch` with unregistered job name → error
-
-**Docs:**
-- `// @ntnt` doc block on new function
-- `ntnt docs --generate` to sync
-
-**Effort:** ~0.5 day
-
-### What it does NOT include
-- No SQLite transaction wrapping (would require new KV operation — `kv_batch_set`)
-- No Redis pipeline — sequential writes for now
-- These optimizations can come later when profiling shows they matter
+**Tests:** 6 new tests (basic, empty, unregistered, bad type, test mode, dedup)
+**Review rounds:** 5 (Greptile), all resolved. Issues found and fixed: N+1 comment accuracy, FIFO timestamp collision, incomplete uniqueness assertion, undocumented dedup behavior, no batch size limit, dead error path with lost item index.
 
 ---
 
@@ -159,12 +130,14 @@ See [dd-037-phase-3-implementation.md](dd-037-phase-3-implementation.md) for 3 d
 
 ---
 
-## What Phase 3 Unlocks (after PR A + B + C)
+## What Phase 3 Delivered
 
-- ✅ Atomic multi-worker job claiming (Redis + SQLite)
-- ✅ Efficient scheduled job polling (no KV churn)
-- ✅ Deduplication (prevent double-work)
-- ✅ Job expiration (prevent stale execution)
-- ✅ Batch enqueue (efficient bulk operations)
+All three PRs merged. Phase 3 is complete:
 
-Combined with Phase 2, this is a complete production-ready job system matching the core feature set of Sidekiq, Bull, and Celery.
+- ✅ Atomic multi-worker job claiming (Redis Lua EVAL + SQLite BEGIN IMMEDIATE)
+- ✅ Efficient scheduled job polling (ceiling parameter, no KV churn)
+- ✅ Deduplication (`unique: N` — SHA-256 hash with TTL, live-job validation)
+- ✅ Job expiration (`expires: N` — worker skips stale jobs)
+- ✅ Batch enqueue (`enqueue_batch` — bulk operations with upfront validation)
+
+Combined with Phases 0-2 and 6, this is a complete production-ready job system matching the core feature set of Sidekiq, Bull, and Celery.

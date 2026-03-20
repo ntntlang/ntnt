@@ -1,9 +1,9 @@
 # DD-037: Concurrency & Job System
 
-**Status:** Phases 0-2, 6 Complete, Phases 3-5, 7-8 Planned
+**Status:** Phases 0-3, 6 Complete, Phases 4-5, 7-8 Planned
 **Author:** Larri
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-17
+**Last Updated:** 2026-03-20
 **Supersedes:** `background_jobs.md`, `dd-037-structured-tasks.md`
 
 ---
@@ -192,7 +192,7 @@ Single global instance (`LazyLock<ConcurrencyRuntime>`) owns all state:
 Phase 0  ✅  Concurrency Primitives                    spawn, channels, schedules
 Phase 1  ✅  Primitive Hardening                        handle types, select(), reaper
 Phase 2  ✅  Job DSL + KV Backend                       PR 2a/2b/2c — declarative jobs, workers, testing, CLI
-Phase 3  📋  Job System Advanced Features               dedup, batch, priority, Lua claim, on_job_event
+Phase 3  ✅  Job System Advanced Features               Lua claim, scheduled optimization, dedup, expiration, batch enqueue
 Phase 4  📋  Composition Layer                          parallel, race, task groups
 Phase 5  📋  Dashboard + Production Hardening            real-time UI, simulation, contracts
 Phase 6  ✅  Observability CLI                          PR #35 — list/inspect/retry/cancel/clear + dedup refactor
@@ -207,7 +207,7 @@ Phase 8  📋  Job Audit Log & Observability Pipeline    structured logs, sinks,
 | 0 | Concurrency Primitives | ✅ Done | PR #31 merged |
 | 1 | Primitive Hardening | ✅ Done | 2 Copilot reviews, 16/16 resolved |
 | 2 | Job DSL + KV Backend | ✅ Done | PR #32 (parser/registry), #33 (workers/retry), #34 (DX/CLI/docs). See [dd-037-phase-2-implementation.md](dd-037-phase-2-implementation.md) |
-| 3 | Job System Advanced Features | 📋 Planned | See [dd-037-phase-3-implementation.md](dd-037-phase-3-implementation.md) |
+| 3 | Job System Advanced Features | ✅ Done | PR #36 (atomic claim + scheduled opt), #38 (dedup + expiration), #39 (batch enqueue). See [dd-037-phase-3-plan.md](dd-037-phase-3-plan.md) |
 | 4 | Composition Layer | 📋 Planned | parallel, race, task groups |
 | 5 | Dashboard + Production Hardening | 📋 Planned | Dashboard, simulation, contracts, intent testing |
 | 6 | Observability CLI | ✅ Done | PR #35 merged. list/inspect/retry/cancel/clear + CLI/stdlib dedup refactor. `tail`, `replay`, `workers` deferred. |
@@ -253,22 +253,31 @@ Phase 8  📋  Job Audit Log & Observability Pipeline    structured logs, sinks,
 
 ---
 
-### Phase 3: Job System Advanced Features 📋
+### Phase 3: Job System Advanced Features ✅
 
-**Status:** Planned
-**Implementation doc:** [dd-037-phase-3-implementation.md](dd-037-phase-3-implementation.md)
+**Status:** Complete. Implemented across 3 PRs (#36, #38, #39).
+**Implementation doc:** [dd-037-phase-3-plan.md](dd-037-phase-3-plan.md) · [dd-037-phase-3-implementation.md](dd-037-phase-3-implementation.md)
 
-Deferred from Phase 2 reviews. Each item is independently implementable:
-- [ ] Redis atomic claim via Lua script
+| PR | Title | Status |
+|----|-------|--------|
+| #36 | Atomic Claim + Scheduled Optimization | ✅ Merged |
+| #38 | Dedup + Expiration | ✅ Merged |
+| #39 | Batch Enqueue | ✅ Merged |
+
+**What shipped:**
+- [x] Redis atomic claim via Lua `EVAL` script (KEYS+sort+GET+DEL in one operation)
+- [x] Scheduled job claim optimization (`ceiling` parameter — workers skip future jobs at KV layer)
+- [x] Deduplication (`unique: N` — SHA-256 hash dedup with TTL, live-job validation, cleanup on terminal states)
+- [x] Job expiration (`expires: N` — worker skips stale jobs, marks "expired")
+- [x] Batch enqueue (`enqueue_batch` — upfront validation, FIFO ordering, 10K limit, item-indexed errors)
+
+**Remaining items (deferred to on-demand, not blocking):**
 - [ ] `on_job_event(handler)` — user callback for job events (cross-thread closure design needed)
-- [ ] Deduplication (`unique: N` option)
-- [ ] Job expiration (`expires: N` option)
-- [ ] Batch enqueue (`enqueue_batch`)
-- [ ] Priority queues
-- [ ] Worker heartbeat refresh
+- [ ] Priority queues (`priority: N`)
+- [ ] Worker heartbeat refresh (for jobs running >5 minutes)
 - [ ] Graceful shutdown drain timeout
-- [ ] Scheduled job claim optimization
-- [ ] `ntnt jobs list` with filters
+- [ ] Atomic dedup via `SET NX` (current is best-effort get+set)
+- [ ] Redis SCAN in Lua (replace `KEYS` for large keyspaces)
 
 ---
 
@@ -684,7 +693,7 @@ For production apps with existing user auth. The dashboard becomes another admin
 | Intent testing | `.intent` files | RSpec (manual) | ExUnit (manual) | Jest (manual) | PHPUnit (manual) |
 | Streaming logs | `ntnt jobs tail` | Manual | Manual | Manual | Docker logs + grep |
 | Stuck job recovery | Automatic (heartbeat) | Automatic | Automatic | Automatic | **Manual clearing** |
-| Batch enqueue | `.enqueue_batch()` | `.perform_bulk()` | `Oban.insert_all()` | `.addBulk()` | Custom |
+| Batch enqueue | `enqueue_batch()` ✅ | `.perform_bulk()` | `Oban.insert_all()` | `.addBulk()` | Custom |
 | Scaling | Same binary, add processes | Separate process | Built into Phoenix | Separate process | Docker containers |
 | Event-driven dispatch | `std/events` subscribe/publish | `ActiveSupport::Notifications` (no durability) | ❌ (pub/sub separate) | ❌ (separate) | Custom event bus |
 
@@ -757,3 +766,4 @@ For production apps with existing user auth. The dashboard becomes another admin
 | 2026-03-17 | PR #34 merged: Greptile review fixes — drain_jobs collects all errors (no silent job loss), timeout always overrides exec error, --concurrency 0 rejected, stderr JSON key order documented. Phase 2 fully complete. |
 | 2026-03-18 | Phase 8 added: Job Audit Log & Observability Pipeline (DD-042). Structured logs with KV/file/stderr/webhook sinks, configurable verbosity, TTL, CLI tail, programmatic API. |
 | 2026-03-17 | Phase 2 merged: PR #34 merged after Greptile review fixes (drain_jobs fail-fast, timeout-wins-over-error, --concurrency 0 guard). All 3 Phase 2 PRs now on main. |
+| 2026-03-20 | Phase 3 complete: PR #36 (atomic Lua claim + scheduled optimization), #38 (dedup + expiration), #39 (batch enqueue) — all merged. Remaining items (priority queues, heartbeat refresh, on_job_event, drain timeout) deferred to on-demand. |

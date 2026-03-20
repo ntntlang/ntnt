@@ -1,6 +1,6 @@
 # DD-037 Phase 3: Job System — Advanced Features
 
-**Status:** Planning
+**Status:** ✅ Complete (core items shipped in PRs #36, #38, #39)
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md)
 **Created:** 2026-03-17
 **Depends on:** Phase 2 ✅ (all 3 PRs merged)
