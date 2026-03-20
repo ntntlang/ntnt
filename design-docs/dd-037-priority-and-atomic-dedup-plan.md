@@ -63,6 +63,30 @@ Low workers:      floor="jobs:pending:70:"  ceiling="jobs:pending:99:<now>:~"
 
 Bands are fully isolated. No starvation. When high-priority work is empty, high workers idle — they don't steal from low. When low work piles up, you scale the low band.
 
+### How Priorities, Numbers, and Bands Relate
+
+The band range is the primary concept. Everything else is derived:
+
+1. **Band range** (e.g., 0-9) → defines which jobs a worker pool scans. This controls behavior: concurrency, poll interval.
+2. **Numeric value** (e.g., 5) → placed into the pending key. Determines FIFO ordering *within* a band. Derived as the midpoint of the band range when using named priorities.
+3. **Named priority** (e.g., "critical") → human-friendly alias. Maps to a band, which gives you the numeric midpoint.
+
+Workers don't see names or numbers — they scan a range. A job at priority 4 and a job at priority 5 both live in the 0-9 range, so critical workers claim both. The `4` just gets claimed before the `5` (lexicographic ordering).
+
+**Key implication:** If you define a custom named priority "very_high" that maps to numeric value 4, but the band range is still 0-9, it behaves identically to critical — same workers, same poll rate. To get different behavior, you need a different band:
+
+```ntnt
+work_jobs(map {
+  "bands": [
+    map { "name": "critical",  "range": [0, 4],  "concurrency": 2, "poll": 1000 },
+    map { "name": "very_high", "range": [5, 9],  "concurrency": 3, "poll": 1500 },
+    // ...
+  ]
+})
+```
+
+Now "very_high" has its own workers, its own poll interval — genuinely different behavior. That's the whole point of 0-99: enough room to slice bands as thin as you need.
+
 ### Custom Bands
 
 Developers can define custom bands for fine-grained control:
