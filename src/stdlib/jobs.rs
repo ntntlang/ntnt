@@ -217,8 +217,13 @@ impl BandStats {
 
 /// Global job runtime state.
 ///
-/// **Lock discipline (same as ConcurrencyRuntime — NEVER nest):**
-/// Acquire one lock at a time, do work, release before acquiring another.
+/// **Lock discipline:**
+/// When acquiring multiple locks, always use this order:
+///   1. `band_worker_task_ids`
+///   2. `band_cancel_arcs`
+///   3. `active_bands`
+/// Prefer acquiring one lock at a time (release before acquiring another).
+/// When two locks must be held simultaneously (e.g., scale_workers), follow the order above.
 pub struct JobRuntime {
     /// Registered job definitions: name -> definition.
     job_registry: RwLock<HashMap<String, JobDefinition>>,
@@ -2617,12 +2622,14 @@ pub fn init() -> HashMap<String, Value> {
                     .map(|q| q.clone())
                     .unwrap_or(None);
 
-                let mut cancel_map = JOB_RUNTIME
-                    .band_cancel_arcs
-                    .lock()
-                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+                // Lock discipline: always acquire task_ids before cancel_arcs.
+                // This matches the order used in work_async/work_jobs.
                 let mut task_ids_map = JOB_RUNTIME
                     .band_worker_task_ids
+                    .lock()
+                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+                let mut cancel_map = JOB_RUNTIME
+                    .band_cancel_arcs
                     .lock()
                     .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
 
