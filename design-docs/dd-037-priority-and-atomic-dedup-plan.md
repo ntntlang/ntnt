@@ -291,6 +291,40 @@ Remove the post-enqueue `kv_set` for dedup — no longer needed.
 
 ~2 days. kv_set_nx is ~30 lines per backend. kv_claim floor is ~10 lines per backend. Priority key format is ~10 lines. Band architecture + worker spawning is the bulk of new work (~200 lines). Runtime scaling reuses existing cancellation. Tests and docs round it out.
 
+## Follow-Up: Control Socket + CLI (separate PR)
+
+The stdlib functions (`scale_workers`, `worker_status`) are the primitives. A Unix domain socket control channel makes them accessible from a second terminal without wiring up admin routes.
+
+### How it works
+
+When `ntnt run server.tnt` starts workers, the runtime creates `.ntnt.sock` in the app's working directory. The CLI connects to it:
+
+```bash
+# Terminal 1: app running
+cd ~/apps/payments && ntnt run server.tnt
+# → .ntnt.sock created in ~/apps/payments/
+
+# Terminal 2: ops
+cd ~/apps/payments
+ntnt workers status         # → connects to ./.ntnt.sock
+ntnt workers scale low 8    # → sends scale command via socket
+
+# Or target a different app explicitly
+ntnt workers --dir ~/apps/emails scale low 4
+```
+
+- Socket path: `.ntnt.sock` in the app's working directory (same model as `docker compose`)
+- Multiple apps on same server: each has its own socket in its own directory
+- Cleanup: socket file deleted on shutdown, stale file overwritten on next start
+- Auth: none needed (local Unix socket = same-user access only)
+- The socket handler internally calls `scale_workers()` / `worker_status()` — same primitives
+
+### Not blocking this PR
+
+The socket is a convenience layer on top of the stdlib functions. This PR ships the core: priority keys, bands, kv_claim floor, kv_set_nx, scale_workers(), worker_status(). The control socket + `ntnt workers` CLI subcommand ships as a follow-up.
+
+---
+
 ## Design Decisions
 
 | Decision | Choice | Why |
