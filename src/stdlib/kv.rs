@@ -719,16 +719,15 @@ impl RedisKV {
                     -- Floor filter: keys are sorted ascending, so once we pass floor
                     -- all subsequent keys are also past it — stop checking
                     if not past_floor then
-                        if key < floor_val then
-                            -- key is below floor, skip
-                            goto continue
+                        if key >= floor_val then
+                            past_floor = true
                         end
-                        past_floor = true
                     end
-                    if ceiling ~= '' and key > ceiling then
-                        -- Early exit: all remaining keys exceed ceiling (sorted ascending)
-                        break
-                    else
+                    if past_floor then
+                        if ceiling ~= '' and key > ceiling then
+                            -- Early exit: all remaining keys exceed ceiling (sorted ascending)
+                            break
+                        end
                         local val = redis.call('GET', key)
                         if val then
                             -- Read legacy type hint before deleting
@@ -742,7 +741,6 @@ impl RedisKV {
                         end
                     end
                 end
-                ::continue::
             end
             return nil
         "#;

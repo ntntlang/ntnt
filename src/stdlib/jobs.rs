@@ -65,13 +65,15 @@ impl BandConfig {
         format!("jobs:pending:{:02}:", self.min_priority)
     }
 
-    /// Ceiling key for kv_claim: last claimable key in this band (past due only).
+    /// Ceiling key for kv_claim: upper bound of this band's priority range.
+    ///
+    /// NOTE: With priority-prefixed keys, a single ceiling cannot gate both priority
+    /// AND timestamp (a future job at priority 15 sorts below priority 39 ceiling
+    /// regardless of timestamp). The ceiling restricts to the band's priority range
+    /// only. Future-scheduled jobs are filtered by the defense-in-depth `scheduled_at`
+    /// check in worker_loop (log + re-enqueue + sleep).
     pub fn ceiling_key(&self) -> String {
-        format!(
-            "jobs:pending:{:02}:{}:~",
-            self.max_priority,
-            timestamp_key()
-        )
+        format!("jobs:pending:{:02}:~", self.max_priority)
     }
 }
 
@@ -601,8 +603,8 @@ fn enqueue_internal(
                     }
                     _ => true,
                 },
-                Ok(Value::Unit) => true,
-                Ok(_) => true,
+                Ok(Value::Unit) => false, // data not yet written — treat as live (set_nx arbitrates)
+                Ok(_) => false,           // unexpected shape — conservative: treat as live
                 Err(_) => {
                     emit_job_event(
                         "job.dedup_warning",
@@ -2517,9 +2519,19 @@ pub fn init() -> HashMap<String, Value> {
                     IntentError::runtime_error(format!("Failed to set Ctrl-C handler: {}", e))
                 })?;
 
-                // Block until Ctrl-C, then cooperatively cancel all workers
+                // Block until Ctrl-C, then cooperatively cancel ALL workers
+                // (including any spawned later via scale_workers)
                 loop {
                     if shutdown.load(AtomicOrdering::Acquire) {
+                        // Signal workers from JOB_RUNTIME (includes scaled workers)
+                        if let Ok(ca) = JOB_RUNTIME.band_cancel_arcs.lock() {
+                            for arcs in ca.values() {
+                                for arc in arcs {
+                                    arc.store(true, AtomicOrdering::Release);
+                                }
+                            }
+                        }
+                        // Also signal the initial arcs (belt and suspenders)
                         for arc in &all_cancel_arcs {
                             arc.store(true, AtomicOrdering::Release);
                         }
@@ -2527,6 +2539,9 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
+
+                // Wait briefly for workers to finish current jobs
+                std::thread::sleep(std::time::Duration::from_millis(500));
 
                 Ok(Value::Unit)
             },
