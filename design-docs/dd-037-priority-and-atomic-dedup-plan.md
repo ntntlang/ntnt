@@ -43,12 +43,12 @@ Out-of-the-box, `work_jobs()` with no configuration spins up 4 bands with sensib
 
 | Band | Priority range | Workers | Poll interval | Use case |
 |------|---------------|---------|---------------|----------|
-| critical | 0-9 | 2 | 1s | Real-time work, immediate response |
-| high | 10-39 | 2 | 2s | Important operations, main workload |
+| critical | 0-9 | 4 | 1s | Real-time work, immediate response |
+| high | 10-39 | 3 | 2s | Important operations, main workload |
 | normal | 40-69 | 2 | 5s | Default — where jobs land if you don't set priority |
-| low | 70-99 | 1 | 10s | Batch work, cleanup, analytics — can pile up |
+| low | 70-99 | 1 | 20s | Batch work, cleanup, analytics — can pile up |
 
-7 threads total. All sleep when idle (zero CPU cost). Even a single-core VPS handles this fine.
+10 threads total. All sleep when idle (zero CPU cost). Even a single-core VPS handles this fine.
 
 ### Worker Band Architecture
 
@@ -262,7 +262,7 @@ For each band: spawn `concurrency` worker threads, each running `worker_loop` wi
 - [ ] Band isolation: enqueue critical (5) and low (85) → critical worker claims 5, low worker claims 85, neither crosses
 - [ ] Default priority: enqueue without priority → pending key contains `:50:`
 - [ ] Invalid priority: `priority: -1` and `priority: 100` → runtime error
-- [ ] Default bands: `work_jobs()` with no config → 4 bands, 7 total workers
+- [ ] Default bands: `work_jobs()` with no config → 4 bands, 10 total workers
 - [ ] Custom bands: custom band config → overrides defaults entirely
 - [ ] Floor+ceiling in kv_claim: claim with floor="jobs:pending:40:" ceiling="jobs:pending:69:..." → only returns keys in range
 - [ ] Priority in job_data: enqueued job's data map contains `priority` field
