@@ -115,25 +115,23 @@ job CleanupLogs on maintenance (priority: "low") { ... }
 job ProcessOrder on orders { ... }   // defaults to "normal"
 ```
 
-Named priorities map to midpoints of their band's range:
+Named priorities:
 
-| Name | Numeric value | Band range |
-|------|--------------|------------|
-| `"critical"` | 5 | 0-9 |
-| `"high"` | 25 | 10-39 |
-| `"normal"` | 50 | 40-69 |
-| `"low"` | 85 | 70-99 |
+| Priority | Meaning |
+|----------|---------|
+| `"critical"` | Real-time, processed immediately |
+| `"high"` | Important, processed quickly |
+| `"normal"` | Default — where jobs land if unspecified |
+| `"low"` | Batch work, can pile up |
 
-Midpoints leave room on either side for fine-grained control when needed.
+That's the entire API. No numbers to think about.
 
-**Advanced: raw numeric priorities** — only for power users defining custom bands:
+**Advanced: raw numeric priorities (0-99)** — for power users defining custom bands on large workloads. Named priorities map to numeric midpoints internally (critical=5, high=25, normal=50, low=85), leaving room for fine-grained custom levels in between. See "Custom Bands" section above.
 
 ```ntnt
-job ChargePayment on payments (priority: 10) { ... }    // top of high band
-job SendReceipt on emails (priority: 38) { ... }         // bottom of high band
+job ChargePayment on payments (priority: 10) { ... }    // custom numeric
+job SendReceipt on emails (priority: 38) { ... }         // custom numeric
 ```
-
-Most developers never need to see a number. The named priorities are the API.
 
 ### Implementation Changes
 
