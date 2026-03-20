@@ -210,6 +210,34 @@ job ChargePayment on payments (priority: 10) { ... }    // custom numeric
 job SendReceipt on emails (priority: 38) { ... }         // custom numeric
 ```
 
+### Queue Name — Optional (defaults to "default")
+
+The `on <queue>` clause is now **optional**. If omitted, the job goes to the `"default"` queue:
+
+```ntnt
+job SendEmail (priority: "high", retry: 3) { ... }             // queue: "default"
+job ProcessPayment on payments (priority: "critical") { ... }   // queue: "payments"
+```
+
+For single-machine apps (the 90% case), you never need to think about queues. Just define jobs, set priority, call `work_jobs()`.
+
+Queues become relevant for **multi-machine horizontal scaling** — multiple worker processes reading from the same KV store, each filtering by queue:
+
+```bash
+# Machine A: only payment jobs
+ntnt worker server.tnt --queues=payments
+
+# Machine B: only email jobs
+ntnt worker server.tnt --queues=emails
+
+# Machine C: everything
+ntnt worker server.tnt   # no filter = all queues
+```
+
+All machines share the same Redis/SQLite. Each has its own band configuration and concurrency.
+
+**Parser change:** `on <identifier>` becomes optional in the `job` syntax. If not present, the parser sets queue to `"default"`. This is a non-breaking change — existing jobs with `on <queue>` continue to work.
+
 ### Implementation Changes
 
 #### 1. `kv_claim` — Add floor parameter (src/stdlib/kv.rs)
@@ -283,7 +311,16 @@ For each band: spawn `concurrency` worker threads, each running `worker_loop` wi
 - Add signatures for `scale_workers(band_name: String, count: Int) -> Result<Unit, String>`
 - Add signatures for `worker_status() -> Array<Map>`
 
-#### 8. Documentation
+#### 8. Parser — Optional queue name (src/parser.rs)
+
+Make `on <identifier>` optional in the `job` declaration. If absent, set queue to `"default"`.
+
+Current parse: `job <Name> on <queue> (<options>) { ... }` — `on <queue>` required.
+New parse: `job <Name> [on <queue>] (<options>) { ... }` — `on <queue>` optional, defaults to `"default"`.
+
+Detection: after parsing job name, peek for `on` keyword. If present, consume it and parse the queue name. If not, use `"default"`.
+
+#### 9. Documentation
 
 - Update `// @ntnt` doc blocks on `work_jobs`, `work_async`, `enqueue`, `enqueue_at`, `enqueue_in`
 - Add priority + bands to AI_AGENT_GUIDE.md
@@ -310,6 +347,9 @@ For each band: spawn `concurrency` worker threads, each running `worker_loop` wi
 - [ ] Poll interval below 100ms → rejected
 - [ ] Range outside 0-99 → rejected
 - [ ] Range min > max → rejected
+- [ ] Optional queue: `job Foo { ... }` → queue is "default"
+- [ ] Explicit queue: `job Foo on emails { ... }` → queue is "emails"
+- [ ] Queue + priority: `job Foo (priority: "high") { ... }` → queue "default", priority "high"
 
 ---
 
@@ -390,16 +430,17 @@ Remove the post-enqueue `kv_set` for dedup — no longer needed.
 
 ## Implementation Order
 
-1. **`kv_set_nx`** — Add to both backends + public function (src/stdlib/kv.rs)
-2. **`kv_claim` floor parameter** — Add to both backends (src/stdlib/kv.rs)
-3. **Priority in `enqueue_internal`** — New key format + validation (src/stdlib/jobs.rs)
-4. **Band-aware `worker_loop`** — Band config, floor+ceiling per band (src/stdlib/jobs.rs)
-5. **Band spawning in `work_jobs`/`work_async`** — Default bands + custom config (src/stdlib/jobs.rs)
-6. **Atomic dedup in `enqueue_internal`** — Replace get+set with set_nx (src/stdlib/jobs.rs)
-7. **`scale_workers` + `worker_status`** — Runtime scaling (src/stdlib/jobs.rs)
-8. **Tests** — All tests for both features
-9. **Documentation** — Doc blocks + `ntnt docs --generate`
-10. **Design doc updates** — Check off items in DD-037
+1. **Parser: optional queue** — Make `on <queue>` optional, default to "default" (src/parser.rs)
+2. **`kv_set_nx`** — Add to both backends + public function (src/stdlib/kv.rs)
+3. **`kv_claim` floor parameter** — Add to both backends (src/stdlib/kv.rs)
+4. **Priority in `enqueue_internal`** — New key format, named + numeric priorities (src/stdlib/jobs.rs)
+5. **Band-aware `worker_loop`** — Band config, floor+ceiling per band (src/stdlib/jobs.rs)
+6. **Band spawning + validation in `work_jobs`/`work_async`** — Default bands, custom config, overlap/gap/bounds checks (src/stdlib/jobs.rs)
+7. **Atomic dedup in `enqueue_internal`** — Replace get+set with set_nx (src/stdlib/jobs.rs)
+8. **`scale_workers` + `worker_status`** — Runtime scaling + stats (src/stdlib/jobs.rs)
+9. **Tests** — All tests for both features
+10. **Documentation** — Doc blocks + `ntnt docs --generate`
+11. **Design doc updates** — Check off items in DD-037
 
 ## Estimated Effort
 
