@@ -5977,6 +5977,7 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`drain_jobs`](#drainjobs) | Execute all enqueued test jobs synchronously and return the count. |
 | [`enqueue`](#enqueue) | Enqueue a background job for processing. |
 | [`enqueue_at`](#enqueueat) | Enqueue a job to run at a specific future time. |
+| [`enqueue_batch`](#enqueuebatch) | Enqueue multiple jobs of the same type in one call. |
 | [`enqueue_in`](#enqueuein) | Enqueue a job to run after a delay in seconds. |
 | [`job_status`](#jobstatus) | Get the current status and data for a job by its ID. |
 | [`list_jobs`](#listjobs) | List jobs with optional status and queue filters. |
@@ -6213,6 +6214,39 @@ enqueue_at("SendEmail", now_nanos + 3600_000_000_000, map { "to": "alice@example
 ```
 
 **See also:** `enqueue_in`, `enqueue`
+
+---
+
+#### `enqueue_batch`
+
+```ntnt
+enqueue_batch(job_name: String, args: Array<Map>) -> Result<Array<String>, String>
+```
+
+Enqueue multiple jobs of the same type in one call.
+
+Validates the job name and all payload types upfront before any writes. Then enqueues each payload map from the array. Respects dedup (unique option) and test mode. Returns an array of job IDs. If the job has `unique` set and two items have identical payloads, the same job ID is returned for both — no duplicate job is created. Note: if a KV error occurs mid-batch, earlier jobs are already enqueued (no rollback). This matches the behavior of calling enqueue() in a loop.
+
+**Parameters:**
+
+- `job_name` — The registered job name (e.g., "SendEmail")
+- `args` — Array of payload maps — one job created per element
+
+**Returns:** Result containing array of job IDs, or error
+
+**Examples:**
+
+```ntnt
+enqueue_batch("SendEmail", [map { "to": "alice@test.com" }, map { "to": "bob@test.com" }])  // Enqueue 2 email jobs
+enqueue_batch("ProcessOrder", [])  // Empty array returns Ok([])
+```
+
+**Errors:**
+
+- **TypeError**: enqueue_batch() args[N] must be a map — *Fix: Ensure every array element is a map*
+- **RuntimeError**: Job 'X' is not registered — *Fix: Define the job with: job X on queue { perform(...) { ... } }*
+
+**See also:** `enqueue`, `enqueue_at`, `enqueue_in`
 
 ---
 
