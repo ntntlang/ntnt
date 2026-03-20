@@ -104,6 +104,26 @@ work_jobs(map {
 
 When custom bands are provided, they **replace** the defaults entirely. This gives full control over resource allocation.
 
+### Band Configuration Validation
+
+All validation runs at `work_jobs()` startup before any threads spawn. Fail fast, fail loud.
+
+| Rule | Behavior | Error message |
+|------|----------|---------------|
+| **Overlapping ranges** | Rejected | `Band ranges overlap — "critical" (0-9) and "very_high" (5-15) both cover priorities 5-9` |
+| **Gaps in ranges** | Rejected | `Priority gap — no band covers priorities 5-9. Jobs at these priorities would never be processed.` |
+| **Concurrency = 0** | Rejected | `Band "low" has concurrency 0 — must be at least 1` |
+| **Concurrency < 0** | Rejected | `Band "low" has negative concurrency` |
+| **Concurrency > 32** | Warning (allowed) | `Band "critical" has concurrency 128 — unusually high (sleeping threads are cheap, but verify this is intentional)` |
+| **Poll interval < 100ms** | Rejected | `Band "high" has poll interval 50ms — minimum is 100ms` |
+| **Poll interval ≤ 0** | Rejected | `Band "high" has poll interval 0ms — minimum is 100ms` |
+| **Range min > max** | Rejected | `Band "ops" has invalid range [39, 35] — min must be ≤ max` |
+| **Range outside 0-99** | Rejected | `Band "ultra" has range [0, 150] — priority must be 0-99` |
+
+**Gap detection:** Sort bands by range start, verify `band[N].max + 1 == band[N+1].min` for all adjacent bands and that the full 0-99 range is covered.
+
+**Overlap detection:** Sort bands by range start, verify `band[N].max < band[N+1].min` for all adjacent bands.
+
 ### Runtime Scaling (No Restart)
 
 Workers can be scaled at runtime without stopping the app or dropping jobs:
@@ -249,6 +269,14 @@ For each band: spawn `concurrency` worker threads, each running `worker_loop` wi
 - [ ] Batch with priority: `enqueue_batch` for a job with `priority: 15` → all keys contain `:15:`
 - [ ] Scale up: `scale_workers("low", 4)` → band has 4 workers
 - [ ] Scale down: `scale_workers("low", 1)` → excess workers exit after current job
+- [ ] Named priority: `priority: "high"` → pending key contains `:25:`
+- [ ] Unknown named priority: `priority: "urgent"` → runtime error with valid names listed
+- [ ] Overlapping band ranges → rejected at work_jobs() startup
+- [ ] Gap in band ranges → rejected at work_jobs() startup
+- [ ] Concurrency 0 → rejected
+- [ ] Poll interval below 100ms → rejected
+- [ ] Range outside 0-99 → rejected
+- [ ] Range min > max → rejected
 
 ---
 
