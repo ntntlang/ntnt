@@ -27,6 +27,7 @@ jobs:
           filters: |
             rust:
               - 'src/**'
+              - 'tests/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'build.rs'
