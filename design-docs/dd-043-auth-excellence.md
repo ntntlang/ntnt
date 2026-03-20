@@ -201,99 +201,392 @@ enable_auth([google], map {
 
 ---
 
-## Phase 3: Developer Experience
+## Phase 3: Developer Experience — 2-3x Easier Than Anything Else
 
-**Goal:** Make auth configuration foolproof and observable.
+**Goal:** Make ntnt auth the fastest path from zero to production-secure authenticated app in any language. Not by hiding things, but by making the right thing obvious at every layer.
 
-**Estimated effort:** Small-Medium (2 PRs)
+**Design principle: Progressive Disclosure, Not Progressive Complexity.** Every layer should feel complete on its own. You don't learn Layer 2 exists until you need it. When you do need it, it's one clear step — not "now go read 40 pages of docs."
 
-### 3.1 Auth Health Check Endpoint
-**Priority:** High
+**Estimated effort:** Large (4-5 PRs — this is the DX differentiator)
 
-**Problem:** Developers can't easily verify their auth configuration is correct and secure.
+### The Problem With Auth Today (Every Language)
 
-**Solution:** Add `auth_health` handler that returns a JSON assessment:
+**What developers actually hate about auth** (sourced from Reddit r/nextjs, r/webdev, Auth0 complaints, Clerk reviews):
 
-```ntnt
-get("/auth/health", auth_health)
+1. **"Too many files / too many concepts before hello world."** Auth.js needs auth.ts + middleware.ts + route handler + provider config + adapter setup. Lucia needs db schema + adapter + auth module + middleware + session validation. Laravel Sanctum needs migration + config + middleware group + CORS setup. It's 5-8 files before you see a login page.
+
+2. **"Silent misconfiguration."** Wrong session store URL? Sessions go to memory and vanish on restart — no error. Wrong TTL type? Falls back to default — no warning. Wrong redirect URI? Opaque OAuth error from Google. Developers lose hours to config bugs that could've been caught at startup.
+
+3. **"The docs don't match reality."** Auth.js v5 is an "infinite beta" — docs show v4 patterns, v5 changed everything. Lucia deprecated itself. Firebase auth docs assume the Firebase ecosystem. When the stdlib IS the docs (because it's one function call), there's nothing to get out of sync.
+
+4. **"I can't see what it's doing."** Sessions expire and nobody knows why. Tokens refresh and nobody knows when. The auth system is a black box until something breaks, then you're reading source code to understand what happened.
+
+5. **"Middleware is confusing."** Which routes need auth? What about API routes vs page routes? Public routes? The mental model of "this middleware runs before everything and decides who gets in" is simple in theory, complex in every implementation.
+
+### The ntnt Answer: Four Layers, Each Complete
+
+```
+Layer 0:  enable_auth([google])                           ← works, production-safe
+Layer 1:  enable_auth([google], "balanced")               ← named preset, still one line
+Layer 2:  enable_auth([google], map { "session_ttl": … }) ← custom config
+Layer 3:  oauth_exchange, create_session_from_oauth, …    ← full manual control
 ```
 
-Returns (only in dev mode):
+**Layer 0 is the key insight.** With zero config, `enable_auth` should:
+- Auto-detect the session store from the environment (REDIS_URL → Redis, DATABASE_URL → Postgres, else → SQLite file in DATA_DIR)
+- Generate a session secret from a hash of the machine ID + app path (stable across restarts in dev, warns in prod to set a real one)
+- Use sane defaults (30-day sessions, 90-day refresh, PKCE, CSRF, HttpOnly+Secure+SameSite)
+- Auto-register `/auth/{provider}`, `/auth/{provider}/callback`, `/auth/logout` routes
+- Print a clear startup summary of what it configured
+
+**The developer writes 4 lines, not 15:**
+
+```ntnt
+import { oauth, enable_auth } from "std/auth"
+load_env(".env")
+enable_auth([oauth("google", get_env("GOOGLE_CLIENT_ID"), get_env("GOOGLE_CLIENT_SECRET"))])
+listen(8080)
+```
+
+That's it. Protected routes, session management, CSRF, PKCE, token refresh, cookie security — all automatic. The `.env` file has two values: `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. Nothing else required.
+
+### 3.1 Zero-Config Defaults (Layer 0)
+**Priority:** Critical — this is the headline feature
+
+**What happens when you call `enable_auth` with no config map:**
+
+| Config | Auto-detected from | Default |
+|--------|-------------------|---------|
+| `session_store` | `REDIS_URL` env → Redis; `DATABASE_URL` env → Postgres; else → `./data/sessions.db` (SQLite) | SQLite |
+| `session_secret` | `AUTH_SESSION_SECRET` env; else → derive from machine ID + app path | Derived (warns in prod) |
+| `session_ttl` | — | 30 days |
+| `refresh_ttl` | — | 90 days |
+| `idle_timeout` | — | 7 days |
+| `sliding` | — | true |
+| `cookie_secure` | `NTNT_ENV` = production → true; else → false | Auto |
+| `cookie_name` | — | `"_session"` (generic, no framework fingerprinting) |
+| `after_login` | — | `"/"` |
+| `after_logout` | — | `"/login"` |
+| `after_failure` | — | `"/login?error=auth_failed"` |
+| `store_tokens` | — | true |
+
+- [ ] Implement env-based session store auto-detection in `enable_auth`
+- [ ] Implement deterministic dev secret derivation (hash of hostname + cwd + "ntnt-dev-session")
+- [ ] Print startup warning when using derived secret: `[auth] ⚠ Using dev session secret. Set AUTH_SESSION_SECRET for production.`
+- [ ] Change default cookie name from `"ntnt_session"` to `"_session"`
+- [ ] Set `idle_timeout: 7 days` and `sliding: true` as defaults (Phase 1.2 prerequisite)
+
+### 3.2 Auto-Route Registration
+**Priority:** Critical — eliminates boilerplate files
+
+**Problem:** Every ntnt app with auth currently needs these 3 lines:
+```ntnt
+get("/auth/{provider}", auth_start)
+get("/auth/{provider}/callback", auth_callback)
+post("/auth/logout", auth_logout)
+```
+
+These are the same in every app. They're never customized. They're boilerplate.
+
+**Solution:** `enable_auth` registers them automatically. If the developer wants custom paths, they override:
+
+```ntnt
+// Auto-registers /auth/google, /auth/google/callback, /auth/logout
+enable_auth([google])
+
+// Custom paths (rare):
+enable_auth([google], map {
+    "auth_prefix": "/login/oauth",    // → /login/oauth/google, /login/oauth/google/callback
+    "logout_path": "/api/logout",     // → POST /api/logout
+    "auto_routes": false              // disable auto-registration entirely, wire your own
+})
+```
+
+- [ ] Register OAuth routes inside `enable_auth` by default
+- [ ] Configurable `auth_prefix` (default: `"/auth"`)
+- [ ] Configurable `logout_path` (default: `"/auth/logout"`)
+- [ ] `auto_routes: false` to opt out completely
+- [ ] Detect conflict: if the app manually registers the same routes, warn instead of crash
+- [ ] Print registered routes in startup log
+
+### 3.3 Startup Config Summary
+**Priority:** High — makes the invisible visible
+
+**Problem:** After `enable_auth`, the developer has no idea what was actually configured. When sessions expire unexpectedly, there's no breadcrumb to trace back to config.
+
+**Solution:** Always print a startup summary. Not behind a flag — always:
+
+```
+┌─ Auth ─────────────────────────────────────┐
+│ Provider:  google (PKCE ✓)                 │
+│ Sessions:  Redis (redis://localhost:6379)   │
+│ TTL:       30d session, 7d idle (sliding)   │
+│ Refresh:   90d (auto-refresh ✓)            │
+│ Cookie:    _session (Secure, HttpOnly, Lax) │
+│ CSRF:      enabled                          │
+│ Routes:    /auth/google → login             │
+│            /auth/google/callback            │
+│            POST /auth/logout                │
+├─ Warnings ─────────────────────────────────┤
+│ ⚠ Using dev session secret                 │
+│   → Set AUTH_SESSION_SECRET in production   │
+└────────────────────────────────────────────┘
+```
+
+In production (no warnings):
+```
+[auth] ✓ google (PKCE) | Redis | 30d/7d sliding | Secure
+```
+
+This is the first thing a developer sees after `enable_auth`. No mystery. No black box.
+
+- [ ] Build the summary printer in `init_auth`
+- [ ] Dev mode: boxed format with full details + warnings
+- [ ] Production mode: single-line compact format
+- [ ] Include every config value that was set (explicit or default)
+- [ ] Flag any value that's using a default with a subtle marker
+
+### 3.4 Typed Config Validation with Actionable Errors
+**Priority:** High — would have caught the `session_ttl: 3600` staging incident
+
+**Problem:** Passing wrong types to `enable_auth` config map fails silently (falls back to defaults). Passing valid types with suspicious values also fails silently.
+
+**Solution:** Two layers of validation:
+
+**Type validation:**
+```
+[auth] ✗ session_ttl: expected Int, got String "3600" — using default 2592000
+        Fix: "session_ttl": 3600  (without quotes)
+```
+
+**Range validation (warnings, not errors):**
+```
+[auth] ⚠ session_ttl: 3600 (1 hour) is unusually short.
+        Common values: 86400 (1 day), 2592000 (30 days), 7776000 (90 days)
+
+[auth] ⚠ session_ttl: 31536000 (365 days) exceeds recommended maximum.
+        OWASP recommends absolute session lifetime ≤ 90 days for sensitive apps.
+```
+
+**Consistency validation:**
+```
+[auth] ⚠ refresh_ttl (7 days) is shorter than session_ttl (30 days).
+        Refresh tokens can't extend sessions past the session TTL.
+        Fix: Set refresh_ttl > session_ttl, or disable refresh (store_tokens: false)
+```
+
+- [ ] Add type validation for every config field in `enable_auth` (Int, String, Bool, URL)
+- [ ] Add range validation: suspiciously short (<5 min), suspiciously long (>365 days)
+- [ ] Add consistency validation: refresh_ttl vs session_ttl, idle_timeout vs session_ttl
+- [ ] Log clear fix suggestions with example values
+- [ ] Never error on valid types with unusual values — warn only (the developer may know what they're doing)
+- [ ] In production: suppress range/consistency warnings (they've been seen in dev)
+
+### 3.5 Auth Health Check Endpoint
+**Priority:** Medium
+
+**Problem:** Developers can't verify auth config is correct without logging in and waiting for something to break.
+
+**Solution:** Add `auth_health` handler — automatically registered in dev mode:
+
+```
+GET /auth/health  (dev mode only, auto-registered)
+```
+
+Returns:
 ```json
 {
     "status": "healthy",
-    "providers": ["google"],
-    "session_store": "redis",
-    "cookie_secure": true,
-    "csrf_enabled": true,
-    "pkce_enabled": true,
-    "session_ttl": 2592000,
-    "refresh_enabled": true,
-    "sliding_sessions": false,
-    "active_sessions": 42,
-    "warnings": [
-        "session_secret is using dev default — set a secure random secret for production"
-    ]
+    "providers": [{"name": "google", "pkce": true, "oidc": true}],
+    "session_store": {"type": "redis", "connected": true, "active_sessions": 42},
+    "config": {
+        "session_ttl": 2592000,
+        "refresh_ttl": 7776000,
+        "idle_timeout": 604800,
+        "sliding": true,
+        "cookie_secure": false,
+        "csrf_enabled": true
+    },
+    "warnings": ["Using dev session secret"],
+    "test_login_url": "/auth/google"
 }
 ```
 
-- [ ] Add `auth_health` handler function
-- [ ] Only enabled when `NTNT_ENV != production` (security: don't expose config in prod)
-- [ ] Check for common misconfigurations and emit warnings
-- [ ] Include session store health (can connect to Redis/PG?)
+- [ ] Auto-register `/auth/health` GET route in dev mode
+- [ ] Include session store connectivity check
+- [ ] Include active session count
+- [ ] Include full resolved config (so you can see what defaults were applied)
+- [ ] Include `test_login_url` for convenience
+- [ ] Blocked in production (`NTNT_ENV=production` returns 404)
 
-### 3.2 Security Headers Audit
-**Priority:** Medium
+### 3.6 `enable_auth` Presets
+**Priority:** Medium — sugar, not substance, but excellent DX
 
-**Problem:** Apps might misconfigure security headers that affect auth (missing HSTS, bad CSP, etc.).
+**Problem:** Even with good defaults, some apps want "just make it more strict" or "just make it more relaxed" without researching what TTL values mean.
 
-**Solution:** Add warnings to `auth_health` for missing/misconfigured headers:
-- `Strict-Transport-Security` not set → warn (cookies can be intercepted)
-- `Content-Security-Policy` too permissive → note
-- `X-Frame-Options` missing → warn (clickjacking on login page)
-
-- [ ] Scan response headers in health check
-- [ ] Emit actionable warnings with fix suggestions
-
-### 3.3 Typed Config Validation
-**Priority:** Medium
-
-**Problem:** Passing wrong types to `enable_auth` config map fails silently (falls back to defaults). A developer who writes `"session_ttl": "3600"` (string instead of int) gets the default 1-week TTL with no warning.
-
-**Solution:** Validate and warn on type mismatches during `enable_auth`:
-
-```
-[auth] Warning: session_ttl should be Int, got String "3600" — using default 604800
-```
-
-- [ ] Add type validation for all config fields in `enable_auth`
-- [ ] Log warnings for type mismatches (don't error — maintain backward compat)
-- [ ] Suggest fixes in warning messages
-- [ ] Validate value ranges (e.g., `session_ttl < 60` → "Session TTL under 60 seconds is unusually short")
-
-### 3.4 `enable_auth` Presets
-**Priority:** Low
-
-**Problem:** Developers have to manually configure session TTLs, refresh TTLs, sliding windows, etc. Easy to get wrong.
-
-**Solution:** Named presets for common patterns:
+**Solution:** Named presets as the second argument:
 
 ```ntnt
-enable_auth([google], "strict")      // short sessions, no sliding, frequent re-auth
-enable_auth([google], "balanced")    // 30-day sessions, 7-day idle, sliding
-enable_auth([google], "relaxed")     // 90-day sessions, 30-day idle, sliding
-enable_auth([google], map { ... })   // full custom (as today)
+enable_auth([google])                         // defaults = "balanced"
+enable_auth([google], "strict")               // banking app
+enable_auth([google], "relaxed")              // personal dashboard
+enable_auth([google], map { ... })            // full custom
+enable_auth([google], map {                   // preset + override
+    "preset": "strict",
+    "after_login": "/dashboard"
+})
 ```
 
-| Preset | session_ttl | idle_timeout | sliding | max_lifetime | refresh |
-|--------|-------------|--------------|---------|--------------|---------|
-| `strict` | 1 hour | 15 min | true | 24 hours | off |
-| `balanced` | 30 days | 7 days | true | 90 days | on |
-| `relaxed` | 90 days | 30 days | true | 365 days | on |
+| Preset | session_ttl | idle_timeout | sliding | max_lifetime | refresh | description |
+|--------|-------------|--------------|---------|--------------|---------|-------------|
+| `"strict"` | 1 hour | 15 min | true | 24 hours | off | Banking, healthcare, anything PII-heavy |
+| `"balanced"` | 30 days | 7 days | true | 90 days | on | Most web apps (the default) |
+| `"relaxed"` | 90 days | 30 days | true | 365 days | on | Personal tools, dashboards |
 
-- [ ] Define preset configurations
-- [ ] Accept string as second arg to `enable_auth` (detect String vs Map)
-- [ ] Allow preset + overrides: `enable_auth([google], map { "preset": "balanced", "session_ttl": 86400 * 60 })`
+**Presets are transparent:** choosing a preset prints every value it sets in the startup summary, so the developer always knows what they got. No magic.
+
+- [ ] Define preset configurations as const maps
+- [ ] Accept String or Map as second arg to `enable_auth`
+- [ ] `"preset"` key in map applies preset first, then overrides
+- [ ] Startup summary shows `[preset: balanced]` or `[custom]`
+- [ ] Document all presets with use case guidance
+
+### 3.7 Protected Route Pattern — `require_auth` Middleware
+**Priority:** High — simplifies the most common auth question: "which routes need auth?"
+
+**Problem:** The current middleware (`01_auth.tnt`) is custom per-app. Every app re-implements the same logic: check for session, redirect to login, allow public paths. The middleware file is typically 50+ lines of boilerplate that does the exact same thing.
+
+**Solution:** Built-in `require_auth` middleware with route patterns:
+
+```ntnt
+import { require_auth } from "std/auth"
+
+// Protect everything except explicitly public routes
+use_middleware(require_auth(map {
+    "public": ["/", "/login", "/about", "/api/health"],
+    "login_redirect": "/login"
+}))
+```
+
+Or invert — protect specific routes:
+```ntnt
+use_middleware(require_auth(map {
+    "protected": ["/admin/*", "/api/*", "/settings"],
+    "public_api": ["/api/health", "/api/status"],  // API routes return 401, not redirect
+    "login_redirect": "/login"
+}))
+```
+
+**Behavior:**
+- Browser requests (Accept: text/html) → redirect to `login_redirect`
+- API requests (Accept: application/json, or /api/* routes) → return `401 {"error": "Authentication required"}`
+- Glob patterns: `"/admin/*"` matches `/admin/anything`
+- Auth routes (`/auth/*`) are always public (never require auth to log in)
+
+**This replaces the custom middleware file in most apps.** For apps that need custom auth logic, `require_auth` is just a function they don't call — they write their own middleware as before.
+
+- [ ] Implement `require_auth(config)` as a stdlib middleware generator
+- [ ] Support `public` (allowlist) and `protected` (denylist) patterns
+- [ ] Glob matching for route patterns
+- [ ] Smart redirect vs 401 based on Accept header
+- [ ] Always exempt `/auth/*` and health check routes
+- [ ] Return the middleware function (compatible with `use_middleware`)
+
+### 3.8 Login Page Generator
+**Priority:** Low-Medium — saves time but not critical
+
+**Problem:** Every app needs a login page. Most login pages are identical: centered card, "Sign in with Google" button, maybe an error message. Developers copy-paste this from examples or build it from scratch.
+
+**Solution:** Built-in login page that works out of the box:
+
+```ntnt
+import { login_page } from "std/auth"
+
+get("/login", login_page)
+```
+
+Renders a clean, minimal login page with buttons for each configured provider. Handles error display (`?error=auth_failed`). Responsive. No external dependencies.
+
+**Customizable via config:**
+```ntnt
+get("/login", login_page(map {
+    "title": "Welcome to MyApp",
+    "logo": "/static/logo.png",
+    "background": "#f5f5f5",
+    "theme": "dark"
+}))
+```
+
+For apps that want full control: don't use `login_page`. Build your own HTML, link to `/auth/google`. Zero lock-in.
+
+- [ ] Implement `login_page` handler with built-in HTML template
+- [ ] Auto-detect configured providers and render buttons for each
+- [ ] Handle `?error=` query param for error display
+- [ ] Accept optional config map for branding (title, logo, colors, theme)
+- [ ] Responsive, accessible, no external CSS/JS dependencies
+- [ ] Include CSRF token in any form elements
+
+### Putting It Together: The Full Competitive Comparison
+
+**Auth.js v5 (Next.js) — minimum viable auth:**
+```
+1. npm install next-auth @auth/core
+2. Create auth.ts (config + providers + adapter)
+3. Create app/api/auth/[...nextauth]/route.ts (route handler)
+4. Create middleware.ts (protected routes)
+5. Add NEXTAUTH_SECRET to .env
+6. Add provider credentials to .env
+7. Set up database adapter (Prisma/Drizzle) if you want sessions
+Files: 4 new files + .env changes. ~60-80 lines of config code.
+```
+
+**Lucia v3 — minimum viable auth:**
+```
+1. npm install lucia @lucia-auth/adapter-*
+2. Create database schema (users + sessions tables)
+3. Run migration
+4. Create lib/auth.ts (Lucia instance + adapter)
+5. Create login route handler
+6. Create callback route handler  
+7. Create middleware for session validation
+8. Create logout handler
+Files: 5-7 new files + migration. ~100-150 lines of auth code.
+```
+
+**Laravel Sanctum — minimum viable auth:**
+```
+1. composer require laravel/sanctum
+2. php artisan vendor:publish --provider="Laravel\Sanctum\SanctumServiceProvider"
+3. php artisan migrate
+4. Add Sanctum middleware to api middleware group
+5. Configure CORS for SPA
+6. Add Socialite for OAuth (separate package)
+Files: config changes across 3-4 files + migration. ~40-60 lines.
+```
+
+**ntnt today (v0.4.6):**
+```
+1. Add 2 env vars to .env (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET)
+2. Add ~15 lines to server.tnt (imports, oauth, enable_auth, route registration)
+3. Create middleware/01_auth.tnt (~50 lines of route protection)
+4. Create login page view
+Files: 2 files modified, 1 new middleware, 1 new view. ~70 lines.
+```
+
+**ntnt after Phase 3:**
+```
+1. Add 2 env vars to .env (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET)
+2. Add 4 lines to server.tnt:
+   import { oauth, enable_auth, require_auth, login_page } from "std/auth"
+   enable_auth([oauth("google", get_env("GOOGLE_CLIENT_ID"), get_env("GOOGLE_CLIENT_SECRET"))])
+   use_middleware(require_auth(map { "public": ["/", "/login"] }))
+   get("/login", login_page)
+Files: 1 file modified, 0 new files. 4 lines of auth code.
+```
+
+**That's the 3x improvement.** From ~70 lines across 4 files → 4 lines in 1 file. Zero boilerplate files. Zero middleware files. Zero custom login page HTML. And every security feature is still there — PKCE, CSRF, signed cookies, auto-refresh — just automatic.
+
+**The escape hatch is always there:** any of these automatic behaviors can be overridden by passing config, or disabled entirely with `auto_routes: false`. You can always go back to "I'll wire everything manually." But you shouldn't have to.
 
 ---
 
@@ -448,17 +741,20 @@ These are features that other auth systems offer but don't belong in a language 
 | Order | Phase | Feature | Why This Order |
 |-------|-------|---------|----------------|
 | **0** | 5.1 | Safari ITP A/B test | Must validate before building more |
-| **1** | 1.1 | Session rotation on auth | Critical security gap |
-| **2** | 1.2 + 1.3 | Sliding sessions + absolute cap | Most-requested session feature |
-| **3** | 2.1 | Refresh token rotation | RFC 9700 compliance |
-| **4** | 3.3 | Typed config validation | Prevents misconfig (like the 3600 incident) |
-| **5** | 3.1 | Auth health check | DX, catches issues early |
-| **6** | 4.1 | Device-aware sessions | Differentiator |
-| **7** | 4.2 | Session revocation cascade | Natural follow-on to 4.1 |
-| **8** | 3.4 | Presets | Polish |
-| **9** | 4.3 | Suspicious activity | Advanced security |
-| **10** | 4.4 | Remember me | Nice-to-have |
-| **11** | 5.2 | Module split | Housekeeping when needed |
+| **1** | 3.1 + 3.2 + 3.3 | Zero-config defaults + auto-routes + startup summary | The headline DX improvement — changes the first impression |
+| **2** | 3.4 | Typed config validation | Prevents misconfig (like the 3600 incident) |
+| **3** | 3.7 | `require_auth` middleware | Eliminates the biggest boilerplate file |
+| **4** | 1.1 | Session rotation on auth | Critical security gap |
+| **5** | 1.2 + 1.3 | Sliding sessions + absolute cap | Prerequisite for presets |
+| **6** | 3.6 | Presets | Builds on sliding sessions, gives the "strict/balanced/relaxed" UX |
+| **7** | 2.1 | Refresh token rotation | RFC 9700 compliance |
+| **8** | 3.5 | Auth health check endpoint | DX, catches issues early |
+| **9** | 3.8 | Login page generator | Nice DX, low effort |
+| **10** | 4.1 | Device-aware sessions | Differentiator |
+| **11** | 4.2 | Session revocation cascade | Natural follow-on to 4.1 |
+| **12** | 4.3 | Suspicious activity | Advanced security |
+| **13** | 4.4 | Remember me | Nice-to-have |
+| **14** | 5.2 | Module split | Housekeeping when needed |
 
 ---
 
@@ -481,12 +777,21 @@ These are features that other auth systems offer but don't belong in a language 
 | Suspicious activity | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | TOTP/MFA | ✅ | ✅ | ❌ | ❌¹ | ❌ | ❌³ |
 | ITP workaround | ✅ | ✅⁴ | ❌ | ❌ | ❌ | ❌ |
+| **Zero-config setup** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Auto route registration** | ❌ | ✅ | ✅⁵ | ❌ | ❌ | ✅ |
+| **Startup config summary** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Config validation** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Built-in route protection** | ❌ | ✅ | ✅⁶ | ❌ | ✅ | ✅ |
+| **Built-in login page** | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| **0 boilerplate files** | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | One-line setup | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
 
 ¹ Lucia is sessions-only — OAuth/tokens/MFA are app-level  
 ² Requires additional packages (Socialite, django-allauth)  
 ³ Requires django-otp  
 ⁴ Pending A/B validation — may be removed if unnecessary  
+⁵ Auth.js uses file-system convention (`[...nextauth]/route.ts`) — auto but requires specific file structure  
+⁶ Auth.js middleware.ts works but is a separate file with its own config — not integrated into the auth call  
 
 ---
 
