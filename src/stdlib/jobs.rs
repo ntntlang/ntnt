@@ -653,7 +653,10 @@ fn enqueue_internal(
                     return Ok(Value::ok(Value::String(existing_id)));
                 }
                 _ => {
-                    // Key vanished between set_nx and get (TTL race) — fall through.
+                    // Key vanished between set_nx and get (TTL race).
+                    // Re-attempt claiming so subsequent enqueues see a live dedup entry.
+                    let _ =
+                        kv::kv_set_nx(&kv_handle, dk, &Value::String(job_id.clone()), unique_secs);
                 }
             }
         }
@@ -2715,7 +2718,10 @@ pub fn init() -> HashMap<String, Value> {
                     .map(|b| b.clone())
                     .unwrap_or_default();
 
-                let stats_map_guard = JOB_RUNTIME.band_stats.read();
+                let stats_map_guard = JOB_RUNTIME
+                    .band_stats
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
                 let task_ids_guard = JOB_RUNTIME.band_worker_task_ids.lock();
 
                 let mut band_entries = Vec::new();
@@ -2747,44 +2753,40 @@ pub fn init() -> HashMap<String, Value> {
                     entry.insert("workers".to_string(), Value::Int(worker_count as i64));
 
                     // Atomic counters
-                    if let Ok(ref sm) = stats_map_guard {
-                        if let Some(stats) = sm.get(&band.name) {
-                            entry.insert(
-                                "completed".to_string(),
-                                Value::Int(
-                                    stats.completed.load(std::sync::atomic::Ordering::Relaxed)
-                                        as i64,
-                                ),
-                            );
-                            entry.insert(
-                                "failed".to_string(),
-                                Value::Int(
-                                    stats.failed.load(std::sync::atomic::Ordering::Relaxed) as i64
-                                ),
-                            );
-                            entry.insert(
-                                "active".to_string(),
-                                Value::Int(
-                                    stats.active.load(std::sync::atomic::Ordering::Relaxed) as i64
-                                ),
-                            );
-                            let total_ms = stats
-                                .total_duration_ms
-                                .load(std::sync::atomic::Ordering::Relaxed);
-                            let completed =
-                                stats.completed.load(std::sync::atomic::Ordering::Relaxed);
-                            let avg_ms = if completed > 0 {
-                                total_ms / completed
-                            } else {
-                                0
-                            };
-                            entry.insert("avg_duration_ms".to_string(), Value::Int(avg_ms as i64));
+                    if let Some(stats) = stats_map_guard.get(&band.name) {
+                        entry.insert(
+                            "completed".to_string(),
+                            Value::Int(
+                                stats.completed.load(std::sync::atomic::Ordering::Relaxed) as i64
+                            ),
+                        );
+                        entry.insert(
+                            "failed".to_string(),
+                            Value::Int(
+                                stats.failed.load(std::sync::atomic::Ordering::Relaxed) as i64
+                            ),
+                        );
+                        entry.insert(
+                            "active".to_string(),
+                            Value::Int(
+                                stats.active.load(std::sync::atomic::Ordering::Relaxed) as i64
+                            ),
+                        );
+                        let total_ms = stats
+                            .total_duration_ms
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        let completed = stats.completed.load(std::sync::atomic::Ordering::Relaxed);
+                        let avg_ms = if completed > 0 {
+                            total_ms / completed
                         } else {
-                            entry.insert("completed".to_string(), Value::Int(0));
-                            entry.insert("failed".to_string(), Value::Int(0));
-                            entry.insert("active".to_string(), Value::Int(0));
-                            entry.insert("avg_duration_ms".to_string(), Value::Int(0));
-                        }
+                            0
+                        };
+                        entry.insert("avg_duration_ms".to_string(), Value::Int(avg_ms as i64));
+                    } else {
+                        entry.insert("completed".to_string(), Value::Int(0));
+                        entry.insert("failed".to_string(), Value::Int(0));
+                        entry.insert("active".to_string(), Value::Int(0));
+                        entry.insert("avg_duration_ms".to_string(), Value::Int(0));
                     }
 
                     band_entries.push(Value::Map(entry));
