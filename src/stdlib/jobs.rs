@@ -695,16 +695,30 @@ fn enqueue_internal(
 
     // Add priority and band name to job data
     job_data.insert("priority".to_string(), Value::Int(priority as i64));
-    let band_name = if priority <= 9 {
-        "critical"
-    } else if priority <= 39 {
-        "high"
-    } else if priority <= 69 {
-        "normal"
-    } else {
-        "low"
+    // Derive band name from active band config (if workers are running),
+    // falling back to default band ranges when no workers are active yet.
+    let band_name = {
+        let active = JOB_RUNTIME
+            .active_bands
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if active.is_empty() {
+            // No workers started yet — use default band ranges
+            let defaults = default_bands();
+            defaults
+                .iter()
+                .find(|b| priority >= b.min_priority && priority <= b.max_priority)
+                .map(|b| b.name.clone())
+                .unwrap_or_else(|| "unknown".to_string())
+        } else {
+            active
+                .iter()
+                .find(|b| priority >= b.min_priority && priority <= b.max_priority)
+                .map(|b| b.name.clone())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
     };
-    job_data.insert("band".to_string(), Value::String(band_name.to_string()));
+    job_data.insert("band".to_string(), Value::String(band_name));
 
     // Store scheduled_at if provided, and set status to "scheduled" (not "pending")
     // so the CLI can distinguish between ready-to-run and future-dated jobs.
@@ -1463,6 +1477,19 @@ fn validate_bands(bands: &[BandConfig]) -> Result<()> {
                 )
                 .as_bytes(),
             );
+        }
+    }
+
+    // Check for duplicate band names
+    {
+        let mut seen = std::collections::HashSet::new();
+        for band in bands {
+            if !seen.insert(&band.name) {
+                return Err(IntentError::runtime_error(format!(
+                    "Duplicate band name \"{}\". Band names must be unique.",
+                    band.name
+                )));
+            }
         }
     }
 
@@ -2619,7 +2646,18 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 }
 
-                Ok(Value::Unit)
+                // Update active_bands concurrency to reflect the new count
+                {
+                    let mut active = JOB_RUNTIME
+                        .active_bands
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if let Some(band) = active.iter_mut().find(|b| b.name == band_name) {
+                        band.concurrency = target_count;
+                    }
+                }
+
+                Ok(Value::ok(Value::Unit))
             },
         },
     );
