@@ -712,13 +712,20 @@ impl RedisKV {
             table.sort(keys)
             local floor_val = ARGV[2]
             local ceiling = ARGV[3]
+            local past_floor = (floor_val == '')
             for _, key in ipairs(keys) do
                 -- Skip internal type metadata keys
                 if not string.find(key, ':__type$') then
-                    -- Apply floor filter: skip keys below floor
-                    if floor_val ~= '' and key < floor_val then
-                        -- key is below floor, skip
-                    elseif ceiling ~= '' and key > ceiling then
+                    -- Floor filter: keys are sorted ascending, so once we pass floor
+                    -- all subsequent keys are also past it — stop checking
+                    if not past_floor then
+                        if key < floor_val then
+                            -- key is below floor, skip
+                            goto continue
+                        end
+                        past_floor = true
+                    end
+                    if ceiling ~= '' and key > ceiling then
                         -- Early exit: all remaining keys exceed ceiling (sorted ascending)
                         break
                     else
@@ -735,6 +742,7 @@ impl RedisKV {
                         end
                     end
                 end
+                ::continue::
             end
             return nil
         "#;

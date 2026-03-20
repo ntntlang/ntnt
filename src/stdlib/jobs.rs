@@ -2615,7 +2615,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     // Remove corresponding task IDs (best-effort — IDs may already be gone)
                     if ids.len() > target_count {
-                        ids.drain(target_count..excess.min(ids.len()) + target_count);
+                        ids.drain(target_count..ids.len());
                     }
                 }
 
