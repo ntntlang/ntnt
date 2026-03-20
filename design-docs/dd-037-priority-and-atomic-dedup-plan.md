@@ -142,10 +142,43 @@ let bands = worker_status()
 
 Uses the existing ConcurrencyRuntime cancellation mechanism — `is_current_task_cancelled()` is already checked in every worker loop iteration.
 
-CLI equivalent (talks to running app via HTTP):
+CLI equivalent (talks to running app via socket):
 ```bash
 ntnt workers scale low 8
 ntnt workers status
+```
+
+### `ntnt workers status` Output
+
+```
+Band        Workers  Active  Pending  Completed  Failed  Avg Time
+──────────  ───────  ──────  ───────  ─────────  ──────  ────────
+critical    4        1       3        1,247      12      45ms
+high        3        0       0        8,831      34      120ms
+normal      2        2       847      42,006     198     340ms
+low         1        0      3,291     5,102      41      1.2s
+
+Total: 10 workers │ 4,141 pending │ 57,186 completed │ 285 failed
+Uptime: 4h 23m │ Throughput: 3.6 jobs/sec
+```
+
+- **Workers** — configured thread count for the band
+- **Active** — currently executing a job right now
+- **Pending** — jobs waiting in the queue (scoped to band's priority range)
+- **Completed** — total jobs completed since startup
+- **Failed** — total jobs that errored/died since startup
+- **Avg Time** — average execution duration for completed jobs in this band
+
+The programmatic equivalent (`worker_status()`) returns the same data as an array of maps:
+
+```ntnt
+let bands = worker_status()
+// → [
+//   map { "name": "critical", "workers": 4, "active": 1, "pending": 3,
+//         "completed": 1247, "failed": 12, "avg_ms": 45 },
+//   map { "name": "high", ... },
+//   ...
+// ]
 ```
 
 ### DX — Job Definition
