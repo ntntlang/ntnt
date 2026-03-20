@@ -106,13 +106,34 @@ ntnt workers status
 
 ### DX — Job Definition
 
-Priority is optional, per-job-type:
+Priority is optional, per-job-type. Use **named priorities** (the default experience):
 
 ```ntnt
-job SendEmail on emails (priority: 15, retry: 3) { ... }     // high band
-job CleanupLogs on maintenance (priority: 85) { ... }         // low band
-job ProcessOrder on orders { ... }                             // default: 50 (normal)
+job SendEmail on emails (priority: "high", retry: 3) { ... }
+job ProcessPayment on payments (priority: "critical") { ... }
+job CleanupLogs on maintenance (priority: "low") { ... }
+job ProcessOrder on orders { ... }   // defaults to "normal"
 ```
+
+Named priorities map to midpoints of their band's range:
+
+| Name | Numeric value | Band range |
+|------|--------------|------------|
+| `"critical"` | 5 | 0-9 |
+| `"high"` | 25 | 10-39 |
+| `"normal"` | 50 | 40-69 |
+| `"low"` | 85 | 70-99 |
+
+Midpoints leave room on either side for fine-grained control when needed.
+
+**Advanced: raw numeric priorities** — only for power users defining custom bands:
+
+```ntnt
+job ChargePayment on payments (priority: 10) { ... }    // top of high band
+job SendReceipt on emails (priority: 38) { ... }         // bottom of high band
+```
+
+Most developers never need to see a number. The named priorities are the API.
 
 ### Implementation Changes
 
@@ -135,14 +156,24 @@ pub fn kv_claim(
 
 ```rust
 let priority = match job_def.options.get("priority") {
+    // Named priorities → map to midpoints
+    Some(JobOptionValue::String(s)) => match s.as_str() {
+        "critical" => 5,
+        "high" => 25,
+        "normal" => 50,
+        "low" => 85,
+        other => return Err(format!("Unknown priority '{}'. Use: critical, high, normal, low (or 0-99)", other)),
+    },
+    // Numeric priorities → validate range
     Some(JobOptionValue::Int(p)) if *p >= 0 && *p <= 99 => *p as u8,
-    Some(JobOptionValue::Int(p)) => return Err(...),  // out of range
-    _ => 50,  // default
+    Some(JobOptionValue::Int(p)) => return Err(format!("Priority must be 0-99, got {}", p)),
+    _ => 50,  // default = normal
 };
 let pending_key = format!("jobs:pending:{:02}:{}:{}", priority, pending_ts, job_id);
 ```
 
 Also store priority in job_data: `job_data.insert("priority", Value::Int(priority))`.
+Also store the band name: `job_data.insert("band", Value::String(band_name_for(priority)))`.
 
 #### 3. `worker_loop` — Band-aware claiming (src/stdlib/jobs.rs)
 
