@@ -269,6 +269,37 @@ impl SQLiteKV {
         Ok(())
     }
 
+    /// Set a key only if it doesn't already exist (atomic NX operation).
+    ///
+    /// First deletes any expired entry for the key, then attempts INSERT OR IGNORE.
+    /// Returns `Ok(true)` if the key was set, `Ok(false)` if it already existed (and is not expired).
+    pub fn set_nx(&self, key: &str, value: &Value, ttl_seconds: Option<i64>) -> Result<bool> {
+        let now = now_unix();
+
+        // Delete any expired entry for this key first (treat expired as non-existent)
+        self.conn
+            .execute(
+                "DELETE FROM _kv WHERE key = ? AND expires_at IS NOT NULL AND expires_at <= ?",
+                params![key, now],
+            )
+            .map_err(|e| {
+                IntentError::runtime_error(format!("KV set_nx delete expired error: {}", e))
+            })?;
+
+        let (serialized, type_hint) = serialize_value(value);
+        let expires_at = ttl_seconds.map(|ttl| now + ttl);
+
+        let changes = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO _kv (key, value, type, expires_at) VALUES (?, ?, ?, ?)",
+                params![key, serialized, type_hint, expires_at],
+            )
+            .map_err(|e| IntentError::runtime_error(format!("KV set_nx error: {}", e)))?;
+
+        Ok(changes > 0)
+    }
+
     /// Delete a key
     pub fn del(&self, key: &str) -> Result<bool> {
         let changes = self
@@ -382,9 +413,17 @@ impl SQLiteKV {
     /// Atomically claim the first key matching a prefix: SELECT + DELETE in one transaction.
     /// Returns the key and its raw (value, type) pair, or None if no matching key exists.
     ///
+    /// `floor`: if provided, only claim keys where `key >= floor`. Used by band workers
+    /// to restrict claims to their priority range.
+    ///
     /// `ceiling`: if provided, only claim keys where `key <= ceiling`. This filters
     /// future-scheduled jobs at the SQL level — no claim+re-enqueue cycle needed.
-    pub fn claim(&self, prefix: &str, ceiling: Option<&str>) -> Result<Option<(String, Value)>> {
+    pub fn claim(
+        &self,
+        prefix: &str,
+        floor: Option<&str>,
+        ceiling: Option<&str>,
+    ) -> Result<Option<(String, Value)>> {
         let now = now_unix();
         let pattern = format!("{}%", prefix);
 
@@ -393,18 +432,29 @@ impl SQLiteKV {
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| IntentError::runtime_error(format!("KV claim begin error: {}", e)))?;
 
-        let row: std::result::Result<(String, String, String), rusqlite::Error> = match ceiling {
-            Some(ceil) => self.conn.query_row(
-                "SELECT key, value, type FROM _kv WHERE key LIKE ? AND key <= ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT 1",
-                params![pattern, ceil, now],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            ),
-            None => self.conn.query_row(
-                "SELECT key, value, type FROM _kv WHERE key LIKE ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT 1",
-                params![pattern, now],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            ),
-        };
+        let row: std::result::Result<(String, String, String), rusqlite::Error> =
+            match (floor, ceiling) {
+                (Some(fl), Some(ceil)) => self.conn.query_row(
+                    "SELECT key, value, type FROM _kv WHERE key LIKE ? AND key >= ? AND key <= ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT 1",
+                    params![pattern, fl, ceil, now],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                ),
+                (Some(fl), None) => self.conn.query_row(
+                    "SELECT key, value, type FROM _kv WHERE key LIKE ? AND key >= ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT 1",
+                    params![pattern, fl, now],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                ),
+                (None, Some(ceil)) => self.conn.query_row(
+                    "SELECT key, value, type FROM _kv WHERE key LIKE ? AND key <= ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT 1",
+                    params![pattern, ceil, now],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                ),
+                (None, None) => self.conn.query_row(
+                    "SELECT key, value, type FROM _kv WHERE key LIKE ? AND (expires_at IS NULL OR expires_at > ?) ORDER BY key LIMIT 1",
+                    params![pattern, now],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                ),
+            };
 
         match row {
             Ok((key, value, type_hint)) => {
@@ -511,6 +561,34 @@ impl RedisKV {
         Ok(())
     }
 
+    /// Set a key only if it doesn't already exist (atomic NX operation).
+    ///
+    /// Uses `SET key value NX [EX ttl]` — atomic in Redis.
+    /// Returns `Ok(true)` if set, `Ok(false)` if the key already existed.
+    pub fn set_nx(&mut self, key: &str, value: &Value, ttl_seconds: Option<i64>) -> Result<bool> {
+        let serialized = serialize_value_envelope(value);
+
+        let result: Option<String> = match ttl_seconds {
+            Some(ttl) => redis::cmd("SET")
+                .arg(key)
+                .arg(&serialized)
+                .arg("NX")
+                .arg("EX")
+                .arg(ttl)
+                .query(&mut self.conn)
+                .map_err(|e| IntentError::runtime_error(format!("Redis set_nx error: {}", e)))?,
+            None => redis::cmd("SET")
+                .arg(key)
+                .arg(&serialized)
+                .arg("NX")
+                .query(&mut self.conn)
+                .map_err(|e| IntentError::runtime_error(format!("Redis set_nx error: {}", e)))?,
+        };
+
+        // Redis returns "OK" if set, nil if key existed
+        Ok(result.as_deref() == Some("OK"))
+    }
+
     /// Delete a key
     pub fn del(&mut self, key: &str) -> Result<bool> {
         let type_key = format!("{}:__type", key);
@@ -609,15 +687,20 @@ impl RedisKV {
     /// Uses a Lua script executed via EVAL for atomicity — no other Redis command
     /// can interleave, preventing double-claim under concurrent workers.
     ///
+    /// `floor`: if provided, only claim keys where `key >= floor`. Used by band workers
+    /// to restrict claims to their priority range.
+    ///
     /// `ceiling`: if provided, only claim keys where `key <= ceiling`. This filters
     /// future-scheduled jobs at the Redis level.
     pub fn claim(
         &mut self,
         prefix: &str,
+        floor: Option<&str>,
         ceiling: Option<&str>,
     ) -> Result<Option<(String, Value)>> {
         let pattern = format!("{}*", prefix);
         let ceil = ceiling.unwrap_or("");
+        let fl = floor.unwrap_or("");
 
         // Lua script runs atomically in Redis — KEYS+sort+GET+DEL in one operation.
         // Note: KEYS scans the entire Redis keyspace (O(total keys), not O(matching keys)).
@@ -627,25 +710,29 @@ impl RedisKV {
             local keys = redis.call('KEYS', ARGV[1])
             if #keys == 0 then return nil end
             table.sort(keys)
-            local ceiling = ARGV[2]
+            local floor_val = ARGV[2]
+            local ceiling = ARGV[3]
             for _, key in ipairs(keys) do
-                -- Early exit: if this key (type hint or not) exceeds the ceiling,
-                -- all remaining keys do too (keys are sorted ascending)
-                if ceiling ~= '' and key > ceiling then
-                    break
-                end
                 -- Skip internal type metadata keys
                 if not string.find(key, ':__type$') then
-                    local val = redis.call('GET', key)
-                    if val then
-                        -- Read legacy type hint before deleting
-                        local type_hint = redis.call('GET', key .. ':__type')
-                        redis.call('DEL', key)
-                        redis.call('DEL', key .. ':__type')
-                        if type_hint then
-                            return {key, val, type_hint}
+                    -- Apply floor filter: skip keys below floor
+                    if floor_val ~= '' and key < floor_val then
+                        -- key is below floor, skip
+                    elseif ceiling ~= '' and key > ceiling then
+                        -- Early exit: all remaining keys exceed ceiling (sorted ascending)
+                        break
+                    else
+                        local val = redis.call('GET', key)
+                        if val then
+                            -- Read legacy type hint before deleting
+                            local type_hint = redis.call('GET', key .. ':__type')
+                            redis.call('DEL', key)
+                            redis.call('DEL', key .. ':__type')
+                            if type_hint then
+                                return {key, val, type_hint}
+                            end
+                            return {key, val}
                         end
-                        return {key, val}
                     end
                 end
             end
@@ -656,6 +743,7 @@ impl RedisKV {
             .arg(lua_script)
             .arg(0) // no KEYS args, using ARGV only
             .arg(&pattern)
+            .arg(fl)
             .arg(ceil)
             .query(&mut self.conn)
             .map_err(|e| IntentError::runtime_error(format!("Redis claim error: {}", e)))?;
@@ -1016,6 +1104,73 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                 }
 
                 Ok(Value::ok(Value::Unit))
+            },
+        },
+    );
+
+    // @ntnt set_nx
+    // @module std/kv
+    // @signature set_nx(handle: KVStore, key: String, value: Any, opts?: Map) -> Result<Bool, String>
+    // Set a key only if it doesn't already exist (atomic NX operation).
+    //
+    // Returns Ok(true) if the key was set (it did not exist before), or Ok(false)
+    // if the key already existed. For SQLite, expired keys are treated as non-existent.
+    // For Redis, uses SET NX which is atomic.
+    // @param handle The KV store handle from open()
+    // @param key The key to set
+    // @param value The value to store
+    // @param opts Optional map with "ttl" key (seconds until expiry)
+    // @returns Ok(true) if set, Ok(false) if key existed
+    // @see_also set, get, del
+    // @example set_nx(kv, "lock:job:123", "worker-1") => Ok(true) ~ "Acquire lock"
+    // @example set_nx(kv, "lock:job:123", "worker-2") => Ok(false) ~ "Lock already held"
+    // @example set_nx(kv, "session:abc", data, map { "ttl": 3600 }) ~ "Set with TTL"
+    module.insert(
+        "set_nx".to_string(),
+        Value::NativeFunction {
+            name: "set_nx".to_string(),
+            arity: 3,
+            max_arity: 4,
+            func: |args| {
+                if args.len() < 3 {
+                    return Err(IntentError::type_error(
+                        "set_nx() requires at least 3 arguments (handle, key, value)".to_string(),
+                    ));
+                }
+
+                let key = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "set_nx() key must be a string".to_string(),
+                        ))
+                    }
+                };
+
+                let ttl = if args.len() >= 4 {
+                    match &args[3] {
+                        Value::Map(opts) => match opts.get("ttl") {
+                            Some(Value::Int(n)) => Some(*n),
+                            Some(_) => {
+                                return Err(IntentError::type_error(
+                                    "set_nx() ttl must be an integer".to_string(),
+                                ))
+                            }
+                            None => None,
+                        },
+                        Value::Unit => None,
+                        _ => {
+                            return Err(IntentError::type_error(
+                                "set_nx() opts must be a map".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let was_set = kv_set_nx(&args[0], &key, &args[2], ttl)?;
+                Ok(Value::ok(Value::Bool(was_set)))
             },
         },
     );
@@ -1505,6 +1660,9 @@ pub fn kv_list(handle: &Value, prefix: Option<&str>) -> Result<Vec<String>> {
 /// Returns Some((key, value)) or None if no matching key exists.
 /// The claimed key is deleted from the store.
 ///
+/// `floor`: if provided, only claim keys where `key >= floor`. Used by band workers
+/// to restrict claims to their priority range.
+///
 /// `ceiling`: if provided, only claim keys where `key <= ceiling`. Used by the
 /// job worker to skip future-scheduled jobs without claiming and re-enqueuing.
 ///
@@ -1513,6 +1671,7 @@ pub fn kv_list(handle: &Value, prefix: Option<&str>) -> Result<Vec<String>> {
 pub fn kv_claim(
     handle: &Value,
     prefix: &str,
+    floor: Option<&str>,
     ceiling: Option<&str>,
 ) -> Result<Option<(String, Value)>> {
     let backend = get_backend_type(handle)?;
@@ -1522,14 +1681,38 @@ pub fn kv_claim(
             let kv = kv_arc
                 .lock()
                 .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
-            kv.claim(prefix, ceiling)
+            kv.claim(prefix, floor, ceiling)
         }
         KVBackend::Redis => {
             let kv_arc = get_redis_kv(handle)?;
             let mut kv = kv_arc
                 .lock()
                 .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
-            kv.claim(prefix, ceiling)
+            kv.claim(prefix, floor, ceiling)
+        }
+    }
+}
+
+/// Atomically set a key only if it doesn't already exist.
+///
+/// Returns `Ok(true)` if the key was set, `Ok(false)` if the key already existed.
+/// SQLite: `DELETE` expired + `INSERT OR IGNORE`. Redis: `SET NX [EX ttl]`.
+pub fn kv_set_nx(handle: &Value, key: &str, value: &Value, ttl: Option<i64>) -> Result<bool> {
+    let backend = get_backend_type(handle)?;
+    match backend {
+        KVBackend::SQLite => {
+            let kv_arc = get_sqlite_kv(handle)?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.set_nx(key, value, ttl)
+        }
+        KVBackend::Redis => {
+            let kv_arc = get_redis_kv(handle)?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.set_nx(key, value, ttl)
         }
     }
 }
@@ -1688,26 +1871,26 @@ mod tests {
             .unwrap();
 
         // Claim without ceiling — should get lexicographically first
-        let result = kv.claim("prefix:", None).unwrap();
+        let result = kv.claim("prefix:", None, None).unwrap();
         assert!(result.is_some());
         let (key, val) = result.unwrap();
         assert_eq!(key, "prefix:aaa");
         assert!(matches!(val, Value::String(s) if s == "first"));
 
         // Key should be deleted — second claim gets next key
-        let result = kv.claim("prefix:", None).unwrap();
+        let result = kv.claim("prefix:", None, None).unwrap();
         assert!(result.is_some());
         let (key, _) = result.unwrap();
         assert_eq!(key, "prefix:bbb");
 
         // Third claim
-        let result = kv.claim("prefix:", None).unwrap();
+        let result = kv.claim("prefix:", None, None).unwrap();
         assert!(result.is_some());
         let (key, _) = result.unwrap();
         assert_eq!(key, "prefix:ccc");
 
         // Empty — nothing left
-        let result = kv.claim("prefix:", None).unwrap();
+        let result = kv.claim("prefix:", None, None).unwrap();
         assert!(result.is_none());
     }
 
@@ -1738,19 +1921,19 @@ mod tests {
 
         // Ceiling at timestamp 3000 — should only claim jobs at or before 3000
         let ceiling = "jobs:pending:00000000000000003000:~";
-        let result = kv.claim("jobs:pending:", Some(ceiling)).unwrap();
+        let result = kv.claim("jobs:pending:", None, Some(ceiling)).unwrap();
         assert!(result.is_some());
         let (key, _) = result.unwrap();
         assert!(key.contains("id-1"));
 
         // Second claim — id-2 is still before ceiling
-        let result = kv.claim("jobs:pending:", Some(ceiling)).unwrap();
+        let result = kv.claim("jobs:pending:", None, Some(ceiling)).unwrap();
         assert!(result.is_some());
         let (key, _) = result.unwrap();
         assert!(key.contains("id-2"));
 
         // Third claim — id-future is AFTER ceiling, should not be claimed
-        let result = kv.claim("jobs:pending:", Some(ceiling)).unwrap();
+        let result = kv.claim("jobs:pending:", None, Some(ceiling)).unwrap();
         assert!(result.is_none());
 
         // Verify future job is still in the store
@@ -1763,7 +1946,7 @@ mod tests {
     fn test_sqlite_claim_ceiling_empty_store() {
         let kv = SQLiteKV::new(":memory:").unwrap();
         let result = kv
-            .claim("jobs:pending:", Some("jobs:pending:99999:~"))
+            .claim("jobs:pending:", None, Some("jobs:pending:99999:~"))
             .unwrap();
         assert!(result.is_none());
     }

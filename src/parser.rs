@@ -843,26 +843,18 @@ impl Parser {
         }
     }
 
-    /// Parse a job declaration: `job Name on queue (options) { perform(params) { body } on_failure(params) { body } }`
+    /// Parse a job declaration: `job Name [on queue] (options) { perform(params) { body } on_failure(params) { body } }`
     fn job_declaration(&mut self) -> Result<Statement> {
         let name = self.consume_identifier("Expected job name")?;
 
-        // Parse "on <queue>" — "on" is parsed contextually as an identifier
-        match self.peek() {
+        // Parse optional "on <queue>" — "on" is parsed contextually as an identifier
+        let queue = match self.peek() {
             Some(token) if matches!(&token.kind, TokenKind::Identifier(s) if s == "on") => {
                 self.advance(); // consume "on"
+                self.consume_identifier("Expected queue name after 'on'")?
             }
-            _ => {
-                return Err(IntentError::ParserError {
-                    line: self.current_line(),
-                    column: self.current_column(),
-                    message: "Expected 'on' after job name (e.g., job SendEmail on emails)"
-                        .to_string(),
-                });
-            }
-        }
-
-        let queue = self.consume_identifier("Expected queue name after 'on'")?;
+            _ => "default".to_string(),
+        };
 
         // Parse optional inline options: (retry: 5, timeout: 120)
         let options = if self.match_token(&[TokenKind::LeftParen]) {

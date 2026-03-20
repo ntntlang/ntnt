@@ -5,13 +5,15 @@
 //! ## KV Key Layout
 //!
 //! ```text
-//! jobs:pending:<zero-padded-timestamp>:<id>   →  "" (queue ordering key)
-//! jobs:data:<id>                               →  full job data map (type, queue, payload, status, etc.)
-//! jobs:active:<id>                             →  TTL key for visibility timeout (PR 2b)
+//! jobs:pending:<priority>:<zero-padded-timestamp>:<id>   →  "" (queue ordering key)
+//! jobs:data:<id>                                          →  full job data map (type, queue, payload, status, etc.)
+//! jobs:active:<id>                                        →  TTL key for visibility timeout (PR 2b)
 //! ```
 //!
+//! Priority is a 2-digit zero-padded integer (00-99). Lower = higher priority.
+//! Named priorities: critical=05, high=25, normal=50 (default), low=85.
 //! `list(kv, "jobs:pending:")` returns keys in lexicographic order.
-//! Zero-padded timestamps sort correctly for FIFO ordering.
+//! Zero-padded timestamps sort correctly for FIFO ordering within a band.
 //!
 //! Example usage:
 //! ```ntnt
@@ -39,6 +41,80 @@ use uuid::Uuid;
 // ============================================================================
 // Job Runtime — global singleton (mirrors ConcurrencyRuntime pattern)
 // ============================================================================
+
+/// Configuration for a single worker band.
+///
+/// Each band scans a contiguous range of priorities and spawns its own thread pool.
+#[derive(Debug, Clone)]
+pub struct BandConfig {
+    /// Band name (e.g., "critical", "high", "normal", "low")
+    pub name: String,
+    /// Lower bound of priority range (inclusive, 0-99)
+    pub min_priority: u8,
+    /// Upper bound of priority range (inclusive, 0-99)
+    pub max_priority: u8,
+    /// Number of worker threads for this band
+    pub concurrency: usize,
+    /// Milliseconds between polls when queue is empty
+    pub poll_interval_ms: u64,
+}
+
+impl BandConfig {
+    /// Floor key for kv_claim: first key in this band's range.
+    pub fn floor_key(&self) -> String {
+        format!("jobs:pending:{:02}:", self.min_priority)
+    }
+
+    /// Ceiling key for kv_claim: last claimable key in this band (past due only).
+    pub fn ceiling_key(&self) -> String {
+        format!(
+            "jobs:pending:{:02}:{}:~",
+            self.max_priority,
+            timestamp_key()
+        )
+    }
+}
+
+/// Default worker band configuration (used when work_jobs/work_async gets no "bands" option).
+///
+/// | Band     | Range | Workers | Poll  |
+/// |----------|-------|---------|-------|
+/// | critical | 0-9   | 4       | 1s    |
+/// | high     | 10-39 | 3       | 2s    |
+/// | normal   | 40-69 | 2       | 5s    |
+/// | low      | 70-99 | 1       | 20s   |
+pub fn default_bands() -> Vec<BandConfig> {
+    vec![
+        BandConfig {
+            name: "critical".to_string(),
+            min_priority: 0,
+            max_priority: 9,
+            concurrency: 4,
+            poll_interval_ms: 1_000,
+        },
+        BandConfig {
+            name: "high".to_string(),
+            min_priority: 10,
+            max_priority: 39,
+            concurrency: 3,
+            poll_interval_ms: 2_000,
+        },
+        BandConfig {
+            name: "normal".to_string(),
+            min_priority: 40,
+            max_priority: 69,
+            concurrency: 2,
+            poll_interval_ms: 5_000,
+        },
+        BandConfig {
+            name: "low".to_string(),
+            min_priority: 70,
+            max_priority: 99,
+            concurrency: 1,
+            poll_interval_ms: 20_000,
+        },
+    ]
+}
 
 /// A serializable job option value (Send + Sync safe, no Rc).
 #[derive(Debug, Clone)]
@@ -118,6 +194,25 @@ impl KvHandleInfo {
     }
 }
 
+/// Atomic counters for a single worker band.
+pub struct BandStats {
+    pub completed: std::sync::atomic::AtomicU64,
+    pub failed: std::sync::atomic::AtomicU64,
+    pub active: std::sync::atomic::AtomicU64,
+    pub total_duration_ms: std::sync::atomic::AtomicU64,
+}
+
+impl BandStats {
+    fn new() -> Self {
+        BandStats {
+            completed: std::sync::atomic::AtomicU64::new(0),
+            failed: std::sync::atomic::AtomicU64::new(0),
+            active: std::sync::atomic::AtomicU64::new(0),
+            total_duration_ms: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+}
+
 /// Global job runtime state.
 ///
 /// **Lock discipline (same as ConcurrencyRuntime — NEVER nest):**
@@ -131,6 +226,12 @@ pub struct JobRuntime {
     kv_url: Mutex<String>,
     /// Test queue: when Some, enqueue() collects here instead of writing to KV.
     test_queue: Mutex<Option<Vec<EnqueuedJob>>>,
+    /// Per-band stats: map from band name to atomic counters.
+    pub band_stats: RwLock<HashMap<String, Arc<BandStats>>>,
+    /// Running worker task IDs per band (for scale_workers).
+    pub band_worker_task_ids: Mutex<HashMap<String, Vec<usize>>>,
+    /// Active band configurations (set at work_jobs/work_async startup).
+    pub active_bands: Mutex<Vec<BandConfig>>,
 }
 
 impl JobRuntime {
@@ -140,6 +241,9 @@ impl JobRuntime {
             kv_handle_info: Mutex::new(None),
             kv_url: Mutex::new("sqlite:./jobs.db".to_string()),
             test_queue: Mutex::new(None),
+            band_stats: RwLock::new(HashMap::new()),
+            band_worker_task_ids: Mutex::new(HashMap::new()),
+            active_bands: Mutex::new(Vec::new()),
         }
     }
 
@@ -207,6 +311,26 @@ impl JobRuntime {
         Ok(kv_handle_value)
     }
 
+    /// Get or create band stats for a given band name.
+    pub fn get_or_create_band_stats(&self, band_name: &str) -> Arc<BandStats> {
+        // Try read first
+        if let Ok(stats_map) = self.band_stats.read() {
+            if let Some(stats) = stats_map.get(band_name) {
+                return Arc::clone(stats);
+            }
+        }
+        // Create under write lock
+        if let Ok(mut stats_map) = self.band_stats.write() {
+            stats_map
+                .entry(band_name.to_string())
+                .or_insert_with(|| Arc::new(BandStats::new()))
+                .clone()
+        } else {
+            // Fallback: create a new untracked stats object
+            Arc::new(BandStats::new())
+        }
+    }
+
     /// Reset the runtime (for testing).
     #[cfg(test)]
     pub fn reset(&self) {
@@ -221,6 +345,15 @@ impl JobRuntime {
         }
         if let Ok(mut tq) = self.test_queue.lock() {
             *tq = None;
+        }
+        if let Ok(mut s) = self.band_stats.write() {
+            s.clear();
+        }
+        if let Ok(mut ids) = self.band_worker_task_ids.lock() {
+            ids.clear();
+        }
+        if let Ok(mut ab) = self.active_bands.lock() {
+            ab.clear();
         }
     }
 }
@@ -378,6 +511,32 @@ fn enqueue_internal(
         }
     };
 
+    // Resolve numeric priority from job options
+    // Named: critical=5, high=25, normal=50 (default), low=85
+    // Numeric: 0-99 inclusive
+    let priority: u8 = match job_def.options.get("priority") {
+        Some(JobOptionValue::String(s)) => match s.as_str() {
+            "critical" => 5,
+            "high" => 25,
+            "normal" => 50,
+            "low" => 85,
+            other => {
+                return Err(IntentError::runtime_error(format!(
+                    "Unknown priority '{}'. Use: critical, high, normal, low (or an integer 0-99)",
+                    other
+                )));
+            }
+        },
+        Some(JobOptionValue::Int(p)) if *p >= 0 && *p <= 99 => *p as u8,
+        Some(JobOptionValue::Int(p)) => {
+            return Err(IntentError::runtime_error(format!(
+                "Priority must be 0-99, got {}",
+                p
+            )));
+        }
+        _ => 50, // default: "normal"
+    };
+
     // Dedup: if job has `unique` option, compute deterministic hash and check for existing job.
     // Hash determinism: value_to_json_public converts HashMap to serde_json::Map backed by
     // BTreeMap (no `preserve_order` feature), so keys are sorted automatically.
@@ -491,6 +650,19 @@ fn enqueue_internal(
         job_data.insert(k.clone(), v.to_value());
     }
 
+    // Add priority and band name to job data
+    job_data.insert("priority".to_string(), Value::Int(priority as i64));
+    let band_name = if priority <= 9 {
+        "critical"
+    } else if priority <= 39 {
+        "high"
+    } else if priority <= 69 {
+        "normal"
+    } else {
+        "low"
+    };
+    job_data.insert("band".to_string(), Value::String(band_name.to_string()));
+
     // Store scheduled_at if provided, and set status to "scheduled" (not "pending")
     // so the CLI can distinguish between ready-to-run and future-dated jobs.
     // The worker claims by scanning jobs:pending:* keys — the status field is for display only.
@@ -503,8 +675,9 @@ fn enqueue_internal(
         job_data.insert("dedup_key".to_string(), Value::String(dk.clone()));
     }
 
-    // Build pending key and store it in job data for O(1) cancel_job lookup
-    let pending_key = format!("jobs:pending:{}:{}", pending_ts, job_id);
+    // Build pending key with priority prefix for band-aware worker claim
+    // Format: jobs:pending:<priority_2digit>:<timestamp>:<id>
+    let pending_key = format!("jobs:pending:{:02}:{}:{}", priority, pending_ts, job_id);
     job_data.insert(
         "pending_key".to_string(),
         Value::String(pending_key.clone()),
@@ -565,11 +738,11 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
             break;
         }
 
-        // Attempt to claim a pending job — ceiling filters out future-scheduled jobs
-        // at the KV layer so we never claim+re-enqueue them (no KV churn)
-        // Use '~' (0x7E) as suffix — lexicographically after all UUID chars (0-9, a-f, '-')
-        let now_ceiling = format!("jobs:pending:{}:~", timestamp_key());
-        let claimed = match kv::kv_claim(&kv_handle, "jobs:pending:", Some(&now_ceiling)) {
+        // Attempt to claim a pending job.
+        // Future-scheduled jobs are filtered at the claim level by band workers (via ceiling).
+        // For the legacy no-band worker, the defense-in-depth scheduled_at check
+        // in the body handles future jobs by re-enqueuing them.
+        let claimed = match kv::kv_claim(&kv_handle, "jobs:pending:", None, None) {
             Ok(Some((_pending_key, value))) => value,
             Ok(None) => {
                 // Queue empty — sleep and try again
@@ -919,7 +1092,13 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                         .as_nanos()
                         + (delay_secs as u128) * 1_000_000_000;
                     let future_ts = format!("{:020}", future_nanos);
-                    let new_pending_key = format!("jobs:pending:{}:{}", future_ts, job_id);
+                    // Preserve original priority in retry pending key
+                    let job_priority = match job_data.get("priority") {
+                        Some(Value::Int(p)) => *p as u8,
+                        _ => 50u8,
+                    };
+                    let new_pending_key =
+                        format!("jobs:pending:{:02}:{}:{}", job_priority, future_ts, job_id);
 
                     // Use "retrying" status so CLI can distinguish retry-waiting
                     // jobs from permanently failed or ready-to-run ones. "retrying"
@@ -1196,7 +1375,11 @@ pub fn retry_job_by_id(job_id: &str) -> Result<RetryResult> {
     }
 
     let pending_ts = timestamp_key();
-    let new_pending_key = format!("jobs:pending:{}:{}", pending_ts, job_id);
+    let job_priority = match job_data.get("priority") {
+        Some(Value::Int(p)) => *p as u8,
+        _ => 50u8,
+    };
+    let new_pending_key = format!("jobs:pending:{:02}:{}:{}", job_priority, pending_ts, job_id);
 
     let retry_manually = match job_data.get("retry_manually") {
         Some(Value::Int(n)) => n + 1,
