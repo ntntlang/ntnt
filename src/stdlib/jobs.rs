@@ -553,7 +553,13 @@ fn enqueue_internal(
                 p
             )));
         }
-        _ => 50, // default: "normal"
+        Some(other) => {
+            return Err(IntentError::type_error(format!(
+                "Priority must be a string (\"critical\", \"high\", \"normal\", \"low\") or integer 0-99, got {:?}",
+                other
+            )));
+        }
+        None => 50, // default: "normal"
     };
 
     // Dedup: if job has `unique` option, compute deterministic hash and check for existing job.
@@ -1177,6 +1183,8 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                         + (delay_secs as u128) * 1_000_000_000;
                     let future_ts = format!("{:020}", future_nanos);
                     // Preserve original priority in retry pending key
+                    // Priority was validated at enqueue time — default 50 is defensive
+                    // for any jobs missing the field (shouldn't happen normally)
                     let job_priority = match job_data.get("priority") {
                         Some(Value::Int(p)) => *p as u8,
                         _ => 50u8,
@@ -1764,6 +1772,8 @@ pub fn retry_job_by_id(job_id: &str) -> Result<RetryResult> {
     }
 
     let pending_ts = timestamp_key();
+    // Priority was validated at enqueue time — default 50 is defensive
+    // for any jobs missing the field (shouldn't happen normally)
     let job_priority = match job_data.get("priority") {
         Some(Value::Int(p)) => *p as u8,
         _ => 50u8,
