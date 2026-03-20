@@ -1,45 +1,86 @@
 # DD-037: Priority Queues + Atomic Dedup — Implementation Plan
 
-**Status:** Design approved
-**Parent:** [DD-037 Phase 3](dd-037-phase-3-plan.md)
-**Created:** 2026-03-20
-**Last Updated:** 2026-03-20
+**Status:** Design approved  
+**Parent:** [DD-037 Phase 3](dd-037-phase-3-plan.md)  
+**Created:** 2026-03-20  
+**Last Updated:** 2026-03-20  
 **Branch:** `feat/priority-and-atomic-dedup`
 
 ---
 
-## Feature 1: Priority Queues with Worker Bands
+# Feature 1: Priority Queues with Worker Bands
 
-### Overview
+## The Developer Experience
 
-Jobs support a `priority` option (0-99, lower = higher importance). Default priority is 50.
+### Defining a Job
 
-Workers are organized into **bands** — each band covers a priority range, has its own concurrency (thread count), and its own poll interval. Bands are fully isolated: a critical worker never touches low-priority jobs and vice versa. This prevents starvation and makes scaling obvious.
+The simplest job definition — no queue, no priority, just works:
 
-### Priority Range: 0-99
-
-- **0-99** range gives 100 levels of granularity
-- Two-digit zero-padded in keys for correct lexicographic ordering (`05` < `10` < `50` < `99`)
-- Default priority: **50** (middle of the "normal" band)
-- Validated at enqueue time: values outside 0-99 return a runtime error
-
-### Pending Key Format
-
-**Current:** `jobs:pending:<timestamp>:<id>`
-**New:** `jobs:pending:<priority>:<timestamp>:<id>`
-
-Examples:
-```
-jobs:pending:05:00000170000001:uuid-a   ← priority 5 (critical)
-jobs:pending:50:00000170000002:uuid-b   ← priority 50 (normal default)
-jobs:pending:99:00000170000003:uuid-c   ← priority 99 (low)
+```ntnt
+job SendEmail (retry: 3) {
+    perform(to: String, subject: String) {
+        // send the email
+    }
+}
 ```
 
-Within a band, jobs are FIFO by timestamp. Across bands, each band's workers only see their own range.
+This job gets priority `"normal"` and goes to the `"default"` queue. Workers pick it up automatically.
 
-### Default Bands
+### Adding Priority
 
-Out-of-the-box, `work_jobs()` with no configuration spins up 4 bands with sensible defaults:
+Use named priorities when some jobs matter more than others:
+
+```ntnt
+job ProcessPayment (priority: "critical") { ... }     // processed immediately
+job SendNotification (priority: "high") { ... }        // processed quickly
+job GenerateReport (priority: "low") { ... }           // can pile up, that's fine
+job ProcessOrder { ... }                                // "normal" by default
+```
+
+Four named priorities:
+
+| Priority | Meaning |
+|----------|---------|
+| `"critical"` | Real-time, processed immediately |
+| `"high"` | Important, processed quickly |
+| `"normal"` | Default — where jobs land if unspecified |
+| `"low"` | Batch work, can pile up |
+
+That's the entire API for most apps. No numbers, no configuration.
+
+### Adding Queues (Multi-Machine Scaling)
+
+For single-machine apps (the 90% case), you never touch queues. Jobs go to the `"default"` queue automatically.
+
+When you need horizontal scaling across multiple machines, add an explicit queue:
+
+```ntnt
+job ProcessPayment on payments (priority: "critical") { ... }
+job SendEmail on emails (priority: "high") { ... }
+job GenerateReport { ... }   // queue: "default", priority: "normal"
+```
+
+Then run separate workers per machine, all reading from the same KV store:
+
+```bash
+# Machine A: only payment jobs
+ntnt worker server.tnt --queues=payments
+
+# Machine B: only email jobs
+ntnt worker server.tnt --queues=emails
+
+# Machine C: everything
+ntnt worker server.tnt   # no filter = all queues
+```
+
+### Starting Workers
+
+```ntnt
+// That's it. Default bands, default everything.
+work_jobs()
+```
+
+Out of the box, this spins up 4 worker bands:
 
 | Band | Priority range | Workers | Poll interval | Use case |
 |------|---------------|---------|---------------|----------|
@@ -48,11 +89,81 @@ Out-of-the-box, `work_jobs()` with no configuration spins up 4 bands with sensib
 | normal | 40-69 | 2 | 5s | Default — where jobs land if you don't set priority |
 | low | 70-99 | 1 | 20s | Batch work, cleanup, analytics — can pile up |
 
-10 threads total. All sleep when idle (zero CPU cost). Even a single-core VPS handles this fine.
+10 threads total. All sleep when idle — zero CPU cost.
+
+### Monitoring Workers
+
+```
+$ ntnt workers status
+
+Band        Workers  Active  Pending  Completed  Failed  Avg Time
+──────────  ───────  ──────  ───────  ─────────  ──────  ────────
+critical    4        1       3        1,247      12      45ms
+high        3        0       0        8,831      34      120ms
+normal      2        2       847      42,006     198     340ms
+low         1        0      3,291     5,102      41      1.2s
+
+Total: 10 workers │ 4,141 pending │ 57,186 completed │ 285 failed
+Uptime: 4h 23m │ Throughput: 3.6 jobs/sec
+```
+
+### Scaling at Runtime
+
+Low queue backing up? Scale it without restarting the app:
+
+```ntnt
+scale_workers("low", 8)       // low band now has 8 workers
+scale_workers("critical", 1)  // scale critical down to 1
+```
+
+Or from the CLI:
+
+```bash
+ntnt workers scale low 8
+```
+
+Workers added immediately. Workers removed finish their current job first — no interrupted work.
+
+### Programmatic Status
+
+```ntnt
+let bands = worker_status()
+// → [
+//   map { "name": "critical", "workers": 4, "active": 1, "pending": 3,
+//         "completed": 1247, "failed": 12, "avg_ms": 45 },
+//   map { "name": "high", "workers": 3, "active": 0, "pending": 0,
+//         "completed": 8831, "failed": 34, "avg_ms": 120 },
+//   ...
+// ]
+```
+
+---
+
+## How It Works
+
+### Priority Range: 0-99
+
+- 100 levels of granularity
+- Two-digit zero-padded in KV keys for correct lexicographic ordering (`05` < `10` < `50` < `99`)
+- Default priority: **50** (midpoint of the "normal" band)
+- Named priorities map to band midpoints: critical=5, high=25, normal=50, low=85
+
+### Pending Key Format
+
+**Current:** `jobs:pending:<timestamp>:<id>`  
+**New:** `jobs:pending:<priority>:<timestamp>:<id>`
+
+```
+jobs:pending:05:00000170000001:uuid-a   ← priority 5 (critical band)
+jobs:pending:50:00000170000002:uuid-b   ← priority 50 (normal band)
+jobs:pending:99:00000170000003:uuid-c   ← priority 99 (low band)
+```
+
+Within a band, jobs are FIFO by timestamp. Across bands, each band's workers only see their own range.
 
 ### Worker Band Architecture
 
-Each band spawns its own worker threads. Each worker only claims jobs in its priority range using `kv_claim` with floor+ceiling parameters:
+Each band spawns its own thread pool. Each worker only claims jobs in its band's priority range using `kv_claim` with floor+ceiling parameters:
 
 ```
 Critical workers: floor="jobs:pending:00:"  ceiling="jobs:pending:09:<now>:~"
@@ -65,44 +176,52 @@ Bands are fully isolated. No starvation. When high-priority work is empty, high 
 
 ### How Priorities, Numbers, and Bands Relate
 
-The band range is the primary concept. Everything else is derived:
+The **band range** is the primary concept. Everything else is derived:
 
-1. **Band range** (e.g., 0-9) → defines which jobs a worker pool scans. This controls behavior: concurrency, poll interval.
-2. **Numeric value** (e.g., 5) → placed into the pending key. Determines FIFO ordering *within* a band. Derived as the midpoint of the band range when using named priorities.
-3. **Named priority** (e.g., "critical") → human-friendly alias. Maps to a band, which gives you the numeric midpoint.
+1. **Band range** (e.g., 0-9) → defines which jobs a worker pool scans. Controls behavior: concurrency, poll interval.
+2. **Numeric value** (e.g., 5) → placed into the pending key. Determines FIFO ordering *within* a band. Derived as the midpoint when using named priorities.
+3. **Named priority** (e.g., "critical") → human-friendly alias. Maps to a band, which gives the numeric midpoint.
 
-Workers don't see names or numbers — they scan a range. A job at priority 4 and a job at priority 5 both live in the 0-9 range, so critical workers claim both. The `4` just gets claimed before the `5` (lexicographic ordering).
+Workers don't see names or numbers — they scan a range. A job at priority 4 and a job at priority 5 both live in the 0-9 range, so critical workers claim both. The `4` just gets claimed before the `5`.
 
-**Key implication:** If you define a custom named priority "very_high" that maps to numeric value 4, but the band range is still 0-9, it behaves identically to critical — same workers, same poll rate. To get different behavior, you need a different band:
+**Key implication:** A custom named priority that maps to the same band range as an existing band gets the same workers, same poll rate. To get genuinely different behavior, you need a different band with a different range.
+
+### Per-Band Stats Tracking
+
+`JOB_RUNTIME` maintains counters per band:
+- **completed** — `AtomicU64`, incremented after each successful job execution
+- **failed** — `AtomicU64`, incremented after each failed/dead job
+- **active** — `AtomicU64`, incremented when a worker starts executing, decremented when done
+- **total_duration_ms** — `AtomicU64`, summed execution time for avg calculation
+- **pending** — computed on demand by counting keys in the band's priority range via `kv_list`
+
+These are cheap atomics — no locking overhead in the hot path.
+
+---
+
+## Advanced: Custom Bands
+
+For fine-grained control, define custom bands that replace the defaults entirely:
 
 ```ntnt
 work_jobs(map {
   "bands": [
-    map { "name": "critical",  "range": [0, 4],  "concurrency": 2, "poll": 1000 },
-    map { "name": "very_high", "range": [5, 9],  "concurrency": 3, "poll": 1500 },
-    // ...
+    map { "name": "payments",  "range": [0, 15],  "concurrency": 4, "poll": 1000 },
+    map { "name": "emails",    "range": [16, 39],  "concurrency": 2, "poll": 3000 },
+    map { "name": "general",   "range": [40, 69],  "concurrency": 2, "poll": 5000 },
+    map { "name": "batch",     "range": [70, 99],  "concurrency": 1, "poll": 10000 },
   ]
 })
 ```
 
-Now "very_high" has its own workers, its own poll interval — genuinely different behavior. That's the whole point of 0-99: enough room to slice bands as thin as you need.
+Custom bands **replace the defaults entirely** — no partial overrides. If you want to tweak one band, redefine all four. The config is only a few lines.
 
-### Custom Bands
-
-Developers can define custom bands for fine-grained control:
+**Advanced: raw numeric priorities** — when using custom bands, you can assign raw numeric priorities to job types for precise ordering within a band:
 
 ```ntnt
-work_jobs(map {
-  "bands": [
-    map { "name": "payments",  "range": [10, 15], "concurrency": 4, "poll": 1000 },
-    map { "name": "emails",    "range": [20, 30], "concurrency": 2, "poll": 3000 },
-    map { "name": "ops",       "range": [35, 39], "concurrency": 1, "poll": 5000 },
-    map { "name": "batch",     "range": [70, 99], "concurrency": 1, "poll": 10000 },
-  ]
-})
+job ChargePayment (priority: 10) { ... }    // top of "emails" band
+job SendReceipt (priority: 38) { ... }       // bottom of "emails" band
 ```
-
-When custom bands are provided, they **replace** the defaults entirely. This gives full control over resource allocation.
 
 ### Band Configuration Validation
 
@@ -119,249 +238,25 @@ All validation runs at `work_jobs()` startup before any threads spawn. Fail fast
 | **Poll interval ≤ 0** | Rejected | `Band "high" has poll interval 0ms — minimum is 100ms` |
 | **Range min > max** | Rejected | `Band "ops" has invalid range [39, 35] — min must be ≤ max` |
 | **Range outside 0-99** | Rejected | `Band "ultra" has range [0, 150] — priority must be 0-99` |
+| **Doesn't cover 0-99** | Rejected | `Bands must cover the full 0-99 range. Missing: 40-69.` |
 
-**Gap detection:** Sort bands by range start, verify `band[N].max + 1 == band[N+1].min` for all adjacent bands and that the full 0-99 range is covered.
+**Why full 0-99 coverage is required:** The default priority is 50. If a custom config doesn't cover 40-69, any job using `priority: "normal"` (or no priority at all) silently gets stuck forever. Requiring full coverage prevents this.
+
+**Gap detection:** Sort bands by range start, verify `band[N].max + 1 == band[N+1].min` for all adjacent bands and that ranges span 0 to 99.
 
 **Overlap detection:** Sort bands by range start, verify `band[N].max < band[N+1].min` for all adjacent bands.
 
-### Runtime Scaling (No Restart)
-
-Workers can be scaled at runtime without stopping the app or dropping jobs:
-
-```ntnt
-scale_workers("low", 8)       // low band now has 8 workers
-scale_workers("critical", 1)  // scale critical down to 1
-
-let bands = worker_status()
-// → [{ name: "critical", concurrency: 2, active: 1, idle: 1 },
-//    { name: "low", concurrency: 8, active: 3, idle: 5 }]
-```
-
-**Scale up:** Spawn more threads for the band. They immediately start polling.
-**Scale down:** Set cooperative cancellation flag on excess threads. They finish their current job and exit cleanly. No interrupted work.
-
-Uses the existing ConcurrencyRuntime cancellation mechanism — `is_current_task_cancelled()` is already checked in every worker loop iteration.
-
-CLI equivalent (talks to running app via socket):
-```bash
-ntnt workers scale low 8
-ntnt workers status
-```
-
-### `ntnt workers status` Output
-
-```
-Band        Workers  Active  Pending  Completed  Failed  Avg Time
-──────────  ───────  ──────  ───────  ─────────  ──────  ────────
-critical    4        1       3        1,247      12      45ms
-high        3        0       0        8,831      34      120ms
-normal      2        2       847      42,006     198     340ms
-low         1        0      3,291     5,102      41      1.2s
-
-Total: 10 workers │ 4,141 pending │ 57,186 completed │ 285 failed
-Uptime: 4h 23m │ Throughput: 3.6 jobs/sec
-```
-
-- **Workers** — configured thread count for the band
-- **Active** — currently executing a job right now
-- **Pending** — jobs waiting in the queue (scoped to band's priority range)
-- **Completed** — total jobs completed since startup
-- **Failed** — total jobs that errored/died since startup
-- **Avg Time** — average execution duration for completed jobs in this band
-
-The programmatic equivalent (`worker_status()`) returns the same data as an array of maps:
-
-```ntnt
-let bands = worker_status()
-// → [
-//   map { "name": "critical", "workers": 4, "active": 1, "pending": 3,
-//         "completed": 1247, "failed": 12, "avg_ms": 45 },
-//   map { "name": "high", ... },
-//   ...
-// ]
-```
-
-### DX — Job Definition
-
-Priority is optional, per-job-type. Use **named priorities** (the default experience):
-
-```ntnt
-job SendEmail on emails (priority: "high", retry: 3) { ... }
-job ProcessPayment on payments (priority: "critical") { ... }
-job CleanupLogs on maintenance (priority: "low") { ... }
-job ProcessOrder on orders { ... }   // defaults to "normal"
-```
-
-Named priorities:
-
-| Priority | Meaning |
-|----------|---------|
-| `"critical"` | Real-time, processed immediately |
-| `"high"` | Important, processed quickly |
-| `"normal"` | Default — where jobs land if unspecified |
-| `"low"` | Batch work, can pile up |
-
-That's the entire API. No numbers to think about.
-
-**Advanced: raw numeric priorities (0-99)** — for power users defining custom bands on large workloads. Named priorities map to numeric midpoints internally (critical=5, high=25, normal=50, low=85), leaving room for fine-grained custom levels in between. See "Custom Bands" section above.
-
-```ntnt
-job ChargePayment on payments (priority: 10) { ... }    // custom numeric
-job SendReceipt on emails (priority: 38) { ... }         // custom numeric
-```
-
-### Queue Name — Optional (defaults to "default")
-
-The `on <queue>` clause is now **optional**. If omitted, the job goes to the `"default"` queue:
-
-```ntnt
-job SendEmail (priority: "high", retry: 3) { ... }             // queue: "default"
-job ProcessPayment on payments (priority: "critical") { ... }   // queue: "payments"
-```
-
-For single-machine apps (the 90% case), you never need to think about queues. Just define jobs, set priority, call `work_jobs()`.
-
-Queues become relevant for **multi-machine horizontal scaling** — multiple worker processes reading from the same KV store, each filtering by queue:
-
-```bash
-# Machine A: only payment jobs
-ntnt worker server.tnt --queues=payments
-
-# Machine B: only email jobs
-ntnt worker server.tnt --queues=emails
-
-# Machine C: everything
-ntnt worker server.tnt   # no filter = all queues
-```
-
-All machines share the same Redis/SQLite. Each has its own band configuration and concurrency.
-
-**Parser change:** `on <identifier>` becomes optional in the `job` syntax. If not present, the parser sets queue to `"default"`. This is a non-breaking change — existing jobs with `on <queue>` continue to work.
-
-### Implementation Changes
-
-#### 1. `kv_claim` — Add floor parameter (src/stdlib/kv.rs)
-
-```rust
-pub fn kv_claim(
-    handle: &Value,
-    prefix: &str,
-    floor: Option<&str>,    // NEW — only claim keys >= floor
-    ceiling: Option<&str>,
-) -> Result<Option<(String, Value)>>
-```
-
-- **SQLite:** `WHERE key >= ? AND key <= ?` (already uses lexicographic ordering)
-- **Redis Lua script:** Add ARGV for floor, filter keys within [floor, ceiling] range
-- All existing callers pass `None` for floor (backward compatible at call site)
-
-#### 2. `enqueue_internal` — Priority in pending key (src/stdlib/jobs.rs)
-
-```rust
-let priority = match job_def.options.get("priority") {
-    // Named priorities → map to midpoints
-    Some(JobOptionValue::String(s)) => match s.as_str() {
-        "critical" => 5,
-        "high" => 25,
-        "normal" => 50,
-        "low" => 85,
-        other => return Err(format!("Unknown priority '{}'. Use: critical, high, normal, low (or 0-99)", other)),
-    },
-    // Numeric priorities → validate range
-    Some(JobOptionValue::Int(p)) if *p >= 0 && *p <= 99 => *p as u8,
-    Some(JobOptionValue::Int(p)) => return Err(format!("Priority must be 0-99, got {}", p)),
-    _ => 50,  // default = normal
-};
-let pending_key = format!("jobs:pending:{:02}:{}:{}", priority, pending_ts, job_id);
-```
-
-Also store priority in job_data: `job_data.insert("priority", Value::Int(priority))`.
-Also store the band name: `job_data.insert("band", Value::String(band_name_for(priority)))`.
-
-#### 3. `worker_loop` — Band-aware claiming (src/stdlib/jobs.rs)
-
-`worker_loop` receives a band configuration (priority range + poll interval). Constructs floor and ceiling from the band's range:
-
-```rust
-let floor = format!("jobs:pending:{:02}:", band.min_priority);
-let ceiling = format!("jobs:pending:{:02}:{}:~", band.max_priority, timestamp_key());
-kv_claim(&kv_handle, "jobs:pending:", Some(&floor), Some(&ceiling))
-```
-
-#### 4. `work_jobs` / `work_async` — Band spawning (src/stdlib/jobs.rs)
-
-When called with no `"bands"` option → use default 4-band configuration.
-When called with `"bands"` → parse and use custom bands.
-
-For each band: spawn `concurrency` worker threads, each running `worker_loop` with that band's config.
-
-#### 5. `scale_workers` / `worker_status` — New stdlib functions (src/stdlib/jobs.rs)
-
-- `scale_workers(band_name, count)` — add/remove workers in a band at runtime
-- `worker_status()` — return current band state (name, concurrency, active count, idle count)
-- Band metadata stored in `JOB_RUNTIME` (band name → Vec of task handles + config)
-
-#### 6. `ntnt workers` CLI (src/main.rs)
-
-- `ntnt workers status` — show band state (connects to running app via HTTP or reads KV directly)
-- `ntnt workers scale <band> <count>` — runtime scaling
-
-#### 7. Typechecker (src/typechecker.rs)
-
-- Add signatures for `scale_workers(band_name: String, count: Int) -> Result<Unit, String>`
-- Add signatures for `worker_status() -> Array<Map>`
-
-#### 8. Parser — Optional queue name (src/parser.rs)
-
-Make `on <identifier>` optional in the `job` declaration. If absent, set queue to `"default"`.
-
-Current parse: `job <Name> on <queue> (<options>) { ... }` — `on <queue>` required.
-New parse: `job <Name> [on <queue>] (<options>) { ... }` — `on <queue>` optional, defaults to `"default"`.
-
-Detection: after parsing job name, peek for `on` keyword. If present, consume it and parse the queue name. If not, use `"default"`.
-
-#### 9. Documentation
-
-- Update `// @ntnt` doc blocks on `work_jobs`, `work_async`, `enqueue`, `enqueue_at`, `enqueue_in`
-- Add priority + bands to AI_AGENT_GUIDE.md
-- Run `ntnt docs --generate`
-
-### Tests
-
-- [ ] Priority ordering within a band: enqueue at priorities 40, 50, 60 → claimed in order 40, 50, 60
-- [ ] Band isolation: enqueue critical (5) and low (85) → critical worker claims 5, low worker claims 85, neither crosses
-- [ ] Default priority: enqueue without priority → pending key contains `:50:`
-- [ ] Invalid priority: `priority: -1` and `priority: 100` → runtime error
-- [ ] Default bands: `work_jobs()` with no config → 4 bands, 10 total workers
-- [ ] Custom bands: custom band config → overrides defaults entirely
-- [ ] Floor+ceiling in kv_claim: claim with floor="jobs:pending:40:" ceiling="jobs:pending:69:..." → only returns keys in range
-- [ ] Priority in job_data: enqueued job's data map contains `priority` field
-- [ ] Batch with priority: `enqueue_batch` for a job with `priority: 15` → all keys contain `:15:`
-- [ ] Scale up: `scale_workers("low", 4)` → band has 4 workers
-- [ ] Scale down: `scale_workers("low", 1)` → excess workers exit after current job
-- [ ] Named priority: `priority: "high"` → pending key contains `:25:`
-- [ ] Unknown named priority: `priority: "urgent"` → runtime error with valid names listed
-- [ ] Overlapping band ranges → rejected at work_jobs() startup
-- [ ] Gap in band ranges → rejected at work_jobs() startup
-- [ ] Concurrency 0 → rejected
-- [ ] Poll interval below 100ms → rejected
-- [ ] Range outside 0-99 → rejected
-- [ ] Range min > max → rejected
-- [ ] Optional queue: `job Foo { ... }` → queue is "default"
-- [ ] Explicit queue: `job Foo on emails { ... }` → queue is "emails"
-- [ ] Queue + priority: `job Foo (priority: "high") { ... }` → queue "default", priority "high"
-
 ---
 
-## Feature 2: Atomic Dedup (`kv_set_nx`)
+# Feature 2: Atomic Dedup (`kv_set_nx`)
 
-### Overview
+## Overview
 
 Add a `kv_set_nx` operation to std/kv that atomically sets a key only if it doesn't exist. Use it in the job dedup path to close the race window between the current `kv_get` + `kv_set`.
 
-### Changes Required
+## Changes Required
 
-#### 1. `SQLiteKV::set_nx` (src/stdlib/kv.rs)
+### 1. `SQLiteKV::set_nx` (src/stdlib/kv.rs)
 
 ```rust
 pub fn set_nx(&self, key: &str, value: &Value, ttl_seconds: Option<i64>) -> Result<bool>
@@ -372,7 +267,7 @@ pub fn set_nx(&self, key: &str, value: &Value, ttl_seconds: Option<i64>) -> Resu
 - Check `changes()` — 0 = key existed, 1 = key was inserted
 - Returns `Ok(true)` if set, `Ok(false)` if key existed
 
-#### 2. `RedisKV::set_nx` (src/stdlib/kv.rs)
+### 2. `RedisKV::set_nx` (src/stdlib/kv.rs)
 
 ```rust
 pub fn set_nx(&mut self, key: &str, value: &Value, ttl_seconds: Option<i64>) -> Result<bool>
@@ -383,7 +278,7 @@ pub fn set_nx(&mut self, key: &str, value: &Value, ttl_seconds: Option<i64>) -> 
 - Redis returns `nil` if key exists, `"OK"` if set
 - Returns `Ok(true)` if set, `Ok(false)` if key existed
 
-#### 3. `kv_set_nx` public function (src/stdlib/kv.rs)
+### 3. `kv_set_nx` public function (src/stdlib/kv.rs)
 
 ```rust
 pub fn kv_set_nx(handle: &Value, key: &str, value: &Value, ttl: Option<i64>) -> Result<bool>
@@ -391,7 +286,7 @@ pub fn kv_set_nx(handle: &Value, key: &str, value: &Value, ttl: Option<i64>) -> 
 
 Dispatches to SQLite or Redis backend.
 
-#### 4. `enqueue_internal` dedup rewrite (src/stdlib/jobs.rs)
+### 4. `enqueue_internal` dedup rewrite (src/stdlib/jobs.rs)
 
 **Current flow (racy):**
 1. `kv_get(dedup_key)` — check if exists
@@ -412,11 +307,136 @@ Dispatches to SQLite or Redis backend.
 
 Remove the post-enqueue `kv_set` for dedup — no longer needed.
 
-#### 5. Expose as stdlib function (optional, low priority)
+### 5. Expose as stdlib function (optional, low priority)
 
 `set_nx(handle, key, value, opts?)` — expose to ntnt code for general use beyond dedup. Same pattern as `set`, `get`, `del`.
 
-### Tests
+---
+
+# Implementation
+
+## Order
+
+1. **Parser: optional queue** — Make `on <queue>` optional, default to "default" (src/parser.rs)
+2. **`kv_set_nx`** — Add to both backends + public function (src/stdlib/kv.rs)
+3. **`kv_claim` floor parameter** — Add to both backends (src/stdlib/kv.rs)
+4. **Priority in `enqueue_internal`** — New key format, named + numeric priorities (src/stdlib/jobs.rs)
+5. **Band-aware `worker_loop`** — Band config, floor+ceiling per band (src/stdlib/jobs.rs)
+6. **Band spawning + validation in `work_jobs`/`work_async`** — Default bands, custom config, overlap/gap/bounds checks (src/stdlib/jobs.rs)
+7. **Atomic dedup in `enqueue_internal`** — Replace get+set with set_nx (src/stdlib/jobs.rs)
+8. **Per-band stats** — AtomicU64 counters in JOB_RUNTIME for completed/failed/active/duration (src/stdlib/jobs.rs)
+9. **`scale_workers` + `worker_status`** — Runtime scaling + stats (src/stdlib/jobs.rs)
+10. **Typechecker** — Signatures for new functions (src/typechecker.rs)
+11. **Tests** — All tests for both features
+12. **Documentation** — Doc blocks + `ntnt docs --generate`
+13. **Design doc updates** — Check off items in DD-037
+
+## Key Implementation Details
+
+### Parser Change (src/parser.rs)
+
+Current: `job <Name> on <queue> (<options>) { ... }` — `on <queue>` required.  
+New: `job <Name> [on <queue>] (<options>) { ... }` — `on <queue>` optional, defaults to `"default"`.
+
+Detection: after parsing job name, peek for `on` keyword. If present, consume it and parse the queue name. If not, use `"default"`.
+
+### `kv_claim` — Add floor parameter (src/stdlib/kv.rs)
+
+```rust
+pub fn kv_claim(
+    handle: &Value,
+    prefix: &str,
+    floor: Option<&str>,    // NEW — only claim keys >= floor
+    ceiling: Option<&str>,
+) -> Result<Option<(String, Value)>>
+```
+
+- **SQLite:** `WHERE key >= ? AND key <= ?` (already uses lexicographic ordering)
+- **Redis Lua script:** Add ARGV for floor, filter keys within [floor, ceiling] range
+- All existing callers pass `None` for floor (backward compatible at call site)
+
+### Priority in `enqueue_internal` (src/stdlib/jobs.rs)
+
+```rust
+let priority = match job_def.options.get("priority") {
+    Some(JobOptionValue::String(s)) => match s.as_str() {
+        "critical" => 5,
+        "high" => 25,
+        "normal" => 50,
+        "low" => 85,
+        other => return Err("Unknown priority '{}'. Use: critical, high, normal, low (or 0-99)"),
+    },
+    Some(JobOptionValue::Int(p)) if *p >= 0 && *p <= 99 => *p as u8,
+    Some(JobOptionValue::Int(p)) => return Err("Priority must be 0-99, got {}"),
+    _ => 50,
+};
+let pending_key = format!("jobs:pending:{:02}:{}:{}", priority, pending_ts, job_id);
+```
+
+Store in job_data: `priority` (numeric) and `band` (resolved band name).
+
+### Band-Aware `worker_loop` (src/stdlib/jobs.rs)
+
+Each worker receives band config (priority range + poll interval):
+
+```rust
+let floor = format!("jobs:pending:{:02}:", band.min_priority);
+let ceiling = format!("jobs:pending:{:02}:{}:~", band.max_priority, timestamp_key());
+kv_claim(&kv_handle, "jobs:pending:", Some(&floor), Some(&ceiling))
+```
+
+### Typechecker (src/typechecker.rs)
+
+- `scale_workers(band_name: String, count: Int) -> Result<Unit, String>`
+- `worker_status() -> Array<Map>`
+
+## Estimated Effort
+
+~3 days. Broken down:
+- Parser change: 0.25 day
+- kv_set_nx + kv_claim floor: 0.5 day
+- Priority key format + named priorities: 0.25 day
+- Band architecture + worker spawning + validation: 1 day
+- Atomic dedup rewrite: 0.25 day
+- Per-band stats + scale_workers + worker_status: 0.5 day
+- Tests (22 tests): 0.5 day
+- Documentation + doc generation: 0.25 day
+
+---
+
+# Tests
+
+## Priority & Bands
+
+- [ ] Priority ordering within a band: enqueue at priorities 40, 50, 60 → claimed in order 40, 50, 60
+- [ ] Band isolation: enqueue critical (5) and low (85) → critical worker claims 5, low worker claims 85, neither crosses
+- [ ] Default priority: enqueue without priority → pending key contains `:50:`
+- [ ] Named priority: `priority: "high"` → pending key contains `:25:`
+- [ ] Unknown named priority: `priority: "urgent"` → runtime error listing valid names
+- [ ] Invalid numeric priority: `priority: -1` and `priority: 100` → runtime error
+- [ ] Default bands: `work_jobs()` with no config → 4 bands, 10 total workers
+- [ ] Custom bands: custom band config → overrides defaults entirely
+- [ ] Floor+ceiling in kv_claim: claim with floor/ceiling → only returns keys in range
+- [ ] Priority in job_data: enqueued job's data map contains `priority` and `band` fields
+- [ ] Batch with priority: `enqueue_batch` for a job with `priority: "high"` → all keys contain `:25:`
+- [ ] Scale up: `scale_workers("low", 4)` → band has 4 workers
+- [ ] Scale down: `scale_workers("low", 1)` → excess workers exit after current job
+- [ ] Overlapping band ranges → rejected at work_jobs() startup
+- [ ] Gap in band ranges → rejected at work_jobs() startup
+- [ ] Incomplete coverage (doesn't span 0-99) → rejected
+- [ ] Concurrency 0 → rejected
+- [ ] Poll interval below 100ms → rejected
+- [ ] Range outside 0-99 → rejected
+- [ ] Range min > max → rejected
+
+## Parser
+
+- [ ] Optional queue: `job Foo { ... }` → queue is "default"
+- [ ] Explicit queue: `job Foo on emails { ... }` → queue is "emails"
+- [ ] Queue + priority: `job Foo (priority: "high") { ... }` → queue "default", priority "high"
+- [ ] Queue + priority + options: `job Foo on emails (priority: "high", retry: 3) { ... }` → all correct
+
+## Atomic Dedup
 
 - [ ] `set_nx` on empty key → returns true, value stored
 - [ ] `set_nx` on existing key → returns false, original value preserved
@@ -428,41 +448,20 @@ Remove the post-enqueue `kv_set` for dedup — no longer needed.
 
 ---
 
-## Implementation Order
-
-1. **Parser: optional queue** — Make `on <queue>` optional, default to "default" (src/parser.rs)
-2. **`kv_set_nx`** — Add to both backends + public function (src/stdlib/kv.rs)
-3. **`kv_claim` floor parameter** — Add to both backends (src/stdlib/kv.rs)
-4. **Priority in `enqueue_internal`** — New key format, named + numeric priorities (src/stdlib/jobs.rs)
-5. **Band-aware `worker_loop`** — Band config, floor+ceiling per band (src/stdlib/jobs.rs)
-6. **Band spawning + validation in `work_jobs`/`work_async`** — Default bands, custom config, overlap/gap/bounds checks (src/stdlib/jobs.rs)
-7. **Atomic dedup in `enqueue_internal`** — Replace get+set with set_nx (src/stdlib/jobs.rs)
-8. **`scale_workers` + `worker_status`** — Runtime scaling + stats (src/stdlib/jobs.rs)
-9. **Tests** — All tests for both features
-10. **Documentation** — Doc blocks + `ntnt docs --generate`
-11. **Design doc updates** — Check off items in DD-037
-
-## Estimated Effort
-
-~2 days. kv_set_nx is ~30 lines per backend. kv_claim floor is ~10 lines per backend. Priority key format is ~10 lines. Band architecture + worker spawning is the bulk of new work (~200 lines). Runtime scaling reuses existing cancellation. Tests and docs round it out.
-
-## Follow-Up: Control Socket + CLI (separate PR)
+# Follow-Up: Control Socket + CLI (separate PR)
 
 The stdlib functions (`scale_workers`, `worker_status`) are the primitives. A Unix domain socket control channel makes them accessible from a second terminal without wiring up admin routes.
-
-### How it works
 
 When `ntnt run server.tnt` starts workers, the runtime creates `.ntnt.sock` in the app's working directory. The CLI connects to it:
 
 ```bash
 # Terminal 1: app running
 cd ~/apps/payments && ntnt run server.tnt
-# → .ntnt.sock created in ~/apps/payments/
 
 # Terminal 2: ops
 cd ~/apps/payments
-ntnt workers status         # → connects to ./.ntnt.sock
-ntnt workers scale low 8    # → sends scale command via socket
+ntnt workers status
+ntnt workers scale low 8
 
 # Or target a different app explicitly
 ntnt workers --dir ~/apps/emails scale low 4
@@ -472,23 +471,26 @@ ntnt workers --dir ~/apps/emails scale low 4
 - Multiple apps on same server: each has its own socket in its own directory
 - Cleanup: socket file deleted on shutdown, stale file overwritten on next start
 - Auth: none needed (local Unix socket = same-user access only)
-- The socket handler internally calls `scale_workers()` / `worker_status()` — same primitives
+- The socket handler internally calls `scale_workers()` / `worker_status()`
 
-### Not blocking this PR
-
-The socket is a convenience layer on top of the stdlib functions. This PR ships the core: priority keys, bands, kv_claim floor, kv_set_nx, scale_workers(), worker_status(). The control socket + `ntnt workers` CLI subcommand ships as a follow-up.
+Not blocking this PR — ships as a follow-up.
 
 ---
 
-## Design Decisions
+# Design Decisions
 
 | Decision | Choice | Why |
 |----------|--------|-----|
-| Priority range | 0-99 (not 0-9) | 100 levels gives headroom for fine-grained bands in large workloads |
-| Default priority | 50 | Middle of "normal" band |
+| Priority range | 0-99 (not 0-9) | 100 levels gives headroom for fine-grained custom bands |
+| Default priority | 50 ("normal") | Midpoint of normal band |
+| Named priorities | critical/high/normal/low | Clean DX — numbers are hidden unless you want them |
 | Key format | Zero-padded 2 digits (`{:02}`) | Correct lexicographic ordering |
 | Worker model | Independent thread pools per band | Prevents starvation, obvious scaling knob |
-| Default bands | 4 (critical/high/normal/low) | Matches common usage patterns |
-| Scaling | Runtime, no restart | Cooperative cancellation already exists |
-| Backward compat | None needed | New system, no production data to migrate |
-| Dedup atomicity | `SET NX` / `INSERT OR IGNORE` | Closes race window, optimistic path is one op |
+| Default bands | 4 (critical 4w/1s, high 3w/2s, normal 2w/5s, low 1w/20s) | Biased toward fast critical response, slow burn on low |
+| Queue name | Optional, defaults to "default" | Single-machine apps never need to think about queues |
+| Custom bands | Replace defaults entirely, no partial overrides | Simple mental model, config is only a few lines |
+| Band validation | Reject overlaps, gaps, bad values at startup | Silent misconfiguration = jobs disappearing into a black hole |
+| Full 0-99 coverage required | Custom bands must span the full range | Default priority is 50 — gaps would silently strand jobs |
+| Runtime scaling | scale_workers() + cooperative cancellation | No restart needed, uses existing ConcurrencyRuntime mechanism |
+| Dedup atomicity | `SET NX` / `INSERT OR IGNORE` | Closes race window, optimistic path is one operation |
+| Control plane | Stdlib functions (this PR) + socket/CLI (follow-up) | Ship primitives first, convenience layer second |
