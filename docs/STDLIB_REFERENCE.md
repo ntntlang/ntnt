@@ -5982,8 +5982,10 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`job_status`](#jobstatus) | Get the current status and data for a job by its ID. |
 | [`list_jobs`](#listjobs) | List jobs with optional status and queue filters. |
 | [`retry_job`](#retryjob) | Re-queue a failed or dead job for another attempt. |
+| [`scale_workers`](#scaleworkers) | Scale the number of worker threads for a named band up or down. |
 | [`work_async`](#workasync) | Start one or more background worker threads that process jobs from the queue. |
 | [`work_jobs`](#workjobs) | Run a blocking worker loop that processes jobs from the queue. |
+| [`worker_status`](#workerstatus) | Return a status snapshot of the job worker system. |
 
 #### `assert_enqueued`
 
@@ -6357,6 +6359,34 @@ retry_job("abc123")  // Re-queue a failed job
 
 ---
 
+#### `scale_workers`
+
+```ntnt
+scale_workers(band_name: String, count: Int) -> Result<Unit, String>
+```
+
+Scale the number of worker threads for a named band up or down.
+
+Adds workers (up to count) or cancels excess workers cooperatively. Only takes effect after work_async() has been called to initialise the band pool. Returns Err if the band name is not found.
+
+**Parameters:**
+
+- `band_name` — The band to scale (e.g. "critical", "high", "normal", "low")
+- `count` — Target number of concurrent workers for this band (>= 1)
+
+**Returns:** Ok(Unit) on success, Err(String) if band not found or count < 1
+
+**Examples:**
+
+```ntnt
+scale_workers("critical", 8)  // Scale critical band to 8 workers
+scale_workers("normal", 1)  // Scale normal band down to 1 worker
+```
+
+**See also:** `work_async`, `worker_status`
+
+---
+
 #### `work_async`
 
 ```ntnt
@@ -6409,6 +6439,28 @@ work_jobs(map { "poll_interval": 500 })  // Poll every 500ms
 ```
 
 **See also:** `work_async`, `enqueue`
+
+---
+
+#### `worker_status`
+
+```ntnt
+worker_status() -> Map
+```
+
+Return a status snapshot of the job worker system.
+
+Returns a map with per-band stats and a system-wide pending count. Requires work_async() to have been called to populate band data.
+
+**Returns:** Map with keys: "bands" (Array of per-band stat maps), "pending" (Int total pending jobs)
+
+**Examples:**
+
+```ntnt
+worker_status()  // Get current worker and queue stats
+```
+
+**See also:** `work_async`, `scale_workers`
 
 ---
 
@@ -6547,6 +6599,7 @@ import { open, get, set } from "std/kv"
 | [`list`](#list) | List keys in the KV store, optionally filtered by prefix. |
 | [`open`](#open) | Open a KV store connection. |
 | [`set`](#set) | Set a key-value pair in the KV store. |
+| [`set_nx`](#setnx) | Set a key only if it doesn't already exist (atomic NX operation). |
 | [`ttl`](#ttl) | Get the remaining TTL (time-to-live) for a key in seconds. |
 
 #### `del`
@@ -6754,6 +6807,37 @@ Values are automatically serialized. Maps and arrays are stored as JSON. Setting
 set(cache, "user:123", map { "name": "Alice" })  // Set without TTL
 set(cache, "session:abc", token, map { "ttl": 3600 })  // Set with 1 hour TTL
 ```
+
+---
+
+#### `set_nx`
+
+```ntnt
+set_nx(handle: KVStore, key: String, value: Any, opts?: Map) -> Result<Bool, String>
+```
+
+Set a key only if it doesn't already exist (atomic NX operation).
+
+Returns Ok(true) if the key was set (it did not exist before), or Ok(false) if the key already existed. For SQLite, expired keys are treated as non-existent. For Redis, uses SET NX which is atomic.
+
+**Parameters:**
+
+- `handle` — The KV store handle from open()
+- `key` — The key to set
+- `value` — The value to store
+- `opts` — Optional map with "ttl" key (seconds until expiry)
+
+**Returns:** Ok(true) if set, Ok(false) if key existed
+
+**Examples:**
+
+```ntnt
+set_nx(kv, "lock:job:123", "worker-1")  // => Ok(true)  // Acquire lock
+set_nx(kv, "lock:job:123", "worker-2")  // => Ok(false)  // Lock already held
+set_nx(kv, "session:abc", data, map { "ttl": 3600 })  // Set with TTL
+```
+
+**See also:** `set`, `get`, `del`
 
 ---
 

@@ -3559,6 +3559,15 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("enqueue_in", ["job_name" => Type::String, "delay_secs" => Type::Int, "args" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::String, Type::String] });
             sig!("work_async", ["opts" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Array(Box::new(Type::Named("Task".to_string()))), required(0));
             sig!("work_jobs", ["opts" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Unit, required(0));
+            sig!("scale_workers", ["band_name" => Type::String, "count" => Type::Int], Type::Generic { name: "Result".to_string(), args: vec![Type::Unit, Type::String] });
+            sig!(
+                "worker_status",
+                [],
+                Type::Map {
+                    key_type: Box::new(Type::String),
+                    value_type: Box::new(Type::Any)
+                }
+            );
             sig!("assert_enqueued", ["job_name" => Type::String, "args" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Bool, Type::String] }, required(1));
             sig!("assert_not_enqueued", ["job_name" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Bool, Type::String] });
             sig!(

@@ -229,9 +229,13 @@ pub struct JobRuntime {
     /// Per-band stats: map from band name to atomic counters.
     pub band_stats: RwLock<HashMap<String, Arc<BandStats>>>,
     /// Running worker task IDs per band (for scale_workers).
-    pub band_worker_task_ids: Mutex<HashMap<String, Vec<usize>>>,
+    pub band_worker_task_ids: Mutex<HashMap<String, Vec<u64>>>,
     /// Active band configurations (set at work_jobs/work_async startup).
     pub active_bands: Mutex<Vec<BandConfig>>,
+    /// Cancel Arcs for active band workers — used by scale_workers to cancel excess threads.
+    pub band_cancel_arcs: Mutex<HashMap<String, Vec<Arc<AtomicBool>>>>,
+    /// Queue filter active at worker startup — so scale_workers uses the same queue filter.
+    pub active_queues: Mutex<Option<Vec<String>>>,
 }
 
 impl JobRuntime {
@@ -244,6 +248,8 @@ impl JobRuntime {
             band_stats: RwLock::new(HashMap::new()),
             band_worker_task_ids: Mutex::new(HashMap::new()),
             active_bands: Mutex::new(Vec::new()),
+            band_cancel_arcs: Mutex::new(HashMap::new()),
+            active_queues: Mutex::new(None),
         }
     }
 
@@ -354,6 +360,12 @@ impl JobRuntime {
         }
         if let Ok(mut ab) = self.active_bands.lock() {
             ab.clear();
+        }
+        if let Ok(mut a) = self.band_cancel_arcs.lock() {
+            a.clear();
+        }
+        if let Ok(mut aq) = self.active_queues.lock() {
+            *aq = None;
         }
     }
 }
@@ -562,15 +574,25 @@ fn enqueue_internal(
         None
     };
 
-    // Check dedup before generating ID (skip in test mode)
     let in_test_mode = JOB_RUNTIME
         .test_queue
         .lock()
         .map(|tq| tq.is_some())
         .unwrap_or(false);
+
+    // Generate job_id early so we can use it as the atomic dedup claim value.
+    let job_id = Uuid::new_v4().to_string();
+
+    // Atomic dedup: use kv_set_nx to claim the dedup key before writing job data.
+    //
+    // Pre-flight stale check: if the dedup key already exists and references a
+    // terminal job (cancelled/dead/expired/failed), delete it so set_nx can succeed.
+    // Then atomically claim the slot — only one concurrent enqueue wins.
     if let (Some(ref dk), false) = (&dedup_key, in_test_mode) {
         let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-        if let Value::String(existing_id) = kv::kv_get(&kv_handle, dk)? {
+
+        // Check for stale dedup key referencing a terminal job.
+        if let Ok(Value::String(ref existing_id)) = kv::kv_get(&kv_handle, dk) {
             let data_key = format!("jobs:data:{}", existing_id);
             let is_terminal = match kv::kv_get(&kv_handle, &data_key) {
                 Ok(Value::Map(data)) => match data.get("status") {
@@ -579,11 +601,9 @@ fn enqueue_internal(
                     }
                     _ => true,
                 },
-                Ok(Value::Unit) => true, // job deleted — stale reference
-                Ok(_) => true,           // unexpected data shape — treat as stale
+                Ok(Value::Unit) => true,
+                Ok(_) => true,
                 Err(_) => {
-                    // KV error — fail-closed: assume job is still live to prevent duplicates.
-                    // A transient timeout should not cause re-enqueue.
                     emit_job_event(
                         "job.dedup_warning",
                         &[
@@ -600,14 +620,37 @@ fn enqueue_internal(
                     false
                 }
             };
-            if !is_terminal {
-                return Ok(Value::ok(Value::String(existing_id)));
+            if is_terminal {
+                let _ = kv::kv_del(&kv_handle, dk);
             }
-            let _ = kv::kv_del(&kv_handle, dk);
+        }
+
+        // Atomically claim the dedup slot with our new job_id.
+        let ttl = unique_secs;
+        let claimed = kv::kv_set_nx(&kv_handle, dk, &Value::String(job_id.clone()), ttl)
+            .unwrap_or_else(|e| {
+                emit_job_event(
+                    "job.dedup_warning",
+                    &[(
+                        "reason",
+                        Value::String(format!("kv_set_nx error (skipping dedup): {}", e)),
+                    )],
+                );
+                true // fail-open: proceed with enqueue on KV error
+            });
+
+        if !claimed {
+            // Concurrent enqueue already holds the slot — return existing job_id.
+            match kv::kv_get(&kv_handle, dk) {
+                Ok(Value::String(existing_id)) => {
+                    return Ok(Value::ok(Value::String(existing_id)));
+                }
+                _ => {
+                    // Key vanished between set_nx and get (TTL race) — fall through.
+                }
+            }
         }
     }
-
-    let job_id = Uuid::new_v4().to_string();
 
     // Check test mode
     {
@@ -687,7 +730,7 @@ fn enqueue_internal(
     let data_key = format!("jobs:data:{}", job_id);
     kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None)?;
 
-    // Write queue ordering key: jobs:pending:<timestamp>:<id>
+    // Write queue ordering key: jobs:pending:<priority>:<timestamp>:<id>
     kv::kv_set(
         &kv_handle,
         &pending_key,
@@ -695,21 +738,8 @@ fn enqueue_internal(
         None,
     )?;
 
-    if let (Some(ref dk), Some(ttl)) = (&dedup_key, unique_secs) {
-        if let Err(e) = kv::kv_set(&kv_handle, dk, &Value::String(job_id.clone()), Some(ttl)) {
-            emit_job_event(
-                "job.dedup_warning",
-                &[
-                    ("job_id", Value::String(job_id.clone())),
-                    ("dedup_key", Value::String(dk.clone())),
-                    (
-                        "error",
-                        Value::String(format!("Failed to write dedup key: {}", e)),
-                    ),
-                ],
-            );
-        }
-    }
+    // Note: dedup key was already written atomically via kv_set_nx above (before job_data).
+    // No second write needed here.
 
     emit_job_event(
         "job.enqueued",
@@ -726,23 +756,26 @@ fn enqueue_internal(
 /// Worker loop — runs until cooperative cancellation is signalled.
 ///
 /// `kv_info`: serializable KV handle info (reconstructed into a `Value` on entry).
-/// `poll_interval_ms`: milliseconds to sleep between empty-queue polls.
+/// `band`: the band configuration (determines floor, ceiling, and poll interval).
 /// `queues`: if Some, only process jobs whose queue field matches one of
 ///           these names; if None, process all queues.
-fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<String>>) {
+fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<String>>) {
     let kv_handle = kv_info.to_value();
-    let poll_duration = std::time::Duration::from_millis(poll_interval_ms);
+    let poll_duration = std::time::Duration::from_millis(band.poll_interval_ms);
+    let band_stats = JOB_RUNTIME.get_or_create_band_stats(&band.name);
 
     loop {
         if is_current_task_cancelled() {
             break;
         }
 
-        // Attempt to claim a pending job.
-        // Future-scheduled jobs are filtered at the claim level by band workers (via ceiling).
-        // For the legacy no-band worker, the defense-in-depth scheduled_at check
-        // in the body handles future jobs by re-enqueuing them.
-        let claimed = match kv::kv_claim(&kv_handle, "jobs:pending:", None, None) {
+        // Compute floor and ceiling for this band's priority range.
+        // ceiling filters out future-scheduled jobs; floor restricts to band's min priority.
+        let floor = band.floor_key();
+        let ceiling = band.ceiling_key();
+
+        let claimed = match kv::kv_claim(&kv_handle, "jobs:pending:", Some(&floor), Some(&ceiling))
+        {
             Ok(Some((_pending_key, value))) => value,
             Ok(None) => {
                 // Queue empty — sleep and try again
@@ -994,7 +1027,12 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
             ],
         );
 
-        // Record start time for timeout detection
+        // Track active count for stats
+        band_stats
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        // Record start time for timeout detection and duration stats
         let start = std::time::Instant::now();
 
         let exec_result = execute_job_perform(&def, &payload);
@@ -1039,9 +1077,23 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
             }
         }
 
+        // Record elapsed time for band stats
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+
         // Execute result handling
         match exec_result {
             Ok(_) => {
+                // Update band stats: decrement active, increment completed, add duration
+                band_stats
+                    .active
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                band_stats
+                    .completed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                band_stats
+                    .total_duration_ms
+                    .fetch_add(elapsed_ms, std::sync::atomic::Ordering::Relaxed);
+
                 // Success
                 job_data.insert("status".to_string(), Value::String("completed".to_string()));
                 job_data.insert("completed_at".to_string(), Value::String(timestamp_key()));
@@ -1056,6 +1108,14 @@ fn worker_loop(kv_info: KvHandleInfo, poll_interval_ms: u64, queues: Option<Vec<
                 );
             }
             Err(err_msg) => {
+                // Update band stats: decrement active, increment failed
+                band_stats
+                    .active
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                band_stats
+                    .failed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                 let new_attempts = attempts + 1;
 
                 // Determine retry limit (default 3)
@@ -1224,15 +1284,306 @@ fn parse_work_opts(args: &[Value]) -> Result<(u64, usize, Option<Vec<String>>)> 
     Ok((poll_interval, concurrency, queues))
 }
 
+/// Parse a single BandConfig from a Value::Map.
+///
+/// Supports two key styles (design doc API takes precedence):
+///   - `"range": [min, max]` **or** `"min_priority"` / `"max_priority"` (legacy)
+///   - `"poll": ms` **or** `"poll_interval": ms` (legacy)
+///   - `"name"`: required String
+///   - `"concurrency"`: optional Int >= 1 (default 1)
+///
+/// Poll minimum is 100ms; concurrency 0 is rejected, > 32 emits a warning.
+fn parse_band_config(m: &HashMap<String, Value>) -> Result<BandConfig> {
+    let name = match m.get("name") {
+        Some(Value::String(s)) => s.clone(),
+        _ => {
+            return Err(IntentError::type_error(
+                "band config must have a 'name' string".to_string(),
+            ))
+        }
+    };
+
+    // "range": [min, max]  OR  "min_priority" + "max_priority"
+    let (min_priority, max_priority): (u8, u8) = if let Some(range_val) = m.get("range") {
+        match range_val {
+            Value::Array(arr) if arr.len() == 2 => {
+                let parse_bound = |v: &Value, label: &str| -> Result<u8> {
+                    match v {
+                        Value::Int(n) if *n >= 0 && *n <= 99 => Ok(*n as u8),
+                        Value::Int(n) => Err(IntentError::runtime_error(format!(
+                            "Band \"{}\": {} value {} out of range — priority must be 0-99",
+                            name, label, n
+                        ))),
+                        _ => Err(IntentError::type_error(format!(
+                            "Band \"{}\": {} must be an integer 0-99",
+                            name, label
+                        ))),
+                    }
+                };
+                let min = parse_bound(&arr[0], "range[0]")?;
+                let max = parse_bound(&arr[1], "range[1]")?;
+                (min, max)
+            }
+            _ => {
+                return Err(IntentError::type_error(format!(
+                    "Band \"{}\": \"range\" must be an array [min, max]",
+                    name
+                )))
+            }
+        }
+    } else {
+        // Legacy: separate min_priority / max_priority keys
+        let min: u8 = match m.get("min_priority") {
+            Some(Value::Int(n)) if *n >= 0 && *n <= 99 => *n as u8,
+            Some(Value::Int(n)) => {
+                return Err(IntentError::runtime_error(format!(
+                    "Band \"{}\": min_priority {} out of range 0-99",
+                    name, n
+                )))
+            }
+            _ => {
+                return Err(IntentError::type_error(format!(
+                    "Band \"{}\": missing \"range\" or \"min_priority\" (integer 0-99)",
+                    name
+                )))
+            }
+        };
+        let max: u8 = match m.get("max_priority") {
+            Some(Value::Int(n)) if *n >= 0 && *n <= 99 => *n as u8,
+            Some(Value::Int(n)) => {
+                return Err(IntentError::runtime_error(format!(
+                    "Band \"{}\": max_priority {} out of range 0-99",
+                    name, n
+                )))
+            }
+            _ => {
+                return Err(IntentError::type_error(format!(
+                    "Band \"{}\": missing \"range\" or \"max_priority\" (integer 0-99)",
+                    name
+                )))
+            }
+        };
+        (min, max)
+    };
+
+    if min_priority > max_priority {
+        return Err(IntentError::runtime_error(format!(
+            "Band \"{}\" has invalid range [{}, {}] — min must be ≤ max",
+            name, min_priority, max_priority
+        )));
+    }
+
+    let concurrency: usize = match m.get("concurrency") {
+        Some(Value::Int(n)) if *n >= 1 => *n as usize,
+        Some(Value::Int(n)) if *n == 0 => {
+            return Err(IntentError::runtime_error(format!(
+                "Band \"{}\" has concurrency 0 — must be at least 1",
+                name
+            )))
+        }
+        Some(Value::Int(n)) => {
+            return Err(IntentError::runtime_error(format!(
+                "Band \"{}\" has negative concurrency ({})",
+                name, n
+            )))
+        }
+        None => 1,
+        _ => {
+            return Err(IntentError::type_error(format!(
+                "Band \"{}\": concurrency must be an integer",
+                name
+            )))
+        }
+    };
+
+    // "poll": ms  OR  "poll_interval": ms (legacy).  Minimum 100ms.
+    let poll_key = if m.contains_key("poll") {
+        "poll"
+    } else {
+        "poll_interval"
+    };
+    let poll_interval_ms: u64 = match m.get(poll_key) {
+        Some(Value::Int(n)) if *n >= 100 => *n as u64,
+        Some(Value::Int(n)) if *n > 0 => {
+            return Err(IntentError::runtime_error(format!(
+                "Band \"{}\" has poll interval {}ms — minimum is 100ms",
+                name, n
+            )))
+        }
+        Some(Value::Int(_)) => {
+            return Err(IntentError::runtime_error(format!(
+                "Band \"{}\" has poll interval 0ms — minimum is 100ms",
+                name
+            )))
+        }
+        None => 1000,
+        _ => {
+            return Err(IntentError::type_error(format!(
+                "Band \"{}\": poll interval must be an integer (milliseconds)",
+                name
+            )))
+        }
+    };
+
+    Ok(BandConfig {
+        name,
+        min_priority,
+        max_priority,
+        concurrency,
+        poll_interval_ms,
+    })
+}
+
+/// Validate a slice of BandConfigs.
+///
+/// Enforces at startup (fail fast, before any threads spawn):
+/// - Non-empty list
+/// - No overlapping ranges: `band[N].max < band[N+1].min` for adjacent sorted bands
+/// - No gaps: bands must collectively span exactly 0-99
+///
+/// Concurrency > 32 emits a stderr warning (allowed).
+fn validate_bands(bands: &[BandConfig]) -> Result<()> {
+    if bands.is_empty() {
+        return Err(IntentError::runtime_error(
+            "Bands configuration cannot be empty".to_string(),
+        ));
+    }
+
+    // Warn on unusually high concurrency (allowed, not rejected)
+    for band in bands {
+        if band.concurrency > 32 {
+            let stderr = std::io::stderr();
+            let mut locked = stderr.lock();
+            let _ = std::io::Write::write_all(
+                &mut locked,
+                format!(
+                    "[WARN] Band \"{}\" has concurrency {} — unusually high \
+                     (sleeping threads are cheap, but verify this is intentional)\n",
+                    band.name, band.concurrency
+                )
+                .as_bytes(),
+            );
+        }
+    }
+
+    // Sort a copy by min_priority to check coverage
+    let mut sorted: Vec<&BandConfig> = bands.iter().collect();
+    sorted.sort_by_key(|b| b.min_priority);
+
+    // Must start at 0
+    if sorted[0].min_priority != 0 {
+        return Err(IntentError::runtime_error(format!(
+            "Bands must cover the full 0-99 range. Missing: 0-{}.",
+            sorted[0].min_priority - 1
+        )));
+    }
+
+    let mut expected_next: u8 = 0;
+    for i in 0..sorted.len() {
+        let band = sorted[i];
+        if band.min_priority < expected_next {
+            // Overlap: find the previous band for a helpful message
+            let prev = sorted[i - 1];
+            return Err(IntentError::runtime_error(format!(
+                "Band ranges overlap — \"{}\" ({}-{}) and \"{}\" ({}-{}) both cover priorities {}-{}",
+                prev.name,
+                prev.min_priority,
+                prev.max_priority,
+                band.name,
+                band.min_priority,
+                band.max_priority,
+                band.min_priority,
+                prev.max_priority,
+            )));
+        }
+        if band.min_priority > expected_next {
+            return Err(IntentError::runtime_error(format!(
+                "Priority gap — no band covers priorities {}-{}. \
+                 Jobs at these priorities would never be processed.",
+                expected_next,
+                band.min_priority - 1
+            )));
+        }
+        expected_next = band.max_priority.saturating_add(1);
+    }
+
+    // Must end at 99
+    if expected_next != 100 {
+        return Err(IntentError::runtime_error(format!(
+            "Bands must cover the full 0-99 range. Missing: {}-99.",
+            expected_next
+        )));
+    }
+
+    Ok(())
+}
+
+/// Parse bands and queues from work opts.
+///
+/// If `opts["bands"]` is present, parse each element as a BandConfig and
+/// validate them. Otherwise, fall back to the legacy path: create a single
+/// full-range band from `poll_interval` and `concurrency` opts.
+///
+/// Returns `(bands, queues)`.
+fn parse_bands_and_queues(args: &[Value]) -> Result<(Vec<BandConfig>, Option<Vec<String>>)> {
+    let (poll_interval, concurrency, queues) = parse_work_opts(args)?;
+
+    let opts_map = args.first().and_then(|v| match v {
+        Value::Map(m) => Some(m),
+        _ => None,
+    });
+
+    if let Some(m) = opts_map {
+        if let Some(bands_val) = m.get("bands") {
+            let band_arr = match bands_val {
+                Value::Array(arr) => arr,
+                _ => {
+                    return Err(IntentError::type_error(
+                        "'bands' must be an array of band config maps".to_string(),
+                    ))
+                }
+            };
+
+            let mut bands = Vec::with_capacity(band_arr.len());
+            for item in band_arr {
+                match item {
+                    Value::Map(bm) => bands.push(parse_band_config(bm)?),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "each element of 'bands' must be a map".to_string(),
+                        ))
+                    }
+                }
+            }
+
+            validate_bands(&bands)?;
+            return Ok((bands, queues));
+        }
+    }
+
+    // Legacy fallback: single full-range band
+    Ok((
+        vec![BandConfig {
+            name: "normal".to_string(),
+            min_priority: 0,
+            max_priority: 99,
+            concurrency,
+            poll_interval_ms: poll_interval,
+        }],
+        queues,
+    ))
+}
+
 /// Spawn a single worker task registered with the ConcurrencyRuntime.
 ///
-/// Returns a `Value::TaskHandle` so callers can cancel the worker via
-/// `cancel_task()`.
+/// Returns `(TaskHandle, cancel_arc)` — the `Arc<AtomicBool>` is the cooperative
+/// cancellation flag for this worker, stored in `JOB_RUNTIME.band_cancel_arcs`
+/// so `scale_workers` can cancel excess threads without going through RUNTIME.
 fn spawn_worker_task(
     kv_handle: Value,
-    poll_interval_ms: u64,
+    band: BandConfig,
     queues: Option<Vec<String>>,
-) -> Result<Value> {
+) -> Result<(Value, Arc<AtomicBool>)> {
     // Extract serializable KvHandleInfo — Value is not Send due to Rc internals.
     let kv_info = extract_kv_handle_info(&kv_handle)?;
 
@@ -1240,6 +1591,7 @@ fn spawn_worker_task(
     check_task_limit()?;
 
     let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel_clone = Arc::clone(&cancelled);
     let task_id = RUNTIME.register_task(Arc::clone(&cancelled))?;
     RUNTIME.active_tasks.fetch_add(1, AtomicOrdering::Release);
     // Safe: task_id was just returned by register_task(), so it must be in the registry
@@ -1252,13 +1604,13 @@ fn spawn_worker_task(
             *cell.borrow_mut() = Some(cancelled);
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            worker_loop(kv_info, poll_interval_ms, queues);
+            worker_loop(kv_info, band, queues);
             Ok(Value::Unit)
         }));
         finalize_task(result, &arcs.inner, &arcs.completed_notify);
     });
 
-    Ok(Value::TaskHandle(task_id))
+    Ok((Value::TaskHandle(task_id), cancel_clone))
 }
 
 // ============================================================================
@@ -2016,14 +2368,44 @@ pub fn init() -> HashMap<String, Value> {
             arity: 0,
             max_arity: 1,
             func: |args| {
-                let (poll_interval, concurrency, queues) = parse_work_opts(args)?;
+                let (bands, queues) = parse_bands_and_queues(args)?;
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                // Store active bands in the runtime for worker_status
+                if let Ok(mut active) = JOB_RUNTIME.active_bands.lock() {
+                    *active = bands.clone();
+                }
                 let mut handles = Vec::new();
-                for _ in 0..concurrency {
-                    match spawn_worker_task(kv_handle.clone(), poll_interval, queues.clone()) {
-                        Ok(handle) => handles.push(handle),
-                        Err(e) => return Err(e),
+                let mut band_task_ids: HashMap<String, Vec<u64>> = HashMap::new();
+                let mut band_cancel_arcs: HashMap<String, Vec<Arc<AtomicBool>>> = HashMap::new();
+                // Store active queues so scale_workers can reuse the same filter
+                if let Ok(mut aq) = JOB_RUNTIME.active_queues.lock() {
+                    *aq = queues.clone();
+                }
+                for band in &bands {
+                    let mut ids = Vec::new();
+                    let mut arcs = Vec::new();
+                    for _ in 0..band.concurrency {
+                        match spawn_worker_task(kv_handle.clone(), band.clone(), queues.clone()) {
+                            Ok((Value::TaskHandle(id), cancel_arc)) => {
+                                ids.push(id);
+                                arcs.push(cancel_arc);
+                                handles.push(Value::TaskHandle(id));
+                            }
+                            Ok((h, cancel_arc)) => {
+                                arcs.push(cancel_arc);
+                                handles.push(h);
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
+                    band_task_ids.insert(band.name.clone(), ids);
+                    band_cancel_arcs.insert(band.name.clone(), arcs);
+                }
+                if let Ok(mut task_ids) = JOB_RUNTIME.band_worker_task_ids.lock() {
+                    *task_ids = band_task_ids;
+                }
+                if let Ok(mut ca) = JOB_RUNTIME.band_cancel_arcs.lock() {
+                    *ca = band_cancel_arcs;
                 }
                 Ok(Value::Array(handles))
             },
@@ -2053,33 +2435,305 @@ pub fn init() -> HashMap<String, Value> {
             arity: 0,
             max_arity: 1,
             func: |args| {
-                let (poll_interval, concurrency, queues) = parse_work_opts(args)?;
-                if concurrency > 1 {
-                    return Err(IntentError::runtime_error(
-                        "work_jobs() does not support concurrency > 1. Use work_async() for multiple worker threads.".to_string(),
-                    ));
-                }
+                let (bands, queues) = parse_bands_and_queues(args)?;
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-                let kv_info = extract_kv_handle_info(&kv_handle)?;
 
-                // Set up Ctrl-C cancellation so worker_loop can exit gracefully
-                let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let cancelled_clone = cancelled.clone();
+                // Store active bands and queues (same as work_async, so scale_workers works)
+                if let Ok(mut active) = JOB_RUNTIME.active_bands.lock() {
+                    *active = bands.clone();
+                }
+                if let Ok(mut aq) = JOB_RUNTIME.active_queues.lock() {
+                    *aq = queues.clone();
+                }
+
+                // Spawn all band workers (background threads), collect cancel arcs
+                let mut band_task_ids: HashMap<String, Vec<u64>> = HashMap::new();
+                let mut band_cancel_arcs_map: HashMap<String, Vec<Arc<AtomicBool>>> =
+                    HashMap::new();
+                let mut all_cancel_arcs: Vec<Arc<AtomicBool>> = Vec::new();
+
+                for band in &bands {
+                    let mut ids = Vec::new();
+                    let mut arcs = Vec::new();
+                    for _ in 0..band.concurrency {
+                        match spawn_worker_task(kv_handle.clone(), band.clone(), queues.clone()) {
+                            Ok((Value::TaskHandle(id), cancel_arc)) => {
+                                ids.push(id);
+                                all_cancel_arcs.push(Arc::clone(&cancel_arc));
+                                arcs.push(cancel_arc);
+                            }
+                            Ok((_, cancel_arc)) => {
+                                all_cancel_arcs.push(Arc::clone(&cancel_arc));
+                                arcs.push(cancel_arc);
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    band_task_ids.insert(band.name.clone(), ids);
+                    band_cancel_arcs_map.insert(band.name.clone(), arcs);
+                }
+
+                if let Ok(mut task_ids) = JOB_RUNTIME.band_worker_task_ids.lock() {
+                    *task_ids = band_task_ids;
+                }
+                if let Ok(mut ca) = JOB_RUNTIME.band_cancel_arcs.lock() {
+                    *ca = band_cancel_arcs_map;
+                }
+
+                // Set up Ctrl-C handler — sets a shared shutdown flag
+                let shutdown = Arc::new(AtomicBool::new(false));
+                let shutdown_clone = Arc::clone(&shutdown);
                 ctrlc::set_handler(move || {
-                    cancelled_clone.store(true, std::sync::atomic::Ordering::Release);
+                    shutdown_clone.store(true, AtomicOrdering::Release);
                 })
                 .map_err(|e| {
-                    IntentError::runtime_error(format!(
-                        "Failed to set Ctrl-C handler: {}",
-                        e
-                    ))
+                    IntentError::runtime_error(format!("Failed to set Ctrl-C handler: {}", e))
                 })?;
-                CURRENT_TASK_CANCELLED.with(|cell| {
-                    *cell.borrow_mut() = Some(cancelled);
-                });
 
-                worker_loop(kv_info, poll_interval, queues);
+                // Block until Ctrl-C, then cooperatively cancel all workers
+                loop {
+                    if shutdown.load(AtomicOrdering::Acquire) {
+                        for arc in &all_cancel_arcs {
+                            arc.store(true, AtomicOrdering::Release);
+                        }
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+
                 Ok(Value::Unit)
+            },
+        },
+    );
+
+    // @ntnt scale_workers
+    // @module std/jobs
+    // @signature scale_workers(band_name: String, count: Int) -> Result<Unit, String>
+    // Scale the number of worker threads for a named band up or down.
+    //
+    // Adds workers (up to count) or cancels excess workers cooperatively.
+    // Only takes effect after work_async() has been called to initialise
+    // the band pool. Returns Err if the band name is not found.
+    // @param band_name The band to scale (e.g. "critical", "high", "normal", "low")
+    // @param count Target number of concurrent workers for this band (>= 1)
+    // @returns Ok(Unit) on success, Err(String) if band not found or count < 1
+    // @see_also work_async, worker_status
+    // @example scale_workers("critical", 8) ~ "Scale critical band to 8 workers"
+    // @example scale_workers("normal", 1) ~ "Scale normal band down to 1 worker"
+    module.insert(
+        "scale_workers".to_string(),
+        Value::NativeFunction {
+            name: "scale_workers".to_string(),
+            arity: 2,
+            max_arity: 2,
+            func: |args| {
+                let band_name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "scale_workers() requires a band name string".to_string(),
+                        ))
+                    }
+                };
+                let target_count: usize = match args.get(1) {
+                    Some(Value::Int(n)) if *n >= 1 => *n as usize,
+                    Some(Value::Int(n)) => {
+                        return Err(IntentError::runtime_error(format!(
+                            "scale_workers() count must be >= 1, got {}",
+                            n
+                        )))
+                    }
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "scale_workers() requires an integer count".to_string(),
+                        ))
+                    }
+                };
+
+                // Find the active band config for this band
+                let band_config = {
+                    let active = JOB_RUNTIME
+                        .active_bands
+                        .lock()
+                        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+                    active.iter().find(|b| b.name == band_name).cloned()
+                };
+                let band_config = match band_config {
+                    Some(b) => b,
+                    None => {
+                        return Err(IntentError::runtime_error(format!(
+                            "scale_workers(): band '{}' not found. Call work_async() first.",
+                            band_name
+                        )))
+                    }
+                };
+
+                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                let queues = JOB_RUNTIME
+                    .active_queues
+                    .lock()
+                    .map(|q| q.clone())
+                    .unwrap_or(None);
+
+                let mut cancel_map = JOB_RUNTIME
+                    .band_cancel_arcs
+                    .lock()
+                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+                let mut task_ids_map = JOB_RUNTIME
+                    .band_worker_task_ids
+                    .lock()
+                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+
+                let arcs = cancel_map.entry(band_name.clone()).or_default();
+                let ids = task_ids_map.entry(band_name.clone()).or_default();
+                let current_count = arcs.len();
+
+                if target_count > current_count {
+                    // Scale up: spawn additional workers
+                    for _ in current_count..target_count {
+                        match spawn_worker_task(
+                            kv_handle.clone(),
+                            band_config.clone(),
+                            queues.clone(),
+                        ) {
+                            Ok((Value::TaskHandle(id), cancel_arc)) => {
+                                ids.push(id);
+                                arcs.push(cancel_arc);
+                            }
+                            Ok((_, cancel_arc)) => {
+                                arcs.push(cancel_arc);
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                } else if target_count < current_count {
+                    // Scale down: cooperatively cancel excess workers
+                    let excess = current_count - target_count;
+                    let drain_start = target_count;
+                    for arc in arcs.drain(drain_start..) {
+                        arc.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    // Remove corresponding task IDs (best-effort — IDs may already be gone)
+                    if ids.len() > target_count {
+                        ids.drain(target_count..excess.min(ids.len()) + target_count);
+                    }
+                }
+
+                Ok(Value::Unit)
+            },
+        },
+    );
+
+    // @ntnt worker_status
+    // @module std/jobs
+    // @signature worker_status() -> Map
+    // Return a status snapshot of the job worker system.
+    //
+    // Returns a map with per-band stats and a system-wide pending count.
+    // Requires work_async() to have been called to populate band data.
+    // @returns Map with keys: "bands" (Array of per-band stat maps), "pending" (Int total pending jobs)
+    // @see_also work_async, scale_workers
+    // @example worker_status() ~ "Get current worker and queue stats"
+    module.insert(
+        "worker_status".to_string(),
+        Value::NativeFunction {
+            name: "worker_status".to_string(),
+            arity: 0,
+            max_arity: 0,
+            func: |_args| {
+                // Count pending jobs via kv_list
+                let pending_count = JOB_RUNTIME
+                    .get_or_init_kv()
+                    .and_then(|kv| kv::kv_list(&kv, Some("jobs:pending:")))
+                    .map(|keys| keys.len() as i64)
+                    .unwrap_or(0);
+
+                // Collect per-band stats
+                let active_bands = JOB_RUNTIME
+                    .active_bands
+                    .lock()
+                    .map(|b| b.clone())
+                    .unwrap_or_default();
+
+                let stats_map_guard = JOB_RUNTIME.band_stats.read();
+                let task_ids_guard = JOB_RUNTIME.band_worker_task_ids.lock();
+
+                let mut band_entries = Vec::new();
+                for band in &active_bands {
+                    let mut entry = HashMap::new();
+                    entry.insert("name".to_string(), Value::String(band.name.clone()));
+                    entry.insert(
+                        "min_priority".to_string(),
+                        Value::Int(band.min_priority as i64),
+                    );
+                    entry.insert(
+                        "max_priority".to_string(),
+                        Value::Int(band.max_priority as i64),
+                    );
+                    entry.insert(
+                        "concurrency".to_string(),
+                        Value::Int(band.concurrency as i64),
+                    );
+                    entry.insert(
+                        "poll_interval_ms".to_string(),
+                        Value::Int(band.poll_interval_ms as i64),
+                    );
+
+                    // Worker count from task IDs
+                    let worker_count = task_ids_guard
+                        .as_ref()
+                        .map(|m| m.get(&band.name).map(|v| v.len()).unwrap_or(0))
+                        .unwrap_or(0);
+                    entry.insert("workers".to_string(), Value::Int(worker_count as i64));
+
+                    // Atomic counters
+                    if let Ok(ref sm) = stats_map_guard {
+                        if let Some(stats) = sm.get(&band.name) {
+                            entry.insert(
+                                "completed".to_string(),
+                                Value::Int(
+                                    stats.completed.load(std::sync::atomic::Ordering::Relaxed)
+                                        as i64,
+                                ),
+                            );
+                            entry.insert(
+                                "failed".to_string(),
+                                Value::Int(
+                                    stats.failed.load(std::sync::atomic::Ordering::Relaxed) as i64
+                                ),
+                            );
+                            entry.insert(
+                                "active".to_string(),
+                                Value::Int(
+                                    stats.active.load(std::sync::atomic::Ordering::Relaxed) as i64
+                                ),
+                            );
+                            let total_ms = stats
+                                .total_duration_ms
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            let completed =
+                                stats.completed.load(std::sync::atomic::Ordering::Relaxed);
+                            let avg_ms = if completed > 0 {
+                                total_ms / completed
+                            } else {
+                                0
+                            };
+                            entry.insert("avg_duration_ms".to_string(), Value::Int(avg_ms as i64));
+                        } else {
+                            entry.insert("completed".to_string(), Value::Int(0));
+                            entry.insert("failed".to_string(), Value::Int(0));
+                            entry.insert("active".to_string(), Value::Int(0));
+                            entry.insert("avg_duration_ms".to_string(), Value::Int(0));
+                        }
+                    }
+
+                    band_entries.push(Value::Map(entry));
+                }
+
+                let mut result = HashMap::new();
+                result.insert("bands".to_string(), Value::Array(band_entries));
+                result.insert("pending".to_string(), Value::Int(pending_count));
+                Ok(Value::Map(result))
             },
         },
     );
@@ -3293,7 +3947,14 @@ mod tests {
                 crate::stdlib::concurrent::CURRENT_TASK_CANCELLED.with(|cell| {
                     *cell.borrow_mut() = Some(cancel_clone);
                 });
-                worker_loop(kv_info, 50, None);
+                let band = BandConfig {
+                    name: "test".to_string(),
+                    min_priority: 0,
+                    max_priority: 99,
+                    concurrency: 1,
+                    poll_interval_ms: 50,
+                };
+                worker_loop(kv_info, band, None);
             });
 
             // Give the worker time to process
@@ -3843,7 +4504,14 @@ mod tests {
                 crate::stdlib::concurrent::CURRENT_TASK_CANCELLED.with(|cell| {
                     *cell.borrow_mut() = Some(cancel_clone);
                 });
-                worker_loop(kv_info, 50, None);
+                let band = BandConfig {
+                    name: "test".to_string(),
+                    min_priority: 0,
+                    max_priority: 99,
+                    concurrency: 1,
+                    poll_interval_ms: 50,
+                };
+                worker_loop(kv_info, band, None);
             });
 
             // Let worker poll a few times
@@ -4102,5 +4770,856 @@ mod tests {
                 _ => panic!("Expected Ok"),
             }
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // DD-037: Priority Queues + Atomic Dedup
+    // -----------------------------------------------------------------------
+
+    /// Lower priority numbers produce lexicographically earlier pending keys.
+    #[test]
+    fn test_priority_key_ordering_lexicographic() {
+        let k_critical = format!(
+            "jobs:pending:{:02}:{}:{}",
+            5u8, "01000000000000000001", "id1"
+        );
+        let k_high = format!(
+            "jobs:pending:{:02}:{}:{}",
+            25u8, "01000000000000000001", "id2"
+        );
+        let k_normal = format!(
+            "jobs:pending:{:02}:{}:{}",
+            50u8, "01000000000000000001", "id3"
+        );
+        let k_low = format!(
+            "jobs:pending:{:02}:{}:{}",
+            85u8, "01000000000000000001", "id4"
+        );
+
+        assert!(k_critical < k_high, "critical < high");
+        assert!(k_high < k_normal, "high < normal");
+        assert!(k_normal < k_low, "normal < low");
+    }
+
+    /// Two jobs at the same priority sort FIFO by timestamp.
+    #[test]
+    fn test_priority_fifo_within_band() {
+        let k_first = format!(
+            "jobs:pending:{:02}:{}:{}",
+            50u8, "01000000000000000001", "id1"
+        );
+        let k_second = format!(
+            "jobs:pending:{:02}:{}:{}",
+            50u8, "01000000000000000002", "id2"
+        );
+        assert!(
+            k_first < k_second,
+            "earlier timestamp = higher priority within band"
+        );
+    }
+
+    /// Named priority strings resolve to the expected numeric values.
+    #[test]
+    fn test_priority_named_values() {
+        with_clean_runtime(|| {
+            let make_job = |name: &str, priority: &str| -> JobDefinition {
+                let mut opts = HashMap::new();
+                opts.insert(
+                    "priority".to_string(),
+                    JobOptionValue::String(priority.to_string()),
+                );
+                JobDefinition {
+                    name: name.to_string(),
+                    queue: "default".to_string(),
+                    perform_params: vec![],
+                    perform_body: Block { statements: vec![] },
+                    on_failure: None,
+                    options: opts,
+                }
+            };
+
+            let module = init();
+            configure_in_memory(&module);
+
+            for (name, priority_str, expected_num) in &[
+                ("PnCritical", "critical", 5i64),
+                ("PnHigh", "high", 25i64),
+                ("PnNormal", "normal", 50i64),
+                ("PnLow", "low", 85i64),
+            ] {
+                JOB_RUNTIME
+                    .register_job(make_job(name, priority_str))
+                    .unwrap();
+                let id = enqueue_job(&module, name, HashMap::new());
+                let kv = JOB_RUNTIME.get_or_init_kv().unwrap();
+                let data_key = format!("jobs:data:{}", id);
+                match kv::kv_get(&kv, &data_key).unwrap() {
+                    Value::Map(data) => {
+                        assert!(
+                            matches!(data.get("priority"), Some(Value::Int(n)) if *n == *expected_num),
+                            "priority for {} should be {}, got {:?}",
+                            priority_str,
+                            expected_num,
+                            data.get("priority")
+                        );
+                    }
+                    _ => panic!("Expected Map for job data"),
+                }
+            }
+        });
+    }
+
+    /// Numeric priority 0-99 is stored verbatim in job data.
+    #[test]
+    fn test_priority_numeric_stored_in_job_data() {
+        with_clean_runtime(|| {
+            let mut opts = HashMap::new();
+            opts.insert("priority".to_string(), JobOptionValue::Int(7));
+            let def = JobDefinition {
+                name: "NumPrioJob".to_string(),
+                queue: "default".to_string(),
+                perform_params: vec![],
+                perform_body: Block { statements: vec![] },
+                on_failure: None,
+                options: opts,
+            };
+            JOB_RUNTIME.register_job(def).unwrap();
+
+            let module = init();
+            configure_in_memory(&module);
+            let id = enqueue_job(&module, "NumPrioJob", HashMap::new());
+
+            let kv = JOB_RUNTIME.get_or_init_kv().unwrap();
+            let data_key = format!("jobs:data:{}", id);
+            match kv::kv_get(&kv, &data_key).unwrap() {
+                Value::Map(data) => {
+                    assert!(
+                        matches!(data.get("priority"), Some(Value::Int(7))),
+                        "priority should be 7"
+                    );
+                    assert!(
+                        matches!(data.get("band"), Some(Value::String(s)) if s == "critical"),
+                        "band should be 'critical'"
+                    );
+                }
+                _ => panic!("Expected Map"),
+            }
+        });
+    }
+
+    /// Priority out of range (> 99) returns an error.
+    #[test]
+    fn test_priority_out_of_range_error() {
+        with_clean_runtime(|| {
+            let mut opts = HashMap::new();
+            opts.insert("priority".to_string(), JobOptionValue::Int(100));
+            let def = JobDefinition {
+                name: "BadPrioJob".to_string(),
+                queue: "default".to_string(),
+                perform_params: vec![],
+                perform_body: Block { statements: vec![] },
+                on_failure: None,
+                options: opts,
+            };
+            JOB_RUNTIME.register_job(def).unwrap();
+            let module = init();
+            configure_in_memory(&module);
+
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let result = enqueue_fn(&[
+                Value::String("BadPrioJob".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(result.is_err(), "Priority 100 should be rejected");
+        });
+    }
+
+    /// Unknown named priority returns an error mentioning the name.
+    #[test]
+    fn test_priority_unknown_named_error() {
+        with_clean_runtime(|| {
+            let mut opts = HashMap::new();
+            opts.insert(
+                "priority".to_string(),
+                JobOptionValue::String("urgent".to_string()),
+            );
+            let def = JobDefinition {
+                name: "UnknownPrioJob".to_string(),
+                queue: "default".to_string(),
+                perform_params: vec![],
+                perform_body: Block { statements: vec![] },
+                on_failure: None,
+                options: opts,
+            };
+            JOB_RUNTIME.register_job(def).unwrap();
+            let module = init();
+            configure_in_memory(&module);
+
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let result = enqueue_fn(&[
+                Value::String("UnknownPrioJob".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(result.is_err(), "Unknown priority name should be rejected");
+            let err = format!("{}", result.unwrap_err());
+            assert!(
+                err.contains("Unknown priority"),
+                "Error should mention unknown priority"
+            );
+        });
+    }
+
+    /// Band name in job data should reflect the actual priority range.
+    #[test]
+    fn test_band_name_derived_from_priority() {
+        let cases: &[(u8, &str)] = &[
+            (0, "critical"),
+            (5, "critical"),
+            (9, "critical"),
+            (10, "high"),
+            (39, "high"),
+            (40, "normal"),
+            (69, "normal"),
+            (70, "low"),
+            (99, "low"),
+        ];
+        for (priority, expected_band) in cases {
+            let band_name = if *priority <= 9 {
+                "critical"
+            } else if *priority <= 39 {
+                "high"
+            } else if *priority <= 69 {
+                "normal"
+            } else {
+                "low"
+            };
+            assert_eq!(
+                band_name, *expected_band,
+                "Priority {} should be in band '{}'",
+                priority, expected_band
+            );
+        }
+    }
+
+    /// BandConfig floor_key starts with the min_priority prefix.
+    #[test]
+    fn test_band_config_floor_key_prefix() {
+        let band = BandConfig {
+            name: "critical".to_string(),
+            min_priority: 0,
+            max_priority: 9,
+            concurrency: 4,
+            poll_interval_ms: 200,
+        };
+        assert!(
+            band.floor_key().starts_with("jobs:pending:00:"),
+            "floor should start with 00 prefix"
+        );
+        assert!(
+            band.ceiling_key().starts_with("jobs:pending:09:"),
+            "ceiling should start with 09 prefix"
+        );
+    }
+
+    /// parse_band_config rejects min_priority > max_priority.
+    #[test]
+    fn test_parse_band_config_min_gt_max() {
+        let mut m = HashMap::new();
+        m.insert("name".to_string(), Value::String("bad".to_string()));
+        m.insert("min_priority".to_string(), Value::Int(50));
+        m.insert("max_priority".to_string(), Value::Int(10));
+        m.insert("concurrency".to_string(), Value::Int(1));
+        let result = parse_band_config(&m);
+        assert!(result.is_err(), "min > max should be rejected");
+    }
+
+    /// parse_band_config rejects concurrency < 1.
+    #[test]
+    fn test_parse_band_config_zero_concurrency() {
+        let mut m = HashMap::new();
+        m.insert("name".to_string(), Value::String("bad".to_string()));
+        m.insert("min_priority".to_string(), Value::Int(0));
+        m.insert("max_priority".to_string(), Value::Int(99));
+        m.insert("concurrency".to_string(), Value::Int(0));
+        let result = parse_band_config(&m);
+        assert!(result.is_err(), "concurrency 0 should be rejected");
+    }
+
+    /// parse_band_config rejects poll_interval < 1.
+    #[test]
+    fn test_parse_band_config_zero_poll_interval() {
+        let mut m = HashMap::new();
+        m.insert("name".to_string(), Value::String("bad".to_string()));
+        m.insert("min_priority".to_string(), Value::Int(0));
+        m.insert("max_priority".to_string(), Value::Int(99));
+        m.insert("concurrency".to_string(), Value::Int(1));
+        m.insert("poll_interval".to_string(), Value::Int(0));
+        let result = parse_band_config(&m);
+        assert!(result.is_err(), "poll_interval 0 should be rejected");
+    }
+
+    /// validate_bands rejects overlapping priority ranges.
+    #[test]
+    fn test_validate_bands_overlap() {
+        let bands = vec![
+            BandConfig {
+                name: "a".to_string(),
+                min_priority: 0,
+                max_priority: 49,
+                concurrency: 1,
+                poll_interval_ms: 1000,
+            },
+            BandConfig {
+                name: "b".to_string(),
+                min_priority: 40,
+                max_priority: 99,
+                concurrency: 1,
+                poll_interval_ms: 1000,
+            },
+        ];
+        let result = validate_bands(&bands);
+        assert!(result.is_err(), "Overlapping bands should be rejected");
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("overlap"), "Error should mention overlap");
+    }
+
+    /// validate_bands rejects gaps in priority coverage.
+    #[test]
+    fn test_validate_bands_gap() {
+        let bands = vec![
+            BandConfig {
+                name: "a".to_string(),
+                min_priority: 0,
+                max_priority: 39,
+                concurrency: 1,
+                poll_interval_ms: 1000,
+            },
+            BandConfig {
+                name: "b".to_string(),
+                min_priority: 50,
+                max_priority: 99,
+                concurrency: 1,
+                poll_interval_ms: 1000,
+            },
+        ];
+        let result = validate_bands(&bands);
+        assert!(result.is_err(), "Gaps should be rejected");
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("gap"), "Error should mention gap");
+    }
+
+    /// validate_bands rejects bands not starting at 0.
+    #[test]
+    fn test_validate_bands_no_zero_start() {
+        let bands = vec![BandConfig {
+            name: "a".to_string(),
+            min_priority: 10,
+            max_priority: 99,
+            concurrency: 1,
+            poll_interval_ms: 1000,
+        }];
+        assert!(
+            validate_bands(&bands).is_err(),
+            "Bands not starting at 0 should be rejected"
+        );
+    }
+
+    /// validate_bands rejects bands not ending at 99.
+    #[test]
+    fn test_validate_bands_no_99_end() {
+        let bands = vec![BandConfig {
+            name: "a".to_string(),
+            min_priority: 0,
+            max_priority: 89,
+            concurrency: 1,
+            poll_interval_ms: 1000,
+        }];
+        assert!(
+            validate_bands(&bands).is_err(),
+            "Bands not ending at 99 should be rejected"
+        );
+    }
+
+    /// validate_bands accepts the default 4-band configuration.
+    #[test]
+    fn test_validate_default_bands() {
+        let bands = default_bands();
+        assert!(
+            validate_bands(&bands).is_ok(),
+            "Default bands should be valid"
+        );
+    }
+
+    /// Parser: `job Name on queue` sets the queue field correctly.
+    #[test]
+    fn test_parser_job_on_queue() {
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        let src = "job SendEmail on emails (retry: 3) { perform(to) { print(to) } }";
+        let tokens: Vec<_> = Lexer::new(src).collect();
+        let mut parser = Parser::new(tokens);
+        let prog = parser.parse().expect("Should parse without error");
+        // Filter out Located wrappers to find the Job statement
+        let job_stmt = prog.statements.iter().find(|s| {
+            matches!(s, crate::ast::Statement::Job { .. })
+                || matches!(s, crate::ast::Statement::Located { stmt, .. }
+                    if matches!(stmt.as_ref(), crate::ast::Statement::Job { .. }))
+        });
+        assert!(job_stmt.is_some(), "Should have a Job statement");
+        let inner = match job_stmt.unwrap() {
+            crate::ast::Statement::Job { name, queue, .. } => (name.clone(), queue.clone()),
+            crate::ast::Statement::Located { stmt, .. } => match stmt.as_ref() {
+                crate::ast::Statement::Job { name, queue, .. } => (name.clone(), queue.clone()),
+                _ => panic!("Expected Job"),
+            },
+            _ => panic!("Expected Job"),
+        };
+        assert_eq!(inner.0, "SendEmail");
+        assert_eq!(inner.1, "emails");
+    }
+
+    /// Parser: `job Name (...)` without `on queue` defaults queue to "default".
+    #[test]
+    fn test_parser_job_default_queue() {
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        let src = "job SendEmail (retry: 3) { perform(to) { print(to) } }";
+        let tokens: Vec<_> = Lexer::new(src).collect();
+        let mut parser = Parser::new(tokens);
+        let prog = parser.parse().expect("Should parse without error");
+        let job_stmt = prog.statements.iter().find(|s| {
+            matches!(s, crate::ast::Statement::Job { .. })
+                || matches!(s, crate::ast::Statement::Located { stmt, .. }
+                    if matches!(stmt.as_ref(), crate::ast::Statement::Job { .. }))
+        });
+        assert!(job_stmt.is_some(), "Should have a Job statement");
+        let inner = match job_stmt.unwrap() {
+            crate::ast::Statement::Job { name, queue, .. } => (name.clone(), queue.clone()),
+            crate::ast::Statement::Located { stmt, .. } => match stmt.as_ref() {
+                crate::ast::Statement::Job { name, queue, .. } => (name.clone(), queue.clone()),
+                _ => panic!("Expected Job"),
+            },
+            _ => panic!("Expected Job"),
+        };
+        assert_eq!(inner.0, "SendEmail");
+        assert_eq!(inner.1, "default");
+    }
+
+    /// kv_set_nx returns true on first write, false on second write, preserving original value.
+    #[test]
+    fn test_kv_set_nx_basic() {
+        with_clean_runtime(|| {
+            let module = init();
+            configure_in_memory(&module);
+            let kv = JOB_RUNTIME.get_or_init_kv().unwrap();
+
+            let first = kv::kv_set_nx(&kv, "test:nx:key", &Value::String("v1".to_string()), None)
+                .expect("set_nx should not error");
+            assert!(first, "First set_nx should return true");
+
+            let second = kv::kv_set_nx(&kv, "test:nx:key", &Value::String("v2".to_string()), None)
+                .expect("set_nx should not error");
+            assert!(!second, "Second set_nx should return false");
+
+            match kv::kv_get(&kv, "test:nx:key").unwrap() {
+                Value::String(s) => assert_eq!(s, "v1", "Value should still be v1"),
+                _ => panic!("Expected String"),
+            }
+        });
+    }
+
+    /// Atomic dedup: two enqueues with the same payload return the same job_id.
+    #[test]
+    fn test_atomic_dedup_concurrent_enqueue() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def_with_unique("ConcurDedupJob", "default", 3600))
+                .unwrap();
+            let module = init();
+            configure_in_memory(&module);
+
+            let mut payload = HashMap::new();
+            payload.insert("user".to_string(), Value::String("alice".to_string()));
+
+            let id1 = enqueue_job(&module, "ConcurDedupJob", payload.clone());
+            let id2 = enqueue_job(&module, "ConcurDedupJob", payload.clone());
+            assert_eq!(id1, id2, "Duplicate enqueues should return the same job_id");
+        });
+    }
+
+    /// Atomic dedup: different payloads are not deduped.
+    #[test]
+    fn test_atomic_dedup_different_payloads() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def_with_unique("DiffPldJob", "default", 3600))
+                .unwrap();
+            let module = init();
+            configure_in_memory(&module);
+
+            let mut p1 = HashMap::new();
+            p1.insert("user".to_string(), Value::String("alice".to_string()));
+            let mut p2 = HashMap::new();
+            p2.insert("user".to_string(), Value::String("bob".to_string()));
+
+            let id1 = enqueue_job(&module, "DiffPldJob", p1);
+            let id2 = enqueue_job(&module, "DiffPldJob", p2);
+            assert_ne!(id1, id2, "Different payloads should not be deduped");
+        });
+    }
+
+    /// Retry pending key should preserve the original priority prefix.
+    #[test]
+    fn test_retry_pending_key_preserves_priority() {
+        with_clean_runtime(|| {
+            let mut opts = HashMap::new();
+            opts.insert("priority".to_string(), JobOptionValue::Int(5)); // critical
+            opts.insert("retry".to_string(), JobOptionValue::Int(2));
+            let def = JobDefinition {
+                name: "RetryPrioJob".to_string(),
+                queue: "default".to_string(),
+                perform_params: vec![],
+                perform_body: Block { statements: vec![] },
+                on_failure: None,
+                options: opts,
+            };
+            JOB_RUNTIME.register_job(def).unwrap();
+            let module = init();
+            configure_in_memory(&module);
+
+            let id = enqueue_job(&module, "RetryPrioJob", HashMap::new());
+            let kv = JOB_RUNTIME.get_or_init_kv().unwrap();
+            let data_key = format!("jobs:data:{}", id);
+
+            match kv::kv_get(&kv, &data_key).unwrap() {
+                Value::Map(data) => {
+                    let pk = match data.get("pending_key") {
+                        Some(Value::String(s)) => s.clone(),
+                        _ => panic!("Expected pending_key string"),
+                    };
+                    assert!(
+                        pk.starts_with("jobs:pending:05:"),
+                        "Pending key should start with priority 05, got: {}",
+                        pk
+                    );
+                }
+                _ => panic!("Expected Map"),
+            }
+        });
+    }
+
+    /// worker_status() returns a Map with "bands" and "pending" keys.
+    #[test]
+    fn test_worker_status_returns_map() {
+        with_clean_runtime(|| {
+            let module = init();
+            configure_in_memory(&module);
+
+            let status_fn = get_fn(&module, "worker_status");
+            let result = status_fn(&[]).unwrap();
+            match result {
+                Value::Map(m) => {
+                    assert!(m.contains_key("bands"), "worker_status should have 'bands'");
+                    assert!(
+                        m.contains_key("pending"),
+                        "worker_status should have 'pending'"
+                    );
+                }
+                _ => panic!("worker_status should return a Map"),
+            }
+        });
+    }
+
+    /// worker_status() pending count reflects actual enqueued jobs.
+    #[test]
+    fn test_worker_status_pending_count() {
+        with_clean_runtime(|| {
+            JOB_RUNTIME
+                .register_job(test_job_def("WsPendingJob", "default"))
+                .unwrap();
+            let module = init();
+            configure_in_memory(&module);
+
+            enqueue_job(&module, "WsPendingJob", HashMap::new());
+            enqueue_job(&module, "WsPendingJob", HashMap::new());
+
+            let status_fn = get_fn(&module, "worker_status");
+            let result = status_fn(&[]).unwrap();
+            match result {
+                Value::Map(m) => match m.get("pending") {
+                    Some(Value::Int(n)) => assert_eq!(*n, 2, "pending count should be 2"),
+                    _ => panic!("Expected Int for pending"),
+                },
+                _ => panic!("Expected Map"),
+            }
+        });
+    }
+
+    /// scale_workers() errors when called before work_async() (no active bands).
+    #[test]
+    fn test_scale_workers_no_active_bands() {
+        with_clean_runtime(|| {
+            let module = init();
+            configure_in_memory(&module);
+
+            let scale_fn = get_fn(&module, "scale_workers");
+            let result = scale_fn(&[Value::String("normal".to_string()), Value::Int(2)]);
+            assert!(
+                result.is_err(),
+                "scale_workers without active bands should error"
+            );
+        });
+    }
+
+    /// scale_workers() errors for count < 1.
+    #[test]
+    fn test_scale_workers_count_below_one() {
+        with_clean_runtime(|| {
+            let module = init();
+            configure_in_memory(&module);
+
+            let scale_fn = get_fn(&module, "scale_workers");
+            let result = scale_fn(&[Value::String("normal".to_string()), Value::Int(0)]);
+            assert!(result.is_err(), "scale_workers with count 0 should error");
+        });
+    }
+
+    /// parse_bands_and_queues parses custom band configs from "bands" key.
+    #[test]
+    fn test_parse_bands_and_queues_custom_bands() {
+        let mut band_map = HashMap::new();
+        band_map.insert("name".to_string(), Value::String("fast".to_string()));
+        band_map.insert("min_priority".to_string(), Value::Int(0));
+        band_map.insert("max_priority".to_string(), Value::Int(99));
+        band_map.insert("concurrency".to_string(), Value::Int(2));
+
+        let mut opts = HashMap::new();
+        opts.insert(
+            "bands".to_string(),
+            Value::Array(vec![Value::Map(band_map)]),
+        );
+
+        let result = parse_bands_and_queues(&[Value::Map(opts)]);
+        assert!(result.is_ok(), "Custom bands should parse OK");
+        let (bands, queues) = result.unwrap();
+        assert_eq!(bands.len(), 1);
+        assert_eq!(bands[0].name, "fast");
+        assert_eq!(bands[0].concurrency, 2);
+        assert!(queues.is_none());
+    }
+
+    /// parse_bands_and_queues without "bands" key falls back to single legacy band.
+    #[test]
+    fn test_parse_bands_and_queues_legacy_fallback() {
+        let mut opts = HashMap::new();
+        opts.insert("poll_interval".to_string(), Value::Int(500));
+        opts.insert("concurrency".to_string(), Value::Int(3));
+
+        let (bands, _) = parse_bands_and_queues(&[Value::Map(opts)]).unwrap();
+        assert_eq!(bands.len(), 1, "Legacy fallback should produce one band");
+        assert_eq!(bands[0].name, "normal");
+        assert_eq!(bands[0].poll_interval_ms, 500);
+        assert_eq!(bands[0].concurrency, 3);
+    }
+
+    /// BandStats atomic counters track active, completed, and failed counts correctly.
+    #[test]
+    fn test_band_stats_increment() {
+        let stats = Arc::new(BandStats::new());
+        stats
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .completed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .failed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        stats
+            .total_duration_ms
+            .fetch_add(42, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(stats.active.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            stats.completed.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(stats.failed.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            stats
+                .total_duration_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+            42
+        );
+    }
+
+    /// get_or_create_band_stats returns the same Arc for the same band name.
+    #[test]
+    fn test_get_or_create_band_stats_idempotent() {
+        with_clean_runtime(|| {
+            let stats1 = JOB_RUNTIME.get_or_create_band_stats("critical");
+            let stats2 = JOB_RUNTIME.get_or_create_band_stats("critical");
+            stats1
+                .completed
+                .fetch_add(5, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                stats2.completed.load(std::sync::atomic::Ordering::Relaxed),
+                5,
+                "Should return the same Arc for the same band name"
+            );
+        });
+    }
+
+    /// default_bands() returns exactly 4 bands covering 0-99 with 10 total workers.
+    #[test]
+    fn test_default_bands_count_and_coverage() {
+        let bands = default_bands();
+        assert_eq!(bands.len(), 4, "default_bands() should return 4 bands");
+        let total_workers: usize = bands.iter().map(|b| b.concurrency).sum();
+        assert_eq!(total_workers, 10, "default bands should total 10 workers");
+        assert_eq!(bands[0].min_priority, 0, "first band must start at 0");
+        assert_eq!(
+            bands[bands.len() - 1].max_priority,
+            99,
+            "last band must end at 99"
+        );
+        // Contiguous coverage
+        for i in 1..bands.len() {
+            assert_eq!(
+                bands[i].min_priority,
+                bands[i - 1].max_priority + 1,
+                "bands must be contiguous at index {}",
+                i
+            );
+        }
+    }
+
+    /// A band worker with range 0-9 should NOT claim a job enqueued at priority 50.
+    #[test]
+    fn test_band_isolation_worker_ignores_outside_range() {
+        with_clean_runtime(|| {
+            // Register a job with priority 50 (normal band)
+            let mut opts = HashMap::new();
+            opts.insert("priority".to_string(), JobOptionValue::Int(50));
+            let def = JobDefinition {
+                name: "TaggedJob".to_string(),
+                queue: "default".to_string(),
+                perform_params: vec![],
+                perform_body: crate::ast::Block { statements: vec![] },
+                on_failure: None,
+                options: opts,
+            };
+            JOB_RUNTIME.register_job(def).unwrap();
+
+            let module = init();
+            configure_in_memory(&module);
+
+            // Enqueue the job (priority comes from job definition)
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let mut payload = HashMap::new();
+            payload.insert(
+                "tag".to_string(),
+                Value::String("normal-priority".to_string()),
+            );
+            let result =
+                enqueue_fn(&[Value::String("TaggedJob".to_string()), Value::Map(payload)]).unwrap();
+            let job_id = match result {
+                Value::EnumValue { values, .. } => match &values[0] {
+                    Value::String(s) => s.clone(),
+                    _ => panic!("Expected string ID"),
+                },
+                _ => panic!("Expected Ok"),
+            };
+
+            // Run a critical-band worker (range 0-9) for a short time
+            let kv_handle = JOB_RUNTIME.get_or_init_kv().unwrap();
+            let kv_info = extract_kv_handle_info(&kv_handle).unwrap();
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel_clone = cancel.clone();
+            let handle = std::thread::spawn(move || {
+                crate::stdlib::concurrent::CURRENT_TASK_CANCELLED.with(|cell| {
+                    *cell.borrow_mut() = Some(cancel_clone);
+                });
+                let band = BandConfig {
+                    name: "critical".to_string(),
+                    min_priority: 0,
+                    max_priority: 9,
+                    concurrency: 1,
+                    poll_interval_ms: 50,
+                };
+                worker_loop(kv_info, band, None);
+            });
+
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+            handle.join().unwrap();
+
+            // Job at priority 50 should still be pending — critical worker should not have claimed it
+            let status_fn = get_fn(&module, "job_status");
+            let status = status_fn(&[Value::String(job_id)]).unwrap();
+            match status {
+                Value::EnumValue {
+                    variant, values, ..
+                } if variant == "Ok" => match &values[0] {
+                    Value::Map(data) => {
+                        let s = match data.get("status") {
+                            Some(Value::String(s)) => s.clone(),
+                            _ => panic!("Expected status string"),
+                        };
+                        assert_eq!(
+                            s, "pending",
+                            "Priority-50 job should remain pending after critical-band worker run"
+                        );
+                    }
+                    _ => panic!("Expected Map in Ok"),
+                },
+                _ => panic!("Expected Ok from job_status"),
+            }
+        });
+    }
+
+    /// parse_band_config accepts the design-doc format: "range" array + "poll" key.
+    #[test]
+    fn test_parse_band_config_range_poll_format() {
+        let mut m = HashMap::new();
+        m.insert("name".to_string(), Value::String("payments".to_string()));
+        m.insert(
+            "range".to_string(),
+            Value::Array(vec![Value::Int(0), Value::Int(15)]),
+        );
+        m.insert("poll".to_string(), Value::Int(500));
+        m.insert("concurrency".to_string(), Value::Int(3));
+
+        let result = parse_band_config(&m);
+        assert!(
+            result.is_ok(),
+            "range+poll format should parse OK: {:?}",
+            result
+        );
+        let band = result.unwrap();
+        assert_eq!(band.name, "payments");
+        assert_eq!(band.min_priority, 0);
+        assert_eq!(band.max_priority, 15);
+        assert_eq!(band.poll_interval_ms, 500);
+        assert_eq!(band.concurrency, 3);
+    }
+
+    /// parse_band_config rejects poll interval below 100ms (e.g., 50ms).
+    #[test]
+    fn test_parse_band_config_poll_below_100ms() {
+        let mut m = HashMap::new();
+        m.insert("name".to_string(), Value::String("fast".to_string()));
+        m.insert("min_priority".to_string(), Value::Int(0));
+        m.insert("max_priority".to_string(), Value::Int(99));
+        m.insert("concurrency".to_string(), Value::Int(1));
+        m.insert("poll".to_string(), Value::Int(50));
+        let result = parse_band_config(&m);
+        assert!(result.is_err(), "poll 50ms should be rejected (min 100ms)");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("100ms"),
+            "Error should mention 100ms minimum, got: {}",
+            msg
+        );
     }
 }
