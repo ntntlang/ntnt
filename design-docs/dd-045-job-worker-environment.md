@@ -15,7 +15,7 @@ Job perform blocks execute in a full application context. Workers evaluate the e
 
 ## Motivation
 
-A developer writes one .tnt file. It has imports, helper functions, constants, and job definitions. The perform block should be able to call any function or reference any value defined in that file — the same way an HTTP route handler can. There is no separate "job environment." Jobs are part of the application.
+A developer writes an application. It might be one file or dozens. It has imports, helper functions, constants, and job definitions — possibly spread across multiple files. The perform block should be able to call any function or reference any value defined in the application — the same way an HTTP route handler can. There is no separate "job environment." Jobs are part of the application.
 
 ```ntnt
 import { fetch } from "std/http"
@@ -56,11 +56,12 @@ Everything in this file — `fetch`, `now`, `stringify`, `API_BASE`, `build_head
 Each job worker thread follows this lifecycle:
 
 ```
-1. Read the .tnt source file from disk
+1. Read the entrypoint .tnt file from disk
 2. Parse → AST
 3. Create Interpreter with ExecutionMode::Job
-4. Evaluate the full AST (imports, functions, constants, job registrations all run;
-   server calls like listen(), serve_static(), work_async() are no-ops)
+4. Evaluate the full AST — imports, jobs(), helper functions, constants, and job
+   registrations all execute normally. Server calls (listen, serve_static,
+   work_async) are no-ops. The full application is loaded.
 5. Enter the job processing loop:
    a. Claim a job from the KV queue
    b. Look up the JobDefinition by name
@@ -70,6 +71,94 @@ Each job worker thread follows this lifecycle:
 ```
 
 This is the same pattern HTTP server workers use. Each worker is an independent interpreter instance with its own `Rc<RefCell<Environment>>`. No cross-thread sharing, no `Send` constraints on the interpreter itself.
+
+### Multi-File Job Organization
+
+Real applications don't live in one file. Jobs follow the same progressive disclosure as routes:
+
+**Small app — everything in one file:**
+```ntnt
+// server.tnt
+import { fetch } from "std/http"
+
+fn notify(msg) { ... }
+
+job SendEmail on emails {
+    perform(to, body) { ... }
+}
+
+listen(8080)
+```
+
+**Medium app — jobs in a separate file, explicitly imported:**
+```ntnt
+// server.tnt
+import "lib/jobs.tnt"   // registers all jobs in JOB_RUNTIME
+listen(8080)
+```
+
+```ntnt
+// lib/jobs.tnt
+import { fetch } from "std/http"
+import { notify } from "lib/notifications.tnt"
+
+job SendEmail on emails {
+    perform(to, body) { notify("Sending to #{to}"); ... }
+}
+```
+
+This already works today. `import` evaluates the file, hits `Statement::Job`, and registers it globally. The imported file's functions and imports are available in the perform body because they're defined in the same module scope.
+
+**Large app — auto-discovered job directory:**
+```
+my-app/
+├── server.tnt
+├── lib/
+│   └── notifications.tnt
+└── jobs/
+    ├── send_email.tnt
+    ├── process_order.tnt
+    └── generate_report.tnt
+```
+
+```ntnt
+// server.tnt
+jobs("jobs/")          // auto-discover and register all jobs
+routes("routes/")      // auto-discover and register all routes
+listen(8080)
+```
+
+`jobs("jobs/")` works exactly like `routes("routes/")`:
+1. Scan the directory recursively for `.tnt` files
+2. Evaluate each file (which registers its `job` declarations in `JOB_RUNTIME`)
+3. Each file has its own imports and helper functions — they're available in its perform blocks
+4. `lib/` modules are available to job files via import (same as route files)
+5. Hot-reload picks up new/changed job files automatically (dev mode)
+
+Each job file is self-contained:
+```ntnt
+// jobs/send_email.tnt
+import { fetch } from "std/http"
+import { notify } from "lib/notifications.tnt"
+
+job SendEmail on emails (retry: 3) {
+    perform(to, subject, body) {
+        fetch("https://api.mailgun.net/v3/...", map { ... })
+        notify("Email sent to #{to}")
+    }
+}
+```
+
+The progressive path:
+- Start with jobs inline in your main file (zero ceremony)
+- Move them to `lib/jobs.tnt` when the file gets big (one import)
+- Move to `jobs/` directory when you have many jobs (one `jobs()` call, auto-discovery)
+
+At no point do you re-learn anything. Each step is a natural reorganization, not a new concept.
+
+#### Worker File Discovery
+
+When workers start, they need to evaluate the same files the main process evaluated. The source file stored in `JOB_RUNTIME` is the entrypoint (`server.tnt`). Evaluating it in `ExecutionMode::Job` naturally follows the same imports and `jobs()` calls, loading all job files. No separate discovery mechanism needed — the worker just re-evaluates the app.
 
 ### Function Capabilities — Structurally Enforced
 
@@ -168,6 +257,9 @@ fn define_server_actions(&mut self) {
     self.register_action("enable_auth",   HttpConfig, Exact(1), Self::action_enable_auth);
     self.register_action("on_shutdown",   HttpConfig, Exact(1), Self::action_on_shutdown);
     self.register_action("on_error",      HttpConfig, Exact(1), Self::action_on_error);
+
+    // --- JobConfig: job directory discovery ---
+    self.register_action("jobs",          JobConfig,  Exact(1), Self::action_jobs_directory);
 
     // Route registration (get, post, put, delete, patch, head, options)
     for method in &["get", "post", "put", "delete", "patch", "head", "options"] {
@@ -483,6 +575,20 @@ Replace `should_skip_server_call()` and the scattered `if name ==` chain with st
 - [ ] Delete NativeFunction string-matching skip block — absorbed into `capability` field
 - [ ] Update all existing `ExecutionMode` tests
 - [ ] Add capability tests: verify each mode provides exactly the right capabilities
+
+### Step 1b: `jobs()` Directory Auto-Discovery
+
+Implement `jobs("jobs/")` following the same pattern as `routes("routes/")`:
+
+- [ ] Add `jobs()` as a server action with `JobConfig` capability
+- [ ] Implement `load_job_directory()` — scan directory recursively for `.tnt` files
+- [ ] Evaluate each job file in the current interpreter (registers jobs via `Statement::Job`)
+- [ ] `lib/` modules available to job files via import (same as route files)
+- [ ] Track file mtimes for hot-reload in dev mode (detect new/changed/deleted job files)
+- [ ] Test: `jobs("jobs/")` discovers and registers jobs from multiple files
+- [ ] Test: job files can import from `lib/` modules
+- [ ] Test: hot-reload picks up new job files added to the directory
+- [ ] Test: `jobs()` works in `ExecutionMode::Job` (workers re-discover on startup)
 
 ### Step 2: Source File Tracking
 
