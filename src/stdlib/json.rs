@@ -96,6 +96,7 @@ pub fn init() -> HashMap<String, Value> {
     // @tags #pure
     // @example parse_json("{\"key\": \"value\"}") => Ok(map { "key": "value" }) ~ "Parse JSON object"
     // @example parse_json("null") => Ok(None) ~ "JSON null becomes None"
+    // @example parse_json(None) => Err("...None/null...") ~ "None input returns Err, not thrown error"
     // @error TypeError ~ "parse_json() requires a JSON string" fix: "Pass a string argument"
     // @gotcha JSON null is parsed as None (not Unit), enabling round-trip with stringify(None) → "null"
     module.insert(
@@ -114,6 +115,11 @@ pub fn init() -> HashMap<String, Value> {
                         Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                     }
                 }
+                // None/Unit from e.g. kv::get() on missing key — return Err instead of throwing
+                Value::Unit => Ok(Value::err(Value::String(
+                    "parse_json(): input is None/null — did you check for a missing key?"
+                        .to_string(),
+                ))),
                 _ => Err(IntentError::type_error(
                     "parse_json() requires a JSON string".to_string(),
                 )),
@@ -181,4 +187,74 @@ pub fn init() -> HashMap<String, Value> {
     );
 
     module
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get_fn(
+        module: &HashMap<String, Value>,
+        name: &str,
+    ) -> fn(&[Value]) -> crate::error::Result<Value> {
+        match module.get(name) {
+            Some(Value::NativeFunction { func, .. }) => *func,
+            _ => panic!("Function {} not found", name),
+        }
+    }
+
+    #[test]
+    fn test_parse_json_none_returns_err() {
+        let module = init();
+        let parse = get_fn(&module, "parse_json");
+        let result = parse(&[Value::Unit]).unwrap();
+        // Should be Err variant, not a thrown error
+        match result {
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                assert_eq!(variant, "Err");
+                match &values[0] {
+                    Value::String(s) => {
+                        assert!(s.contains("None/null"), "Error should mention None: {}", s)
+                    }
+                    _ => panic!("Expected string error message"),
+                }
+            }
+            _ => panic!("Expected Err result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_parse_json_valid_object() {
+        let module = init();
+        let parse = get_fn(&module, "parse_json");
+        let result = parse(&[Value::String(r#"{"key":"value"}"#.to_string())]).unwrap();
+        match result {
+            Value::EnumValue { variant, .. } => assert_eq!(variant, "Ok"),
+            _ => panic!("Expected Ok result"),
+        }
+    }
+
+    #[test]
+    fn test_parse_json_invalid_throws_err_variant() {
+        let module = init();
+        let parse = get_fn(&module, "parse_json");
+        let result = parse(&[Value::String("not json".to_string())]).unwrap();
+        match result {
+            Value::EnumValue { variant, .. } => assert_eq!(variant, "Err"),
+            _ => panic!("Expected Err result"),
+        }
+    }
+
+    #[test]
+    fn test_parse_json_non_string_throws_type_error() {
+        let module = init();
+        let parse = get_fn(&module, "parse_json");
+        let result = parse(&[Value::Int(42)]);
+        assert!(
+            result.is_err(),
+            "Non-string non-None should throw TypeError"
+        );
+    }
 }

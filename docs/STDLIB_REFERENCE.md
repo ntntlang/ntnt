@@ -6501,6 +6501,7 @@ Returns Ok with the parsed value on success, or Err with a descriptive parse err
 ```ntnt
 parse_json("{\"key\": \"value\"}")  // => Ok(map { "key": "value" })  // Parse JSON object
 parse_json("null")  // => Ok(None)  // JSON null becomes None
+parse_json(None)  // => Err("...None/null...")  // None input returns Err, not thrown error
 ```
 
 **Errors:**
