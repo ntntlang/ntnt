@@ -189,7 +189,12 @@ fn handle_connection(stream: std::os::unix::net::UnixStream) {
         _ => {}
     }
 
-    let response = dispatch_command(line.trim());
+    // Detect truncation: max bytes reached without a newline
+    let response = if line.len() as u64 >= MAX_REQUEST_SIZE && !line.ends_with('\n') {
+        serde_json::json!({ "error": format!("request too large (max {}KB)", MAX_REQUEST_SIZE / 1024) }).to_string()
+    } else {
+        dispatch_command(line.trim())
+    };
 
     let mut writer = std::io::BufWriter::new(&stream);
     let _ = writeln!(writer, "{}", response);
@@ -243,5 +248,46 @@ fn cmd_scale(band: &str, count: usize) -> String {
     match crate::stdlib::jobs::scale_workers_impl(band, count) {
         Ok(_) => serde_json::json!({ "ok": true, "band": band, "count": count }).to_string(),
         Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dispatch_invalid_json() {
+        let resp = dispatch_command("not json");
+        assert!(resp.contains("invalid JSON"));
+    }
+
+    #[test]
+    fn test_dispatch_unknown_command() {
+        let resp = dispatch_command(r#"{"cmd":"reboot"}"#);
+        assert!(resp.contains("unknown command"));
+    }
+
+    #[test]
+    fn test_dispatch_scale_missing_band() {
+        let resp = dispatch_command(r#"{"cmd":"scale","count":4}"#);
+        assert!(resp.contains("missing 'band'"));
+    }
+
+    #[test]
+    fn test_dispatch_scale_missing_count() {
+        let resp = dispatch_command(r#"{"cmd":"scale","band":"low"}"#);
+        assert!(resp.contains("missing or invalid 'count'"));
+    }
+
+    #[test]
+    fn test_dispatch_scale_zero_count() {
+        let resp = dispatch_command(r#"{"cmd":"scale","band":"low","count":0}"#);
+        assert!(resp.contains("count must be >= 1"));
+    }
+
+    #[test]
+    fn test_dispatch_no_cmd_field() {
+        let resp = dispatch_command(r#"{"band":"low"}"#);
+        assert!(resp.contains("unknown command"));
     }
 }

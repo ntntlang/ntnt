@@ -1366,7 +1366,9 @@ fn run_workers_status(dir: Option<PathBuf>) -> anyhow::Result<()> {
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
 
-        let avg_str = if avg_ms > 0 {
+        let avg_str = if avg_ms >= 1000 {
+            format!("{:.1}s", avg_ms as f64 / 1000.0)
+        } else if avg_ms > 0 {
             format!("{}ms", avg_ms)
         } else {
             "-".to_string()
@@ -1391,6 +1393,9 @@ fn run_workers_status(dir: Option<PathBuf>) -> anyhow::Result<()> {
 }
 
 fn run_workers_scale(band: String, count: u64, dir: Option<PathBuf>) -> anyhow::Result<()> {
+    if count < 1 {
+        anyhow::bail!("Worker count must be >= 1, got {}", count);
+    }
     let payload = serde_json::json!({
         "cmd": "scale",
         "band": band,
