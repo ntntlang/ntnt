@@ -2028,8 +2028,8 @@ pub(crate) fn worker_status_impl() -> crate::error::Result<Value> {
     let active_bands = JOB_RUNTIME
         .active_bands
         .lock()
-        .map(|b| b.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
     let stats_map_guard = JOB_RUNTIME
         .band_stats
