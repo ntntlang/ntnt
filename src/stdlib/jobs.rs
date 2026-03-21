@@ -260,16 +260,17 @@ impl JobRuntime {
         }
     }
 
-    /// Register a job definition. Errors if a job with the same name already exists.
+    /// Register a job definition. Idempotent — silently skips if a job with the
+    /// same name is already registered (first registration wins). This is intentional:
+    /// worker threads re-execute the .tnt file and hit job declarations again.
     pub fn register_job(&self, def: JobDefinition) -> Result<()> {
         let mut registry = self.job_registry.write().map_err(|e| {
             IntentError::runtime_error(format!("Job registry lock poisoned: {}", e))
         })?;
         if registry.contains_key(&def.name) {
-            return Err(IntentError::runtime_error(format!(
-                "Duplicate job definition: '{}' is already registered",
-                def.name
-            )));
+            // Idempotent: silently skip re-registration. Workers re-execute
+            // the .tnt file, hitting job declarations again. First registration wins.
+            return Ok(());
         }
         registry.insert(def.name.clone(), def);
         Ok(())
@@ -3463,16 +3464,22 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_job_registration() {
+    fn test_duplicate_job_registration_is_idempotent() {
         with_clean_runtime(|| {
             JOB_RUNTIME
                 .register_job(test_job_def("DupJob", "default"))
                 .unwrap();
 
+            // Second registration is idempotent — returns Ok, first definition wins
             let result = JOB_RUNTIME.register_job(test_job_def("DupJob", "other"));
-            assert!(result.is_err());
-            let err = format!("{}", result.unwrap_err());
-            assert!(err.contains("Duplicate job definition"));
+            assert!(
+                result.is_ok(),
+                "Duplicate registration should be idempotent"
+            );
+
+            // First registration's queue is preserved
+            let job = JOB_RUNTIME.get_job("DupJob").unwrap().unwrap();
+            assert_eq!(job.queue, "default", "First registration should win");
         });
     }
 

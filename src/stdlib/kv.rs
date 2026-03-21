@@ -833,6 +833,15 @@ fn get_backend_type(handle: &Value) -> Result<KVBackend> {
                 ))
             }
         }
+        Value::EnumValue {
+            enum_name, variant, ..
+        } if enum_name == "Result" && (variant == "Ok" || variant == "Err") => {
+            Err(IntentError::type_error(
+                "Expected a KV store handle, got a Result — did you forget to unwrap() the open() call? \
+                 Use: let kv = unwrap(open(\"...\"))"
+                    .to_string(),
+            ))
+        }
         _ => Err(IntentError::type_error(
             "Expected a KV store handle".to_string(),
         )),
