@@ -353,6 +353,19 @@ enum Commands {
     ///   ntnt jobs clear server.tnt --status=completed
     #[command(subcommand)]
     Jobs(JobsCommands),
+
+    /// Manage live job workers (status and dynamic scaling)
+    ///
+    /// Connects to the control socket (.ntnt.sock) started automatically when
+    /// `ntnt worker` or `work_jobs()`/`work_async()` is running.
+    ///
+    /// Examples:
+    ///   ntnt workers status
+    ///   ntnt workers status --dir ~/apps/emails
+    ///   ntnt workers scale low 8
+    ///   ntnt workers scale critical 2 --dir /var/app
+    #[command(subcommand)]
+    Workers(WorkersCommands),
 }
 
 /// Intent-Driven Development subcommands
@@ -577,6 +590,48 @@ enum JobsCommands {
     },
 }
 
+/// Live worker management subcommands
+#[derive(Subcommand)]
+enum WorkersCommands {
+    /// Show current worker band status
+    ///
+    /// Connects to .ntnt.sock and prints a live status table showing band
+    /// names, worker counts, active jobs, completed/failed totals, and average
+    /// execution time.
+    ///
+    /// Examples:
+    ///   ntnt workers status
+    ///   ntnt workers status --dir /var/app
+    Status {
+        /// Directory that contains .ntnt.sock (default: current directory)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
+
+    /// Scale a worker band to a new concurrency level
+    ///
+    /// Connects to .ntnt.sock and dynamically adjusts the number of worker
+    /// threads for the named band.  Workers are added or cooperatively
+    /// cancelled without restarting the process.
+    ///
+    /// Examples:
+    ///   ntnt workers scale low 4
+    ///   ntnt workers scale critical 2 --dir /var/app
+    Scale {
+        /// Band name to scale (critical, high, normal, low)
+        #[arg(value_name = "BAND")]
+        band: String,
+
+        /// Target number of workers for this band (>= 1)
+        #[arg(value_name = "COUNT")]
+        count: u64,
+
+        /// Directory that contains .ntnt.sock (default: current directory)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
+}
+
 /// Format and display an error with rich context (error codes, source snippets, suggestions).
 fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
     // Try to downcast to IntentError for rich formatting
@@ -747,6 +802,7 @@ fn main() {
             poll_interval,
         }) => run_worker_command(&file, concurrency, queues, poll_interval),
         Some(Commands::Jobs(jobs_cmd)) => run_jobs_command(jobs_cmd),
+        Some(Commands::Workers(workers_cmd)) => run_workers_command(workers_cmd),
         None => {
             if let Some(file) = cli.file {
                 run_file(&file, 30)
@@ -1207,6 +1263,144 @@ fn run_worker_command(
     func(&[ntnt::interpreter::Value::Map(opts)])?;
     ntnt::stdlib::concurrent::RUNTIME.shutdown();
     Ok(())
+}
+
+fn run_workers_command(cmd: WorkersCommands) -> anyhow::Result<()> {
+    match cmd {
+        WorkersCommands::Status { dir } => run_workers_status(dir),
+        WorkersCommands::Scale { band, count, dir } => run_workers_scale(band, count, dir),
+    }
+}
+
+/// Connect to .ntnt.sock, send a JSON command, return the parsed response.
+fn workers_socket_call(dir: Option<PathBuf>, payload: &str) -> anyhow::Result<serde_json::Value> {
+    let sock_path = dir
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        .join(".ntnt.sock");
+
+    #[cfg(unix)]
+    {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixStream;
+
+        let stream = UnixStream::connect(&sock_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot connect to {}: {} (is `ntnt worker` running?)",
+                sock_path.display(),
+                e
+            )
+        })?;
+
+        {
+            let mut writer = std::io::BufWriter::new(&stream);
+            writeln!(writer, "{}", payload)?;
+            writer.flush()?;
+        }
+
+        let mut reader = BufReader::new(&stream);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+
+        let v: serde_json::Value = serde_json::from_str(line.trim())
+            .map_err(|e| anyhow::anyhow!("Invalid response from control socket: {}", e))?;
+        Ok(v)
+    }
+
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("ntnt workers is not available on Windows");
+    }
+}
+
+fn run_workers_status(dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let resp = workers_socket_call(dir, r#"{"cmd":"status"}"#)?;
+
+    if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+        anyhow::bail!("{}", err);
+    }
+
+    let bands = resp
+        .get("bands")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+
+    let pending = resp.get("pending").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    // Table header
+    println!(
+        "{:<12}  {:>7}  {:>6}  {:>7}  {:>9}  {:>6}  {:>8}",
+        "Band", "Workers", "Active", "Pending", "Completed", "Failed", "Avg Time"
+    );
+    println!(
+        "{:<12}  {:>7}  {:>6}  {:>7}  {:>9}  {:>6}  {:>8}",
+        "──────────", "───────", "──────", "───────", "─────────", "──────", "────────"
+    );
+
+    for band in bands {
+        let name = band.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let workers = band.get("workers").and_then(|v| v.as_i64()).unwrap_or(0);
+        let active = band.get("active").and_then(|v| v.as_i64()).unwrap_or(0);
+        let completed = band.get("completed").and_then(|v| v.as_i64()).unwrap_or(0);
+        let failed = band.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
+        let avg_ms = band
+            .get("avg_duration_ms")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let avg_str = if avg_ms > 0 {
+            format!("{}ms", avg_ms)
+        } else {
+            "-".to_string()
+        };
+
+        println!(
+            "{:<12}  {:>7}  {:>6}  {:>7}  {:>9}  {:>6}  {:>8}",
+            name,
+            workers,
+            active,
+            "-", // per-band pending not tracked; total shown below
+            format_count(completed),
+            failed,
+            avg_str,
+        );
+    }
+
+    println!();
+    println!("Total pending: {}", pending);
+
+    Ok(())
+}
+
+fn run_workers_scale(band: String, count: u64, dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let payload = serde_json::json!({
+        "cmd": "scale",
+        "band": band,
+        "count": count,
+    })
+    .to_string();
+
+    let resp = workers_socket_call(dir, &payload)?;
+
+    if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+        anyhow::bail!("{}", err);
+    }
+
+    println!("✓ {}: scaled to {} workers", band, count);
+    Ok(())
+}
+
+/// Format a large integer with comma separators for readability.
+fn format_count(n: i64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }
 
 /// Show job queue status
