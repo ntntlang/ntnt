@@ -101,10 +101,8 @@ fn start_unix() {
         }
     };
 
-    // Restrict socket permissions to owner only (0600) — prevents other users
-    // on multi-user systems from connecting and issuing scale commands.
-    // If this fails, remove the socket and abort — don't leave a world-readable control socket.
-    #[cfg(unix)]
+    // Restrict socket permissions to owner only (0600) immediately after bind.
+    // If this fails, remove the socket and abort — don't leave a permissive socket.
     {
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
@@ -156,6 +154,9 @@ fn run_accept_loop(listener: std::os::unix::net::UnixListener, cancel: Arc<Atomi
             Ok((stream, _)) => handle_connection(stream),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                continue; // EINTR from signal delivery — retry accept
             }
             Err(e) => {
                 if !cancel.load(Ordering::Acquire) {
@@ -220,7 +221,10 @@ fn dispatch_command(line: &str) -> String {
                 None => return serde_json::json!({ "error": "missing 'band' field" }).to_string(),
             };
             let count = match cmd.get("count").and_then(|v| v.as_u64()) {
-                Some(c) if c >= 1 => c as usize,
+                Some(c) if c >= 1 && c <= usize::MAX as u64 => c as usize,
+                Some(c) if c > usize::MAX as u64 => {
+                    return serde_json::json!({ "error": format!("count {} exceeds maximum ({})", c, usize::MAX) }).to_string()
+                }
                 Some(_) => return serde_json::json!({ "error": "count must be >= 1" }).to_string(),
                 None => {
                     return serde_json::json!({ "error": "missing or invalid 'count' field" })

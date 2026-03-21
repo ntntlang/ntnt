@@ -623,8 +623,8 @@ enum WorkersCommands {
         band: String,
 
         /// Target number of workers for this band (>= 1)
-        #[arg(value_name = "COUNT")]
-        count: u64,
+        #[arg(value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..))]
+        count: u32,
 
         /// Directory that contains .ntnt.sock (default: current directory)
         #[arg(long, value_name = "DIR")]
@@ -1283,7 +1283,7 @@ fn workers_socket_call(dir: Option<PathBuf>, payload: &str) -> anyhow::Result<se
 
     #[cfg(unix)]
     {
-        use std::io::{BufRead, BufReader, Write};
+        use std::io::{BufRead, BufReader, Read, Write};
         use std::os::unix::net::UnixStream;
 
         let stream = UnixStream::connect(&sock_path).map_err(|e| {
@@ -1305,7 +1305,9 @@ fn workers_socket_call(dir: Option<PathBuf>, payload: &str) -> anyhow::Result<se
             writer.flush()?;
         }
 
-        let mut reader = BufReader::new(&stream);
+        // Cap response at 1MB to prevent unbounded allocation
+        let limited = (&stream).take(1_048_576);
+        let mut reader = BufReader::new(limited);
         let mut line = String::new();
         reader.read_line(&mut line).map_err(|e| {
             if e.kind() == std::io::ErrorKind::WouldBlock
@@ -1347,12 +1349,12 @@ fn run_workers_status(dir: Option<PathBuf>) -> anyhow::Result<()> {
 
     // Table header
     println!(
-        "{:<12}  {:>7}  {:>6}  {:>7}  {:>9}  {:>6}  {:>8}",
-        "Band", "Workers", "Active", "Pending", "Completed", "Failed", "Avg Time"
+        "{:<12}  {:>7}  {:>6}  {:>9}  {:>6}  {:>8}",
+        "Band", "Workers", "Active", "Completed", "Failed", "Avg Time"
     );
     println!(
-        "{:<12}  {:>7}  {:>6}  {:>7}  {:>9}  {:>6}  {:>8}",
-        "──────────", "───────", "──────", "───────", "─────────", "──────", "────────"
+        "{:<12}  {:>7}  {:>6}  {:>9}  {:>6}  {:>8}",
+        "──────────", "───────", "──────", "─────────", "──────", "────────"
     );
 
     for band in bands {
@@ -1375,11 +1377,10 @@ fn run_workers_status(dir: Option<PathBuf>) -> anyhow::Result<()> {
         };
 
         println!(
-            "{:<12}  {:>7}  {:>6}  {:>7}  {:>9}  {:>6}  {:>8}",
+            "{:<12}  {:>7}  {:>6}  {:>9}  {:>6}  {:>8}",
             name,
             workers,
             active,
-            "-", // per-band pending not tracked; total shown below
             format_count(completed),
             failed,
             avg_str,
@@ -1387,15 +1388,12 @@ fn run_workers_status(dir: Option<PathBuf>) -> anyhow::Result<()> {
     }
 
     println!();
-    println!("Total pending: {}", pending);
+    println!("Total pending: {}", format_count(pending));
 
     Ok(())
 }
 
-fn run_workers_scale(band: String, count: u64, dir: Option<PathBuf>) -> anyhow::Result<()> {
-    if count < 1 {
-        anyhow::bail!("Worker count must be >= 1, got {}", count);
-    }
+fn run_workers_scale(band: String, count: u32, dir: Option<PathBuf>) -> anyhow::Result<()> {
     let payload = serde_json::json!({
         "cmd": "scale",
         "band": &band,
@@ -1415,15 +1413,20 @@ fn run_workers_scale(band: String, count: u64, dir: Option<PathBuf>) -> anyhow::
 
 /// Format a large integer with comma separators for readability.
 fn format_count(n: i64) -> String {
-    let s = n.to_string();
+    let (sign, abs_s) = if n < 0 {
+        ("-", (-n).to_string())
+    } else {
+        ("", n.to_string())
+    };
     let mut result = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
+    for (i, c) in abs_s.chars().rev().enumerate() {
         if i > 0 && i % 3 == 0 {
             result.push(',');
         }
         result.push(c);
     }
-    result.chars().rev().collect()
+    let formatted: String = result.chars().rev().collect();
+    format!("{}{}", sign, formatted)
 }
 
 /// Show job queue status

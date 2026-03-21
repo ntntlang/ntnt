@@ -2122,7 +2122,7 @@ pub(crate) fn scale_workers_impl(
         Some(b) => b,
         None => {
             return Err(IntentError::runtime_error(format!(
-                "scale_workers(): band '{}' not found. Call work_async() first.",
+                "scale_workers(): band '{}' not found. Call work_async() or work_jobs() first.",
                 band_name
             )))
         }
@@ -2156,8 +2156,10 @@ pub(crate) fn scale_workers_impl(
                     ids.push(id);
                     arcs.push(cancel_arc);
                 }
-                Ok((_, cancel_arc)) => {
-                    arcs.push(cancel_arc);
+                Ok((_, _)) => {
+                    return Err(IntentError::runtime_error(
+                        "spawn_worker_task returned unexpected value type".to_string(),
+                    ));
                 }
                 Err(e) => return Err(e),
             }
@@ -2778,10 +2780,18 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
                 let target_count: usize = match args.get(1) {
-                    Some(Value::Int(n)) if *n >= 1 => *n as usize,
-                    Some(Value::Int(n)) => {
+                    Some(Value::Int(n)) if *n >= 1 && (*n as u64) <= usize::MAX as u64 => {
+                        *n as usize
+                    }
+                    Some(Value::Int(n)) if *n < 1 => {
                         return Err(IntentError::runtime_error(format!(
                             "scale_workers() count must be >= 1, got {}",
+                            n
+                        )))
+                    }
+                    Some(Value::Int(n)) => {
+                        return Err(IntentError::runtime_error(format!(
+                            "scale_workers() count {} exceeds platform maximum",
                             n
                         )))
                     }
