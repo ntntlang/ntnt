@@ -1,10 +1,10 @@
 # DD-044: Jobs DX Fixes — Addressing v0.4.6 Field Findings
 
-**Status:** Draft
+**Status:** Partial — Fixes C/D/E merged, A superseded by DD-045, B/F still planned
 **Author:** Larri
 **Created:** 2026-03-21
 **Source:** [ntnt-findings.md §5](https://app.larri.net/admin/design-docs/dd-005-ntnt-findings) — findings #25-30 from snowgauge.app build
-**Branch:** `fix/jobs-dx` (from `main`)
+**Branch:** `fix/jobs-dx` (merged to `main`)
 
 ---
 
@@ -18,9 +18,9 @@ This PR bundles them into one branch because they're small, self-contained, and 
 
 ## Findings → Fixes
 
-### Fix A: Auto-inject parent file imports into job perform interpreter (#25)
+### Fix A: ~~Auto-inject parent file imports into job perform interpreter~~ (#25) — SUPERSEDED by DD-045
 **File:** `src/stdlib/jobs.rs` — `execute_job_perform()`
-**Effort:** Medium (2-3 hours)
+**Effort:** N/A — solved by DD-045 (job worker environment). Workers evaluate the full .tnt file, so all imports are already available.
 
 **Problem:** Job perform blocks run in `Interpreter::new()` which has builtins and stdlib module registry but no imports from the parent file. Users must add `import { ... } from "std/..."` inside every perform block.
 
@@ -185,21 +185,20 @@ This is the most robust fix — no file parsing needed at all. The `.tnt` file a
 
 ## Implementation Order
 
-| PR | Fix | Effort | Risk |
-|----|-----|--------|------|
-| 1  | E: Idempotent job registration | 15 min | None — behavior change is strictly less noisy |
-| 2  | C: `parse_json(None)` → `Err` | 30 min | Low — new code path for None, existing paths unchanged |
-| 3  | D: Better KV handle error message | 30 min | None — error message improvement only |
-| 4  | F: `--store` flag for jobs CLI | 2-3 hr | Low — additive flag, existing behavior preserved |
-| 5  | A: Auto-inject imports into job perform | 2-3 hr | Medium — touches interpreter eval path |
-| 6  | B: Smart capture for schedule() | 2-3 hr | Medium — touches concurrent capture logic |
+| PR | Fix | Status |
+|----|-----|--------|
+| ✅  | E: Idempotent job registration | Merged in `fix/jobs-dx` |
+| ✅  | C: `parse_json(None)` → `Err` | Merged in `fix/jobs-dx` |
+| ✅  | D: Better KV handle error message | Merged in `fix/jobs-dx` |
+| 📋  | F: `--store` flag for jobs CLI | Still planned |
+| ~~5~~  | ~~A: Auto-inject imports into job perform~~ | Superseded by DD-045 |
+| 📋  | B: Smart capture for schedule() | Still planned (concurrency primitive, not job system) |
 
 **Total estimated effort:** 8-10 hours across 6 focused PRs (or bundle into 1-2 larger PRs).
 
-**Suggested bundling:**
-- **PR 1:** Fixes E + C + D (quick wins, <2 hours total)
-- **PR 2:** Fixes A + B (interpreter/concurrent changes, shared test patterns)
-- **PR 3:** Fix F (CLI-only change, independent)
+**PR 1 (merged):** Fixes E + C + D — `fix/jobs-dx` branch, 3 Copilot review rounds.
+**Remaining:** Fix B (schedule capture — concurrency primitive), Fix F (CLI --store flag).
+**Superseded:** Fix A — replaced by DD-045 job worker environment.
 
 ---
 
