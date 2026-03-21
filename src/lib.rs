@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod config;
 pub mod contracts;
+pub mod control_socket;
 pub mod error;
 pub mod ial;
 pub mod intent;

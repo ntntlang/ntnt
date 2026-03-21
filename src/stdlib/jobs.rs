@@ -2011,6 +2011,183 @@ pub fn job_status_counts() -> Result<JobStatusCounts> {
 }
 
 // ============================================================================
+// Control-socket helpers — called by src/control_socket.rs
+// ============================================================================
+
+/// Return a status snapshot of the job worker system.
+///
+/// Same logic as the `worker_status` NativeFunction; extracted so the control
+/// socket can call it directly without going through the stdlib function table.
+pub(crate) fn worker_status_impl() -> crate::error::Result<Value> {
+    let pending_count = JOB_RUNTIME
+        .get_or_init_kv()
+        .and_then(|kv| kv::kv_list(&kv, Some("jobs:pending:")))
+        .map(|keys| keys.len() as i64)
+        .unwrap_or(0);
+
+    let active_bands = JOB_RUNTIME
+        .active_bands
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+
+    let stats_map_guard = JOB_RUNTIME
+        .band_stats
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let task_ids_guard = JOB_RUNTIME.band_worker_task_ids.lock();
+
+    let mut band_entries = Vec::new();
+    for band in &active_bands {
+        let mut entry = HashMap::new();
+        entry.insert("name".to_string(), Value::String(band.name.clone()));
+        entry.insert(
+            "min_priority".to_string(),
+            Value::Int(band.min_priority as i64),
+        );
+        entry.insert(
+            "max_priority".to_string(),
+            Value::Int(band.max_priority as i64),
+        );
+        entry.insert(
+            "concurrency".to_string(),
+            Value::Int(band.concurrency as i64),
+        );
+        entry.insert(
+            "poll_interval_ms".to_string(),
+            Value::Int(band.poll_interval_ms as i64),
+        );
+
+        let worker_count = task_ids_guard
+            .as_ref()
+            .map(|m| m.get(&band.name).map(|v| v.len()).unwrap_or(0))
+            .unwrap_or(0);
+        entry.insert("workers".to_string(), Value::Int(worker_count as i64));
+
+        if let Some(stats) = stats_map_guard.get(&band.name) {
+            entry.insert(
+                "completed".to_string(),
+                Value::Int(stats.completed.load(std::sync::atomic::Ordering::Relaxed) as i64),
+            );
+            entry.insert(
+                "failed".to_string(),
+                Value::Int(stats.failed.load(std::sync::atomic::Ordering::Relaxed) as i64),
+            );
+            entry.insert(
+                "active".to_string(),
+                Value::Int(stats.active.load(std::sync::atomic::Ordering::Relaxed) as i64),
+            );
+            let total_ms = stats
+                .total_duration_ms
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let completed = stats.completed.load(std::sync::atomic::Ordering::Relaxed);
+            let avg_ms = if completed > 0 {
+                total_ms / completed
+            } else {
+                0
+            };
+            entry.insert("avg_duration_ms".to_string(), Value::Int(avg_ms as i64));
+        } else {
+            entry.insert("completed".to_string(), Value::Int(0));
+            entry.insert("failed".to_string(), Value::Int(0));
+            entry.insert("active".to_string(), Value::Int(0));
+            entry.insert("avg_duration_ms".to_string(), Value::Int(0));
+        }
+
+        band_entries.push(Value::Map(entry));
+    }
+
+    let mut result = HashMap::new();
+    result.insert("bands".to_string(), Value::Array(band_entries));
+    result.insert("pending".to_string(), Value::Int(pending_count));
+    Ok(Value::Map(result))
+}
+
+/// Scale the number of worker threads for a named band up or down.
+///
+/// Same logic as the `scale_workers` NativeFunction; extracted so the control
+/// socket can call it directly without going through the stdlib function table.
+pub(crate) fn scale_workers_impl(
+    band_name: &str,
+    target_count: usize,
+) -> crate::error::Result<Value> {
+    let band_config = {
+        let active = JOB_RUNTIME
+            .active_bands
+            .lock()
+            .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+        active.iter().find(|b| b.name == band_name).cloned()
+    };
+    let band_config = match band_config {
+        Some(b) => b,
+        None => {
+            return Err(IntentError::runtime_error(format!(
+                "scale_workers(): band '{}' not found. Call work_async() or work_jobs() first.",
+                band_name
+            )))
+        }
+    };
+
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+    let queues = JOB_RUNTIME
+        .active_queues
+        .lock()
+        .map(|q| q.clone())
+        .unwrap_or(None);
+
+    // Lock discipline: task_ids before cancel_arcs.
+    let mut task_ids_map = JOB_RUNTIME
+        .band_worker_task_ids
+        .lock()
+        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+    let mut cancel_map = JOB_RUNTIME
+        .band_cancel_arcs
+        .lock()
+        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
+
+    let arcs = cancel_map.entry(band_name.to_string()).or_default();
+    let ids = task_ids_map.entry(band_name.to_string()).or_default();
+    let current_count = arcs.len();
+
+    if target_count > current_count {
+        for _ in current_count..target_count {
+            match spawn_worker_task(kv_handle.clone(), band_config.clone(), queues.clone()) {
+                Ok((Value::TaskHandle(id), cancel_arc)) => {
+                    ids.push(id);
+                    arcs.push(cancel_arc);
+                }
+                Ok((_, _)) => {
+                    return Err(IntentError::runtime_error(
+                        "spawn_worker_task returned unexpected value type".to_string(),
+                    ));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    } else if target_count < current_count {
+        for arc in arcs.drain(target_count..) {
+            arc.store(true, std::sync::atomic::Ordering::Release);
+        }
+        if ids.len() > target_count {
+            ids.drain(target_count..ids.len());
+        }
+    }
+
+    // Update active_bands concurrency to reflect the new count.
+    {
+        let mut active = JOB_RUNTIME
+            .active_bands
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(band) = active.iter_mut().find(|b| b.name == band_name) {
+            band.concurrency = target_count;
+        }
+    }
+
+    Ok(Value::ok(Value::Unit))
+}
+
+// ============================================================================
 // Module Export
 // ============================================================================
 
@@ -2454,6 +2631,10 @@ pub fn init() -> HashMap<String, Value> {
                 if let Ok(mut ca) = JOB_RUNTIME.band_cancel_arcs.lock() {
                     *ca = band_cancel_arcs;
                 }
+                // Start control socket — lives until process exit or stop_control_socket().
+                // For work_async (non-blocking), the socket persists with the app process.
+                // For work_jobs (blocking), stop_control_socket() is called on Ctrl-C.
+                crate::control_socket::start_control_socket();
                 Ok(Value::Array(handles))
             },
         },
@@ -2527,6 +2708,8 @@ pub fn init() -> HashMap<String, Value> {
                     *ca = band_cancel_arcs_map;
                 }
 
+                crate::control_socket::start_control_socket();
+
                 // Set up Ctrl-C handler — sets a shared shutdown flag
                 let shutdown = Arc::new(AtomicBool::new(false));
                 let shutdown_clone = Arc::clone(&shutdown);
@@ -2561,6 +2744,7 @@ pub fn init() -> HashMap<String, Value> {
                 // Wait briefly for workers to finish current jobs
                 std::thread::sleep(std::time::Duration::from_millis(500));
 
+                crate::control_socket::stop_control_socket();
                 Ok(Value::Unit)
             },
         },
@@ -2596,10 +2780,18 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
                 let target_count: usize = match args.get(1) {
-                    Some(Value::Int(n)) if *n >= 1 => *n as usize,
-                    Some(Value::Int(n)) => {
+                    Some(Value::Int(n)) if *n >= 1 && (*n as u64) <= usize::MAX as u64 => {
+                        *n as usize
+                    }
+                    Some(Value::Int(n)) if *n < 1 => {
                         return Err(IntentError::runtime_error(format!(
                             "scale_workers() count must be >= 1, got {}",
+                            n
+                        )))
+                    }
+                    Some(Value::Int(n)) => {
+                        return Err(IntentError::runtime_error(format!(
+                            "scale_workers() count {} exceeds platform maximum",
                             n
                         )))
                     }
@@ -2610,88 +2802,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                // Find the active band config for this band
-                let band_config = {
-                    let active = JOB_RUNTIME
-                        .active_bands
-                        .lock()
-                        .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
-                    active.iter().find(|b| b.name == band_name).cloned()
-                };
-                let band_config = match band_config {
-                    Some(b) => b,
-                    None => {
-                        return Err(IntentError::runtime_error(format!(
-                            "scale_workers(): band '{}' not found. Call work_async() first.",
-                            band_name
-                        )))
-                    }
-                };
-
-                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-                let queues = JOB_RUNTIME
-                    .active_queues
-                    .lock()
-                    .map(|q| q.clone())
-                    .unwrap_or(None);
-
-                // Lock discipline: always acquire task_ids before cancel_arcs.
-                // This matches the order used in work_async/work_jobs.
-                let mut task_ids_map = JOB_RUNTIME
-                    .band_worker_task_ids
-                    .lock()
-                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
-                let mut cancel_map = JOB_RUNTIME
-                    .band_cancel_arcs
-                    .lock()
-                    .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?;
-
-                let arcs = cancel_map.entry(band_name.clone()).or_default();
-                let ids = task_ids_map.entry(band_name.clone()).or_default();
-                let current_count = arcs.len();
-
-                if target_count > current_count {
-                    // Scale up: spawn additional workers
-                    for _ in current_count..target_count {
-                        match spawn_worker_task(
-                            kv_handle.clone(),
-                            band_config.clone(),
-                            queues.clone(),
-                        ) {
-                            Ok((Value::TaskHandle(id), cancel_arc)) => {
-                                ids.push(id);
-                                arcs.push(cancel_arc);
-                            }
-                            Ok((_, cancel_arc)) => {
-                                arcs.push(cancel_arc);
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-                } else if target_count < current_count {
-                    // Scale down: cooperatively cancel excess workers
-                    let excess = current_count - target_count;
-                    let drain_start = target_count;
-                    for arc in arcs.drain(drain_start..) {
-                        arc.store(true, std::sync::atomic::Ordering::Release);
-                    }
-                    // Remove corresponding task IDs (best-effort — IDs may already be gone)
-                    if ids.len() > target_count {
-                        ids.drain(target_count..ids.len());
-                    }
-                }
-
-                // Update active_bands concurrency to reflect the new count
-                {
-                    let mut active = JOB_RUNTIME
-                        .active_bands
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    if let Some(band) = active.iter_mut().find(|b| b.name == band_name) {
-                        band.concurrency = target_count;
-                    }
-                }
-
+                scale_workers_impl(&band_name, target_count)?;
                 Ok(Value::ok(Value::Unit))
             },
         },
@@ -2713,100 +2824,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "worker_status".to_string(),
             arity: 0,
             max_arity: 0,
-            func: |_args| {
-                // Count pending jobs via kv_list
-                let pending_count = JOB_RUNTIME
-                    .get_or_init_kv()
-                    .and_then(|kv| kv::kv_list(&kv, Some("jobs:pending:")))
-                    .map(|keys| keys.len() as i64)
-                    .unwrap_or(0);
-
-                // Collect per-band stats
-                let active_bands = JOB_RUNTIME
-                    .active_bands
-                    .lock()
-                    .map(|b| b.clone())
-                    .unwrap_or_default();
-
-                let stats_map_guard = JOB_RUNTIME
-                    .band_stats
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                let task_ids_guard = JOB_RUNTIME.band_worker_task_ids.lock();
-
-                let mut band_entries = Vec::new();
-                for band in &active_bands {
-                    let mut entry = HashMap::new();
-                    entry.insert("name".to_string(), Value::String(band.name.clone()));
-                    entry.insert(
-                        "min_priority".to_string(),
-                        Value::Int(band.min_priority as i64),
-                    );
-                    entry.insert(
-                        "max_priority".to_string(),
-                        Value::Int(band.max_priority as i64),
-                    );
-                    entry.insert(
-                        "concurrency".to_string(),
-                        Value::Int(band.concurrency as i64),
-                    );
-                    entry.insert(
-                        "poll_interval_ms".to_string(),
-                        Value::Int(band.poll_interval_ms as i64),
-                    );
-
-                    // Worker count from task IDs
-                    let worker_count = task_ids_guard
-                        .as_ref()
-                        .map(|m| m.get(&band.name).map(|v| v.len()).unwrap_or(0))
-                        .unwrap_or(0);
-                    entry.insert("workers".to_string(), Value::Int(worker_count as i64));
-
-                    // Atomic counters
-                    if let Some(stats) = stats_map_guard.get(&band.name) {
-                        entry.insert(
-                            "completed".to_string(),
-                            Value::Int(
-                                stats.completed.load(std::sync::atomic::Ordering::Relaxed) as i64
-                            ),
-                        );
-                        entry.insert(
-                            "failed".to_string(),
-                            Value::Int(
-                                stats.failed.load(std::sync::atomic::Ordering::Relaxed) as i64
-                            ),
-                        );
-                        entry.insert(
-                            "active".to_string(),
-                            Value::Int(
-                                stats.active.load(std::sync::atomic::Ordering::Relaxed) as i64
-                            ),
-                        );
-                        let total_ms = stats
-                            .total_duration_ms
-                            .load(std::sync::atomic::Ordering::Relaxed);
-                        let completed = stats.completed.load(std::sync::atomic::Ordering::Relaxed);
-                        let avg_ms = if completed > 0 {
-                            total_ms / completed
-                        } else {
-                            0
-                        };
-                        entry.insert("avg_duration_ms".to_string(), Value::Int(avg_ms as i64));
-                    } else {
-                        entry.insert("completed".to_string(), Value::Int(0));
-                        entry.insert("failed".to_string(), Value::Int(0));
-                        entry.insert("active".to_string(), Value::Int(0));
-                        entry.insert("avg_duration_ms".to_string(), Value::Int(0));
-                    }
-
-                    band_entries.push(Value::Map(entry));
-                }
-
-                let mut result = HashMap::new();
-                result.insert("bands".to_string(), Value::Array(band_entries));
-                result.insert("pending".to_string(), Value::Int(pending_count));
-                Ok(Value::Map(result))
-            },
+            func: |_args| worker_status_impl(),
         },
     );
 

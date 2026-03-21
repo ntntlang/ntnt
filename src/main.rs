@@ -353,6 +353,19 @@ enum Commands {
     ///   ntnt jobs clear server.tnt --status=completed
     #[command(subcommand)]
     Jobs(JobsCommands),
+
+    /// Manage live job workers (status and dynamic scaling)
+    ///
+    /// Connects to the control socket (.ntnt.sock) started automatically when
+    /// `ntnt worker` or `work_jobs()`/`work_async()` is running.
+    ///
+    /// Examples:
+    ///   ntnt workers status
+    ///   ntnt workers status --dir ~/apps/emails
+    ///   ntnt workers scale low 8
+    ///   ntnt workers scale critical 2 --dir /var/app
+    #[command(subcommand)]
+    Workers(WorkersCommands),
 }
 
 /// Intent-Driven Development subcommands
@@ -577,6 +590,48 @@ enum JobsCommands {
     },
 }
 
+/// Live worker management subcommands
+#[derive(Subcommand)]
+enum WorkersCommands {
+    /// Show current worker band status
+    ///
+    /// Connects to .ntnt.sock and prints a live status table showing band
+    /// names, worker counts, active jobs, completed/failed totals, and average
+    /// execution time.
+    ///
+    /// Examples:
+    ///   ntnt workers status
+    ///   ntnt workers status --dir /var/app
+    Status {
+        /// Directory that contains .ntnt.sock (default: current directory)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
+
+    /// Scale a worker band to a new concurrency level
+    ///
+    /// Connects to .ntnt.sock and dynamically adjusts the number of worker
+    /// threads for the named band.  Workers are added or cooperatively
+    /// cancelled without restarting the process.
+    ///
+    /// Examples:
+    ///   ntnt workers scale low 4
+    ///   ntnt workers scale critical 2 --dir /var/app
+    Scale {
+        /// Band name to scale (critical, high, normal, low)
+        #[arg(value_name = "BAND")]
+        band: String,
+
+        /// Target number of workers for this band (>= 1)
+        #[arg(value_name = "COUNT", value_parser = clap::value_parser!(u32).range(1..))]
+        count: u32,
+
+        /// Directory that contains .ntnt.sock (default: current directory)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
+}
+
 /// Format and display an error with rich context (error codes, source snippets, suggestions).
 fn format_error(error: &anyhow::Error, file_path: Option<&PathBuf>) {
     // Try to downcast to IntentError for rich formatting
@@ -747,6 +802,7 @@ fn main() {
             poll_interval,
         }) => run_worker_command(&file, concurrency, queues, poll_interval),
         Some(Commands::Jobs(jobs_cmd)) => run_jobs_command(jobs_cmd),
+        Some(Commands::Workers(workers_cmd)) => run_workers_command(workers_cmd),
         None => {
             if let Some(file) = cli.file {
                 run_file(&file, 30)
@@ -1207,6 +1263,170 @@ fn run_worker_command(
     func(&[ntnt::interpreter::Value::Map(opts)])?;
     ntnt::stdlib::concurrent::RUNTIME.shutdown();
     Ok(())
+}
+
+fn run_workers_command(cmd: WorkersCommands) -> anyhow::Result<()> {
+    match cmd {
+        WorkersCommands::Status { dir } => run_workers_status(dir),
+        WorkersCommands::Scale { band, count, dir } => run_workers_scale(band, count, dir),
+    }
+}
+
+/// Connect to .ntnt.sock, send a JSON command, return the parsed response.
+fn workers_socket_call(dir: Option<PathBuf>, payload: &str) -> anyhow::Result<serde_json::Value> {
+    let base_dir = match dir {
+        Some(d) => d,
+        None => std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?,
+    };
+    let sock_path = base_dir.join(".ntnt.sock");
+
+    #[cfg(unix)]
+    {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let stream = UnixStream::connect(&sock_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot connect to {}: {} (is `ntnt worker` running?)",
+                sock_path.display(),
+                e
+            )
+        })?;
+
+        // Set read/write timeouts to avoid indefinite hang if worker is stuck
+        let timeout = Some(std::time::Duration::from_secs(10));
+        stream.set_read_timeout(timeout)?;
+        stream.set_write_timeout(timeout)?;
+
+        {
+            let mut writer = std::io::BufWriter::new(&stream);
+            writeln!(writer, "{}", payload)?;
+            writer.flush()?;
+        }
+
+        // Cap response at 1MB to prevent unbounded allocation
+        let limited = (&stream).take(1_048_576);
+        let mut reader = BufReader::new(limited);
+        let mut line = String::new();
+        reader.read_line(&mut line).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut
+            {
+                anyhow::anyhow!(
+                    "Timeout waiting for response from control socket (is the worker busy?)"
+                )
+            } else {
+                anyhow::anyhow!("Failed to read from control socket: {}", e)
+            }
+        })?;
+
+        let v: serde_json::Value = serde_json::from_str(line.trim())
+            .map_err(|e| anyhow::anyhow!("Invalid response from control socket: {}", e))?;
+        Ok(v)
+    }
+
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("ntnt workers is not available on Windows");
+    }
+}
+
+fn run_workers_status(dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let resp = workers_socket_call(dir, r#"{"cmd":"status"}"#)?;
+
+    if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+        anyhow::bail!("{}", err);
+    }
+
+    let bands = resp
+        .get("bands")
+        .and_then(|v| v.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+
+    let pending = resp.get("pending").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    // Table header
+    println!(
+        "{:<12}  {:>7}  {:>6}  {:>9}  {:>6}  {:>8}",
+        "Band", "Workers", "Active", "Completed", "Failed", "Avg Time"
+    );
+    println!(
+        "{:<12}  {:>7}  {:>6}  {:>9}  {:>6}  {:>8}",
+        "──────────", "───────", "──────", "─────────", "──────", "────────"
+    );
+
+    for band in bands {
+        let name = band.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let workers = band.get("workers").and_then(|v| v.as_i64()).unwrap_or(0);
+        let active = band.get("active").and_then(|v| v.as_i64()).unwrap_or(0);
+        let completed = band.get("completed").and_then(|v| v.as_i64()).unwrap_or(0);
+        let failed = band.get("failed").and_then(|v| v.as_i64()).unwrap_or(0);
+        let avg_ms = band
+            .get("avg_duration_ms")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+
+        let avg_str = if avg_ms >= 1000 {
+            format!("{:.1}s", avg_ms as f64 / 1000.0)
+        } else if avg_ms > 0 {
+            format!("{}ms", avg_ms)
+        } else {
+            "-".to_string()
+        };
+
+        println!(
+            "{:<12}  {:>7}  {:>6}  {:>9}  {:>6}  {:>8}",
+            name,
+            workers,
+            active,
+            format_count(completed),
+            failed,
+            avg_str,
+        );
+    }
+
+    println!();
+    println!("Total pending: {}", format_count(pending));
+
+    Ok(())
+}
+
+fn run_workers_scale(band: String, count: u32, dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let payload = serde_json::json!({
+        "cmd": "scale",
+        "band": &band,
+        "count": count,
+    })
+    .to_string();
+
+    let resp = workers_socket_call(dir, &payload)?;
+
+    if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+        anyhow::bail!("{}", err);
+    }
+
+    println!("✓ {}: scaled to {} workers", band, count);
+    Ok(())
+}
+
+/// Format a large integer with comma separators for readability.
+fn format_count(n: i64) -> String {
+    let (sign, abs_s) = if n < 0 {
+        ("-", (-n).to_string())
+    } else {
+        ("", n.to_string())
+    };
+    let mut result = String::new();
+    for (i, c) in abs_s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    let formatted: String = result.chars().rev().collect();
+    format!("{}{}", sign, formatted)
 }
 
 /// Show job queue status
