@@ -71,39 +71,43 @@ Each job worker thread follows this lifecycle:
 
 This is the same pattern HTTP server workers use. Each worker is an independent interpreter instance with its own `Rc<RefCell<Environment>>`. No cross-thread sharing, no `Send` constraints on the interpreter itself.
 
-### Function Capabilities — Making Execution Modes Self-Documenting
+### Function Capabilities — Structurally Enforced
 
 The current approach to execution modes — string matching in `should_skip_server_call()` and scattered `if name == "X"` checks — fails silently when new functions are added. A developer adds `enable_rate_limit()` to the interpreter and forgets to update the skip list. Job workers now try to configure rate limiting. Nobody notices until production.
 
-**The fix: every function declares what it needs.** Instead of execution modes maintaining deny-lists, functions declare their capability requirements. The execution mode defines which capabilities are active. If a function requires a capability the mode doesn't provide, it's automatically a no-op.
+**The fix: restructure the interpreter so that side-effecting functions can only be registered through a path that requires declaring their execution mode behavior.** No checklists, no documentation to remember. The code structure makes it obvious and the compiler makes it mandatory.
 
-#### Capability Definitions
+#### The Problem with the Current Structure
+
+Today, side-effecting functions live in two places:
+
+1. **Interpreter special-cases** — a long chain of `if name == "listen"` / `if name == "serve_static"` blocks in the `Expression::Call` eval path. Each one independently calls `should_skip_server_call()`.
+
+2. **NativeFunction dispatch** — a string-matching block that skips `spawn`/`schedule`/`after` based on execution mode.
+
+Both require manual coordination. If you add a function to category 1 and forget the skip check, it runs in all modes. If you add a function to category 2 and forget the string match, same thing. There's no structural forcing function.
+
+#### Solution: Server Actions Registry
+
+Replace the scattered `if name ==` special-cases with a **registered action table** that the interpreter dispatches through. Every server-related function goes through this table, and the table requires a capability declaration at registration time.
 
 ```rust
 /// What a function needs from the runtime to execute.
-/// Functions declare these; execution modes provide them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeCapability {
-    /// Can bind network ports and accept connections (listen, serve_static, routes)
+    /// Bind ports, accept connections, register routes, serve static files
     HttpServer,
-    /// Can register middleware, CORS, CSP, auth, error handlers
+    /// Configure middleware, CORS, CSP, auth, error/shutdown handlers
     HttpConfig,
-    /// Can spawn background threads or schedule recurring work
+    /// Spawn threads, schedule recurring work, delayed execution
     Concurrency,
-    /// Can start job worker loops (work_async, work_jobs)
+    /// Start job worker loops
     JobWorkers,
-    /// Can register and configure job queues
+    /// Configure job queues
     JobConfig,
 }
-```
 
-#### Execution Mode → Capability Mapping
-
-Each execution mode declares exactly which capabilities it provides:
-
-```rust
 impl ExecutionMode {
-    /// Capabilities active in this mode.
     pub fn capabilities(&self) -> &'static [RuntimeCapability] {
         use RuntimeCapability::*;
         match self {
@@ -121,99 +125,145 @@ impl ExecutionMode {
 }
 ```
 
-Reading this table tells you immediately: Job mode can configure queues but can't start an HTTP server, can't spawn threads, and can't start workers. Normal mode can do everything. If we add a new mode later (e.g., `REPL`, `Preview`, `Migration`), you define its capabilities in one place.
+**Adding a new `ExecutionMode` variant:** The Rust compiler forces you to add a branch to `capabilities()`. You can't compile without deciding what the new mode can do.
 
-#### Functions Declare Their Requirements
+**Adding a new `RuntimeCapability` variant:** Doesn't require touching mode definitions — capabilities are additive. But the new variant only has effect when a function requires it, which makes you think about which modes should include it.
 
-Where a function is registered or special-cased, it declares what it requires:
+#### Refactoring the Special-Case Functions
+
+The interpreter currently has ~15 `if name == "X"` blocks for server functions. These get restructured into a dispatch table:
 
 ```rust
-// In the interpreter's special-case handling:
-if name == "listen" && arguments.len() == 1 {
-    if !self.execution_mode.has(RuntimeCapability::HttpServer) {
-        return Ok(Value::Unit);
-    }
-    // ... actual listen logic ...
+/// A server action: a named function with a capability requirement and an implementation.
+struct ServerAction {
+    capability: RuntimeCapability,
+    /// Expected argument count (for dispatch matching)
+    arity: AritySpec,
+    /// The implementation — receives the interpreter and pre-evaluated args
+    handler: fn(&mut Interpreter, &[Expression]) -> Result<Value>,
 }
 
-if name == "serve_static" && arguments.len() == 2 {
-    if !self.execution_mode.has(RuntimeCapability::HttpServer) {
-        return Ok(Value::Unit);
-    }
-    // ... actual serve_static logic ...
-}
-
-if name == "use_middleware" && arguments.len() == 1 {
-    if !self.execution_mode.has(RuntimeCapability::HttpConfig) {
-        return Ok(Value::Unit);
-    }
-    // ... actual middleware logic ...
+/// Arity matching for dispatch
+enum AritySpec {
+    Exact(usize),
+    Range(usize, usize),  // min..=max
 }
 ```
 
-And for NativeFunctions dispatched through the module system:
+Registration happens once, in a `define_server_actions()` method:
 
 ```rust
-// In NativeFunction dispatch (replaces the current string-matching block):
-Value::NativeFunction { name: fn_name, .. } => {
-    // Check function capability requirements
-    if let Some(required) = function_capability(fn_name) {
-        if !self.execution_mode.has(required) {
+fn define_server_actions(&mut self) {
+    use RuntimeCapability::*;
+
+    // --- HttpServer: port binding, route registration, static files ---
+    self.register_action("listen",       HttpServer, Exact(1), Self::action_listen);
+    self.register_action("serve_static", HttpServer, Exact(2), Self::action_serve_static);
+    self.register_action("routes",       HttpServer, Exact(1), Self::action_routes);
+
+    // --- HttpConfig: middleware, security, lifecycle handlers ---
+    self.register_action("use_middleware", HttpConfig, Exact(1), Self::action_use_middleware);
+    self.register_action("enable_cors",   HttpConfig, Range(0, 1), Self::action_enable_cors);
+    self.register_action("enable_csp",    HttpConfig, Range(0, 1), Self::action_enable_csp);
+    self.register_action("enable_auth",   HttpConfig, Exact(1), Self::action_enable_auth);
+    self.register_action("on_shutdown",   HttpConfig, Exact(1), Self::action_on_shutdown);
+    self.register_action("on_error",      HttpConfig, Exact(1), Self::action_on_error);
+
+    // Route registration (get, post, put, delete, patch, head, options)
+    for method in &["get", "post", "put", "delete", "patch", "head", "options"] {
+        self.register_action(method, HttpServer, Exact(2), Self::action_route_handler);
+    }
+}
+```
+
+**The key insight:** `register_action` takes a `RuntimeCapability` as a required parameter. You literally cannot register a server action without declaring what it needs. There's no path to add `enable_rate_limit()` without answering "what capability does this require?"
+
+#### Dispatch: One Place, Automatic
+
+The interpreter's `Expression::Call` handler checks the action table before falling through to normal function dispatch:
+
+```rust
+Expression::Call { function, arguments } => {
+    if let Expression::Identifier(name) = function.as_ref() {
+        // Server action dispatch — capability check is automatic
+        if let Some(action) = self.get_action(name, arguments.len()) {
+            if !self.execution_mode.has(action.capability) {
+                return Ok(Value::Unit);  // silent no-op in this mode
+            }
+            return (action.handler)(self, arguments);
+        }
+    }
+
+    // ... normal function eval (NativeFunctions, user functions, etc.) ...
+}
+```
+
+This replaces the entire chain of `if name == "listen"` / `if name == "serve_static"` / etc. with a single table lookup. The capability check happens automatically — there's no way to bypass it.
+
+#### NativeFunction Capabilities
+
+For NativeFunctions in stdlib modules (`spawn`, `schedule`, `work_async`, etc.), the capability is declared at the `Value::NativeFunction` level by adding an optional capability field:
+
+```rust
+Value::NativeFunction {
+    name: String,
+    arity: usize,
+    max_arity: usize,
+    func: fn(&[Value]) -> Result<Value>,
+    capability: Option<RuntimeCapability>,  // NEW: None = runs in all modes
+}
+```
+
+When registering functions in stdlib modules:
+
+```rust
+// std/concurrent — these require Concurrency capability
+module.insert("spawn".to_string(), Value::NativeFunction {
+    name: "spawn".to_string(),
+    arity: 1,
+    max_arity: 1,
+    func: |args| { ... },
+    capability: Some(RuntimeCapability::Concurrency),
+});
+
+// std/json — pure function, no capability needed
+module.insert("parse_json".to_string(), Value::NativeFunction {
+    name: "parse_json".to_string(),
+    arity: 1,
+    max_arity: 1,
+    func: |args| { ... },
+    capability: None,  // runs everywhere
+});
+```
+
+The NativeFunction dispatch checks this automatically:
+
+```rust
+Value::NativeFunction { name, func, capability, .. } => {
+    if let Some(required) = capability {
+        if !self.execution_mode.has(*required) {
             return Ok(Value::Unit);
         }
     }
-    // ... normal dispatch ...
-}
-
-/// Map NativeFunction names to their capability requirement.
-/// Functions not listed here run in all modes.
-fn function_capability(name: &str) -> Option<RuntimeCapability> {
-    use RuntimeCapability::*;
-    match name {
-        // Concurrency primitives
-        "spawn" | "schedule" | "after" => Some(Concurrency),
-        // Job worker startup
-        "work_async" | "work_jobs" => Some(JobWorkers),
-        // Everything else runs unconditionally
-        _ => None,
-    }
+    // ... normal arity check and dispatch ...
 }
 ```
 
-#### Why This Design
+**Why this works:** When you add a new NativeFunction, the `capability` field is right there in the struct literal. You see it in every existing function. The pattern is obvious because it's co-located. If you set it to `None`, that's an explicit decision ("this is safe in all modes"). If you forget the field entirely, the compiler tells you.
 
-1. **New functions are obvious.** When you add `enable_rate_limit()` to the interpreter, you write `if !self.execution_mode.has(RuntimeCapability::HttpConfig)` right next to the implementation. The capability check is co-located with the function — you can't miss it.
+#### Why No Checklist Needed
 
-2. **New modes are obvious.** When you add `ExecutionMode::Repl`, you define its capabilities in one place: `&[Concurrency, JobConfig]`. You don't hunt through string lists.
+The structure makes the right thing automatic:
 
-3. **New capabilities are obvious.** When you add a new subsystem (e.g., `WebSocket`), you add one enum variant. The compiler forces you to handle it in the mode capability mapping. Every function that touches WebSocket gets `RuntimeCapability::WebSocket` as its guard.
+1. **Adding a server-action function** → you call `register_action()`, which requires a `RuntimeCapability` parameter. You can't register without declaring the capability. The other registrations in `define_server_actions()` show you exactly how.
 
-4. **Compile-time safety.** The enum is exhaustive. `capabilities()` returns a static slice per mode. Adding a mode variant without defining its capabilities is a compile error (non-exhaustive match). Adding a capability variant prompts review of which modes should have it.
+2. **Adding a NativeFunction with side effects** → the `capability` field is in the struct literal. Every existing NativeFunction shows the pattern. The compiler requires the field.
 
-5. **Self-documenting.** The capability table in `ExecutionMode::capabilities()` is the single source of truth for what each mode can do. No scattered string lists. No separate skip functions. Reading the table tells you the full story.
+3. **Adding a new execution mode** → `capabilities()` has a non-exhaustive match. The compiler forces you to define what the new mode can do.
 
-#### Current Functions → Capabilities
+4. **Adding a new capability** → you add an enum variant. The compiler forces `capabilities()` to handle it. The existing `register_action()` calls and NativeFunction registrations show the convention.
 
-| Function | Capability | Where Checked |
-|----------|-----------|---------------|
-| `listen()` | `HttpServer` | Interpreter special-case |
-| `serve_static()` | `HttpServer` | Interpreter special-case |
-| `routes()` | `HttpServer` | Interpreter special-case |
-| `use_middleware()` | `HttpConfig` | Interpreter special-case |
-| `enable_cors()` | `HttpConfig` | Interpreter special-case |
-| `enable_csp()` | `HttpConfig` | Interpreter special-case |
-| `enable_auth()` | `HttpConfig` | Interpreter special-case |
-| `on_shutdown()` | `HttpConfig` | Interpreter special-case |
-| `on_error()` | `HttpConfig` | Interpreter special-case |
-| `spawn()` | `Concurrency` | NativeFunction dispatch |
-| `schedule()` | `Concurrency` | NativeFunction dispatch |
-| `after()` | `Concurrency` | NativeFunction dispatch |
-| `work_async()` | `JobWorkers` | NativeFunction dispatch |
-| `work_jobs()` | `JobWorkers` | NativeFunction dispatch |
-| `configure_queue()` | `JobConfig` | NativeFunction dispatch |
-| Route handlers (`get`, `post`, etc.) | `HttpServer` | Interpreter special-case (route registration) |
-
-Functions without capability requirements (imports, `let`, `fn`, `job`, `print`, `fetch`, `parse_json`, all stdlib) run in every mode.
+There's no separate list to maintain, no documentation to remember, no skip function to update. The architecture is the documentation.
 
 ### Per-Job Scoping
 
@@ -383,8 +433,10 @@ fn execute_on_failure_in_worker(
 |------|--------|
 | `execute_job_perform()` | Replaced by `execute_in_worker()` — scoped eval in worker interpreter |
 | `execute_on_failure()` | Replaced by `execute_on_failure_in_worker()` |
-| `should_skip_server_call()` | Replaced by capability checks co-located with each function |
-| NativeFunction string-matching skip block | Replaced by `function_capability()` lookup |
+| `should_skip_server_call()` | Replaced by server actions registry — capability check is structural |
+| `should_skip_route_registration()` | Absorbed into action registry (`HttpServer` capability) |
+| NativeFunction string-matching skip block | Replaced by `capability` field on `Value::NativeFunction` |
+| `if name == "listen"` / `"serve_static"` / etc. chain | Replaced by action table dispatch in `Expression::Call` |
 | DD-044 Fix A (import replay) | Unnecessary — worker interpreter already has all imports |
 
 Fix A from DD-044 is no longer needed. The problem it solved (imports unavailable in perform blocks) doesn't exist when the worker has the full application loaded. Fix B remains relevant but is about `schedule()` / concurrency primitives, not the job system.
@@ -410,20 +462,27 @@ Fix A from DD-044 is no longer needed. The problem it solved (imports unavailabl
 
 ## Implementation Plan
 
-### Step 1: RuntimeCapability Enum and ExecutionMode Overhaul
+### Step 1: RuntimeCapability Enum, Server Actions Registry, NativeFunction Capability Field
 
-Replace `should_skip_server_call()` with the capability system:
+Replace `should_skip_server_call()` and the scattered `if name ==` chain with structural enforcement:
 
 - [ ] Define `RuntimeCapability` enum: `HttpServer`, `HttpConfig`, `Concurrency`, `JobWorkers`, `JobConfig`
 - [ ] Add `ExecutionMode::Job` variant
 - [ ] Implement `ExecutionMode::capabilities() -> &'static [RuntimeCapability]` for all modes
 - [ ] Implement `ExecutionMode::has(RuntimeCapability) -> bool`
-- [ ] Delete `should_skip_server_call()` — replace all call sites with `self.execution_mode.has(cap)`
-- [ ] Delete `should_skip_route_registration()` — replace with `!self.execution_mode.has(HttpServer)`
-- [ ] Replace NativeFunction string-matching skip block with `function_capability()` lookup
+- [ ] Define `ServerAction` struct with `capability`, `arity`, and `handler`
+- [ ] Add action registry (`HashMap<String, ServerAction>`) to `Interpreter`
+- [ ] Implement `register_action()` — requires `RuntimeCapability` parameter (impossible to skip)
+- [ ] Implement `define_server_actions()` — move all `if name == "X"` blocks into registered action handlers
+- [ ] Replace the `if name ==` chain in `Expression::Call` with single action table lookup + automatic capability check
+- [ ] Add `capability: Option<RuntimeCapability>` field to `Value::NativeFunction`
+- [ ] Update all NativeFunction registrations in stdlib modules to include `capability` field
+- [ ] Update NativeFunction dispatch to check `capability` automatically
+- [ ] Delete `should_skip_server_call()` — no longer needed
+- [ ] Delete `should_skip_route_registration()` — absorbed into action registry
+- [ ] Delete NativeFunction string-matching skip block — absorbed into `capability` field
 - [ ] Update all existing `ExecutionMode` tests
 - [ ] Add capability tests: verify each mode provides exactly the right capabilities
-- [ ] Add test: adding a new `RuntimeCapability` variant without updating `capabilities()` fails to compile
 
 ### Step 2: Source File Tracking
 
@@ -572,26 +631,6 @@ fn test_job_worker_panic_recovery() {
 - [ ] Top-level constants accessible in perform blocks
 - [ ] `ntnt worker server.tnt` starts without side effects
 - [ ] Multiple workers process jobs correctly (each with independent interpreter)
-
----
-
-## Adding New Features — The Capability Checklist
-
-When adding a new function or subsystem to ntnt:
-
-1. **Does it have side effects?** (binds ports, spawns threads, writes files, starts loops)
-   - Yes → it needs a capability gate
-   - No → it runs in all modes, no gate needed
-
-2. **Which capability?** Pick the most specific existing one, or add a new variant if the function represents a genuinely new subsystem.
-
-3. **Where to add the check:**
-   - Interpreter special-case functions → `if !self.execution_mode.has(Cap) { return Ok(Value::Unit); }` right next to the implementation
-   - NativeFunction modules → add to `function_capability()` mapping
-
-4. **Update tests:** Add the new function to the capability test for each mode.
-
-The compiler enforces the structural parts (new enum variants require exhaustive matches in `capabilities()`). The convention enforces the rest: every side-effecting function has a capability check co-located with its implementation.
 
 ---
 
