@@ -260,7 +260,9 @@ impl JobRuntime {
         }
     }
 
-    /// Register a job definition. Errors if a job with the same name already exists.
+    /// Register a job definition. Idempotent — silently skips if a job with the
+    /// same name is already registered (first registration wins). This is intentional:
+    /// worker threads re-execute the .tnt file and hit job declarations again.
     pub fn register_job(&self, def: JobDefinition) -> Result<()> {
         let mut registry = self.job_registry.write().map_err(|e| {
             IntentError::runtime_error(format!("Job registry lock poisoned: {}", e))

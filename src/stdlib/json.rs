@@ -115,8 +115,15 @@ pub fn init() -> HashMap<String, Value> {
                         Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                     }
                 }
-                // None/Unit from e.g. kv::get() on missing key — return Err instead of throwing
+                // None/Unit from e.g. kv::get() on missing key — return Err instead of throwing.
+                // Handle both forms: Value::Unit (from KV) and Option::None (from ntnt None literal).
                 Value::Unit => Ok(Value::err(Value::String(
+                    "parse_json(): input is None/null — did you check for a missing key?"
+                        .to_string(),
+                ))),
+                Value::EnumValue {
+                    enum_name, variant, ..
+                } if enum_name == "Option" && variant == "None" => Ok(Value::err(Value::String(
                     "parse_json(): input is None/null — did you check for a missing key?"
                         .to_string(),
                 ))),
@@ -244,6 +251,28 @@ mod tests {
         match result {
             Value::EnumValue { variant, .. } => assert_eq!(variant, "Err"),
             _ => panic!("Expected Err result"),
+        }
+    }
+
+    #[test]
+    fn test_parse_json_option_none_returns_err() {
+        let module = init();
+        let parse = get_fn(&module, "parse_json");
+        // ntnt's None literal is Value::none() = EnumValue(Option, None)
+        let result = parse(&[Value::none()]).unwrap();
+        match result {
+            Value::EnumValue {
+                variant, values, ..
+            } => {
+                assert_eq!(variant, "Err");
+                match &values[0] {
+                    Value::String(s) => {
+                        assert!(s.contains("None/null"), "Error should mention None: {}", s)
+                    }
+                    _ => panic!("Expected string error message"),
+                }
+            }
+            _ => panic!("Expected Err result, got {:?}", result),
         }
     }
 
