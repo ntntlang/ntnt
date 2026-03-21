@@ -89,7 +89,7 @@ pub fn init() -> HashMap<String, Value> {
     // Returns Ok with the parsed value on success, or Err with a descriptive
     // parse error message. Supports all JSON types: objects become Maps,
     // arrays become Arrays, numbers become Int or Float, and null becomes None.
-    // @param json_str The JSON string to parse
+    // @param json_str The JSON string to parse, or None/Unit (returns Err gracefully)
     // @returns Result containing the parsed value or an error message
     // @see_also stringify, stringify_pretty
     // @since v0.1.0
@@ -115,8 +115,9 @@ pub fn init() -> HashMap<String, Value> {
                         Err(e) => Ok(Value::err(Value::String(e.to_string()))),
                     }
                 }
-                // None/Unit from e.g. kv::get() on missing key — return Err instead of throwing.
-                // Handle both forms: Value::Unit (from KV) and Option::None (from ntnt None literal).
+                // Missing KV value or ntnt None: return Err instead of throwing.
+                // Internal Rust helper kv::kv_get() yields Value::Unit on missing key,
+                // while the public std/kv get() API exposes missing keys as Option::None (Value::none()).
                 Value::Unit => Ok(Value::err(Value::String(
                     "parse_json(): input is None/null — did you check for a missing key?"
                         .to_string(),
@@ -211,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_json_none_returns_err() {
+    fn test_parse_json_unit_returns_err() {
         let module = init();
         let parse = get_fn(&module, "parse_json");
         let result = parse(&[Value::Unit]).unwrap();

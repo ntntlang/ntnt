@@ -6,9 +6,9 @@
 - Silent error swallows: `let _ =`, `.ok()`, `unwrap_or_default()` — verify the error is truly ignorable
 - `_ =>` catch-all match arms — verify they don't swallow types that should be rejected
 - KV read-then-write patterns — race condition if two workers can execute simultaneously. Use `kv_set_nx` for atomic claims
-- `Value::Unit` (missing KV data) must NOT be treated as terminal — could be mid-write by another thread
+- Missing KV keys: public `std/kv::get()` returns `Option::None`, while internal Rust helpers (`kv::kv_get()`) use `Value::Unit` — must NOT treat either as terminal (could be mid-write by another thread)
 - Return types: if doc/typechecker says `-> Result<T, String>`, return `Value::ok(value)` not bare `Value`
-- None has two forms: `Value::Unit` (KV missing keys) and `Value::EnumValue(Option::None)` (ntnt `None` literal) — handle BOTH
+- ntnt `None` literal is `Value::EnumValue(Option::None)` — when matching on `Value` directly, handle BOTH `Unit` (internal helpers) and `EnumValue(Option::None)` (public API / ntnt code)
 - EnumValue matching: always check `enum_name` AND `variant` together — `variant == "Ok"` alone matches user-defined enums
 
 ### Concurrency

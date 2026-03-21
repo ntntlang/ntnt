@@ -6492,7 +6492,7 @@ Returns Ok with the parsed value on success, or Err with a descriptive parse err
 
 **Parameters:**
 
-- `json_str` — The JSON string to parse
+- `json_str` — The JSON string to parse, or None/Unit (returns Err gracefully)
 
 **Returns:** Result containing the parsed value or an error message
 
