@@ -1274,9 +1274,12 @@ fn run_workers_command(cmd: WorkersCommands) -> anyhow::Result<()> {
 
 /// Connect to .ntnt.sock, send a JSON command, return the parsed response.
 fn workers_socket_call(dir: Option<PathBuf>, payload: &str) -> anyhow::Result<serde_json::Value> {
-    let sock_path = dir
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-        .join(".ntnt.sock");
+    let base_dir = match dir {
+        Some(d) => d,
+        None => std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?,
+    };
+    let sock_path = base_dir.join(".ntnt.sock");
 
     #[cfg(unix)]
     {

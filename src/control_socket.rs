@@ -103,10 +103,19 @@ fn start_unix() {
 
     // Restrict socket permissions to owner only (0600) — prevents other users
     // on multi-user systems from connecting and issuing scale commands.
+    // If this fails, remove the socket and abort — don't leave a world-readable control socket.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            eprintln!(
+                "[ntnt] control socket: failed to set permissions on {}: {} — removing socket",
+                path.display(),
+                e
+            );
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
     }
 
     // Non-blocking accept so the loop can check the cancellation flag.
@@ -118,14 +127,20 @@ fn start_unix() {
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_thread = Arc::clone(&cancel);
 
-    std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("ntnt-control-socket".to_string())
         .spawn(move || run_accept_loop(listener, cancel_thread))
-        .ok();
-
-    let handle = SocketHandle { cancel, path };
-    if let Ok(mut guard) = SOCKET_HANDLE.lock() {
-        *guard = Some(handle);
+    {
+        Ok(_) => {
+            let handle = SocketHandle { cancel, path };
+            if let Ok(mut guard) = SOCKET_HANDLE.lock() {
+                *guard = Some(handle);
+            }
+        }
+        Err(e) => {
+            eprintln!("[ntnt] control socket: failed to spawn thread: {}", e);
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -153,7 +168,7 @@ fn run_accept_loop(listener: std::os::unix::net::UnixListener, cancel: Arc<Atomi
 
 #[cfg(unix)]
 fn handle_connection(stream: std::os::unix::net::UnixStream) {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
 
     // Switch to blocking with a 5-second timeout — prevents a misbehaving
     // client from blocking the control socket thread indefinitely.
@@ -161,13 +176,15 @@ fn handle_connection(stream: std::os::unix::net::UnixStream) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
 
-    // Cap request size at 64KB to prevent memory exhaustion.
-    let mut reader = BufReader::new(&stream);
+    // Enforce 64KB max request size at the Read level — take() limits how many
+    // bytes BufReader can read, preventing large allocations before the newline check.
+    const MAX_REQUEST_SIZE: u64 = 65_536;
+    let limited = (&stream).take(MAX_REQUEST_SIZE);
+    let mut reader = BufReader::new(limited);
     let mut line = String::new();
-    const MAX_REQUEST_SIZE: usize = 65_536;
 
     match reader.read_line(&mut line) {
-        Ok(n) if n == 0 || n > MAX_REQUEST_SIZE => return,
+        Ok(0) => return,
         Err(_) => return,
         _ => {}
     }
