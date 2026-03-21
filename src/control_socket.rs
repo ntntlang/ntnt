@@ -121,6 +121,7 @@ fn start_unix() {
     // Non-blocking accept so the loop can check the cancellation flag.
     if let Err(e) = listener.set_nonblocking(true) {
         eprintln!("[ntnt] control socket: set_nonblocking failed: {}", e);
+        let _ = std::fs::remove_file(&path);
         return;
     }
 

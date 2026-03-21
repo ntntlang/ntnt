@@ -1398,7 +1398,7 @@ fn run_workers_scale(band: String, count: u64, dir: Option<PathBuf>) -> anyhow::
     }
     let payload = serde_json::json!({
         "cmd": "scale",
-        "band": band,
+        "band": &band,
         "count": count,
     })
     .to_string();
