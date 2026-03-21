@@ -80,7 +80,13 @@ fn start_unix() {
         }
     };
 
-    // Remove stale socket file from a previous run.
+    // Drop the old handle BEFORE binding — SocketHandle::drop removes the socket
+    // file, so dropping after bind would unlink the newly-bound socket.
+    if let Ok(mut guard) = SOCKET_HANDLE.lock() {
+        *guard = None;
+    }
+
+    // Remove stale socket file from a previous run (e.g., crash without cleanup).
     let _ = std::fs::remove_file(&path);
 
     let listener = match UnixListener::bind(&path) {
@@ -94,6 +100,14 @@ fn start_unix() {
             return;
         }
     };
+
+    // Restrict socket permissions to owner only (0600) — prevents other users
+    // on multi-user systems from connecting and issuing scale commands.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
 
     // Non-blocking accept so the loop can check the cancellation flag.
     if let Err(e) = listener.set_nonblocking(true) {
@@ -141,14 +155,21 @@ fn run_accept_loop(listener: std::os::unix::net::UnixListener, cancel: Arc<Atomi
 fn handle_connection(stream: std::os::unix::net::UnixStream) {
     use std::io::{BufRead, BufReader, Write};
 
-    // Switch back to blocking for this individual connection.
+    // Switch to blocking with a 5-second timeout — prevents a misbehaving
+    // client from blocking the control socket thread indefinitely.
     let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
 
+    // Cap request size at 64KB to prevent memory exhaustion.
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
+    const MAX_REQUEST_SIZE: usize = 65_536;
 
-    if reader.read_line(&mut line).is_err() {
-        return;
+    match reader.read_line(&mut line) {
+        Ok(n) if n == 0 || n > MAX_REQUEST_SIZE => return,
+        Err(_) => return,
+        _ => {}
     }
 
     let response = dispatch_command(line.trim());

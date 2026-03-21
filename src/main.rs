@@ -1291,6 +1291,11 @@ fn workers_socket_call(dir: Option<PathBuf>, payload: &str) -> anyhow::Result<se
             )
         })?;
 
+        // Set read/write timeouts to avoid indefinite hang if worker is stuck
+        let timeout = Some(std::time::Duration::from_secs(10));
+        stream.set_read_timeout(timeout)?;
+        stream.set_write_timeout(timeout)?;
+
         {
             let mut writer = std::io::BufWriter::new(&stream);
             writeln!(writer, "{}", payload)?;
@@ -1299,7 +1304,17 @@ fn workers_socket_call(dir: Option<PathBuf>, payload: &str) -> anyhow::Result<se
 
         let mut reader = BufReader::new(&stream);
         let mut line = String::new();
-        reader.read_line(&mut line)?;
+        reader.read_line(&mut line).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut
+            {
+                anyhow::anyhow!(
+                    "Timeout waiting for response from control socket (is the worker busy?)"
+                )
+            } else {
+                anyhow::anyhow!("Failed to read from control socket: {}", e)
+            }
+        })?;
 
         let v: serde_json::Value = serde_json::from_str(line.trim())
             .map_err(|e| anyhow::anyhow!("Invalid response from control socket: {}", e))?;
