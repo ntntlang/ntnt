@@ -1,6 +1,6 @@
 <!-- NTNT coding guide sections are sourced from docs/AI_AGENT_GUIDE.md -->
 <!-- To update NTNT coding instructions, edit AI_AGENT_GUIDE.md and copy to all agent files -->
-<!-- Last synced: 2026-03-18 -->
+<!-- Last synced: 2026-03-19 -->
 
 # NTNT Language - Claude Code Instructions
 
@@ -2378,3 +2378,23 @@ ntnt> :search "uppercase"     # Search names, summaries, descriptions
 7. Add integration tests and example files
 
 Do not wait for the user to ask — update docs as part of every implementation task.
+
+## Greptile Review Process
+
+Greptile auto-reviews every PR on this repo. AI agents must self-service Greptile feedback before requesting human review.
+
+### Comment Triage
+
+| Bucket | Type | Action |
+|--------|------|--------|
+| 1 | **Correctness** — bugs, race conditions, dead code, wrong logic | Auto-fix. Commit + reply with hash. |
+| 2 | **Hardening** — missing validation, undocumented behavior, incomplete tests, error messages | Auto-fix. Clear right answer exists. |
+| 3 | **Architecture** — data structure changes, API redesign, flow restructuring, design philosophy | **Do not fix.** Escalate to maintainer with the suggestion and your assessment. |
+
+### Workflow
+
+1. Push PR → Greptile reviews (~3 min)
+2. Read comments, triage into buckets
+3. Fix all Bucket 1/2 items → commit → push → Greptile re-reviews
+4. Loop until only Bucket 3 items remain (or clean)
+5. Post summary to maintainer: ✅ Fixed (list), ❓ Need your call (Bucket 3 items)
