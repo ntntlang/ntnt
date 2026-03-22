@@ -26,7 +26,7 @@
 
 use crate::ast::{Block, Parameter};
 use crate::error::{IntentError, Result};
-use crate::interpreter::Value;
+use crate::interpreter::{RuntimeCapability, Value};
 use crate::stdlib::concurrent::{
     check_task_limit, finalize_task, is_current_task_cancelled, CURRENT_TASK_CANCELLED, RUNTIME,
 };
@@ -2598,7 +2598,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "work_async".to_string(),
             arity: 0,
             max_arity: 1,
-            requires: None,
+            requires: Some(RuntimeCapability::JobWorkers),
             func: |args| {
                 let (bands, queues) = parse_bands_and_queues(args)?;
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
@@ -2670,7 +2670,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "work_jobs".to_string(),
             arity: 0,
             max_arity: 1,
-            requires: None,
+            requires: Some(RuntimeCapability::JobWorkers),
             func: |args| {
                 let (bands, queues) = parse_bands_and_queues(args)?;
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
@@ -2779,7 +2779,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "scale_workers".to_string(),
             arity: 2,
             max_arity: 2,
-            requires: None,
+            requires: Some(RuntimeCapability::JobWorkers),
             func: |args| {
                 let band_name = match args.first() {
                     Some(Value::String(s)) => s.clone(),

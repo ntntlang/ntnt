@@ -6720,21 +6720,12 @@ impl Interpreter {
                 func,
                 requires,
             } => {
-                // Eval-path guard: skip concurrency functions in non-Normal modes (rule 24/25).
-                // spawn() skipped in Worker, HotReload, and Job modes.
-                // schedule(), after() skipped in Worker, HotReload, Job, and UnitTest modes.
-                match self.execution_mode {
-                    ExecutionMode::Worker | ExecutionMode::HotReload | ExecutionMode::Job => {
-                        if matches!(fn_name.as_str(), "spawn" | "schedule" | "after") {
-                            return Ok(Value::Unit);
-                        }
+                // Capability gate: if the function declares a required capability,
+                // silently skip it (return Unit) when the active mode lacks that capability.
+                if let Some(cap) = requires {
+                    if !self.execution_mode.has(cap) {
+                        return Ok(Value::Unit);
                     }
-                    ExecutionMode::UnitTest => {
-                        if matches!(fn_name.as_str(), "schedule" | "after") {
-                            return Ok(Value::Unit);
-                        }
-                    }
-                    ExecutionMode::Normal => {}
                 }
 
                 if arity == max_arity {
@@ -11766,6 +11757,120 @@ c")
         assert_eq!(ExecutionMode::Job.capabilities().len(), 2);
         // UnitTest has 1
         assert_eq!(ExecutionMode::UnitTest.capabilities().len(), 1);
+    }
+
+    // === Capability gate in call_function ===
+
+    /// Helper: create a gated NativeFunction value and call it
+    fn call_gated_fn(
+        interpreter: &mut Interpreter,
+        cap: Option<RuntimeCapability>,
+    ) -> Result<Value> {
+        let f = Value::NativeFunction {
+            name: "test_gated".to_string(),
+            arity: 0,
+            max_arity: 0,
+            func: |_| Ok(Value::Int(42)),
+            requires: cap,
+        };
+        interpreter.call_function(f, vec![])
+    }
+
+    #[test]
+    fn test_capability_gate_none_always_runs() {
+        let mut interp = Interpreter::new();
+        // Normal mode — no gate: returns 42
+        assert!(matches!(
+            call_gated_fn(&mut interp, None).unwrap(),
+            Value::Int(42)
+        ));
+
+        // Worker mode — no gate: still returns 42
+        interp.set_execution_mode(ExecutionMode::Worker);
+        assert!(matches!(
+            call_gated_fn(&mut interp, None).unwrap(),
+            Value::Int(42)
+        ));
+
+        // UnitTest mode — no gate: still returns 42
+        interp.set_execution_mode(ExecutionMode::UnitTest);
+        assert!(matches!(
+            call_gated_fn(&mut interp, None).unwrap(),
+            Value::Int(42)
+        ));
+    }
+
+    #[test]
+    fn test_capability_gate_concurrency_normal_mode_runs() {
+        let mut interp = Interpreter::new();
+        // Normal mode has Concurrency: function runs and returns 42
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Concurrency)).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_capability_gate_concurrency_worker_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Worker);
+        // Worker mode lacks Concurrency: silently returns Unit
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Concurrency)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_concurrency_hot_reload_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::HotReload);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Concurrency)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_concurrency_job_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Job);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Concurrency)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_concurrency_unit_test_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::UnitTest);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Concurrency)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_job_workers_normal_mode_runs() {
+        let mut interp = Interpreter::new();
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::JobWorkers)).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_capability_gate_job_workers_unit_test_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::UnitTest);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::JobWorkers)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_job_workers_worker_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Worker);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::JobWorkers)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_job_workers_job_mode_runs() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Job);
+        // Job mode has JobWorkers capability
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::JobWorkers)).unwrap();
+        assert!(matches!(result, Value::Int(42)));
     }
 
     #[test]
