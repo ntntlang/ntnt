@@ -2008,7 +2008,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "spawn".to_string(),
             arity: 1,
             max_arity: 1,
-            requires: Some(RuntimeCapability::Concurrency),
+            requires: Some(RuntimeCapability::TaskSpawning),
             func: |args| concurrent_spawn(&args[0]),
         },
     );
@@ -2098,7 +2098,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "after".to_string(),
             arity: 2,
             max_arity: 2,
-            requires: Some(RuntimeCapability::Concurrency),
+            requires: Some(RuntimeCapability::Scheduling),
             func: |args| concurrent_after(&args[0], &args[1]),
         },
     );
@@ -2123,7 +2123,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "schedule".to_string(),
             arity: 2,
             max_arity: 2,
-            requires: Some(RuntimeCapability::Concurrency),
+            requires: Some(RuntimeCapability::Scheduling),
             func: |args| concurrent_schedule(&args[0], &args[1]),
         },
     );

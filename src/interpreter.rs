@@ -445,8 +445,10 @@ pub enum RuntimeCapability {
     HttpServer,
     /// HTTP configuration helpers: enable_cors, enable_csp, enable_auth
     HttpConfig,
-    /// Concurrency primitives: spawn, schedule, after
-    Concurrency,
+    /// Task spawning: spawn()
+    TaskSpawning,
+    /// Scheduled/delayed execution: schedule(), after()
+    Scheduling,
     /// Job worker runners: work_async, work_jobs, scale_workers
     JobWorkers,
     /// Job configuration and enqueueing: configure_queue, enqueue, enqueue_in,
@@ -478,7 +480,8 @@ impl ExecutionMode {
             ExecutionMode::Normal => &[
                 RuntimeCapability::HttpServer,
                 RuntimeCapability::HttpConfig,
-                RuntimeCapability::Concurrency,
+                RuntimeCapability::TaskSpawning,
+                RuntimeCapability::Scheduling,
                 RuntimeCapability::JobWorkers,
                 RuntimeCapability::JobConfig,
             ],
@@ -493,7 +496,10 @@ impl ExecutionMode {
                 RuntimeCapability::JobConfig,
             ],
             ExecutionMode::Job => &[RuntimeCapability::JobWorkers, RuntimeCapability::JobConfig],
-            ExecutionMode::UnitTest => &[RuntimeCapability::JobConfig],
+            ExecutionMode::UnitTest => &[
+                RuntimeCapability::TaskSpawning,
+                RuntimeCapability::JobConfig,
+            ],
         }
     }
 
@@ -515,9 +521,6 @@ impl AritySpec {
     }
     fn at_most(n: usize) -> Self {
         Self { min: 0, max: n }
-    }
-    fn matches(&self, n: usize) -> bool {
-        n >= self.min && n <= self.max
     }
 }
 
@@ -11749,7 +11752,8 @@ c")
         let mode = ExecutionMode::Normal;
         assert!(mode.has(RuntimeCapability::HttpServer));
         assert!(mode.has(RuntimeCapability::HttpConfig));
-        assert!(mode.has(RuntimeCapability::Concurrency));
+        assert!(mode.has(RuntimeCapability::TaskSpawning));
+        assert!(mode.has(RuntimeCapability::Scheduling));
         assert!(mode.has(RuntimeCapability::JobWorkers));
         assert!(mode.has(RuntimeCapability::JobConfig));
     }
@@ -11761,7 +11765,8 @@ c")
         assert!(mode.has(RuntimeCapability::HttpConfig));
         assert!(mode.has(RuntimeCapability::JobConfig));
         // No concurrency or job workers in hot-reload
-        assert!(!mode.has(RuntimeCapability::Concurrency));
+        assert!(!mode.has(RuntimeCapability::TaskSpawning));
+        assert!(!mode.has(RuntimeCapability::Scheduling));
         assert!(!mode.has(RuntimeCapability::JobWorkers));
     }
 
@@ -11771,7 +11776,8 @@ c")
         assert!(mode.has(RuntimeCapability::HttpServer));
         assert!(mode.has(RuntimeCapability::HttpConfig));
         assert!(mode.has(RuntimeCapability::JobConfig));
-        assert!(!mode.has(RuntimeCapability::Concurrency));
+        assert!(!mode.has(RuntimeCapability::TaskSpawning));
+        assert!(!mode.has(RuntimeCapability::Scheduling));
         assert!(!mode.has(RuntimeCapability::JobWorkers));
     }
 
@@ -11783,30 +11789,32 @@ c")
         // Job mode has no HTTP or concurrency capabilities
         assert!(!mode.has(RuntimeCapability::HttpServer));
         assert!(!mode.has(RuntimeCapability::HttpConfig));
-        assert!(!mode.has(RuntimeCapability::Concurrency));
+        assert!(!mode.has(RuntimeCapability::TaskSpawning));
+        assert!(!mode.has(RuntimeCapability::Scheduling));
     }
 
     #[test]
     fn test_unit_test_mode_capabilities() {
         let mode = ExecutionMode::UnitTest;
         assert!(mode.has(RuntimeCapability::JobConfig));
+        assert!(mode.has(RuntimeCapability::TaskSpawning)); // spawn() works in tests
         assert!(!mode.has(RuntimeCapability::HttpServer));
         assert!(!mode.has(RuntimeCapability::HttpConfig));
-        assert!(!mode.has(RuntimeCapability::Concurrency));
+        assert!(!mode.has(RuntimeCapability::Scheduling)); // schedule/after skipped in tests
         assert!(!mode.has(RuntimeCapability::JobWorkers));
     }
 
     #[test]
     fn test_capabilities_returns_correct_slice_lengths() {
-        // Normal has all 5 capabilities
-        assert_eq!(ExecutionMode::Normal.capabilities().len(), 5);
+        // Normal has all 6 capabilities
+        assert_eq!(ExecutionMode::Normal.capabilities().len(), 6);
         // HotReload and Worker have 3 each
         assert_eq!(ExecutionMode::HotReload.capabilities().len(), 3);
         assert_eq!(ExecutionMode::Worker.capabilities().len(), 3);
         // Job has 2
         assert_eq!(ExecutionMode::Job.capabilities().len(), 2);
-        // UnitTest has 1
-        assert_eq!(ExecutionMode::UnitTest.capabilities().len(), 1);
+        // UnitTest has 2 (TaskSpawning + JobConfig)
+        assert_eq!(ExecutionMode::UnitTest.capabilities().len(), 2);
     }
 
     // === Capability gate in call_function ===
@@ -11850,44 +11858,79 @@ c")
         ));
     }
 
+    // --- TaskSpawning capability (spawn) ---
+
     #[test]
-    fn test_capability_gate_concurrency_normal_mode_runs() {
+    fn test_capability_gate_task_spawning_normal_mode_runs() {
         let mut interp = Interpreter::new();
-        // Normal mode has Concurrency: function runs and returns 42
-        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Concurrency)).unwrap();
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::TaskSpawning)).unwrap();
         assert!(matches!(result, Value::Int(42)));
     }
 
     #[test]
-    fn test_capability_gate_concurrency_worker_mode_skips() {
-        let mut interp = Interpreter::new();
-        interp.set_execution_mode(ExecutionMode::Worker);
-        // Worker mode lacks Concurrency: silently returns Unit
-        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Concurrency)).unwrap();
-        assert!(matches!(result, Value::Unit));
-    }
-
-    #[test]
-    fn test_capability_gate_concurrency_hot_reload_mode_skips() {
-        let mut interp = Interpreter::new();
-        interp.set_execution_mode(ExecutionMode::HotReload);
-        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Concurrency)).unwrap();
-        assert!(matches!(result, Value::Unit));
-    }
-
-    #[test]
-    fn test_capability_gate_concurrency_job_mode_skips() {
-        let mut interp = Interpreter::new();
-        interp.set_execution_mode(ExecutionMode::Job);
-        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Concurrency)).unwrap();
-        assert!(matches!(result, Value::Unit));
-    }
-
-    #[test]
-    fn test_capability_gate_concurrency_unit_test_mode_skips() {
+    fn test_capability_gate_task_spawning_unit_test_mode_runs() {
         let mut interp = Interpreter::new();
         interp.set_execution_mode(ExecutionMode::UnitTest);
-        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Concurrency)).unwrap();
+        // UnitTest has TaskSpawning — spawn() works in tests
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::TaskSpawning)).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_capability_gate_task_spawning_worker_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Worker);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::TaskSpawning)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_task_spawning_job_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Job);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::TaskSpawning)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    // --- Scheduling capability (schedule, after) ---
+
+    #[test]
+    fn test_capability_gate_scheduling_normal_mode_runs() {
+        let mut interp = Interpreter::new();
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Scheduling)).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_capability_gate_scheduling_worker_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Worker);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Scheduling)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_scheduling_hot_reload_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::HotReload);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Scheduling)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_scheduling_job_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Job);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Scheduling)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_scheduling_unit_test_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::UnitTest);
+        // UnitTest lacks Scheduling — schedule/after don't run in tests
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Scheduling)).unwrap();
         assert!(matches!(result, Value::Unit));
     }
 
@@ -11921,6 +11964,100 @@ c")
         // Job mode has JobWorkers capability
         let result = call_gated_fn(&mut interp, Some(RuntimeCapability::JobWorkers)).unwrap();
         assert!(matches!(result, Value::Int(42)));
+    }
+
+    // === Integration tests: eval real ntnt code in non-Normal modes ===
+
+    /// Eval ntnt source in a specific execution mode
+    fn eval_in_mode(source: &str, mode: ExecutionMode) -> Result<Value> {
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse()?;
+        let mut interpreter = Interpreter::new();
+        interpreter.set_execution_mode(mode);
+        interpreter.eval(&ast)
+    }
+
+    #[test]
+    fn test_job_mode_skips_listen() {
+        // listen() in Job mode should be a no-op (returns Unit), not bind a port
+        let result = eval_in_mode("listen(9999)", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_job_mode_skips_serve_static() {
+        let result =
+            eval_in_mode("serve_static(\"/s\", \"./public\")", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_job_mode_skips_enable_cors() {
+        let result = eval_in_mode("enable_cors()", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_job_mode_skips_route_registration() {
+        let result = eval_in_mode("get(\"/\", fn(req) { 1 })", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_job_mode_runs_pure_stdlib() {
+        // Pure stdlib functions (requires: None) work in Job mode
+        let result = eval_in_mode("len(\"hello\")", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Int(5)));
+    }
+
+    #[test]
+    fn test_job_mode_runs_user_functions() {
+        let result = eval_in_mode("fn add(a, b) { a + b }\nadd(2, 3)", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Int(5)));
+    }
+
+    #[test]
+    fn test_unit_test_mode_skips_listen() {
+        let result = eval_in_mode("listen(9999)", ExecutionMode::UnitTest).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_unit_test_mode_skips_enable_cors() {
+        let result = eval_in_mode("enable_cors()", ExecutionMode::UnitTest).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_hot_reload_mode_skips_listen() {
+        let result = eval_in_mode("listen(9999)", ExecutionMode::HotReload).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_hot_reload_mode_runs_serve_static() {
+        // HotReload has HttpServer — serve_static runs (returns Unit on success)
+        let result = eval_in_mode(
+            "serve_static(\"/s\", \"./public\")",
+            ExecutionMode::HotReload,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_worker_mode_skips_listen() {
+        let result = eval_in_mode("listen(9999)", ExecutionMode::Worker).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_worker_mode_runs_enable_cors() {
+        // Worker has HttpConfig — enable_cors runs
+        let result = eval_in_mode("enable_cors()", ExecutionMode::Worker).unwrap();
+        assert!(matches!(result, Value::Unit));
     }
 
     #[test]
