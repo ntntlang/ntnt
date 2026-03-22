@@ -103,7 +103,7 @@ listen(8080)
 ```ntnt
 // lib/jobs.tnt
 import { fetch } from "std/http"
-import { notify } from "./lib/notifications.tnt"
+import { notify } from "./notifications.tnt"
 
 job SendEmail on emails {
     perform(to, body) { notify("Sending to #{to}"); ... }
@@ -142,7 +142,7 @@ Each job file is self-contained:
 ```ntnt
 // jobs/send_email.tnt
 import { fetch } from "std/http"
-import { notify } from "./lib/notifications.tnt"
+import { notify } from "../lib/notifications.tnt"
 
 job SendEmail on emails (retry: 3) {
     perform(to, subject, body) {

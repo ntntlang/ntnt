@@ -592,6 +592,9 @@ pub struct Interpreter {
     jobs_dir: Option<String>,
     /// Tracked jobs directory mtimes for detecting new/deleted files (dir_path -> mtime)
     jobs_dir_mtimes: HashMap<String, std::time::SystemTime>,
+    /// When true, job registration overwrites existing definitions (for hot-reload).
+    /// This avoids the empty-registry window that clear+reload creates.
+    jobs_overwrite_mode: bool,
     /// Registry of server actions handled specially before general function lookup
     server_actions: HashMap<String, ServerAction>,
     /// Last known source line being executed (for runtime error reporting)
@@ -777,6 +780,7 @@ impl Interpreter {
             routes_dir: None,
             routes_dir_mtimes: HashMap::new(),
             jobs_dir: None,
+            jobs_overwrite_mode: false,
             jobs_dir_mtimes: HashMap::new(),
             server_actions: HashMap::new(),
             current_line: 0,
@@ -1181,18 +1185,27 @@ impl Interpreter {
                 }
             }
 
-            // Detect cross-file name collisions (new names that were already defined by another file)
+            // Detect cross-file name collisions.
+            // A collision occurs when this file defines a name that was previously
+            // defined by a DIFFERENT job file (tracked in `defined_by`). We compare
+            // the environment before and after eval: any name that appeared or changed
+            // was defined/overwritten by this file.
             let file_label = file_path.to_string_lossy().to_string();
             {
                 let env = self.environment.borrow();
-                for name in env.values.keys() {
-                    if !names_before.contains(name) {
-                        // New name defined by this file
+                for (name, _) in env.values.iter() {
+                    let is_new = !names_before.contains(name);
+                    let was_overwritten =
+                        names_before.contains(name) && defined_by.contains_key(name);
+
+                    if is_new || was_overwritten {
                         if let Some(prev_file) = defined_by.get(name) {
-                            eprintln!(
-                                "[warn] jobs(): '{}' defined in '{}' overwrites definition from '{}'",
-                                name, file_label, prev_file
-                            );
+                            if prev_file != &file_label {
+                                eprintln!(
+                                    "[warn] jobs(): '{}' defined in '{}' overwrites definition from '{}'",
+                                    name, file_label, prev_file
+                                );
+                            }
                         }
                         defined_by.insert(name.clone(), file_label.clone());
                     }
@@ -1813,15 +1826,13 @@ impl Interpreter {
         let dir_path = self.jobs_dir.clone().unwrap();
         println!("\n[hot-reload] Jobs directory changed, re-discovering jobs...");
 
-        use crate::stdlib::jobs::JOB_RUNTIME;
-
-        // Snapshot existing definitions so we can roll back on failure.
-        // This avoids the "clear then fail = no jobs registered" problem.
-        let snapshot = JOB_RUNTIME.snapshot_job_definitions();
-        JOB_RUNTIME.clear_job_definitions();
+        // Use overwrite mode so job re-registration replaces existing definitions
+        // atomically — workers always see either the old or new definition, never
+        // an empty registry. No clear step needed.
+        self.jobs_overwrite_mode = true;
 
         // Re-discover jobs from the directory
-        match self.load_jobs_from_directory(&dir_path) {
+        let result = match self.load_jobs_from_directory(&dir_path) {
             Ok(count) => {
                 println!(
                     "[hot-reload] Re-discovered jobs from {} files.",
@@ -1834,13 +1845,14 @@ impl Interpreter {
             }
             Err(e) => {
                 eprintln!("[hot-reload] Error re-discovering jobs: {}", e);
-                // Restore previous definitions so jobs keep running with the old
-                // perform bodies rather than failing with "unknown job".
-                JOB_RUNTIME.restore_job_definitions(snapshot);
-                eprintln!("[hot-reload] Restored previous job definitions.");
+                // Overwrite mode means old definitions that weren't re-registered
+                // are still present — no data loss on failure.
                 false
             }
-        }
+        };
+
+        self.jobs_overwrite_mode = false;
+        result
     }
 
     fn define_builtins(&mut self) {
@@ -4197,14 +4209,19 @@ impl Interpreter {
                 // perform body so workers can re-evaluate the source file and execute
                 // perform blocks with full access to imports and user-defined functions.
                 use crate::stdlib::jobs::{JobDefinition, JOB_RUNTIME};
-                JOB_RUNTIME.register_job(JobDefinition {
+                let job_def = JobDefinition {
                     name: name.clone(),
                     queue: queue.clone(),
                     options: opts,
                     perform_params: perform_params.clone(),
                     perform_body: perform_body.clone(),
                     on_failure: on_failure.clone(),
-                })?;
+                };
+                if self.jobs_overwrite_mode {
+                    JOB_RUNTIME.register_job_overwrite(job_def)?;
+                } else {
+                    JOB_RUNTIME.register_job(job_def)?;
+                }
 
                 // Record the main source file so workers can recreate a full interpreter.
                 // Use main_source_file (not current_file) so jobs defined in imported

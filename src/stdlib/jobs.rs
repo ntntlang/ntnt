@@ -280,6 +280,19 @@ impl JobRuntime {
         Ok(())
     }
 
+    /// Register a job definition, overwriting any existing definition with the same name.
+    ///
+    /// Used by hot-reload to update perform bodies without clearing the registry.
+    /// This avoids the empty-registry window that `clear_job_definitions()` + reload
+    /// creates — workers always see either the old or new definition, never "missing."
+    pub fn register_job_overwrite(&self, def: JobDefinition) -> Result<()> {
+        let mut registry = self.job_registry.write().map_err(|e| {
+            IntentError::runtime_error(format!("Job registry lock poisoned: {}", e))
+        })?;
+        registry.insert(def.name.clone(), def);
+        Ok(())
+    }
+
     /// Set the main source file path (called when a job is registered).
     ///
     /// Panics if the mutex is poisoned — this indicates a prior panic in a
@@ -374,10 +387,10 @@ impl JobRuntime {
 
     /// Clear only the job definition registry (not the queue, workers, or config).
     ///
-    /// Used by hot-reload to allow re-registration of updated job definitions.
-    /// Unlike `reset()`, this is safe to call while the server is running — it
-    /// only affects which `perform` body is executed for future jobs, not in-flight
-    /// jobs or the queue contents.
+    /// **Warning:** Workers look up definitions at execution time. Clearing while
+    /// workers are running creates a window where jobs are treated as unknown.
+    /// Prefer `register_job_overwrite()` for hot-reload (no empty-registry window).
+    /// This method is kept for testing and full resets only.
     pub fn clear_job_definitions(&self) {
         self.job_registry
             .write()
