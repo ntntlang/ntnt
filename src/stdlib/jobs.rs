@@ -281,15 +281,26 @@ impl JobRuntime {
     }
 
     /// Set the main source file path (called when a job is registered).
+    ///
+    /// Panics if the mutex is poisoned — this indicates a prior panic in a
+    /// critical path and the runtime is in an unrecoverable state.
     pub fn set_source_file(&self, path: String) {
-        if let Ok(mut sf) = self.source_file.lock() {
-            *sf = Some(path);
-        }
+        let mut sf = self
+            .source_file
+            .lock()
+            .expect("Job source_file lock poisoned");
+        *sf = Some(path);
     }
 
     /// Get the main source file path, if set.
+    ///
+    /// Panics if the mutex is poisoned — workers must not silently fall back
+    /// to a bare interpreter when the lock is in an unrecoverable state.
     pub fn get_source_file(&self) -> Option<String> {
-        self.source_file.lock().ok()?.clone()
+        self.source_file
+            .lock()
+            .expect("Job source_file lock poisoned")
+            .clone()
     }
 
     /// Look up a job definition by name.
@@ -472,7 +483,7 @@ fn calculate_backoff(strategy: &str, attempt: i64, base_secs: i64) -> i64 {
 /// directly) a bare interpreter is returned — job perform bodies run with no
 /// application context, which is sufficient for simple test jobs.
 ///
-/// Panics if a source file path is set but the file cannot be read or parsed.
+/// Panics if a source file path is set but the file cannot be read, parsed, or evaluated.
 fn create_job_interpreter() -> crate::interpreter::Interpreter {
     let Some(source_path) = JOB_RUNTIME.get_source_file() else {
         // No source file set — return a bare interpreter (sufficient for tests).
@@ -480,22 +491,26 @@ fn create_job_interpreter() -> crate::interpreter::Interpreter {
     };
 
     let source = std::fs::read_to_string(&source_path)
-        .unwrap_or_else(|e| panic!("failed to read source file for worker: {}", e));
+        .unwrap_or_else(|e| panic!("failed to read '{}' for worker: {}", source_path, e));
 
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     let tokens: Vec<_> = Lexer::new(&source).collect();
     let ast = Parser::new(tokens)
         .parse()
-        .unwrap_or_else(|e| panic!("failed to parse source file for worker: {}", e));
+        .unwrap_or_else(|e| panic!("failed to parse '{}' for worker: {}", source_path, e));
 
     let mut interp = crate::interpreter::Interpreter::new();
-    interp.set_execution_mode(crate::interpreter::ExecutionMode::Job);
+    // Bootstrap in Worker mode (not Job) so that work_async()/work_jobs()/scale_workers()
+    // are no-ops during source evaluation — prevents recursive worker spawning.
+    interp.set_execution_mode(crate::interpreter::ExecutionMode::Worker);
     interp.set_current_file(&source_path);
     interp.set_main_source_file(&source_path);
     interp
         .eval(&ast)
-        .unwrap_or_else(|e| panic!("failed to evaluate source file for worker: {}", e));
+        .unwrap_or_else(|e| panic!("failed to evaluate '{}' for worker: {}", source_path, e));
+    // Switch to Job mode for actual job execution semantics.
+    interp.set_execution_mode(crate::interpreter::ExecutionMode::Job);
 
     interp
 }
