@@ -427,6 +427,27 @@ impl Default for Environment {
     }
 }
 
+/// Runtime capability required to execute a built-in function.
+///
+/// Each mode (Normal, Worker, Job, HotReload, UnitTest) exposes a subset of these
+/// capabilities. Built-in functions that carry a `requires` field will silently
+/// return `Unit` when the active mode lacks the required capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeCapability {
+    /// HTTP server lifecycle: listen, serve_static, routes, use_middleware,
+    /// on_shutdown, on_error, get/post/put/patch/delete route registration
+    HttpServer,
+    /// HTTP configuration helpers: enable_cors, enable_csp, enable_auth
+    HttpConfig,
+    /// Concurrency primitives: spawn, schedule, after
+    Concurrency,
+    /// Job worker runners: work_async, work_jobs, scale_workers
+    JobWorkers,
+    /// Job configuration and enqueueing: configure_queue, enqueue, enqueue_in,
+    /// enqueue_at, job_status, cancel_job, retry_job, list_jobs, delete_jobs
+    JobConfig,
+}
+
 /// Execution mode controls how server-related functions behave
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ExecutionMode {
@@ -438,8 +459,42 @@ pub enum ExecutionMode {
     /// Worker mode - skip listen(), on_shutdown(), on_error() but keep route registrations
     /// Used when spawning worker interpreters that process requests from the shared channel
     Worker,
+    /// Job mode - only job-related functions run; HTTP server functions are skipped
+    Job,
     /// Unit test mode - skip all server-related calls
     UnitTest,
+}
+
+impl ExecutionMode {
+    /// Returns the set of capabilities available in this execution mode.
+    pub fn capabilities(self) -> &'static [RuntimeCapability] {
+        match self {
+            ExecutionMode::Normal => &[
+                RuntimeCapability::HttpServer,
+                RuntimeCapability::HttpConfig,
+                RuntimeCapability::Concurrency,
+                RuntimeCapability::JobWorkers,
+                RuntimeCapability::JobConfig,
+            ],
+            ExecutionMode::HotReload => &[
+                RuntimeCapability::HttpServer,
+                RuntimeCapability::HttpConfig,
+                RuntimeCapability::JobConfig,
+            ],
+            ExecutionMode::Worker => &[
+                RuntimeCapability::HttpServer,
+                RuntimeCapability::HttpConfig,
+                RuntimeCapability::JobConfig,
+            ],
+            ExecutionMode::Job => &[RuntimeCapability::JobWorkers, RuntimeCapability::JobConfig],
+            ExecutionMode::UnitTest => &[RuntimeCapability::JobConfig],
+        }
+    }
+
+    /// Returns `true` if this mode grants the given capability.
+    pub fn has(self, cap: RuntimeCapability) -> bool {
+        self.capabilities().contains(&cap)
+    }
 }
 
 /// The Intent interpreter
@@ -724,6 +779,21 @@ impl Interpreter {
             ExecutionMode::Worker => {
                 // Workers skip listen(), on_shutdown(), on_error() but keep route registrations
                 matches!(name, "listen" | "on_shutdown" | "on_error")
+            }
+            ExecutionMode::Job => {
+                // Job mode skips all HTTP server functions; only job functions run
+                matches!(
+                    name,
+                    "listen"
+                        | "serve_static"
+                        | "routes"
+                        | "use_middleware"
+                        | "on_shutdown"
+                        | "on_error"
+                        | "enable_cors"
+                        | "enable_csp"
+                        | "enable_auth"
+                )
             }
             ExecutionMode::UnitTest => {
                 // In unit test mode, skip all server-related functions
@@ -6597,10 +6667,10 @@ impl Interpreter {
                 func,
             } => {
                 // Eval-path guard: skip concurrency functions in non-Normal modes (rule 24/25).
-                // spawn() skipped in Worker and HotReload modes.
-                // schedule(), after() skipped in Worker, HotReload, and UnitTest modes.
+                // spawn() skipped in Worker, HotReload, and Job modes.
+                // schedule(), after() skipped in Worker, HotReload, Job, and UnitTest modes.
                 match self.execution_mode {
-                    ExecutionMode::Worker | ExecutionMode::HotReload => {
+                    ExecutionMode::Worker | ExecutionMode::HotReload | ExecutionMode::Job => {
                         if matches!(fn_name.as_str(), "spawn" | "schedule" | "after") {
                             return Ok(Value::Unit);
                         }
@@ -11547,6 +11617,101 @@ c")
         assert!(!interpreter.should_skip_server_call("serve_static"));
         assert!(!interpreter.should_skip_server_call("routes"));
         assert!(!interpreter.should_skip_server_call("use_middleware"));
+    }
+
+    #[test]
+    fn test_should_skip_server_call_job_mode() {
+        let mut interpreter = Interpreter::new();
+        interpreter.set_execution_mode(ExecutionMode::Job);
+
+        // Job mode skips all HTTP server functions
+        assert!(interpreter.should_skip_server_call("listen"));
+        assert!(interpreter.should_skip_server_call("on_shutdown"));
+        assert!(interpreter.should_skip_server_call("on_error"));
+        assert!(interpreter.should_skip_server_call("serve_static"));
+        assert!(interpreter.should_skip_server_call("routes"));
+        assert!(interpreter.should_skip_server_call("use_middleware"));
+        assert!(interpreter.should_skip_server_call("enable_cors"));
+        assert!(interpreter.should_skip_server_call("enable_csp"));
+        assert!(interpreter.should_skip_server_call("enable_auth"));
+
+        // Non-server functions are not skipped
+        assert!(!interpreter.should_skip_server_call("print"));
+        assert!(!interpreter.should_skip_server_call("enqueue"));
+    }
+
+    // === RuntimeCapability / ExecutionMode::has() Tests ===
+
+    #[test]
+    fn test_execution_mode_job_variant() {
+        let mut interpreter = Interpreter::new();
+        interpreter.set_execution_mode(ExecutionMode::Job);
+        assert_eq!(interpreter.execution_mode, ExecutionMode::Job);
+    }
+
+    #[test]
+    fn test_normal_mode_has_all_capabilities() {
+        let mode = ExecutionMode::Normal;
+        assert!(mode.has(RuntimeCapability::HttpServer));
+        assert!(mode.has(RuntimeCapability::HttpConfig));
+        assert!(mode.has(RuntimeCapability::Concurrency));
+        assert!(mode.has(RuntimeCapability::JobWorkers));
+        assert!(mode.has(RuntimeCapability::JobConfig));
+    }
+
+    #[test]
+    fn test_hot_reload_mode_capabilities() {
+        let mode = ExecutionMode::HotReload;
+        assert!(mode.has(RuntimeCapability::HttpServer));
+        assert!(mode.has(RuntimeCapability::HttpConfig));
+        assert!(mode.has(RuntimeCapability::JobConfig));
+        // No concurrency or job workers in hot-reload
+        assert!(!mode.has(RuntimeCapability::Concurrency));
+        assert!(!mode.has(RuntimeCapability::JobWorkers));
+    }
+
+    #[test]
+    fn test_worker_mode_capabilities() {
+        let mode = ExecutionMode::Worker;
+        assert!(mode.has(RuntimeCapability::HttpServer));
+        assert!(mode.has(RuntimeCapability::HttpConfig));
+        assert!(mode.has(RuntimeCapability::JobConfig));
+        assert!(!mode.has(RuntimeCapability::Concurrency));
+        assert!(!mode.has(RuntimeCapability::JobWorkers));
+    }
+
+    #[test]
+    fn test_job_mode_capabilities() {
+        let mode = ExecutionMode::Job;
+        assert!(mode.has(RuntimeCapability::JobWorkers));
+        assert!(mode.has(RuntimeCapability::JobConfig));
+        // Job mode has no HTTP or concurrency capabilities
+        assert!(!mode.has(RuntimeCapability::HttpServer));
+        assert!(!mode.has(RuntimeCapability::HttpConfig));
+        assert!(!mode.has(RuntimeCapability::Concurrency));
+    }
+
+    #[test]
+    fn test_unit_test_mode_capabilities() {
+        let mode = ExecutionMode::UnitTest;
+        assert!(mode.has(RuntimeCapability::JobConfig));
+        assert!(!mode.has(RuntimeCapability::HttpServer));
+        assert!(!mode.has(RuntimeCapability::HttpConfig));
+        assert!(!mode.has(RuntimeCapability::Concurrency));
+        assert!(!mode.has(RuntimeCapability::JobWorkers));
+    }
+
+    #[test]
+    fn test_capabilities_returns_correct_slice_lengths() {
+        // Normal has all 5 capabilities
+        assert_eq!(ExecutionMode::Normal.capabilities().len(), 5);
+        // HotReload and Worker have 3 each
+        assert_eq!(ExecutionMode::HotReload.capabilities().len(), 3);
+        assert_eq!(ExecutionMode::Worker.capabilities().len(), 3);
+        // Job has 2
+        assert_eq!(ExecutionMode::Job.capabilities().len(), 2);
+        // UnitTest has 1
+        assert_eq!(ExecutionMode::UnitTest.capabilities().len(), 1);
     }
 
     #[test]
