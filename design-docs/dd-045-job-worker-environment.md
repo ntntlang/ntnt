@@ -182,6 +182,7 @@ Replace the scattered `if name ==` special-cases with a **registered action tabl
 
 ```rust
 /// What a function needs from the runtime to execute.
+/// Used as Option<RuntimeCapability> — None means "requires nothing, runs in all modes."
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeCapability {
     /// Bind ports, accept connections, register routes, serve static files
@@ -192,7 +193,7 @@ pub enum RuntimeCapability {
     Concurrency,
     /// Start job worker loops
     JobWorkers,
-    /// Configure job queues
+    /// Configure job queues and discover job directories
     JobConfig,
 }
 
@@ -294,7 +295,7 @@ This replaces the entire chain of `if name == "listen"` / `if name == "serve_sta
 
 #### NativeFunction Capabilities
 
-For NativeFunctions in stdlib modules (`spawn`, `schedule`, `work_async`, etc.), the capability is declared at the `Value::NativeFunction` level by adding an optional capability field:
+For NativeFunctions in stdlib modules (`spawn`, `schedule`, `work_async`, etc.), the capability is declared at the `Value::NativeFunction` level:
 
 ```rust
 Value::NativeFunction {
@@ -302,38 +303,37 @@ Value::NativeFunction {
     arity: usize,
     max_arity: usize,
     func: fn(&[Value]) -> Result<Value>,
-    capability: Option<RuntimeCapability>,  // NEW: None = runs in all modes
+    /// Capability required to execute. None = runs in all modes.
+    requires: Option<RuntimeCapability>,
 }
 ```
 
 When registering functions in stdlib modules:
 
 ```rust
-// std/concurrent — these require Concurrency capability
+// std/concurrent — requires Concurrency capability
 module.insert("spawn".to_string(), Value::NativeFunction {
     name: "spawn".to_string(),
-    arity: 1,
-    max_arity: 1,
+    arity: 1, max_arity: 1,
     func: |args| { ... },
-    capability: Some(RuntimeCapability::Concurrency),
+    requires: Some(RuntimeCapability::Concurrency),
 });
 
-// std/json — pure function, no capability needed
+// std/json — no requirements, runs everywhere
 module.insert("parse_json".to_string(), Value::NativeFunction {
     name: "parse_json".to_string(),
-    arity: 1,
-    max_arity: 1,
+    arity: 1, max_arity: 1,
     func: |args| { ... },
-    capability: None,  // runs everywhere
+    requires: None,
 });
 ```
 
 The NativeFunction dispatch checks this automatically:
 
 ```rust
-Value::NativeFunction { name, func, capability, .. } => {
-    if let Some(required) = capability {
-        if !self.execution_mode.has(*required) {
+Value::NativeFunction { name, func, requires, .. } => {
+    if let Some(cap) = requires {
+        if !self.execution_mode.has(*cap) {
             return Ok(Value::Unit);
         }
     }
@@ -341,7 +341,7 @@ Value::NativeFunction { name, func, capability, .. } => {
 }
 ```
 
-**Why this works:** When you add a new NativeFunction, the `capability` field is right there in the struct literal. You see it in every existing function. The pattern is obvious because it's co-located. If you set it to `None`, that's an explicit decision ("this is safe in all modes"). If you forget the field entirely, the compiler tells you.
+**Why this works:** When you add a new NativeFunction, the `requires` field is right there in the struct literal. You see it in every existing function. `requires: None` reads as "requires nothing." `requires: Some(HttpServer)` reads as "requires the HTTP server." The compiler enforces the field — forget it and the code won't compile.
 
 #### Why No Checklist Needed
 
@@ -737,6 +737,93 @@ fn test_job_worker_panic_recovery() {
 - [ ] Top-level constants accessible in perform blocks
 - [ ] `ntnt worker server.tnt` starts without side effects
 - [ ] Multiple workers process jobs correctly (each with independent interpreter)
+
+---
+
+## Complete Capability Mapping
+
+Every function in the language, classified. 22 functions require a capability; everything else is `requires: None`.
+
+### Server Actions (interpreter special-cases → action registry)
+
+| Function | `requires` | Rationale |
+|----------|-----------|-----------|
+| `listen()` | `HttpServer` | Binds port, starts server |
+| `serve_static()` | `HttpServer` | Registers static file dirs |
+| `routes()` | `HttpServer` | Discovers and registers route handlers |
+| `new_server()` | `HttpServer` | Resets server state |
+| `get/post/put/delete/patch/head/options()` | `HttpServer` | Registers route handlers (7 functions) |
+| `use_middleware()` | `HttpConfig` | Registers middleware handler |
+| `enable_cors()` | `HttpConfig` | Configures CORS policy |
+| `enable_csp()` | `HttpConfig` | Configures Content Security Policy |
+| `enable_auth()` | `HttpConfig` | Sets up auth routes and providers |
+| `on_shutdown()` | `HttpConfig` | Registers shutdown handler |
+| `on_error()` | `HttpConfig` | Registers error handler |
+| `jobs()` | `JobConfig` | Discovers and registers job files (new) |
+
+**Total: 18 functions** (counting HTTP methods as 7)
+
+### NativeFunctions with Capabilities
+
+| Function | Module | `requires` | Rationale |
+|----------|--------|-----------|-----------|
+| `spawn()` | std/concurrent | `Concurrency` | Spawns OS thread |
+| `schedule()` | std/concurrent | `Concurrency` | Starts recurring timer thread |
+| `after()` | std/concurrent | `Concurrency` | Spawns delayed one-shot thread |
+| `work_async()` | std/jobs | `JobWorkers` | Starts background worker threads |
+| `work_jobs()` | std/jobs | `JobWorkers` | Starts blocking worker loop |
+| `scale_workers()` | std/jobs | `JobWorkers` | Modifies live worker count |
+
+**Total: 6 functions**
+
+### NativeFunctions — `requires: None` (runs in all modes)
+
+| Module | Count | Examples |
+|--------|-------|---------|
+| std/string | 61 | trim, split, replace, starts_with, ... |
+| std/jobs | 37 | enqueue, enqueue_at, enqueue_batch, job_status, configure_queue, ... |
+| std/time | 40 | now, format_time, parse_time, ... |
+| std/auth | 34 | hash_password, verify_password, create_session, ... |
+| std/http_server | 32 | json, html, redirect, parse_form, set_cookie, ... |
+| std/math | 25 | abs, floor, ceil, sin, cos, ... |
+| std/crypto | 23 | sha256, hmac, random_bytes, ... |
+| std/concurrent | 13 | channel, send, recv, select, await_task, cancel_task, sleep_ms, ... |
+| std/collections | 18 | map, keys, values, merge, group_by, ... |
+| std/fs | 17 | read, write, exists, mkdir, ... |
+| std/path | 11 | join, basename, dirname, extension, ... |
+| std/kv | 10 | open, get, set, del, list, ... |
+| std/postgres | 8 | query, execute, connect, ... |
+| std/sqlite | 8 | query, execute, open, ... |
+| std/url | 8 | parse_url, encode, decode, ... |
+| std/log | 7 | info, warn, error, debug, ... |
+| std/http | 6 | fetch, download, ... |
+| std/json | 4 | parse_json, stringify, stringify_pretty, ... |
+| std/env | 4 | env, set_env, ... |
+| std/csv | 4 | parse_csv, generate_csv, ... |
+| std/markdown | 2 | render_markdown, ... |
+
+**Total: ~350+ functions**
+
+### Interpreter Special-Cases — No Capability (pure transforms, stay as-is)
+
+These are special-cased in the interpreter for closure-argument handling (HOFs) or template rendering, not for side effects. They don't need capabilities and don't move to the action registry:
+
+| Function | Reason for special-case |
+|----------|------------------------|
+| `template()` | Resolves file path relative to .tnt file |
+| `compile()` | Template compilation |
+| `render()` | Template rendering |
+| `filter()` | HOF — needs closure eval in current scope |
+| `transform()` | HOF — same |
+| `sort()` / `sort_desc()` | HOF — same |
+| `find()` | HOF — same |
+| `any()` / `all()` | HOF — same |
+| `count()` | HOF — same |
+| `reduce()` | HOF — same |
+| `flat_map()` | HOF — same |
+| `old()` | Contract system (postconditions) |
+
+These run in all modes. No changes needed.
 
 ---
 
