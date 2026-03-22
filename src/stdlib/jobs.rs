@@ -280,6 +280,25 @@ impl JobRuntime {
         Ok(())
     }
 
+    /// Get the set of registered job names (for detecting ghost definitions after hot-reload).
+    pub fn job_names(&self) -> std::collections::HashSet<String> {
+        self.job_registry
+            .read()
+            .expect("Job registry lock poisoned during name listing")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Remove job definitions not in the given set (prune ghosts after hot-reload).
+    pub fn remove_jobs_not_in(&self, keep: &std::collections::HashSet<String>) {
+        let mut registry = self
+            .job_registry
+            .write()
+            .expect("Job registry lock poisoned during ghost removal");
+        registry.retain(|name, _| keep.contains(name));
+    }
+
     /// Register a job definition, overwriting any existing definition with the same name.
     ///
     /// Used by hot-reload to update perform bodies without clearing the registry.

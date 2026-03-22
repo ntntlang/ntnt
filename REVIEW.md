@@ -23,7 +23,7 @@ Full skill with workflow, examples, and deep review techniques: see ntnt-code-re
 - `#[cfg(test)]` attaches to the next syntactic *item* (fn, struct, impl, etc.) — inserting a new item between the attribute and its intended target silently compiles away the wrong method. When adding code near `#[cfg(test)]`, verify the attribute still applies to the correct item.
 
 ### Hot-Reload & Re-Registration
-- Re-registration paths (hot-reload, re-discovery) must `clear_X()` before `load_X()`. Without clearing, renamed/deleted items persist as ghosts.
+- Re-registration paths (hot-reload, re-discovery): snapshot before clearing so you can rollback on failure. Clear is needed to remove ghosts (renamed/deleted items). Overwrite-only (without clear) avoids empty-registry windows but leaves ghosts.
 - Recursive file collection must skip `node_modules/`, `target/`, and hidden directories (`.git`, `.cache`, etc.)
 
 ### Error Quality

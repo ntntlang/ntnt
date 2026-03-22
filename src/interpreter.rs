@@ -1091,7 +1091,16 @@ impl Interpreter {
     fn sa_jobs_directory(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
         let directory = interp.eval_expression(&args[0])?;
         if let Value::String(dir_str) = directory {
-            interp.load_jobs_from_directory(&dir_str)
+            // In HotReload mode (main file re-evaluation), enable overwrite so
+            // Statement::Job doesn't skip registration. Without this, jobs("jobs/")
+            // during main-file hot-reload silently registers nothing.
+            let was_overwrite = interp.jobs_overwrite_mode;
+            if interp.execution_mode == ExecutionMode::HotReload {
+                interp.jobs_overwrite_mode = true;
+            }
+            let result = interp.load_jobs_from_directory(&dir_str);
+            interp.jobs_overwrite_mode = was_overwrite;
+            result
         } else {
             Err(IntentError::type_error(
                 "jobs() requires a string directory path".to_string(),
@@ -1171,9 +1180,16 @@ impl Interpreter {
             // Set current file so imports in the job file resolve correctly
             self.set_current_file(&file_path.to_string_lossy());
 
-            // Snapshot names before eval to detect cross-file collisions
-            let names_before: std::collections::HashSet<String> =
-                self.environment.borrow().values.keys().cloned().collect();
+            // Snapshot environment keys AND value identity before eval.
+            // We use Debug representation as a cheap identity check — if the
+            // string repr changes, the value was overwritten by this file.
+            let snapshot_before: HashMap<String, String> = self
+                .environment
+                .borrow()
+                .values
+                .iter()
+                .map(|(k, v)| (k.clone(), format!("{:?}", v)))
+                .collect();
 
             // Evaluate the file in the current interpreter — job declarations
             // are registered via Statement::Job handling
@@ -1185,20 +1201,21 @@ impl Interpreter {
                 }
             }
 
-            // Detect cross-file name collisions.
-            // A collision occurs when this file defines a name that was previously
-            // defined by a DIFFERENT job file (tracked in `defined_by`). We compare
-            // the environment before and after eval: any name that appeared or changed
-            // was defined/overwritten by this file.
+            // Detect cross-file name collisions by comparing environment snapshots.
+            // A name was defined/overwritten by this file if:
+            //   (a) it's new (not in snapshot_before), OR
+            //   (b) its Debug representation changed (value was overwritten)
             let file_label = file_path.to_string_lossy().to_string();
             {
                 let env = self.environment.borrow();
-                for (name, _) in env.values.iter() {
-                    let is_new = !names_before.contains(name);
-                    let was_overwritten =
-                        names_before.contains(name) && defined_by.contains_key(name);
+                for (name, value) in env.values.iter() {
+                    let value_repr = format!("{:?}", value);
+                    let changed = match snapshot_before.get(name) {
+                        None => true,                              // new name
+                        Some(old_repr) => *old_repr != value_repr, // value changed
+                    };
 
-                    if is_new || was_overwritten {
+                    if changed {
                         if let Some(prev_file) = defined_by.get(name) {
                             if prev_file != &file_label {
                                 eprintln!(
@@ -1809,11 +1826,16 @@ impl Interpreter {
             }
         }
 
-        // Also check for new subdirectories by comparing current dir tree to tracked dirs
+        // Also check for new/renamed/deleted files by comparing key sets (not just length,
+        // which misses renames where delete+add keeps the count the same).
         if !changed {
             if let Some(jobs_dir) = &self.jobs_dir {
                 let current_mtimes = Self::collect_jobs_mtimes(std::path::Path::new(jobs_dir));
-                if current_mtimes.len() != self.jobs_dir_mtimes.len() {
+                if current_mtimes.len() != self.jobs_dir_mtimes.len()
+                    || current_mtimes
+                        .keys()
+                        .any(|k| !self.jobs_dir_mtimes.contains_key(k))
+                {
                     changed = true;
                 }
             }
@@ -1826,9 +1848,16 @@ impl Interpreter {
         let dir_path = self.jobs_dir.clone().unwrap();
         println!("\n[hot-reload] Jobs directory changed, re-discovering jobs...");
 
-        // Use overwrite mode so job re-registration replaces existing definitions
-        // atomically — workers always see either the old or new definition, never
-        // an empty registry. No clear step needed.
+        use crate::stdlib::jobs::JOB_RUNTIME;
+
+        // Snapshot → clear → reload → restore on failure.
+        // Clear is needed to detect deleted/renamed job files (ghosts).
+        // Workers look up definitions at execution time, so the brief empty window
+        // during dev-mode hot-reload is acceptable (dev mode only, sub-millisecond).
+        let snapshot = JOB_RUNTIME.snapshot_job_definitions();
+        JOB_RUNTIME.clear_job_definitions();
+
+        // Use overwrite mode so Statement::Job registers even in HotReload mode.
         self.jobs_overwrite_mode = true;
 
         // Re-discover jobs from the directory
@@ -1845,8 +1874,9 @@ impl Interpreter {
             }
             Err(e) => {
                 eprintln!("[hot-reload] Error re-discovering jobs: {}", e);
-                // Overwrite mode means old definitions that weren't re-registered
-                // are still present — no data loss on failure.
+                // Restore previous definitions on failure.
+                JOB_RUNTIME.restore_job_definitions(snapshot);
+                eprintln!("[hot-reload] Restored previous job definitions.");
                 false
             }
         };
@@ -4187,7 +4217,10 @@ impl Interpreter {
                 on_failure,
             } => {
                 // Skip job registration in HotReload mode (same pattern as spawn)
-                if self.execution_mode == ExecutionMode::HotReload {
+                // UNLESS jobs_overwrite_mode is active (hot-reload of jobs directory
+                // needs to re-register updated definitions even when the interpreter
+                // is in HotReload mode from main-file re-evaluation).
+                if self.execution_mode == ExecutionMode::HotReload && !self.jobs_overwrite_mode {
                     return Ok(Value::Unit);
                 }
 
