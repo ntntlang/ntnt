@@ -425,6 +425,10 @@ impl Environment {
         keys.dedup();
         keys
     }
+
+    pub(crate) fn parent_clone(&self) -> Option<Rc<RefCell<Environment>>> {
+        self.parent.clone()
+    }
 }
 
 impl Default for Environment {
@@ -1086,6 +1090,27 @@ impl Interpreter {
     /// Look up a variable in the global environment (for builtins like len, print, str).
     pub fn get_global(&self, name: &str) -> Option<Value> {
         self.environment.borrow().get(name)
+    }
+
+    /// Push a new child scope. Caller must call pop_scope() to restore.
+    pub(crate) fn push_scope(&mut self) {
+        let parent = Rc::clone(&self.environment);
+        self.environment = Rc::new(RefCell::new(Environment::with_parent(parent)));
+    }
+
+    /// Pop the current scope, restoring the parent. Panics if no parent exists.
+    pub(crate) fn pop_scope(&mut self) {
+        let parent = self
+            .environment
+            .borrow()
+            .parent_clone()
+            .expect("pop_scope: no parent scope");
+        self.environment = parent;
+    }
+
+    /// Define a variable in the current scope.
+    pub(crate) fn define_in_scope(&mut self, name: String, value: Value) {
+        self.environment.borrow_mut().define(name, value);
     }
 
     /// Resolve a path relative to the current script's directory
@@ -3816,7 +3841,8 @@ impl Interpreter {
                 }
 
                 // Register in global JOB_RUNTIME — store full definition including
-                // perform body so workers can execute it in a fresh interpreter (PR 2b)
+                // perform body so workers can re-evaluate the source file and execute
+                // perform blocks with full access to imports and user-defined functions.
                 use crate::stdlib::jobs::{JobDefinition, JOB_RUNTIME};
                 JOB_RUNTIME.register_job(JobDefinition {
                     name: name.clone(),
@@ -3826,6 +3852,13 @@ impl Interpreter {
                     perform_body: perform_body.clone(),
                     on_failure: on_failure.clone(),
                 })?;
+
+                // Record the main source file so workers can recreate a full interpreter.
+                // Use main_source_file (not current_file) so jobs defined in imported
+                // modules still point back to the entry-point file.
+                if let Some(ref path) = self.main_source_file {
+                    JOB_RUNTIME.set_source_file(path.clone());
+                }
 
                 Ok(Value::Unit)
             }
@@ -12058,6 +12091,37 @@ c")
         // Worker has HttpConfig — enable_cors runs
         let result = eval_in_mode("enable_cors()", ExecutionMode::Worker).unwrap();
         assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_push_pop_scope_isolation() {
+        let mut interp = Interpreter::new();
+        interp.define_global("parent_var".to_string(), Value::Int(1));
+
+        interp.push_scope();
+        interp.define_in_scope("child_var".to_string(), Value::Int(2));
+
+        // Child can see parent
+        assert!(interp.get_global("parent_var").is_some());
+        // Child can see its own var
+        assert!(interp.get_global("child_var").is_some());
+
+        interp.pop_scope();
+
+        // Parent can see its own var
+        assert!(interp.get_global("parent_var").is_some());
+        // Parent cannot see child's var
+        assert!(
+            interp.get_global("child_var").is_none(),
+            "Child scope vars must not leak to parent"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "pop_scope: no parent scope")]
+    fn test_pop_scope_panics_without_parent() {
+        let mut interp = Interpreter::new();
+        interp.pop_scope(); // Should panic — root scope has no parent
     }
 
     #[test]

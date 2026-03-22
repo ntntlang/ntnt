@@ -6,7 +6,10 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::*;
 use ntnt::{
-    error::IntentError, intent, intent_studio_server, interpreter::Interpreter, lexer::Lexer,
+    error::IntentError,
+    intent, intent_studio_server,
+    interpreter::{ExecutionMode, Interpreter},
+    lexer::Lexer,
     parser::Parser as IntentParser,
 };
 use rustyline::error::ReadlineError;
@@ -1175,6 +1178,7 @@ fn run_worker_command(
     let path_str = canonical_path.to_string_lossy();
     interpreter.set_current_file(&path_str);
     interpreter.set_main_source_file(&path_str);
+    interpreter.set_execution_mode(ExecutionMode::Job);
 
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();

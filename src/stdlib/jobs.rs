@@ -161,7 +161,7 @@ pub struct JobDefinition {
     pub options: HashMap<String, JobOptionValue>,
     /// Parameters for the perform block (e.g., [to, body])
     pub perform_params: Vec<Parameter>,
-    /// Body of the perform block — executed by workers in a fresh interpreter
+    /// Body of the perform block — executed by workers in a child scope of the worker interpreter
     pub perform_body: Block,
     /// Optional on_failure handler: (params, body)
     pub on_failure: Option<(Vec<Parameter>, Block)>,
@@ -243,6 +243,9 @@ pub struct JobRuntime {
     pub band_cancel_arcs: Mutex<HashMap<String, Vec<Arc<AtomicBool>>>>,
     /// Queue filter active at worker startup — so scale_workers uses the same queue filter.
     pub active_queues: Mutex<Option<Vec<String>>>,
+    /// Main source file path — set when a job is registered so workers can recreate a
+    /// full interpreter (with imports and user functions) for each job execution.
+    source_file: Mutex<Option<String>>,
 }
 
 impl JobRuntime {
@@ -257,6 +260,7 @@ impl JobRuntime {
             active_bands: Mutex::new(Vec::new()),
             band_cancel_arcs: Mutex::new(HashMap::new()),
             active_queues: Mutex::new(None),
+            source_file: Mutex::new(None),
         }
     }
 
@@ -274,6 +278,18 @@ impl JobRuntime {
         }
         registry.insert(def.name.clone(), def);
         Ok(())
+    }
+
+    /// Set the main source file path (called when a job is registered).
+    pub fn set_source_file(&self, path: String) {
+        if let Ok(mut sf) = self.source_file.lock() {
+            *sf = Some(path);
+        }
+    }
+
+    /// Get the main source file path, if set.
+    pub fn get_source_file(&self) -> Option<String> {
+        self.source_file.lock().ok()?.clone()
     }
 
     /// Look up a job definition by name.
@@ -375,6 +391,9 @@ impl JobRuntime {
         if let Ok(mut aq) = self.active_queues.lock() {
             *aq = None;
         }
+        if let Ok(mut sf) = self.source_file.lock() {
+            *sf = None;
+        }
     }
 }
 
@@ -442,25 +461,71 @@ fn calculate_backoff(strategy: &str, attempt: i64, base_secs: i64) -> i64 {
     }
 }
 
-/// Execute a job's perform block in a fresh interpreter.
+/// Create a fully-initialised interpreter for a job worker.
 ///
-/// Creates a new `Interpreter`, injects each perform parameter from the payload
-/// map, then evaluates the perform body wrapped in `catch_unwind`.
-fn execute_job_perform(
+/// If a main source file has been recorded via `JOB_RUNTIME.set_source_file()`,
+/// reads, parses, and evaluates it in `Job` execution mode.  This gives the
+/// interpreter access to all imports and user-defined functions from the
+/// application, so job perform blocks can call any helper the user has defined.
+///
+/// If no source file has been set (e.g. in unit tests that call `worker_loop`
+/// directly) a bare interpreter is returned — job perform bodies run with no
+/// application context, which is sufficient for simple test jobs.
+///
+/// Panics if a source file path is set but the file cannot be read or parsed.
+fn create_job_interpreter() -> crate::interpreter::Interpreter {
+    let Some(source_path) = JOB_RUNTIME.get_source_file() else {
+        // No source file set — return a bare interpreter (sufficient for tests).
+        return crate::interpreter::Interpreter::new();
+    };
+
+    let source = std::fs::read_to_string(&source_path)
+        .unwrap_or_else(|e| panic!("failed to read source file for worker: {}", e));
+
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    let tokens: Vec<_> = Lexer::new(&source).collect();
+    let ast = Parser::new(tokens)
+        .parse()
+        .unwrap_or_else(|e| panic!("failed to parse source file for worker: {}", e));
+
+    let mut interp = crate::interpreter::Interpreter::new();
+    interp.set_execution_mode(crate::interpreter::ExecutionMode::Job);
+    interp.set_current_file(&source_path);
+    interp.set_main_source_file(&source_path);
+    interp
+        .eval(&ast)
+        .unwrap_or_else(|e| panic!("failed to evaluate source file for worker: {}", e));
+
+    interp
+}
+
+/// Execute a job's perform block using a pre-initialised interpreter.
+///
+/// Pushes a child scope, injects perform parameters from the payload map,
+/// evaluates the perform body (which creates its own inner scope for locals),
+/// then always restores the scope — even on panic.
+fn execute_in_worker(
+    interp: &mut crate::interpreter::Interpreter,
     def: &JobDefinition,
     payload: &HashMap<String, Value>,
 ) -> std::result::Result<Value, String> {
-    let mut interp = crate::interpreter::Interpreter::new();
+    // Push a child scope for this job's parameters
+    interp.push_scope();
 
-    // Inject perform parameters from the payload map
+    // Inject perform parameters from the payload
     for param in &def.perform_params {
         let val = payload.get(&param.name).cloned().unwrap_or(Value::Unit);
-        interp.define_global(param.name.clone(), val);
+        interp.define_in_scope(param.name.clone(), val);
     }
 
+    // Evaluate the perform body — eval_block() creates its own child scope for locals
     let body = def.perform_body.clone();
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interp.eval_block(&body)));
+
+    // ALWAYS restore scope, even on panic
+    interp.pop_scope();
 
     match result {
         Ok(Ok(v)) => Ok(v),
@@ -478,34 +543,42 @@ fn execute_job_perform(
     }
 }
 
-/// Execute a job's on_failure handler, if present.
+/// Execute a job's on_failure handler using a pre-initialised interpreter.
 ///
 /// Binds `error` (String) and `attempt` (Int) to the on_failure params
 /// (first and second respectively, falling back to those names if the param
 /// list is shorter).  Errors are silently discarded — on_failure is
 /// fire-and-forget.
-fn execute_on_failure(def: &JobDefinition, error: &str, attempt: i64) {
+fn execute_on_failure_in_worker(
+    interp: &mut crate::interpreter::Interpreter,
+    def: &JobDefinition,
+    error: &str,
+    attempt: i64,
+) {
     let Some((params, body)) = def.on_failure.as_ref() else {
         return;
     };
 
-    let mut interp = crate::interpreter::Interpreter::new();
+    interp.push_scope();
 
     // Bind by position: first param → error string, second param → attempt int.
     // Also bind the conventional names so handlers can use either.
-    interp.define_global("error".to_string(), Value::String(error.to_string()));
-    interp.define_global("attempt".to_string(), Value::Int(attempt));
+    interp.define_in_scope("error".to_string(), Value::String(error.to_string()));
+    interp.define_in_scope("attempt".to_string(), Value::Int(attempt));
 
     if let Some(p) = params.first() {
-        interp.define_global(p.name.clone(), Value::String(error.to_string()));
+        interp.define_in_scope(p.name.clone(), Value::String(error.to_string()));
     }
     if let Some(p) = params.get(1) {
-        interp.define_global(p.name.clone(), Value::Int(attempt));
+        interp.define_in_scope(p.name.clone(), Value::Int(attempt));
     }
 
     let body = body.clone();
     // Ignore result — on_failure is best-effort
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interp.eval_block(&body)));
+
+    // ALWAYS restore scope
+    interp.pop_scope();
 }
 
 /// Core implementation shared by `enqueue()`, `enqueue_at()`, and `enqueue_in()`.
@@ -795,6 +868,10 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
     let poll_duration = std::time::Duration::from_millis(band.poll_interval_ms);
     let band_stats = JOB_RUNTIME.get_or_create_band_stats(&band.name);
 
+    // Build a fully-initialised interpreter once per worker thread so that
+    // job perform blocks have access to all imports and user-defined functions.
+    let mut interp = create_job_interpreter();
+
     loop {
         if is_current_task_cancelled() {
             break;
@@ -1066,7 +1143,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         // Record start time for timeout detection and duration stats
         let start = std::time::Instant::now();
 
-        let exec_result = execute_job_perform(&def, &payload);
+        let exec_result = execute_in_worker(&mut interp, &def, &payload);
 
         // Check job timeout (non-negative values only; >= for boundary correctness)
         let timed_out = if let Some(Value::Int(timeout_secs)) = job_data.get("timeout") {
@@ -1162,7 +1239,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 job_data.insert("attempts".to_string(), Value::Int(new_attempts));
 
                 // Call on_failure handler (fire-and-forget)
-                execute_on_failure(&def, &err_msg, new_attempts);
+                execute_on_failure_in_worker(&mut interp, &def, &err_msg, new_attempts);
 
                 if new_attempts < retry_limit {
                     // Re-enqueue with backoff
@@ -3058,6 +3135,16 @@ pub fn init() -> HashMap<String, Value> {
                 let mut executed: i64 = 0;
                 let mut errors: Vec<String> = Vec::new();
 
+                // If a source file has been set, build a full interpreter so perform
+                // blocks have access to imports and user functions.  Otherwise fall
+                // back to a naked interpreter (sufficient for tests that don't rely
+                // on application-level imports).
+                let mut drain_interp = if JOB_RUNTIME.get_source_file().is_some() {
+                    create_job_interpreter()
+                } else {
+                    crate::interpreter::Interpreter::new()
+                };
+
                 for job in jobs {
                     let def = match JOB_RUNTIME.get_job(&job.job_type)? {
                         Some(d) => d,
@@ -3082,7 +3169,7 @@ pub fn init() -> HashMap<String, Value> {
                         _ => HashMap::new(),
                     };
 
-                    match execute_job_perform(&def, &payload) {
+                    match execute_in_worker(&mut drain_interp, &def, &payload) {
                         Ok(_) => executed += 1,
                         Err(e) => errors.push(format!(
                             "drain_jobs(): job '{}' failed: {}",
@@ -3773,11 +3860,133 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_job_perform_empty_body() {
+    fn test_execute_in_worker_empty_body() {
         // A job with an empty perform body should return Unit
         let def = test_job_def("EmptyJob", "default");
-        let result = execute_job_perform(&def, &HashMap::new());
+        let mut interp = crate::interpreter::Interpreter::new();
+        let result = execute_in_worker(&mut interp, &def, &HashMap::new());
         assert!(result.is_ok(), "Empty body should succeed: {:?}", result);
+    }
+
+    /// Helper: parse ntnt source containing a job declaration and return the JobDefinition.
+    fn parse_job_def(src: &str) -> JobDefinition {
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        let tokens: Vec<_> = Lexer::new(src).collect();
+        let ast = Parser::new(tokens).parse().expect("parse failed");
+        let job_name = src
+            .split_whitespace()
+            .skip_while(|&t| t != "job")
+            .nth(1)
+            .expect("no job name after 'job'")
+            .to_string();
+        let mut interp = crate::interpreter::Interpreter::new();
+        interp.eval(&ast).expect("eval failed");
+        JOB_RUNTIME
+            .get_job(&job_name)
+            .expect("get_job failed")
+            .expect("job not found")
+    }
+
+    #[test]
+    fn test_execute_in_worker_scope_isolation() {
+        // Locals from one job execution must not leak to parent scope or next job
+        with_clean_runtime(|| {
+            let def = parse_job_def("job ScopeTest on q { perform() { let leak_test = 999 } }");
+            let mut interp = crate::interpreter::Interpreter::new();
+
+            let _ = execute_in_worker(&mut interp, &def, &HashMap::new());
+            assert!(
+                interp.get_global("leak_test").is_none(),
+                "Locals from job execution must not leak to parent scope"
+            );
+
+            // Second run — must not see job-1 locals
+            let _ = execute_in_worker(&mut interp, &def, &HashMap::new());
+            assert!(
+                interp.get_global("leak_test").is_none(),
+                "Locals from previous job must not leak"
+            );
+        });
+    }
+
+    #[test]
+    fn test_execute_in_worker_inherits_parent_scope() {
+        // Perform body can read constants defined in the interpreter's parent scope
+        with_clean_runtime(|| {
+            let def = parse_job_def("job InheritTest on q { perform() { APP_NAME } }");
+            let mut interp = crate::interpreter::Interpreter::new();
+            interp.define_global(
+                "APP_NAME".to_string(),
+                crate::interpreter::Value::String("test-app".to_string()),
+            );
+
+            let result = execute_in_worker(&mut interp, &def, &HashMap::new());
+            match result {
+                Ok(crate::interpreter::Value::String(s)) => assert_eq!(s, "test-app"),
+                other => panic!("Expected String 'test-app', got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn test_execute_in_worker_params_injected() {
+        // Perform parameters from the payload are visible in the body
+        with_clean_runtime(|| {
+            let def = parse_job_def("job ParamTest on q { perform(user_id) { user_id } }");
+            let mut interp = crate::interpreter::Interpreter::new();
+            let mut payload = HashMap::new();
+            payload.insert(
+                "user_id".to_string(),
+                crate::interpreter::Value::String("abc-123".to_string()),
+            );
+
+            let result = execute_in_worker(&mut interp, &def, &payload);
+            match result {
+                Ok(crate::interpreter::Value::String(s)) => assert_eq!(s, "abc-123"),
+                other => panic!("Expected String 'abc-123', got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn test_execute_in_worker_error_recovery() {
+        // An error in the perform body must not corrupt the interpreter
+        with_clean_runtime(|| {
+            let def = parse_job_def("job ErrorTest on q { perform() { 1 / 0 } }");
+            let mut interp = crate::interpreter::Interpreter::new();
+            interp.define_global("MARKER".to_string(), crate::interpreter::Value::Int(42));
+
+            let result = execute_in_worker(&mut interp, &def, &HashMap::new());
+            assert!(result.is_err(), "Division by zero should fail");
+
+            // Interpreter must remain functional
+            assert!(
+                interp.get_global("MARKER").is_some(),
+                "Interpreter must remain functional after job error"
+            );
+
+            // A subsequent job must succeed
+            let def2 = parse_job_def("job RecoveryTest on q { perform() { 42 } }");
+            let result2 = execute_in_worker(&mut interp, &def2, &HashMap::new());
+            assert!(
+                result2.is_ok(),
+                "Worker should recover and run next job: {:?}",
+                result2
+            );
+        });
+    }
+
+    #[test]
+    fn test_source_file_tracking() {
+        with_clean_runtime(|| {
+            assert!(JOB_RUNTIME.get_source_file().is_none());
+            JOB_RUNTIME.set_source_file("/tmp/test.tnt".to_string());
+            assert_eq!(
+                JOB_RUNTIME.get_source_file(),
+                Some("/tmp/test.tnt".to_string())
+            );
+        });
     }
 
     #[test]
