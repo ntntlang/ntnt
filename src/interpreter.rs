@@ -499,7 +499,7 @@ impl ExecutionMode {
                 RuntimeCapability::HttpConfig,
                 RuntimeCapability::JobConfig,
             ],
-            ExecutionMode::Job => &[RuntimeCapability::JobWorkers, RuntimeCapability::JobConfig],
+            ExecutionMode::Job => &[RuntimeCapability::JobConfig],
             ExecutionMode::UnitTest => &[
                 RuntimeCapability::TaskSpawning,
                 RuntimeCapability::JobConfig,
@@ -11817,13 +11817,13 @@ c")
     #[test]
     fn test_job_mode_capabilities() {
         let mode = ExecutionMode::Job;
-        assert!(mode.has(RuntimeCapability::JobWorkers));
         assert!(mode.has(RuntimeCapability::JobConfig));
-        // Job mode has no HTTP or concurrency capabilities
+        // Job mode: only JobConfig — no HTTP, no concurrency, no worker spawning
         assert!(!mode.has(RuntimeCapability::HttpServer));
         assert!(!mode.has(RuntimeCapability::HttpConfig));
         assert!(!mode.has(RuntimeCapability::TaskSpawning));
         assert!(!mode.has(RuntimeCapability::Scheduling));
+        assert!(!mode.has(RuntimeCapability::JobWorkers));
     }
 
     #[test]
@@ -11844,8 +11844,8 @@ c")
         // HotReload and Worker have 3 each
         assert_eq!(ExecutionMode::HotReload.capabilities().len(), 3);
         assert_eq!(ExecutionMode::Worker.capabilities().len(), 3);
-        // Job has 2
-        assert_eq!(ExecutionMode::Job.capabilities().len(), 2);
+        // Job has 1 (JobConfig only)
+        assert_eq!(ExecutionMode::Job.capabilities().len(), 1);
         // UnitTest has 2 (TaskSpawning + JobConfig)
         assert_eq!(ExecutionMode::UnitTest.capabilities().len(), 2);
     }
@@ -11991,12 +11991,12 @@ c")
     }
 
     #[test]
-    fn test_capability_gate_job_workers_job_mode_runs() {
+    fn test_capability_gate_job_workers_job_mode_skips() {
         let mut interp = Interpreter::new();
         interp.set_execution_mode(ExecutionMode::Job);
-        // Job mode has JobWorkers capability
+        // Job mode does NOT have JobWorkers — perform blocks should not spawn workers
         let result = call_gated_fn(&mut interp, Some(RuntimeCapability::JobWorkers)).unwrap();
-        assert!(matches!(result, Value::Int(42)));
+        assert!(matches!(result, Value::Unit));
     }
 
     // === Integration tests: eval real ntnt code in non-Normal modes ===
