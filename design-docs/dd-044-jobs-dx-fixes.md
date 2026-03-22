@@ -1,10 +1,11 @@
 # DD-044: Jobs DX Fixes — Addressing v0.4.6 Field Findings
 
-**Status:** Draft
+**Status:** Partially Complete (4/6 fixes done)
 **Author:** Larri
 **Created:** 2026-03-21
 **Source:** [ntnt-findings.md §5](https://app.larri.net/admin/design-docs/dd-005-ntnt-findings) — findings #25-30 from snowgauge.app build
-**Branch:** `fix/jobs-dx` (from `main`)
+**Implemented in:** PR #43 (Fixes C, D, E), DD-045 PRs #44-#46 (Fix A superseded)
+**Remaining:** Fix B (schedule smart capture), Fix F (--store CLI flag)
 
 ---
 
@@ -19,6 +20,7 @@ This PR bundles them into one branch because they're small, self-contained, and 
 ## Findings → Fixes
 
 ### Fix A: Auto-inject parent file imports into job perform interpreter (#25)
+**Status:** ✅ SUPERSEDED by DD-045 — workers now get full app context via `create_job_interpreter()`
 **File:** `src/stdlib/jobs.rs` — `execute_job_perform()`
 **Effort:** Medium (2-3 hours)
 
@@ -41,6 +43,7 @@ This PR bundles them into one branch because they're small, self-contained, and 
 ---
 
 ### Fix B: `schedule()` — capture only free variables, not entire scope (#26)
+**Status:** ⏳ NOT YET IMPLEMENTED — deferred (medium effort)
 **File:** `src/stdlib/concurrent.rs` — `validate_and_capture()` / `capture_bindings()`
 **Effort:** Medium (2-3 hours)
 
@@ -64,6 +67,7 @@ This PR bundles them into one branch because they're small, self-contained, and 
 ---
 
 ### Fix C: `parse_json(None)` returns `Err` instead of throwing (#27)
+**Status:** ✅ COMPLETE — implemented in PR #43
 **File:** `src/stdlib/json.rs` — `parse_json` function
 **Effort:** Small (30 min)
 
@@ -90,14 +94,15 @@ func: |args| match &args[0] {
 ```
 
 **Tests:**
-- [ ] `parse_json(None)` returns `Err("...None/null...")` — not a thrown error
-- [ ] `parse_json("null")` still returns `Ok(None)` (existing behavior)
-- [ ] `parse_json("{}")` still returns `Ok(map {})` (existing behavior)
-- [ ] `parse_json(42)` still throws TypeError (non-string, non-None)
+- [x] `parse_json(None)` returns `Err("...None/null...")` — not a thrown error
+- [x] `parse_json("null")` still returns `Ok(None)` (existing behavior)
+- [x] `parse_json("{}")` still returns `Ok(map {})` (existing behavior)
+- [x] `parse_json(42)` still throws TypeError (non-string, non-None)
 
 ---
 
 ### Fix D: Better error message for unwrapped KV handles (#28)
+**Status:** ✅ COMPLETE — implemented in PR #43
 **File:** `src/stdlib/kv.rs` — type check in `get`/`set`/`list`/`del`
 **Effort:** Small (30 min)
 
@@ -116,12 +121,13 @@ Value::EnumValue { variant, .. } if variant == "Ok" || variant == "Err" => {
 ```
 
 **Tests:**
-- [ ] `get(open("redis://..."), "key")` produces the hint message
-- [ ] `get(unwrap(open("redis://...")), "key")` works normally
+- [x] `get(open("redis://..."), "key")` produces the hint message
+- [x] `get(unwrap(open("redis://...")), "key")` works normally
 
 ---
 
 ### Fix E: Idempotent job registration — suppress duplicate warnings (#29)
+**Status:** ✅ COMPLETE — implemented in PR #43
 **File:** `src/stdlib/jobs.rs` — `register_job()`
 **Effort:** Small (15 min)
 
@@ -145,13 +151,14 @@ pub fn register_job(&self, def: JobDefinition) -> Result<()> {
 ```
 
 **Tests:**
-- [ ] Registering same job name twice returns `Ok(())` (not error)
-- [ ] First registration's definition is preserved (not overwritten)
-- [ ] Worker startup logs are clean (no "Duplicate" warnings)
+- [x] Registering same job name twice returns `Ok(())` (not error)
+- [x] First registration's definition is preserved (not overwritten)
+- [x] Worker startup logs are clean (no "Duplicate" warnings)
 
 ---
 
 ### Fix F: `ntnt jobs` CLI — don't re-execute the full app (#30)
+**Status:** ⏳ NOT YET IMPLEMENTED — deferred (medium effort)
 **File:** `src/main.rs` — `jobs_load_kv()`
 **Effort:** Medium (2-3 hours)
 
