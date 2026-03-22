@@ -10,6 +10,9 @@
 - Return types: if doc/typechecker says `-> Result<T, String>`, return `Value::ok(value)` not bare `Value`
 - ntnt `None` literal is `Value::EnumValue(Option::None)` — when matching on `Value` directly, handle BOTH `Unit` (internal helpers) and `EnumValue(Option::None)` (public API / ntnt code)
 - EnumValue matching: always check `enum_name` AND `variant` together — `variant == "Ok"` alone matches user-defined enums
+- Recursive bootstrapping: when re-evaluating a .tnt file (workers, hot-reload), verify the eval mode suppresses capabilities that trigger the sub-runtime itself (e.g., worker eval must NOT have JobWorkers, or work_async() recurses infinitely)
+- Panic/error messages must include context (file paths, job names, key names) — "failed to X" without "which Y" is useless in production
+- Mutex poison on critical data (source file, config): use `expect()`, not `.ok()?`. Silent degradation (bare interpreter, missing config) is worse than crashing — at least a crash tells you what happened
 
 ### Concurrency
 - Lock ordering on JOB_RUNTIME: `band_worker_task_ids` → `band_cancel_arcs` → `active_bands`. Never violate.
