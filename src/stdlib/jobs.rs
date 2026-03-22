@@ -3617,12 +3617,13 @@ pub fn init() -> HashMap<String, Value> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Serialize tests that use the global JOB_RUNTIME.
     /// Parallel tests that call reset() or configure_queue() will race.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// pub(crate) so interpreter.rs tests that touch JOB_RUNTIME can use the same lock.
+    pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_clean_runtime<F: FnOnce()>(f: F) {
         // unwrap_or_else recovers from poisoned mutex (a previous test panicked

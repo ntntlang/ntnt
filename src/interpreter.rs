@@ -1805,8 +1805,9 @@ impl Interpreter {
         }
     }
 
-    /// Check if the jobs directory structure has changed (new/deleted/modified files).
-    /// If so, re-evaluate changed files to pick up new or modified job definitions.
+    /// Check if the jobs directory has changed (new/deleted/modified files).
+    /// If so, clear existing definitions and fully re-discover all job files to
+    /// pick up additions, modifications, deletions, and renames.
     /// Returns true if any job files were reloaded.
     fn check_and_reload_jobs_dir(&mut self) -> bool {
         if !self.server_state.hot_reload || self.jobs_dir.is_none() {
@@ -1851,16 +1852,22 @@ impl Interpreter {
         use crate::stdlib::jobs::JOB_RUNTIME;
 
         // Snapshot → clear → reload → restore on failure.
-        // Clear is needed to detect deleted/renamed job files (ghosts).
-        // Workers look up definitions at execution time, so the brief empty window
-        // during dev-mode hot-reload is acceptable (dev mode only, sub-millisecond).
+        //
+        // Why clear is safe here: hot-reload only runs in dev mode where the HTTP
+        // server uses the synchronous single-threaded path. The clear, reload, and
+        // any restore all happen on the same thread as request handling — no concurrent
+        // worker can observe the empty registry. In production (async server), hot-reload
+        // is disabled entirely (NTNT_ENV=production).
+        //
+        // Clear is required to handle deleted/renamed job files: without it, ghost
+        // definitions persist with stale perform bodies.
         let snapshot = JOB_RUNTIME.snapshot_job_definitions();
         JOB_RUNTIME.clear_job_definitions();
 
         // Use overwrite mode so Statement::Job registers even in HotReload mode.
         self.jobs_overwrite_mode = true;
 
-        // Re-discover jobs from the directory
+        // Re-discover all job files (full re-evaluation, not incremental).
         let result = match self.load_jobs_from_directory(&dir_path) {
             Ok(count) => {
                 println!(
@@ -13645,14 +13652,14 @@ page
     }
 
     // Shared mutex for all tests that touch the global JOB_RUNTIME.
-    // Separate statics (JOB_TEST_LOCK, JOB_TEST_LOCK2, etc.) don't serialize
-    // against each other — tests using different statics run concurrently and
-    // race on JOB_RUNTIME.reset()/register_job().
-    static JOB_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Use the shared TEST_LOCK from jobs.rs to serialize all tests that touch JOB_RUNTIME.
+    // Without this, interpreter.rs tests race with jobs.rs tests on the global runtime.
 
     #[test]
     fn test_jobs_directory_discovers_files() {
-        let _guard = JOB_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let tmp_dir = make_job_test_dir("discovers");
         let jobs_dir = tmp_dir.join("jobs");
@@ -13712,7 +13719,9 @@ page
 
     #[test]
     fn test_jobs_directory_recursive_discovery() {
-        let _guard = JOB_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let tmp_dir = make_job_test_dir("recursive");
         let jobs_dir = tmp_dir.join("jobs");
@@ -13788,7 +13797,9 @@ page
 
     #[test]
     fn test_jobs_runs_in_worker_mode() {
-        let _guard = JOB_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let tmp_dir = make_job_test_dir("worker_mode");
         let jobs_dir = tmp_dir.join("jobs");
@@ -13825,7 +13836,9 @@ page
 
     #[test]
     fn test_jobs_runs_in_job_mode() {
-        let _guard = JOB_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         let tmp_dir = make_job_test_dir("job_mode");
         let jobs_dir = tmp_dir.join("jobs");
@@ -13884,6 +13897,101 @@ page
             result
         );
 
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_jobs_hot_reload_modified_file() {
+        let _guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let tmp_dir = make_job_test_dir("hot_reload");
+        let jobs_dir = tmp_dir.join("jobs");
+        std::fs::create_dir_all(&jobs_dir).unwrap();
+
+        // Initial load: job with perform body "1"
+        std::fs::write(
+            jobs_dir.join("reload_test.tnt"),
+            "job HotReloadTest on q {\n    perform() {\n        1\n    }\n}\n",
+        )
+        .unwrap();
+
+        let main_file = tmp_dir.join("server.tnt");
+        std::fs::write(&main_file, "jobs(\"jobs/\")\n").unwrap();
+
+        let mut interp = Interpreter::new();
+        interp.set_current_file(&main_file.to_string_lossy());
+        interp.set_main_source_file(&main_file.to_string_lossy());
+        interp.server_state.hot_reload = true;
+
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
+
+        let source = std::fs::read_to_string(&main_file).unwrap();
+        let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
+        let ast = crate::parser::Parser::new(tokens).parse().unwrap();
+        interp.eval(&ast).expect("Initial load failed");
+
+        // Verify initial registration
+        assert!(
+            crate::stdlib::jobs::JOB_RUNTIME
+                .get_job("HotReloadTest")
+                .unwrap()
+                .is_some(),
+            "Job should be registered after initial load"
+        );
+
+        // Modify the file (sleep briefly to ensure mtime changes)
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(
+            jobs_dir.join("reload_test.tnt"),
+            "job HotReloadTest on q {\n    perform() {\n        2\n    }\n}\n",
+        )
+        .unwrap();
+
+        // Hot-reload should detect the change and re-register
+        let reloaded = interp.check_and_reload_jobs_dir();
+        assert!(reloaded, "Hot-reload should detect modified job file");
+
+        // Job should still be registered
+        assert!(
+            crate::stdlib::jobs::JOB_RUNTIME
+                .get_job("HotReloadTest")
+                .unwrap()
+                .is_some(),
+            "Job should still be registered after hot-reload"
+        );
+
+        // Test deletion: remove the file, add a different one
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::remove_file(jobs_dir.join("reload_test.tnt")).unwrap();
+        std::fs::write(
+            jobs_dir.join("new_job.tnt"),
+            "job NewHotJob on q {\n    perform() {\n        3\n    }\n}\n",
+        )
+        .unwrap();
+
+        let reloaded = interp.check_and_reload_jobs_dir();
+        assert!(reloaded, "Hot-reload should detect deleted + new file");
+
+        // Old job should be gone (cleared), new job should exist
+        assert!(
+            crate::stdlib::jobs::JOB_RUNTIME
+                .get_job("HotReloadTest")
+                .unwrap()
+                .is_none(),
+            "Deleted job should be removed after hot-reload"
+        );
+        assert!(
+            crate::stdlib::jobs::JOB_RUNTIME
+                .get_job("NewHotJob")
+                .unwrap()
+                .is_some(),
+            "New job should be registered after hot-reload"
+        );
+
+        // Clean up global state
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
