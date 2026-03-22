@@ -15,41 +15,20 @@ Six issues found building snowgauge.app on `std/jobs`. All have been addressed e
 
 ---
 
-## Completed Fixes
+## Findings → Fixes
 
-### Fix A: Job perform blocks lack imports (#25) — ✅ SUPERSEDED
+### Fix A: Job perform blocks lack imports (#25) — ✅ SUPERSEDED by DD-045
 
-**Original problem:** Job perform blocks ran in `Interpreter::new()` with no imports from the parent file.
+**Problem:** Job perform blocks ran in `Interpreter::new()` with no imports from the parent file.
 
-**Resolution:** DD-045 (PRs #44-#46) replaced `execute_job_perform()` with `create_job_interpreter()`, which evaluates the entire source file in Worker mode. Workers now have full app context — all imports, functions, and constants. This is a fundamentally better solution than the import-replay approach originally proposed here.
+**Resolution:** DD-045 (PRs #44-#46) replaced `execute_job_perform()` with `create_job_interpreter()`, which evaluates the entire source file in Worker mode. Workers now have full app context — all imports, functions, and constants.
 
----
-
-### Fix C: `parse_json(None)` returns `Err` instead of throwing (#27) — ✅ COMPLETE
-
-Implemented in PR #43. `parse_json(None)` now returns `Err("parse_json(): input is None/null")` instead of throwing a TypeError. Enables clean `get → parse_json` pipelines.
-
----
-
-### Fix D: Better error for unwrapped KV handles (#28) — ✅ COMPLETE
-
-Implemented in PR #43. `get(open("redis://..."), "key")` now says "did you forget to unwrap() the open() call?" instead of the generic "Expected a KV store handle."
+- [x] Job perform can call `now()` from `std/time` when parent file imports it
+- [x] Job perform can call `fetch()` from `std/http` when parent file imports it
+- [x] Job perform that uses an unimported function still fails with clear error
+- [x] Imports inside perform block still work (backward compatible)
 
 ---
-
-### Fix E: Idempotent job registration (#29) — ✅ COMPLETE
-
-Implemented in PR #43. `register_job()` silently skips when a job with the same name is already registered. Worker startup logs are clean.
-
----
-
-### Fix F: `ntnt jobs` CLI side effects (#30) — ✅ COMPLETE
-
-Implemented in PR #54. `jobs_load_kv()` now evaluates in `ExecutionMode::Worker` — `listen()`, `enqueue()`, `work_async()`, and `schedule()` are all suppressed. One line change leveraging the DD-045 RuntimeCapability system.
-
----
-
-## Remaining Fix
 
 ### Fix B: `schedule()` captures entire scope, fails on user functions (#26) — ⏳ OPEN
 
@@ -59,65 +38,75 @@ Implemented in PR #54. `jobs_load_kv()` now evaluates in `ExecutionMode::Worker`
 
 **Current workaround:** Use `enqueue_in()` self-scheduling pattern instead of `schedule()`.
 
-**Proposed fix (simplified):** Instead of full free-variable analysis (AST walking), use a simpler approach — try to capture each binding individually and skip any that fail serialization, with a warning:
+**Proposed fix (simplified):** Instead of full free-variable analysis (AST walking), skip user-defined functions during capture instead of failing on them. If the closure actually references a skipped function, it gets a clear "undefined variable" runtime error at execution time.
 
 ```rust
-fn capture_bindings(bindings: &HashMap<String, Value>) -> Result<CapturedBindings, Vec<String>> {
-    let mut values = HashMap::new();
-    let mut native_fns = Vec::new();
-    let mut skipped_fns = Vec::new();
-
-    for (key, value) in bindings {
-        match value {
-            Value::NativeFunction { .. } => {
-                // Capture native functions (they're Send-safe)
-                native_fns.push(/* ... */);
-            }
-            Value::Function { .. } => {
-                // User-defined closures can't cross threads — skip silently.
-                // If the closure body actually references this function,
-                // it will fail at runtime with a clear "undefined" error.
-                skipped_fns.push(key.clone());
-            }
-            _ => {
-                // Try to serialize data values
-                match SerializedValue::from_value(value) {
-                    Ok(serialized) => { values.insert(key.clone(), serialized); }
-                    Err(_) => { /* skip non-serializable values */ }
-                }
-            }
-        }
-    }
-
-    if !skipped_fns.is_empty() {
-        eprintln!(
-            "[dev] schedule/spawn: skipping {} user-defined function(s) \
-             that can't cross thread boundaries: {}",
-            skipped_fns.len(),
-            skipped_fns.join(", ")
-        );
-    }
-
-    Ok(CapturedBindings { values, native_fns })
+// In capture_bindings(): change user-defined function handling from error to skip
+Value::Function { .. } => {
+    // Skip — can't cross threads. If the closure body references this,
+    // it will fail at runtime with "undefined variable" (clear error).
+    skipped_fns.push(key.clone());
 }
 ```
 
-**Why this is simpler than free-variable analysis:**
-- No AST walking needed
-- No new `free_variables()` function
-- Change is isolated to `capture_bindings()` — one function
-- Behavior: user functions are skipped instead of causing an error
-- If the closure actually needs a skipped function, it gets a clear "undefined variable" runtime error
-- Dev-mode warning shows what was skipped so the developer knows why
+**Why simpler than free-variable analysis:**
+- No AST walking needed, no new `free_variables()` function
+- Change isolated to `capture_bindings()` — one function
+- Dev-mode warning lists what was skipped
 
-**Risk:** Low. The only behavior change is: closures that DON'T reference user functions now succeed (previously they failed). Closures that DO reference them get a different error ("undefined variable" instead of "cannot capture"). Both errors are clear.
-
-**Tests:**
 - [ ] `schedule()` works when closure references only native functions + data, even if user functions exist in scope
-- [ ] `schedule()` closure that references a user-defined function fails with "undefined" error
+- [ ] `schedule()` closure that references a user-defined function fails with "undefined" error at runtime
 - [ ] `spawn()` and `after()` also benefit (same code path)
 - [ ] Captured data values still work correctly
 - [ ] Dev warning printed listing skipped functions
+
+---
+
+### Fix C: `parse_json(None)` returns `Err` instead of throwing (#27) — ✅ COMPLETE (PR #43)
+
+**Problem:** `kv::get()` on missing key returns `Ok(None)`. Passing `None` to `parse_json()` throws a `TypeError` instead of returning `Err`.
+
+**Fix:** Handle `None`/`Unit` inputs gracefully — return `Err` instead of throwing.
+
+- [x] `parse_json(None)` returns `Err("...None/null...")` — not a thrown error
+- [x] `parse_json("null")` still returns `Ok(None)` (existing behavior)
+- [x] `parse_json("{}")` still returns `Ok(map {})` (existing behavior)
+- [x] `parse_json(42)` still throws TypeError (non-string, non-None)
+
+---
+
+### Fix D: Better error message for unwrapped KV handles (#28) — ✅ COMPLETE (PR #43)
+
+**Problem:** `get(open("redis://..."), "key")` says "Expected a KV store handle" — no hint about the missing `unwrap()`.
+
+**Fix:** Detect `Result` wrapper and suggest `unwrap()`.
+
+- [x] `get(open("redis://..."), "key")` produces the hint message
+- [x] `get(unwrap(open("redis://...")), "key")` works normally
+
+---
+
+### Fix E: Idempotent job registration (#29) — ✅ COMPLETE (PR #43)
+
+**Problem:** Worker threads re-execute the .tnt file, logging "Duplicate job definition" errors. 8 workers × N jobs = noisy.
+
+**Fix:** `register_job()` silently skips if the job name already exists.
+
+- [x] Registering same job name twice returns `Ok(())` (not error)
+- [x] First registration's definition is preserved (not overwritten)
+- [x] Worker startup logs are clean (no "Duplicate" warnings)
+
+---
+
+### Fix F: `ntnt jobs` CLI re-executes the full app (#30) — ✅ COMPLETE (PR #54)
+
+**Problem:** `ntnt jobs list server.tnt` evaluates in Normal mode — fires `listen()`, `enqueue()`, `work_async()`.
+
+**Fix:** Evaluate in `ExecutionMode::Worker` — only `configure_queue()` and job definitions run. One-line change leveraging DD-045's RuntimeCapability system.
+
+- [x] `ntnt jobs list server.tnt` works without binding ports or spawning workers
+- [x] `ntnt jobs status server.tnt` shows counts without side effects
+- [x] No duplicate job enqueues when running jobs CLI commands
 
 ---
 
