@@ -372,7 +372,7 @@ impl JobRuntime {
         }
     }
 
-        /// Clear only the job definition registry (not the queue, workers, or config).
+    /// Clear only the job definition registry (not the queue, workers, or config).
     ///
     /// Used by hot-reload to allow re-registration of updated job definitions.
     /// Unlike `reset()`, this is safe to call while the server is running — it

@@ -1224,6 +1224,13 @@ impl Interpreter {
         for entry in entries {
             let path = entry.path();
             if path.is_dir() {
+                // Skip hidden dirs and common non-source dirs (consistent with
+                // collect_tnt_files_recursive_migrate in main.rs).
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with('.') || name_str == "node_modules" || name_str == "target" {
+                    continue;
+                }
                 let sub_files = Self::collect_tnt_files(&path)?;
                 files.extend(sub_files);
             } else if path.extension().map(|e| e == "tnt").unwrap_or(false) {
@@ -1767,6 +1774,10 @@ impl Interpreter {
             }
             Err(e) => {
                 eprintln!("[hot-reload] Error re-discovering jobs: {}", e);
+                // Job definitions were already cleared above — newly enqueued jobs
+                // will fail with "unknown job" until the error is fixed and the next
+                // hot-reload succeeds. In-flight workers retain their own interpreter.
+                // This matches the routes hot-reload pattern (clear → attempt → degrade).
                 false
             }
         }
@@ -13750,6 +13761,45 @@ page
             files[1].file_name().unwrap() == "c.tnt",
             "Second file should be c.tnt"
         );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_collect_tnt_files_skips_nonsource_dirs() {
+        let tmp_dir = make_job_test_dir("skip_dirs");
+        let base = tmp_dir.join("jobs");
+        let node_modules = base.join("node_modules");
+        let target_dir = base.join("target");
+        let hidden_dir = base.join(".hidden");
+        let valid_sub = base.join("emails");
+        std::fs::create_dir_all(&node_modules).unwrap();
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::create_dir_all(&hidden_dir).unwrap();
+        std::fs::create_dir_all(&valid_sub).unwrap();
+
+        // Files in skipped dirs should not be found
+        std::fs::write(node_modules.join("junk.tnt"), "").unwrap();
+        std::fs::write(target_dir.join("build.tnt"), "").unwrap();
+        std::fs::write(hidden_dir.join("secret.tnt"), "").unwrap();
+        // Files in valid dirs should be found
+        std::fs::write(base.join("cleanup.tnt"), "").unwrap();
+        std::fs::write(valid_sub.join("send.tnt"), "").unwrap();
+
+        let files = Interpreter::collect_tnt_files(&base).unwrap();
+        assert_eq!(
+            files.len(),
+            2,
+            "Should find 2 .tnt files (skipping node_modules, target, .hidden): {:?}",
+            files
+        );
+
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"cleanup.tnt".to_string()));
+        assert!(names.contains(&"send.tnt".to_string()));
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
