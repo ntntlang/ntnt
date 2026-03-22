@@ -1877,6 +1877,30 @@ let count = unwrap(drain_jobs())
 clear_jobs()
 ```
 
+### Scaling: Separate Web and Worker Processes
+
+For production, run web servers and workers as separate processes:
+
+```bash
+# Web server — handles HTTP, enqueues jobs
+ntnt run server.tnt
+
+# Workers — process jobs, no HTTP (same file, different entry point)
+ntnt worker server.tnt --concurrency 10
+ntnt worker server.tnt --concurrency 5 --queues emails
+```
+
+Or use a dedicated worker file:
+```ntnt
+// worker.tnt — jobs only, no HTTP
+import "./lib/helpers.tnt"
+jobs("jobs/")
+configure_queue(map { "store": "redis://redis:6379" })
+work_jobs(map { "concurrency": 10 })  // blocks until Ctrl-C
+```
+
+`ntnt worker` evaluates the source in Worker mode — `listen()`, `work_async()`, and `serve_static()` are automatically suppressed. See the [Deployment Guide](DEPLOYMENT_GUIDE.md) for full Docker Compose examples with web + worker + Redis + PostgreSQL.
+
 ### Queue Configuration
 
 ```ntnt

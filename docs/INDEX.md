@@ -30,7 +30,7 @@ Source files:
 | Document | Description |
 |----------|-------------|
 | [AI Agent Guide](AI_AGENT_GUIDE.md) | Critical syntax rules for AI-assisted development |
-| [Web Deployment](WEB_DEPLOYMENT.md) | Docker, production setup, Cloudflare |
+| [Deployment Guide](DEPLOYMENT_GUIDE.md) | Docker, workers, scaling, Cloudflare, production setup |
 | [Architecture](../ARCHITECTURE.md) | System design and implementation details |
 | [Language Overview](ntnt_language_overview.md) | High-level feature summary |
 
