@@ -283,7 +283,12 @@ impl JobRuntime {
     /// Register a job definition, overwriting any existing definition with the same name.
     ///
     /// Used by hot-reload (HotReload execution mode) to update perform bodies.
-    /// Workers always see either the old or new definition, never a missing one.
+    /// Workers read definitions fresh via `get_job()` on each iteration, so updated
+    /// perform blocks take effect on the next job run. Workers always see either the
+    /// old or new definition, never a missing one.
+    ///
+    /// Note: workers cache their interpreter at startup, so new imports or helper
+    /// functions in the updated definition won't be available until workers restart.
     pub fn register_job_overwrite(&self, def: JobDefinition) -> Result<()> {
         let mut registry = self.job_registry.write().map_err(|e| {
             IntentError::runtime_error(format!("Job registry lock poisoned: {}", e))

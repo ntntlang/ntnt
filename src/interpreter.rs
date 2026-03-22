@@ -1751,8 +1751,17 @@ impl Interpreter {
     }
 
     /// Check if the jobs directory has changed (new/deleted/modified files).
-    /// If so, clear existing definitions and fully re-discover all job files to
-    /// pick up additions, modifications, deletions, and renames.
+    /// If so, re-evaluate all job files to pick up new and modified definitions.
+    ///
+    /// **What hot-reload handles:** Changed perform block logic, new job declarations,
+    /// and modified job options are picked up on the next worker iteration (workers
+    /// read definitions fresh from `JOB_RUNTIME.get_job()` each time).
+    ///
+    /// **What hot-reload does NOT handle:** Deleted/renamed job files leave ghost
+    /// definitions until server restart (harmless — never enqueued). New imports
+    /// or helper functions require a server restart since workers cache their
+    /// interpreter at startup.
+    ///
     /// Returns true if any job files were reloaded.
     fn check_and_reload_jobs_dir(&mut self) -> bool {
         if !self.server_state.hot_reload || self.jobs_dir.is_none() {
