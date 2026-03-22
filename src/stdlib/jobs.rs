@@ -552,12 +552,24 @@ fn execute_in_worker(
     // nested scopes eval_block leaked on panic.
     interp.restore_env(snapshot);
 
-    // Clean up interpreter state that may have accumulated during a panic.
-    // call_depth is incremented on function entry and decremented on exit;
-    // a Rust panic skips the decrement, leaving the depth permanently > 0.
-    // Reset both deferred statements and call depth together so subsequent
-    // jobs on this reused interpreter start from a clean state.
-    if result.is_err() {
+    // Clean up interpreter state on any failure path — both Rust panics AND ntnt errors.
+    //
+    // Panic path (result.is_err()): call_depth is incremented on function entry and
+    // decremented on exit; a panic skips the decrement. Deferred statements are also
+    // not drained because eval_block's drain code is unreachable after an unwind.
+    //
+    // Ntnt error path (Ok(Err(_))): eval_block returns early via `?`, which also
+    // skips the deferred drain at the end of eval_block. Deferred entries from the
+    // failed block accumulate in the interpreter and corrupt subsequent jobs.
+    //
+    // Both paths: clear_deferred() + reset_call_depth() to ensure clean state for
+    // the next job on this reused interpreter.
+    let failed = match &result {
+        Err(_) => true,     // Rust panic
+        Ok(Err(_)) => true, // ntnt error
+        Ok(Ok(_)) => false, // success
+    };
+    if failed {
         interp.clear_deferred();
         interp.reset_call_depth();
     }
@@ -618,7 +630,14 @@ fn execute_on_failure_in_worker(
     // Unconditionally restore — depth-safe regardless of nested scope leaks
     interp.restore_env(snapshot);
 
-    if panic_result.is_err() {
+    // Same cleanup as execute_in_worker: both panic and ntnt error paths skip
+    // eval_block's deferred drain and leave call_depth incremented.
+    let failed = match &panic_result {
+        Err(_) => true,
+        Ok(Err(_)) => true,
+        Ok(Ok(_)) => false,
+    };
+    if failed {
         interp.clear_deferred();
         interp.reset_call_depth();
     }
@@ -4066,6 +4085,36 @@ mod tests {
             match result2 {
                 Ok(crate::interpreter::Value::Int(42)) => {} // correct
                 other => panic!("Expected Int(42) after panic recovery, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn test_execute_in_worker_ntnt_error_clears_deferred() {
+        // Regression: when a perform body fails with an ntnt error (Ok(Err(_))),
+        // eval_block returns early via `?` and never drains its deferred statements.
+        // Without the ntnt error path cleanup, deferred entries accumulate across
+        // failed jobs and corrupt subsequent executions.
+        with_clean_runtime(|| {
+            // A job that registers a deferred statement then errors before completing
+            let def =
+                parse_job_def("job DeferredLeak on q { perform() { defer { 999 } \n 1 / 0 } }");
+            let mut interp = crate::interpreter::Interpreter::new();
+
+            // First run: ntnt error — deferred must be cleaned up
+            let result = execute_in_worker(&mut interp, &def, &HashMap::new());
+            assert!(result.is_err(), "Division by zero should fail");
+
+            // Verify deferred was cleared — run a clean job and confirm it returns its value,
+            // not some leaked deferred accumulation
+            let def2 = parse_job_def("job CleanAfterDefer on q { perform() { 42 } }");
+            let result2 = execute_in_worker(&mut interp, &def2, &HashMap::new());
+            match result2 {
+                Ok(crate::interpreter::Value::Int(42)) => {}
+                other => panic!(
+                    "Expected Int(42) after deferred-leak error recovery, got {:?}",
+                    other
+                ),
             }
         });
     }
