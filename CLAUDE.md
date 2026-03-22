@@ -1773,7 +1773,7 @@ routes("routes/")      // auto-discover and register all routes
 listen(8080)
 ```
 
-Each job file is self-contained with its own imports:
+Each job file has its own imports (evaluated in the shared interpreter context):
 ```ntnt
 // jobs/send_email.tnt
 import { fetch } from "std/http"

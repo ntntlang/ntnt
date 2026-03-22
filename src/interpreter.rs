@@ -592,9 +592,6 @@ pub struct Interpreter {
     jobs_dir: Option<String>,
     /// Tracked jobs directory mtimes for detecting new/deleted files (dir_path -> mtime)
     jobs_dir_mtimes: HashMap<String, std::time::SystemTime>,
-    /// When true, job registration overwrites existing definitions (for hot-reload).
-    /// This avoids the empty-registry window that clear+reload creates.
-    jobs_overwrite_mode: bool,
     /// Registry of server actions handled specially before general function lookup
     server_actions: HashMap<String, ServerAction>,
     /// Last known source line being executed (for runtime error reporting)
@@ -780,7 +777,6 @@ impl Interpreter {
             routes_dir: None,
             routes_dir_mtimes: HashMap::new(),
             jobs_dir: None,
-            jobs_overwrite_mode: false,
             jobs_dir_mtimes: HashMap::new(),
             server_actions: HashMap::new(),
             current_line: 0,
@@ -1091,16 +1087,7 @@ impl Interpreter {
     fn sa_jobs_directory(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
         let directory = interp.eval_expression(&args[0])?;
         if let Value::String(dir_str) = directory {
-            // In HotReload mode (main file re-evaluation), enable overwrite so
-            // Statement::Job doesn't skip registration. Without this, jobs("jobs/")
-            // during main-file hot-reload silently registers nothing.
-            let was_overwrite = interp.jobs_overwrite_mode;
-            if interp.execution_mode == ExecutionMode::HotReload {
-                interp.jobs_overwrite_mode = true;
-            }
-            let result = interp.load_jobs_from_directory(&dir_str);
-            interp.jobs_overwrite_mode = was_overwrite;
-            result
+            interp.load_jobs_from_directory(&dir_str)
         } else {
             Err(IntentError::type_error(
                 "jobs() requires a string directory path".to_string(),
@@ -1149,8 +1136,6 @@ impl Interpreter {
 
         let mut file_count = 0;
         let mut eval_error: Option<IntentError> = None;
-        // Track which names were defined by which file for cross-file collision detection.
-        let mut defined_by: HashMap<String, String> = HashMap::new();
         for file_path in &tnt_files {
             let source = match fs::read_to_string(file_path) {
                 Ok(s) => s,
@@ -1180,52 +1165,12 @@ impl Interpreter {
             // Set current file so imports in the job file resolve correctly
             self.set_current_file(&file_path.to_string_lossy());
 
-            // Snapshot environment keys AND value identity before eval.
-            // We use Debug representation as a cheap identity check — if the
-            // string repr changes, the value was overwritten by this file.
-            let snapshot_before: HashMap<String, String> = self
-                .environment
-                .borrow()
-                .values
-                .iter()
-                .map(|(k, v)| (k.clone(), format!("{:?}", v)))
-                .collect();
-
-            // Evaluate the file in the current interpreter — job declarations
-            // are registered via Statement::Job handling
+            // Evaluate the file — job declarations register via Statement::Job
             match self.eval(&ast) {
                 Ok(_) => {}
                 Err(e) => {
                     eval_error = Some(e);
                     break;
-                }
-            }
-
-            // Detect cross-file name collisions by comparing environment snapshots.
-            // A name was defined/overwritten by this file if:
-            //   (a) it's new (not in snapshot_before), OR
-            //   (b) its Debug representation changed (value was overwritten)
-            let file_label = file_path.to_string_lossy().to_string();
-            {
-                let env = self.environment.borrow();
-                for (name, value) in env.values.iter() {
-                    let value_repr = format!("{:?}", value);
-                    let changed = match snapshot_before.get(name) {
-                        None => true,                              // new name
-                        Some(old_repr) => *old_repr != value_repr, // value changed
-                    };
-
-                    if changed {
-                        if let Some(prev_file) = defined_by.get(name) {
-                            if prev_file != &file_label {
-                                eprintln!(
-                                    "[warn] jobs(): '{}' defined in '{}' overwrites definition from '{}'",
-                                    name, file_label, prev_file
-                                );
-                            }
-                        }
-                        defined_by.insert(name.clone(), file_label.clone());
-                    }
                 }
             }
 
@@ -1849,26 +1794,12 @@ impl Interpreter {
         let dir_path = self.jobs_dir.clone().unwrap();
         println!("\n[hot-reload] Jobs directory changed, re-discovering jobs...");
 
-        use crate::stdlib::jobs::JOB_RUNTIME;
-
-        // Snapshot → clear → reload → restore on failure.
-        //
-        // Why clear is safe here: hot-reload only runs in dev mode where the HTTP
-        // server uses the synchronous single-threaded path. The clear, reload, and
-        // any restore all happen on the same thread as request handling — no concurrent
-        // worker can observe the empty registry. In production (async server), hot-reload
-        // is disabled entirely (NTNT_ENV=production).
-        //
-        // Clear is required to handle deleted/renamed job files: without it, ghost
-        // definitions persist with stale perform bodies.
-        let snapshot = JOB_RUNTIME.snapshot_job_definitions();
-        JOB_RUNTIME.clear_job_definitions();
-
-        // Use overwrite mode so Statement::Job registers even in HotReload mode.
-        self.jobs_overwrite_mode = true;
-
-        // Re-discover all job files (full re-evaluation, not incremental).
-        let result = match self.load_jobs_from_directory(&dir_path) {
+        // Re-evaluate all job files. register_job() is idempotent (first wins),
+        // so unchanged jobs are silently skipped. For updated perform bodies,
+        // Statement::Job uses register_job_overwrite() during hot-reload.
+        // Ghost definitions from deleted files remain until server restart —
+        // acceptable in dev mode (they\'re never enqueued).
+        match self.load_jobs_from_directory(&dir_path) {
             Ok(count) => {
                 println!(
                     "[hot-reload] Re-discovered jobs from {} files.",
@@ -1881,15 +1812,9 @@ impl Interpreter {
             }
             Err(e) => {
                 eprintln!("[hot-reload] Error re-discovering jobs: {}", e);
-                // Restore previous definitions on failure.
-                JOB_RUNTIME.restore_job_definitions(snapshot);
-                eprintln!("[hot-reload] Restored previous job definitions.");
                 false
             }
-        };
-
-        self.jobs_overwrite_mode = false;
-        result
+        }
     }
 
     fn define_builtins(&mut self) {
@@ -4223,13 +4148,7 @@ impl Interpreter {
                 perform_body,
                 on_failure,
             } => {
-                // Skip job registration in HotReload mode (same pattern as spawn)
-                // UNLESS jobs_overwrite_mode is active (hot-reload of jobs directory
-                // needs to re-register updated definitions even when the interpreter
-                // is in HotReload mode from main-file re-evaluation).
-                if self.execution_mode == ExecutionMode::HotReload && !self.jobs_overwrite_mode {
-                    return Ok(Value::Unit);
-                }
+                // Job registration is idempotent — no need to skip in any mode.
 
                 // Evaluate option expressions and convert to Send-safe types
                 let mut opts = std::collections::HashMap::new();
@@ -4257,7 +4176,9 @@ impl Interpreter {
                     perform_body: perform_body.clone(),
                     on_failure: on_failure.clone(),
                 };
-                if self.jobs_overwrite_mode {
+                // In HotReload mode, overwrite to pick up updated perform bodies.
+                // In all other modes, idempotent first-registration-wins.
+                if self.execution_mode == ExecutionMode::HotReload {
                     JOB_RUNTIME.register_job_overwrite(job_def)?;
                 } else {
                     JOB_RUNTIME.register_job(job_def)?;
@@ -13974,14 +13895,8 @@ page
         let reloaded = interp.check_and_reload_jobs_dir();
         assert!(reloaded, "Hot-reload should detect deleted + new file");
 
-        // Old job should be gone (cleared), new job should exist
-        assert!(
-            crate::stdlib::jobs::JOB_RUNTIME
-                .get_job("HotReloadTest")
-                .unwrap()
-                .is_none(),
-            "Deleted job should be removed after hot-reload"
-        );
+        // Old job remains as a ghost (acceptable in dev mode — never enqueued).
+        // New job should be registered.
         assert!(
             crate::stdlib::jobs::JOB_RUNTIME
                 .get_job("NewHotJob")

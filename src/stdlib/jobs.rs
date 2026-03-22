@@ -280,30 +280,10 @@ impl JobRuntime {
         Ok(())
     }
 
-    /// Get the set of registered job names (for detecting ghost definitions after hot-reload).
-    pub fn job_names(&self) -> std::collections::HashSet<String> {
-        self.job_registry
-            .read()
-            .expect("Job registry lock poisoned during name listing")
-            .keys()
-            .cloned()
-            .collect()
-    }
-
-    /// Remove job definitions not in the given set (prune ghosts after hot-reload).
-    pub fn remove_jobs_not_in(&self, keep: &std::collections::HashSet<String>) {
-        let mut registry = self
-            .job_registry
-            .write()
-            .expect("Job registry lock poisoned during ghost removal");
-        registry.retain(|name, _| keep.contains(name));
-    }
-
     /// Register a job definition, overwriting any existing definition with the same name.
     ///
-    /// Used by hot-reload to update perform bodies without clearing the registry.
-    /// This avoids the empty-registry window that `clear_job_definitions()` + reload
-    /// creates — workers always see either the old or new definition, never "missing."
+    /// Used by hot-reload (HotReload execution mode) to update perform bodies.
+    /// Workers always see either the old or new definition, never a missing one.
     pub fn register_job_overwrite(&self, def: JobDefinition) -> Result<()> {
         let mut registry = self.job_registry.write().map_err(|e| {
             IntentError::runtime_error(format!("Job registry lock poisoned: {}", e))
@@ -402,36 +382,6 @@ impl JobRuntime {
             // Fallback: create a new untracked stats object
             Arc::new(BandStats::new())
         }
-    }
-
-    /// Clear only the job definition registry (not the queue, workers, or config).
-    ///
-    /// **Warning:** Workers look up definitions at execution time. Clearing while
-    /// workers are running creates a window where jobs are treated as unknown.
-    /// Prefer `register_job_overwrite()` for hot-reload (no empty-registry window).
-    /// This method is kept for testing and full resets only.
-    pub fn clear_job_definitions(&self) {
-        self.job_registry
-            .write()
-            .expect("Job registry lock poisoned during hot-reload clear")
-            .clear();
-    }
-
-    /// Snapshot the current job definitions for rollback on hot-reload failure.
-    pub fn snapshot_job_definitions(&self) -> HashMap<String, JobDefinition> {
-        self.job_registry
-            .read()
-            .expect("Job registry lock poisoned during snapshot")
-            .clone()
-    }
-
-    /// Restore job definitions from a previous snapshot.
-    pub fn restore_job_definitions(&self, snapshot: HashMap<String, JobDefinition>) {
-        let mut reg = self
-            .job_registry
-            .write()
-            .expect("Job registry lock poisoned during restore");
-        *reg = snapshot;
     }
 
     /// Reset the runtime (for testing).
