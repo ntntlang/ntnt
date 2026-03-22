@@ -682,21 +682,21 @@ Update `run_worker_command` in `main.rs`:
 
 New feature — depends on `ExecutionMode::Job` existing but independent of worker interpreter changes. Implemented last so the core fix ships without blocking on a new feature.
 
-- [ ] Add `jobs()` as a server action with `JobConfig` capability in `define_server_actions()`
-- [ ] Implement `action_jobs_directory()` — scan directory recursively for `.tnt` files
-- [ ] Evaluate each job file in the current interpreter (registers jobs via `Statement::Job`)
-- [ ] `lib/` modules available to job files via import (same as route files)
-- [ ] Track file mtimes for hot-reload in dev mode (detect new/changed/deleted job files)
-- [ ] Test: `jobs("jobs/")` discovers and registers jobs from multiple files
+- [x] Add `jobs()` as a server action with `JobConfig` capability in `define_server_actions()`
+- [x] Implement `action_jobs_directory()` — scan directory recursively for `.tnt` files
+- [x] Evaluate each job file in the current interpreter (registers jobs via `Statement::Job`)
+- [x] `lib/` modules available to job files via import (same as route files)
+- [x] Track file mtimes for hot-reload in dev mode (detect new/changed/deleted job files)
+- [x] Test: `jobs("jobs/")` discovers and registers jobs from multiple files
 - [ ] Test: job files can import from `lib/` modules
 - [ ] Test: hot-reload picks up new job files added to the directory
-- [ ] Test: `jobs()` works in `ExecutionMode::Job` (workers re-discover on startup)
+- [x] Test: `jobs()` works in `ExecutionMode::Job` (workers re-discover on startup)
 
 ### Step 8: Documentation
 
-- [ ] Update AI_AGENT_GUIDE.md job system section
-- [ ] Update STDLIB_REFERENCE.md
-- [ ] Run `ntnt docs --generate`
+- [x] Update AI_AGENT_GUIDE.md job system section
+- [x] Update STDLIB_REFERENCE.md
+- [x] Run `ntnt docs --generate`
 - [ ] Update DD-037 (main concurrency/jobs DD) to reflect the worker environment model and capability system
 - [ ] Remove DD-044 Fix A references (no longer applicable)
 
