@@ -917,6 +917,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "fetch".to_string(),
             arity: 1,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() == 2 {
                     // Two-arg form: fetch(url, options)
@@ -970,6 +971,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "download".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(url), Value::String(file_path)) => http_download(url, file_path),
                 _ => Err(IntentError::type_error(
@@ -1000,6 +1002,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "Cache".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ttl) => {
                     let cache_id = get_next_cache_id();
@@ -1049,6 +1052,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "cache_fetch".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 let cache_id = match &args[0] {
                     Value::Map(m) => match m.get("_cache_id") {
@@ -1104,6 +1108,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "cache_delete".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 let cache_id = match &args[0] {
                     Value::Map(m) => match m.get("_cache_id") {
@@ -1148,6 +1153,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "cache_clear".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let cache_id = match &args[0] {
                     Value::Map(m) => match m.get("_cache_id") {

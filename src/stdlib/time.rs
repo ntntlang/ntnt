@@ -69,6 +69,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "now".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| Ok(Value::Int(Utc::now().timestamp())),
         },
     );
@@ -91,6 +92,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "now_millis".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| Ok(Value::Int(Utc::now().timestamp_millis())),
         },
     );
@@ -114,6 +116,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "now_nanos".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| match Utc::now().timestamp_nanos_opt() {
                 Some(nanos) => Ok(Value::Int(nanos)),
                 None => Err(IntentError::runtime_error(
@@ -148,6 +151,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_timezone".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::String(tz_str)) => {
                     let tz = parse_timezone(tz_str)?;
@@ -184,6 +188,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_utc".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -222,6 +227,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "format".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::String(fmt)) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -260,6 +266,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "format_in".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::Int(ts), Value::String(tz_str), Value::String(fmt)) => {
                     let tz = parse_timezone(tz_str)?;
@@ -297,6 +304,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_iso".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -335,6 +343,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "parse_datetime".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(date_str), Value::String(fmt)) => {
                     match NaiveDateTime::parse_from_str(date_str, fmt) {
@@ -372,6 +381,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "parse_iso".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => match DateTime::parse_from_rfc3339(s) {
                     Ok(dt) => Ok(Value::ok(Value::Int(dt.timestamp()))),
@@ -411,6 +421,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "make_time".to_string(),
             arity: 6,
             max_arity: 6,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2], &args[3], &args[4], &args[5]) {
                 (
                     Value::Int(year),
@@ -466,6 +477,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "make_date".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::Int(year), Value::Int(month), Value::Int(day)) => {
                     match Utc.with_ymd_and_hms(*year as i32, *month as u32, *day as u32, 0, 0, 0) {
@@ -506,6 +518,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "add_seconds".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::Int(secs)) => Ok(Value::Int(ts + secs)),
                 _ => Err(IntentError::type_error(
@@ -535,6 +548,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "add_minutes".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::Int(mins)) => Ok(Value::Int(ts + mins * 60)),
                 _ => Err(IntentError::type_error(
@@ -564,6 +578,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "add_hours".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::Int(hours)) => Ok(Value::Int(ts + hours * 3600)),
                 _ => Err(IntentError::type_error(
@@ -595,6 +610,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "add_days".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::Int(days)) => Ok(Value::Int(ts + days * 86400)),
                 _ => Err(IntentError::type_error(
@@ -625,6 +641,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "add_weeks".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::Int(weeks)) => Ok(Value::Int(ts + weeks * 604800)),
                 _ => Err(IntentError::type_error(
@@ -658,6 +675,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "add_months".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 match (&args[0], &args[1]) {
                     (Value::Int(ts), Value::Int(months)) => {
@@ -738,6 +756,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "add_years".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 match (&args[0], &args[1]) {
                     (Value::Int(ts), Value::Int(years)) => {
@@ -809,6 +828,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "diff".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts1), Value::Int(ts2)) => {
                     let diff_secs = ts1 - ts2;
@@ -849,6 +869,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "before".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 < ts2)),
                 _ => Err(IntentError::type_error(
@@ -879,6 +900,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "after".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 > ts2)),
                 _ => Err(IntentError::type_error(
@@ -909,6 +931,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "equal".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts1), Value::Int(ts2)) => Ok(Value::Bool(ts1 == ts2)),
                 _ => Err(IntentError::type_error(
@@ -939,6 +962,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "year".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -972,6 +996,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "month".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -1005,6 +1030,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "day".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -1038,6 +1064,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "hour".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -1071,6 +1098,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "minute".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -1104,6 +1132,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "second".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -1138,6 +1167,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "weekday".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -1173,6 +1203,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "weekday_name".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -1216,6 +1247,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "month_name".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -1265,6 +1297,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "day_of_year".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -1300,6 +1333,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_leap_year".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ts) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -1340,6 +1374,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "sleep".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ms) => {
                     if *ms < 0 {
@@ -1377,6 +1412,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "elapsed".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(start) => {
                     let now = Utc::now().timestamp_millis();
@@ -1410,6 +1446,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "list_timezones".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| {
                 let common = vec![
                     "UTC",
@@ -1482,6 +1519,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "format_timestamp".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(ts), Value::String(fmt)) => {
                     let dt = DateTime::from_timestamp(*ts, 0).ok_or_else(|| {
@@ -1518,6 +1556,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "duration_secs".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(secs) => {
                     let mut map = HashMap::new();
@@ -1555,6 +1594,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "duration_millis".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ms) => {
                     let mut map = HashMap::new();

@@ -2213,6 +2213,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "configure_queue".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.len() != 1 {
                     return Err(IntentError::type_error(
@@ -2307,6 +2308,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "enqueue".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::type_error(
@@ -2353,6 +2355,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "job_status".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.len() != 1 {
                     return Err(IntentError::type_error(
@@ -2407,6 +2410,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "cancel_job".to_string(),
             arity: 1,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::type_error(
@@ -2456,6 +2460,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "enqueue_at".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| {
                 if args.len() != 3 {
                     return Err(IntentError::type_error(
@@ -2522,6 +2527,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "enqueue_in".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| {
                 if args.len() != 3 {
                     return Err(IntentError::type_error(
@@ -2592,6 +2598,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "work_async".to_string(),
             arity: 0,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let (bands, queues) = parse_bands_and_queues(args)?;
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
@@ -2663,6 +2670,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "work_jobs".to_string(),
             arity: 0,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let (bands, queues) = parse_bands_and_queues(args)?;
                 let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
@@ -2771,6 +2779,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "scale_workers".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 let band_name = match args.first() {
                     Some(Value::String(s)) => s.clone(),
@@ -2825,6 +2834,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "worker_status".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| worker_status_impl(),
         },
     );
@@ -2851,6 +2861,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "assert_enqueued".to_string(),
             arity: 1,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -2958,6 +2969,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "assert_not_enqueued".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.len() != 1 {
                     return Err(IntentError::type_error(
@@ -3024,6 +3036,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "drain_jobs".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| {
                 let jobs: Vec<EnqueuedJob> = {
                     let mut tq = JOB_RUNTIME
@@ -3103,6 +3116,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "clear_jobs".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| {
                 let mut tq = JOB_RUNTIME
                     .test_queue
@@ -3141,6 +3155,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "retry_job".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.len() != 1 {
                     return Err(IntentError::type_error(
@@ -3184,6 +3199,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "list_jobs".to_string(),
             arity: 0,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let (status, queue, limit) = if !args.is_empty() {
                     match &args[0] {
@@ -3238,6 +3254,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "delete_jobs".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.len() != 1 {
                     return Err(IntentError::type_error(
@@ -3300,6 +3317,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "enqueue_batch".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::type_error(

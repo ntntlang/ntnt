@@ -4563,6 +4563,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "oauth".to_string(),
             arity: 0,  // Variadic: 2-4 args (provider, client_id, client_secret?, options?)
             max_arity: 0,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -4794,6 +4795,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "oauth_discover".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::type_error(
@@ -4930,6 +4932,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "oauth_m2m".to_string(),
             arity: 4,
             max_arity: 4,
+            requires: None,
             func: |args| {
                 if args.len() < 4 {
                     return Err(IntentError::type_error(
@@ -5021,6 +5024,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "oauth_refresh".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -5100,6 +5104,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "oauth_validate".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::type_error(
@@ -5188,6 +5193,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "oauth_introspect".to_string(),
             arity: 4,
             max_arity: 4,
+            requires: None,
             func: |args| {
                 if args.len() < 4 {
                     return Err(IntentError::type_error(
@@ -5239,6 +5245,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "get_user".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -5276,6 +5283,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "get_session".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -5315,6 +5323,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "session_data".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -5375,6 +5384,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "validate_csrf".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -5512,6 +5522,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "set_session".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::type_error(
@@ -5561,6 +5572,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "sessions_cleanup".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| {
                 let mut total = 0u64;
 
@@ -5622,6 +5634,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "user_sessions".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -5686,6 +5699,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "logout_all".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::type_error(
@@ -5741,6 +5755,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "csrf_token".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -5779,6 +5794,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "csrf_field".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -5823,6 +5839,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "verify_csrf".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::type_error(
@@ -5876,6 +5893,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "jwt_sign".to_string(),
             arity: 2, // 2-3 args (options is optional)
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::type_error(
@@ -5974,6 +5992,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "jwt_verify".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::type_error(
@@ -6039,6 +6058,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "jwt_decode".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -6146,6 +6166,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "logout_user".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -6198,6 +6219,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "enable_auth".to_string(),
             arity: 0, // Variadic: 1-2 args (providers, options?)
             max_arity: 0,
+            requires: None,
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
@@ -6431,6 +6453,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "oauth_start".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::type_error(
@@ -6519,6 +6542,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "oauth_exchange".to_string(),
             arity: 4,
             max_arity: 4,
+            requires: None,
             func: |args| {
                 if args.len() < 4 {
                     return Err(IntentError::type_error(
@@ -6642,6 +6666,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "create_session_from_oauth".to_string(),
             arity: 0, // Variadic: 2-3 args
             max_arity: 0,
+            requires: None,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::type_error(
@@ -6754,6 +6779,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "auth_start".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| handle_auth_start(&args),
         },
     );
@@ -6777,6 +6803,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "auth_callback".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| handle_auth_callback(&args),
         },
     );
@@ -6800,6 +6827,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "auth_logout".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| handle_auth_logout(&args),
         },
     );
@@ -6823,6 +6851,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "auth_me".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let user = get_user_from_request(&args[0]);
                 match user {
@@ -6862,6 +6891,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "hash_password".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 eprintln!("[DEPRECATED] hash_password() in std/auth is deprecated. Use hash_password() from std/crypto instead.");
                 if args.is_empty() {
@@ -6906,6 +6936,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "verify_password".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 eprintln!("[DEPRECATED] verify_password() in std/auth is deprecated. Use verify_password() from std/crypto instead.");
                 if args.len() < 2 {
@@ -6959,6 +6990,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "totp_secret".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| Ok(Value::String(generate_totp_secret())),
         },
     );
@@ -6984,6 +7016,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "totp_uri".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| {
                 if args.len() < 3 {
                     return Err(IntentError::type_error(
@@ -7046,6 +7079,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "verify_totp".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() < 2 {
                     return Err(IntentError::type_error(

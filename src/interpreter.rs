@@ -106,11 +106,17 @@ pub enum Value {
     /// - `arity == max_arity`: exact argument count required
     /// - `arity < max_arity`: accepts between `arity` (min) and `max_arity` args
     /// - `max_arity == 0 && arity == 0`: legacy variadic (no checking) — being phased out
+    ///
+    /// Capability gating:
+    /// - `requires == None`: always runs regardless of execution mode
+    /// - `requires == Some(cap)`: silently returns `Unit` when the active mode
+    ///   does not grant `cap` (checked in `call_function`)
     NativeFunction {
         name: String,
         arity: usize,
         max_arity: usize,
         func: fn(&[Value]) -> Result<Value>,
+        requires: Option<RuntimeCapability>,
     },
 
     /// Task handle (from spawn/after)
@@ -1268,6 +1274,7 @@ impl Interpreter {
                 name: "print".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| {
                     for arg in args {
                         println!("{}", arg);
@@ -1298,6 +1305,7 @@ impl Interpreter {
                 name: "len".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::String(s) => Ok(Value::Int(s.len() as i64)),
                     Value::Array(a) => Ok(Value::Int(a.len() as i64)),
@@ -1330,6 +1338,7 @@ impl Interpreter {
                 name: "type".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::String(args[0].type_name().to_string())),
             },
         );
@@ -1358,6 +1367,7 @@ impl Interpreter {
                 name: "typeof".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::String(args[0].type_name().to_string())),
             },
         );
@@ -1381,6 +1391,7 @@ impl Interpreter {
                 name: "str".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::String(args[0].to_string())),
             },
         );
@@ -1406,6 +1417,7 @@ impl Interpreter {
                 name: "int".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(*f as i64)),
@@ -1439,6 +1451,7 @@ impl Interpreter {
                 name: "float".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Float(*n as f64)),
                     Value::Float(f) => Ok(Value::Float(*f)),
@@ -1473,6 +1486,7 @@ impl Interpreter {
                 name: "push".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |args| {
                     if let Value::Array(mut arr) = args[0].clone() {
                         arr.push(args[1].clone());
@@ -1502,6 +1516,7 @@ impl Interpreter {
                 name: "assert".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| {
                     if args[0].is_truthy() {
                         Ok(Value::Unit)
@@ -1536,6 +1551,7 @@ impl Interpreter {
                 name: "abs".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(n.abs())),
                     Value::Float(f) => Ok(Value::Float(f.abs())),
@@ -1566,6 +1582,7 @@ impl Interpreter {
                 name: "min".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |args| match (&args[0], &args[1]) {
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.min(b))),
                     (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.min(*b))),
@@ -1598,6 +1615,7 @@ impl Interpreter {
                 name: "max".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |args| match (&args[0], &args[1]) {
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.max(b))),
                     (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.max(*b))),
@@ -1633,6 +1651,7 @@ impl Interpreter {
                 name: "round".to_string(),
                 arity: 0, // Variable arity: 1 or 2 args
                 max_arity: 0,
+                requires: None,
                 func: |args| {
                     if args.is_empty() || args.len() > 2 {
                         return Err(IntentError::type_error(
@@ -1697,6 +1716,7 @@ impl Interpreter {
                 name: "floor".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
@@ -1726,6 +1746,7 @@ impl Interpreter {
                 name: "ceil".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
@@ -1757,6 +1778,7 @@ impl Interpreter {
                 name: "trunc".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.trunc() as i64)),
@@ -1787,6 +1809,7 @@ impl Interpreter {
                 name: "sqrt".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => {
                         if *n < 0 {
@@ -1833,6 +1856,7 @@ impl Interpreter {
                 name: "pow".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |args| match (&args[0], &args[1]) {
                     (Value::Int(base), Value::Int(exp)) => {
                         if *exp >= 0 {
@@ -1876,6 +1900,7 @@ impl Interpreter {
                 name: "sign".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(n.signum())),
                     Value::Float(f) => {
@@ -1917,6 +1942,7 @@ impl Interpreter {
                 name: "clamp".to_string(),
                 arity: 3,
                 max_arity: 3,
+                requires: None,
                 func: |args| match (&args[0], &args[1], &args[2]) {
                     (Value::Int(val), Value::Int(min), Value::Int(max)) => {
                         Ok(Value::Int(*val.max(min).min(max)))
@@ -1983,6 +2009,7 @@ impl Interpreter {
                 name: "Some".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::some(args[0].clone())),
             },
         );
@@ -2010,6 +2037,7 @@ impl Interpreter {
                 name: "Ok".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::ok(args[0].clone())),
             },
         );
@@ -2033,6 +2061,7 @@ impl Interpreter {
                 name: "Err".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::err(args[0].clone())),
             },
         );
@@ -2056,6 +2085,7 @@ impl Interpreter {
                 name: "is_some".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -2086,6 +2116,7 @@ impl Interpreter {
                 name: "is_none".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -2116,6 +2147,7 @@ impl Interpreter {
                 name: "is_ok".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -2146,6 +2178,7 @@ impl Interpreter {
                 name: "is_err".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -2179,6 +2212,7 @@ impl Interpreter {
                 name: "is_map".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::Map(_)))),
             },
         );
@@ -2203,6 +2237,7 @@ impl Interpreter {
                 name: "is_array".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::Array(_)))),
             },
         );
@@ -2223,6 +2258,7 @@ impl Interpreter {
                 name: "is_string".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::String(_)))),
             },
         );
@@ -2243,6 +2279,7 @@ impl Interpreter {
                 name: "is_int".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::Int(_)))),
             },
         );
@@ -2263,6 +2300,7 @@ impl Interpreter {
                 name: "is_float".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::Float(_)))),
             },
         );
@@ -2283,6 +2321,7 @@ impl Interpreter {
                 name: "is_bool".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::Bool(_)))),
             },
         );
@@ -2309,6 +2348,7 @@ impl Interpreter {
                 name: "unwrap".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name,
@@ -2361,6 +2401,7 @@ impl Interpreter {
                 name: "unwrap_or".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name,
@@ -2401,6 +2442,7 @@ impl Interpreter {
                 name: "listen".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |_args| {
                     // This is a placeholder - actual implementation is in eval_call
                     // because we need access to the interpreter to call handlers
@@ -2429,6 +2471,7 @@ impl Interpreter {
                 name: "get".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
@@ -2455,6 +2498,7 @@ impl Interpreter {
                 name: "post".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
@@ -2481,6 +2525,7 @@ impl Interpreter {
                 name: "put".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
@@ -2507,6 +2552,7 @@ impl Interpreter {
                 name: "delete".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
@@ -2533,6 +2579,7 @@ impl Interpreter {
                 name: "patch".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
@@ -2557,6 +2604,7 @@ impl Interpreter {
                 name: "new_server".to_string(),
                 arity: 0,
                 max_arity: 0,
+                requires: None,
                 func: |_args| {
                     // Placeholder - actual implementation clears server_state
                     Err(IntentError::runtime_error(
@@ -2593,6 +2641,7 @@ impl Interpreter {
                 name: "enable_cors".to_string(),
                 arity: 0, // Variadic: 0-1 args
                 max_arity: 0,
+                requires: None,
                 func: |_args| {
                     // Placeholder - actual implementation is in eval_call
                     Err(IntentError::runtime_error(
@@ -2633,6 +2682,7 @@ impl Interpreter {
                 name: "enable_csp".to_string(),
                 arity: 0, // Variadic: 0-1 args
                 max_arity: 0,
+                requires: None,
                 func: |_args| {
                     // Placeholder - actual implementation is in eval_call
                     Err(IntentError::runtime_error(
@@ -5643,6 +5693,7 @@ impl Interpreter {
                 name: "_auth_start".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: crate::stdlib::auth::handle_auth_start,
             },
         );
@@ -5655,6 +5706,7 @@ impl Interpreter {
                 name: "_auth_callback".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: crate::stdlib::auth::handle_auth_callback,
             },
         );
@@ -5667,6 +5719,7 @@ impl Interpreter {
                 name: "_auth_logout".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: crate::stdlib::auth::handle_auth_logout,
             },
         );
@@ -6665,6 +6718,7 @@ impl Interpreter {
                 arity,
                 max_arity,
                 func,
+                requires,
             } => {
                 // Eval-path guard: skip concurrency functions in non-Normal modes (rule 24/25).
                 // spawn() skipped in Worker, HotReload, and Job modes.

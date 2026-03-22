@@ -51,6 +51,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "sin".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -86,6 +87,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "cos".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -120,6 +122,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "tan".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -156,6 +159,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "asin".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -192,6 +196,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "acos".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -227,6 +232,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "atan".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -265,6 +271,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "atan2".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 let y = match &args[0] {
                     Value::Float(f) => *f,
@@ -309,6 +316,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "sinh".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -344,6 +352,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "cosh".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -379,6 +388,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "tanh".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -416,6 +426,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "log".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -458,6 +469,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "log10".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -500,6 +512,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "log2".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -540,6 +553,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "exp".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -576,6 +590,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "exp2".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -612,6 +627,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "cbrt".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -649,6 +665,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "hypot".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -693,6 +710,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "degrees".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -728,6 +746,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "radians".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let x = match &args[0] {
                     Value::Float(f) => *f,
@@ -761,6 +780,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "random".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| {
                 let mut rng = rand::thread_rng();
                 Ok(Value::Float(rng.gen::<f64>()))
@@ -790,6 +810,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "random_int".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 let min = match &args[0] {
                     Value::Int(i) => *i,
@@ -841,6 +862,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "random_range".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 let min = match &args[0] {
                     Value::Float(f) => *f,
@@ -892,6 +914,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_nan".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let result = match &args[0] {
                     Value::Float(f) => f.is_nan(),
@@ -928,6 +951,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_infinite".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let result = match &args[0] {
                     Value::Float(f) => f.is_infinite(),
@@ -964,6 +988,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_finite".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let result = match &args[0] {
                     Value::Float(f) => f.is_finite(),

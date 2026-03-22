@@ -35,6 +35,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "split".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(delim)) => {
                     let parts: Vec<Value> = s
@@ -68,6 +69,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "join".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Array(arr), Value::String(delim)) => {
                     let parts: Vec<String> = arr
@@ -105,6 +107,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "concat".to_string(),
             arity: 2, // At least 2, but handles variadic via array
             max_arity: 2,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Array(arr) => {
                     let result: String = arr
@@ -146,6 +149,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "repeat".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::Int(n)) => {
                     if *n < 0 {
@@ -176,6 +180,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "reverse".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
                 _ => Err(IntentError::type_error(
@@ -202,6 +207,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "trim".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim().to_string())),
                 _ => Err(IntentError::type_error(
@@ -226,6 +232,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "trim_left".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 eprintln!("[DEPRECATED] trim_left() is deprecated. Use trim_start() instead.");
                 match &args[0] {
@@ -253,6 +260,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "trim_right".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 eprintln!("[DEPRECATED] trim_right() is deprecated. Use trim_end() instead.");
                 match &args[0] {
@@ -281,6 +289,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "trim_chars".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(chars)) => {
                     let char_set: Vec<char> = chars.chars().collect();
@@ -312,6 +321,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_upper".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 eprintln!("[DEPRECATED] to_upper() is deprecated. Use upper() instead.");
                 match &args[0] {
@@ -339,6 +349,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_lower".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 eprintln!("[DEPRECATED] to_lower() is deprecated. Use lower() instead.");
                 match &args[0] {
@@ -366,6 +377,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "capitalize".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let mut chars = s.chars();
@@ -402,6 +414,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "title".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let result = s
@@ -442,6 +455,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_snake_case".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let mut result = String::new();
@@ -481,6 +495,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_camel_case".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let mut result = String::new();
@@ -519,6 +534,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_pascal_case".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let mut result = String::new();
@@ -557,6 +573,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_kebab_case".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let mut result = String::new();
@@ -599,6 +616,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "slugify".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 match &args[0] {
                     Value::String(s) => {
@@ -660,6 +678,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "contains".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(substr)) => {
                     Ok(Value::Bool(s.contains(substr.as_str())))
@@ -687,6 +706,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "starts_with".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(prefix)) => {
                     Ok(Value::Bool(s.starts_with(prefix.as_str())))
@@ -714,6 +734,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "ends_with".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(suffix)) => {
                     Ok(Value::Bool(s.ends_with(suffix.as_str())))
@@ -741,6 +762,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "index_of".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(substr)) => match s.find(substr.as_str()) {
                     Some(idx) => Ok(Value::Int(idx as i64)),
@@ -769,6 +791,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "last_index_of".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(substr)) => match s.rfind(substr.as_str()) {
                     Some(idx) => Ok(Value::Int(idx as i64)),
@@ -797,6 +820,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "count".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(substr)) => {
                     Ok(Value::Int(s.matches(substr.as_str()).count() as i64))
@@ -825,6 +849,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "replace".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(from), Value::String(to)) => {
                     Ok(Value::String(s.replace(from.as_str(), to.as_str())))
@@ -853,6 +878,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "replace_first".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(from), Value::String(to)) => {
                     Ok(Value::String(s.replacen(from.as_str(), to.as_str(), 1)))
@@ -881,6 +907,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "replace_chars".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(chars), Value::String(replacement)) => {
                     let char_set: std::collections::HashSet<char> = chars.chars().collect();
@@ -919,6 +946,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "remove_chars".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(chars)) => {
                     let char_set: std::collections::HashSet<char> = chars.chars().collect();
@@ -948,6 +976,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "keep_chars".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(allowed)) => {
                     let char_set: std::collections::HashSet<char> = allowed.chars().collect();
@@ -981,6 +1010,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "replace_pattern".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(pattern), Value::String(replacement)) => {
                     match regex::Regex::new(pattern) {
@@ -1017,6 +1047,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "matches_pattern".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => Ok(Value::Bool(re.is_match(s))),
@@ -1049,6 +1080,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "find_pattern".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => match re.find(s) {
@@ -1084,6 +1116,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "find_all_pattern".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => {
@@ -1122,6 +1155,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "split_pattern".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => {
@@ -1163,6 +1197,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "capture_pattern".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => match re.captures(s) {
@@ -1213,6 +1248,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "capture_all_pattern".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => {
@@ -1267,6 +1303,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "capture_named_pattern".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => match regex::Regex::new(pattern) {
                     Ok(re) => match re.captures(s) {
@@ -1318,6 +1355,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "char_at".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::Int(idx)) => {
                     let idx = *idx as usize;
@@ -1353,6 +1391,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "substring".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::Int(start), Value::Int(end)) => {
                     let start = *start as usize;
@@ -1387,6 +1426,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "chars".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let chars: Vec<Value> =
@@ -1415,6 +1455,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "lines".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let lines: Vec<Value> =
@@ -1443,6 +1484,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "words".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let words: Vec<Value> = s
@@ -1477,6 +1519,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "truncate".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::Int(max_len), Value::String(suffix)) => {
                     let max = *max_len as usize;
@@ -1515,6 +1558,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "pad_left".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::Int(len), Value::String(pad_char)) => {
                     let target_len = *len as usize;
@@ -1551,6 +1595,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "pad_right".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::Int(len), Value::String(pad_char)) => {
                     let target_len = *len as usize;
@@ -1587,6 +1632,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "center".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::Int(len), Value::String(pad_char)) => {
                     let target_len = *len as usize;
@@ -1626,6 +1672,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_empty".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(s.is_empty())),
                 _ => Err(IntentError::type_error(
@@ -1650,6 +1697,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_blank".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(s.trim().is_empty())),
                 _ => Err(IntentError::type_error(
@@ -1674,6 +1722,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_numeric".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
@@ -1700,6 +1749,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_alpha".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
@@ -1726,6 +1776,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_alphanumeric".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
@@ -1752,6 +1803,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_lowercase".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| !c.is_alphabetic() || c.is_lowercase()),
@@ -1778,6 +1830,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_uppercase".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| !c.is_alphabetic() || c.is_uppercase()),
@@ -1804,6 +1857,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_whitespace".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::Bool(
                     !s.is_empty() && s.chars().all(|c| c.is_whitespace()),
@@ -1834,6 +1888,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "matches".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(pattern)) => {
                     Ok(Value::Bool(simple_glob_match(s, pattern)))
@@ -1864,6 +1919,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "replace_all".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(from), Value::String(to)) => {
                     Ok(Value::String(s.replace(from.as_str(), to.as_str())))
@@ -1890,6 +1946,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "upper".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.to_uppercase())),
                 _ => Err(IntentError::type_error(
@@ -1914,6 +1971,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "lower".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.to_lowercase())),
                 _ => Err(IntentError::type_error(
@@ -1938,6 +1996,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "trim_start".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim_start().to_string())),
                 _ => Err(IntentError::type_error(
@@ -1962,6 +2021,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "trim_end".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => Ok(Value::String(s.trim_end().to_string())),
                 _ => Err(IntentError::type_error(
@@ -1992,6 +2052,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "html_escape".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let escaped = s
