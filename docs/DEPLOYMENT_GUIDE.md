@@ -569,6 +569,45 @@ Hot-reload is disabled in production (`NTNT_ENV=production`).
 
 ---
 
+## Cloudflare Optimization (Optional)
+
+### Domain Setup
+
+If your domain isn't on Cloudflare yet:
+1. Sign up at [cloudflare.com](https://cloudflare.com) → **Add a site**
+2. Select the **Free** plan
+3. Update your domain's nameservers to the ones Cloudflare provides
+4. Wait for DNS propagation (5-30 minutes)
+
+### Caching Static Assets
+
+1. Go to **Caching** → **Cache Rules**
+2. Create a rule:
+   - **If**: URI Path starts with `/assets` or `/static`
+   - **Then**: Cache eligible, Edge TTL: 1 month
+3. Static files are now served from Cloudflare's global CDN
+
+### Rate Limiting
+
+1. Go to **Security** → **WAF** → **Rate limiting rules**
+2. Create a rule:
+   - **If**: URI Path contains `/api`
+   - **Then**: Block for 10 minutes when rate exceeds 100 requests/minute
+
+### Security Hardening
+
+In your domain dashboard:
+- **Security** → **Settings** → Enable **Bot Fight Mode** and **Browser Integrity Check**
+- **Speed** → **Optimization** → Enable **Auto Minify** (JS, CSS, HTML) and **Brotli** compression
+
+### Analytics
+
+Analytics are automatically available in your Cloudflare dashboard under **Analytics & Logs** → **Traffic** (requests, visitors, bandwidth, geography, threats blocked).
+
+For client-side analytics, enable **Web Analytics** (free): **Analytics & Logs** → **Web Analytics** → add site → copy JS snippet into your HTML templates.
+
+---
+
 ## Production Checklist
 
 - [ ] Environment variables configured (`.env` file, in `.gitignore`)
