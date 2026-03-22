@@ -552,9 +552,14 @@ fn execute_in_worker(
     // nested scopes eval_block leaked on panic.
     interp.restore_env(snapshot);
 
-    // Clean up deferred statements that may have accumulated during a panic
+    // Clean up interpreter state that may have accumulated during a panic.
+    // call_depth is incremented on function entry and decremented on exit;
+    // a Rust panic skips the decrement, leaving the depth permanently > 0.
+    // Reset both deferred statements and call depth together so subsequent
+    // jobs on this reused interpreter start from a clean state.
     if result.is_err() {
         interp.clear_deferred();
+        interp.reset_call_depth();
     }
 
     match result {
@@ -615,6 +620,7 @@ fn execute_on_failure_in_worker(
 
     if panic_result.is_err() {
         interp.clear_deferred();
+        interp.reset_call_depth();
     }
 }
 
@@ -4061,6 +4067,53 @@ mod tests {
                 Ok(crate::interpreter::Value::Int(42)) => {} // correct
                 other => panic!("Expected Int(42) after panic recovery, got {:?}", other),
             }
+        });
+    }
+
+    #[test]
+    fn test_execute_in_worker_panic_does_not_leak_call_depth() {
+        // Regression: a Rust panic inside a user function call increments call_depth
+        // but skips the decrement. Without reset_call_depth() this accumulates across
+        // jobs on a reused interpreter, eventually triggering "Maximum recursion depth
+        // exceeded" for unrelated jobs.
+        with_clean_runtime(|| {
+            let mut interp = crate::interpreter::Interpreter::new();
+            // Set a low recursion limit so the leak is detectable quickly
+            interp.set_max_recursion_depth(5);
+
+            interp.define_global(
+                "trigger_panic".to_string(),
+                crate::interpreter::Value::NativeFunction {
+                    name: "trigger_panic".to_string(),
+                    arity: 0,
+                    max_arity: 0,
+                    func: |_| panic!("call_depth leak test panic"),
+                    requires: None,
+                },
+            );
+
+            // Job that panics inside a function call — call_depth gets incremented
+            // before trigger_panic() and never decremented on panic.
+            let panic_def =
+                parse_job_def("job DepthLeakPanic on q { perform() { trigger_panic() } }");
+            // Job that calls a function successfully — verifies call_depth is still valid
+            let normal_def = parse_job_def("job DepthLeakNormal on q { perform() { 1 + 1 } }");
+
+            // Panic 4 times — without the fix this would accumulate depth=4,
+            // and the next function call would hit the limit of 5.
+            for _ in 0..4 {
+                let r = execute_in_worker(&mut interp, &panic_def, &HashMap::new());
+                assert!(r.is_err(), "Expected panic job to fail");
+            }
+
+            // This must succeed even though we've panicked 4 times.
+            // Without reset_call_depth() it would fail with "Maximum recursion depth exceeded".
+            let result = execute_in_worker(&mut interp, &normal_def, &HashMap::new());
+            assert!(
+                result.is_ok(),
+                "Job after repeated panics must not hit recursion limit: {:?}",
+                result
+            );
         });
     }
 

@@ -1115,6 +1115,18 @@ impl Interpreter {
         self.deferred_statements.clear();
     }
 
+    /// Reset call depth to zero after a panicked eval.
+    ///
+    /// `call_depth` is incremented before each user-function call and decremented
+    /// after. A Rust-level panic unwinds the stack without running the decrement,
+    /// leaving the depth permanently positive. On a reused worker interpreter this
+    /// accumulates across jobs and eventually triggers "Maximum recursion depth
+    /// exceeded" for unrelated jobs. Call this alongside `clear_deferred()` on
+    /// any panic path.
+    pub(crate) fn reset_call_depth(&mut self) {
+        self.call_depth = 0;
+    }
+
     /// Define a variable in the current scope.
     pub(crate) fn define_in_scope(&mut self, name: String, value: Value) {
         self.environment.borrow_mut().define(name, value);
