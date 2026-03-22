@@ -1,6 +1,6 @@
 <!-- NTNT coding guide sections are sourced from docs/AI_AGENT_GUIDE.md -->
 <!-- To update NTNT coding instructions, edit AI_AGENT_GUIDE.md and copy to all agent files -->
-<!-- Last synced: 2026-03-21 -->
+<!-- Last synced: 2026-03-22 -->
 
 # NTNT Language - Claude Code Instructions
 
@@ -1721,6 +1721,78 @@ job SendEmail on emails (retry: 5, backoff: "exponential") {
 - `on queue_name` — assigns the job to a named queue
 - Options: `retry: N` (default 3), `backoff: "exponential"|"linear"|"constant"`, `timeout: N` (seconds, post-execution check — does not preemptively interrupt)
 - `on_failure` block is optional — called on each failure with error message and attempt count
+
+### Multi-File Job Organization
+
+Jobs follow the same progressive disclosure pattern as routes:
+
+**Small app — everything in one file:**
+```ntnt
+// server.tnt
+import { fetch } from "std/http"
+
+job SendEmail on emails {
+    perform(to, body) { fetch("https://api.mailgun.net/...", map { ... }) }
+}
+
+listen(8080)
+```
+
+**Medium app — jobs in a separate file, explicitly imported:**
+```ntnt
+// server.tnt
+import "./lib/jobs.tnt"
+listen(8080)
+```
+
+```ntnt
+// lib/jobs.tnt
+import { fetch } from "std/http"
+
+job SendEmail on emails {
+    perform(to, body) { fetch("https://api.mailgun.net/...", map { ... }) }
+}
+```
+
+**Large app — auto-discovered job directory:**
+```
+my-app/
+├── server.tnt
+├── lib/
+│   └── notifications.tnt
+└── jobs/
+    ├── send_email.tnt
+    ├── process_order.tnt
+    └── generate_report.tnt
+```
+
+```ntnt
+// server.tnt
+jobs("jobs/")          // auto-discover and register all jobs
+routes("routes/")      // auto-discover and register all routes
+listen(8080)
+```
+
+Each job file has its own imports (evaluated in the shared interpreter context):
+```ntnt
+// jobs/send_email.tnt
+import { fetch } from "std/http"
+import { notify } from "../lib/notifications.tnt"
+
+job SendEmail on emails (retry: 3) {
+    perform(to, subject, body) {
+        fetch("https://api.mailgun.net/v3/...", map { ... })
+        notify("Email sent to #{to}")
+    }
+}
+```
+
+`jobs()` works exactly like `routes()`:
+- Recursively scans for `.tnt` files
+- Evaluates each file (registering `job` declarations)
+- Files sorted alphabetically for deterministic order
+- Hot-reload picks up new/changed job files automatically (dev mode)
+- Workers re-discover jobs on startup via the same `jobs()` call
 
 ### Enqueueing Jobs
 

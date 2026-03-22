@@ -19,6 +19,13 @@ Full skill with workflow, examples, and deep review techniques: see ntnt-code-re
 - Recursive bootstrapping: when re-evaluating a .tnt file (workers, hot-reload, CLI), the eval mode must suppress capabilities that trigger re-evaluation (e.g., worker eval uses Worker mode, not Job — prevents `work_async()` from recursively spawning)
 - Check ALL eval paths for the same pattern, not just the one being edited
 
+### Attribute Placement
+- `#[cfg(test)]` attaches to the next syntactic *item* (fn, struct, impl, etc.) — inserting a new item between the attribute and its intended target silently compiles away the wrong method. When adding code near `#[cfg(test)]`, verify the attribute still applies to the correct item.
+
+### Hot-Reload & Re-Registration
+- Re-registration paths (hot-reload, re-discovery): snapshot before clearing so you can rollback on failure. Clear is needed to remove ghosts (renamed/deleted items). Overwrite-only (without clear) avoids empty-registry windows but leaves ghosts.
+- Recursive file collection must skip `node_modules/`, `target/`, and hidden directories (`.git`, `.cache`, etc.)
+
 ### Error Quality
 - Panic/error messages must include context: file paths, job names, key names. "Failed to X" without "which Y" is useless in production
 - Mutex poison on critical data (source file, config): use `expect()`, not `.ok()?`. Silent degradation is worse than crashing

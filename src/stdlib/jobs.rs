@@ -280,6 +280,23 @@ impl JobRuntime {
         Ok(())
     }
 
+    /// Register a job definition, overwriting any existing definition with the same name.
+    ///
+    /// Used by hot-reload (HotReload execution mode) to update perform bodies.
+    /// Workers read definitions fresh via `get_job()` on each iteration, so updated
+    /// perform blocks take effect on the next job run. Workers always see either the
+    /// old or new definition, never a missing one.
+    ///
+    /// Note: workers cache their interpreter at startup, so new imports or helper
+    /// functions in the updated definition won't be available until workers restart.
+    pub fn register_job_overwrite(&self, def: JobDefinition) -> Result<()> {
+        let mut registry = self.job_registry.write().map_err(|e| {
+            IntentError::runtime_error(format!("Job registry lock poisoned: {}", e))
+        })?;
+        registry.insert(def.name.clone(), def);
+        Ok(())
+    }
+
     /// Set the main source file path (called when a job is registered).
     ///
     /// Panics if the mutex is poisoned — this indicates a prior panic in a
@@ -3555,12 +3572,13 @@ pub fn init() -> HashMap<String, Value> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Serialize tests that use the global JOB_RUNTIME.
     /// Parallel tests that call reset() or configure_queue() will race.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// pub(crate) so interpreter.rs tests that touch JOB_RUNTIME can use the same lock.
+    pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_clean_runtime<F: FnOnce()>(f: F) {
         // unwrap_or_else recovers from poisoned mutex (a previous test panicked

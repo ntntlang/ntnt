@@ -588,6 +588,10 @@ pub struct Interpreter {
     routes_dir: Option<String>,
     /// Tracked routes directory mtimes for detecting new/deleted files (dir_path -> mtime)
     routes_dir_mtimes: HashMap<String, std::time::SystemTime>,
+    /// Jobs directory path for hot-reload directory watching
+    jobs_dir: Option<String>,
+    /// Tracked jobs directory mtimes for detecting new/deleted files (dir_path -> mtime)
+    jobs_dir_mtimes: HashMap<String, std::time::SystemTime>,
     /// Registry of server actions handled specially before general function lookup
     server_actions: HashMap<String, ServerAction>,
     /// Last known source line being executed (for runtime error reporting)
@@ -772,6 +776,8 @@ impl Interpreter {
             middleware_files: HashMap::new(),
             routes_dir: None,
             routes_dir_mtimes: HashMap::new(),
+            jobs_dir: None,
+            jobs_dir_mtimes: HashMap::new(),
             server_actions: HashMap::new(),
             current_line: 0,
             current_col: 0,
@@ -907,6 +913,12 @@ impl Interpreter {
             None,
             AritySpec::exact(1),
             Interpreter::sa_on_error
+        );
+        register!(
+            "jobs",
+            Some(RuntimeCapability::JobConfig),
+            AritySpec::exact(1),
+            Interpreter::sa_jobs_directory
         );
     }
 
@@ -1070,6 +1082,164 @@ impl Interpreter {
         let handler = interp.eval_expression(&args[0])?;
         interp.server_state.set_error_handler(handler);
         Ok(Value::Unit)
+    }
+
+    fn sa_jobs_directory(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        let directory = interp.eval_expression(&args[0])?;
+        if let Value::String(dir_str) = directory {
+            interp.load_jobs_from_directory(&dir_str)
+        } else {
+            Err(IntentError::type_error(
+                "jobs() requires a string directory path".to_string(),
+            ))
+        }
+    }
+
+    /// Load and evaluate all .tnt files from a jobs directory.
+    ///
+    /// Recursively scans the directory for .tnt files and evaluates each one
+    /// in the current interpreter. Job declarations (`Statement::Job`) in those
+    /// files are registered in the global `JOB_RUNTIME`. Tracks file mtimes for
+    /// hot-reload support.
+    fn load_jobs_from_directory(&mut self, dir_path: &str) -> Result<Value> {
+        use std::fs;
+
+        // Resolve the directory path relative to the current .tnt file's location
+        let base_dir = if std::path::Path::new(dir_path).is_relative() {
+            if let Some(current_file) = &self.current_file {
+                let script_dir = std::path::Path::new(current_file)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."));
+                script_dir.join(dir_path)
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(dir_path))
+                    .unwrap_or_else(|_| std::path::PathBuf::from(dir_path))
+            }
+        } else {
+            std::path::PathBuf::from(dir_path)
+        };
+
+        if !base_dir.exists() || !base_dir.is_dir() {
+            return Err(IntentError::runtime_error(format!(
+                "Jobs directory does not exist: {}",
+                base_dir.display()
+            )));
+        }
+
+        // Collect all .tnt files recursively, sorted for deterministic order
+        let tnt_files = Self::collect_tnt_files(&base_dir)?;
+
+        // Save current file context so we can restore it after evaluating job files.
+        // Must be restored on BOTH success AND error paths (early `?` would leak).
+        let previous_file = self.current_file.clone();
+
+        let mut file_count = 0;
+        let mut eval_error: Option<IntentError> = None;
+        for file_path in &tnt_files {
+            let source = match fs::read_to_string(file_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eval_error = Some(IntentError::runtime_error(format!(
+                        "Failed to read job file '{}': {}",
+                        file_path.display(),
+                        e
+                    )));
+                    break;
+                }
+            };
+
+            let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
+            let ast = match crate::parser::Parser::new(tokens).parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    eval_error = Some(IntentError::runtime_error(format!(
+                        "Failed to parse job file '{}': {}",
+                        file_path.display(),
+                        e
+                    )));
+                    break;
+                }
+            };
+
+            // Set current file so imports in the job file resolve correctly
+            self.set_current_file(&file_path.to_string_lossy());
+
+            // Evaluate the file — job declarations register via Statement::Job
+            match self.eval(&ast) {
+                Ok(_) => {}
+                Err(e) => {
+                    eval_error = Some(e);
+                    break;
+                }
+            }
+
+            file_count += 1;
+        }
+
+        // Restore previous file context (always — even on error)
+        if let Some(prev) = previous_file {
+            self.set_current_file(&prev);
+        } else {
+            self.current_file = None;
+        }
+
+        // Propagate any error that occurred during file processing
+        if let Some(e) = eval_error {
+            return Err(e);
+        }
+
+        // Track the jobs directory for hot-reload (detect new/changed/deleted files).
+        // Uses collect_jobs_mtimes which tracks both directory AND file mtimes,
+        // so editing a job file is detected even when the directory mtime doesn't change.
+        self.jobs_dir = Some(base_dir.to_string_lossy().to_string());
+        self.jobs_dir_mtimes = Self::collect_jobs_mtimes(&base_dir);
+
+        Ok(Value::Int(file_count))
+    }
+
+    /// Recursively collect all .tnt files in a directory, sorted for deterministic order.
+    fn collect_tnt_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
+        use std::fs;
+
+        let mut files = Vec::new();
+
+        if !dir.exists() || !dir.is_dir() {
+            return Ok(files);
+        }
+
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .map_err(|e| {
+                IntentError::runtime_error(format!(
+                    "Failed to read jobs directory '{}': {}",
+                    dir.display(),
+                    e
+                ))
+            })?
+            .flatten()
+            .collect();
+
+        // Sort for consistent ordering
+        entries.sort_by_key(|e| e.path());
+
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                // Skip hidden dirs and common non-source dirs (consistent with
+                // collect_tnt_files_recursive_migrate in main.rs).
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with('.') || name_str == "node_modules" || name_str == "target" {
+                    continue;
+                }
+                let sub_files = Self::collect_tnt_files(&path)?;
+                files.extend(sub_files);
+            } else if path.extension().map(|e| e == "tnt").unwrap_or(false) {
+                files.push(path);
+            }
+        }
+
+        Ok(files)
     }
 
     /// Set the current file path for relative imports
@@ -1480,6 +1650,39 @@ impl Interpreter {
         mtimes
     }
 
+    /// Collect mtimes for both directories AND .tnt files in a jobs directory.
+    /// Unlike `collect_dir_mtimes` (directories only), this also tracks individual
+    /// file mtimes so that hot-reload detects edited job files — not just new/deleted ones.
+    fn collect_jobs_mtimes(dir: &std::path::Path) -> HashMap<String, std::time::SystemTime> {
+        let mut mtimes = HashMap::new();
+        if let Ok(metadata) = std::fs::metadata(dir) {
+            if let Ok(mtime) = metadata.modified() {
+                mtimes.insert(dir.to_string_lossy().to_string(), mtime);
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if !dir_name.starts_with('.')
+                        && dir_name != "node_modules"
+                        && dir_name != "target"
+                    {
+                        mtimes.extend(Self::collect_jobs_mtimes(&path));
+                    }
+                } else if path.extension().map(|e| e == "tnt").unwrap_or(false) {
+                    if let Ok(metadata) = std::fs::metadata(&path) {
+                        if let Ok(mtime) = metadata.modified() {
+                            mtimes.insert(path.to_string_lossy().to_string(), mtime);
+                        }
+                    }
+                }
+            }
+        }
+        mtimes
+    }
+
     /// Check if the routes directory structure has changed (new/deleted files).
     /// If so, clear routes and re-discover them.
     /// Returns true if routes were reloaded.
@@ -1542,6 +1745,88 @@ impl Interpreter {
                 // Routes and route_index are already cleared above — server will return 404
                 // for all routes until the next successful reload. This is safer than serving
                 // requests with a stale/corrupt route_index pointing into an empty routes vec.
+                false
+            }
+        }
+    }
+
+    /// Check if the jobs directory has changed (new/deleted/modified files).
+    /// If so, re-evaluate all job files to pick up new and modified definitions.
+    ///
+    /// **What hot-reload handles:** Changed perform block logic, new job declarations,
+    /// and modified job options are picked up on the next worker iteration (workers
+    /// read definitions fresh from `JOB_RUNTIME.get_job()` each time).
+    ///
+    /// **What hot-reload does NOT handle:** Deleted/renamed job files leave ghost
+    /// definitions until server restart (harmless — never enqueued). New imports
+    /// or helper functions require a server restart since workers cache their
+    /// interpreter at startup.
+    ///
+    /// Returns true if any job files were reloaded.
+    fn check_and_reload_jobs_dir(&mut self) -> bool {
+        if !self.server_state.hot_reload || self.jobs_dir.is_none() {
+            return false;
+        }
+
+        // Check if any tracked directory has a new mtime
+        let mut changed = false;
+        for (dir_path, cached_mtime) in &self.jobs_dir_mtimes {
+            if let Ok(metadata) = std::fs::metadata(dir_path) {
+                if let Ok(current_mtime) = metadata.modified() {
+                    if current_mtime > *cached_mtime {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Also check for new/renamed/deleted files by comparing key sets (not just length,
+        // which misses renames where delete+add keeps the count the same).
+        if !changed {
+            if let Some(jobs_dir) = &self.jobs_dir {
+                let current_mtimes = Self::collect_jobs_mtimes(std::path::Path::new(jobs_dir));
+                if current_mtimes.len() != self.jobs_dir_mtimes.len()
+                    || current_mtimes
+                        .keys()
+                        .any(|k| !self.jobs_dir_mtimes.contains_key(k))
+                {
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            return false;
+        }
+
+        let dir_path = self.jobs_dir.clone().unwrap();
+        println!("\n[hot-reload] Jobs directory changed, re-discovering jobs...");
+
+        // Temporarily switch to HotReload mode so Statement::Job uses
+        // register_job_overwrite() instead of the idempotent register_job().
+        // Without this, modified perform bodies are silently NOT updated
+        // because register_job() skips re-registration (first-wins).
+        // Ghost definitions from deleted files remain until server restart —
+        // acceptable in dev mode (they're never enqueued).
+        let previous_mode = self.execution_mode;
+        self.execution_mode = ExecutionMode::HotReload;
+        let reload_result = self.load_jobs_from_directory(&dir_path);
+        self.execution_mode = previous_mode;
+
+        match reload_result {
+            Ok(count) => {
+                println!(
+                    "[hot-reload] Re-discovered jobs from {} files.",
+                    match count {
+                        Value::Int(n) => n.to_string(),
+                        _ => "?".to_string(),
+                    }
+                );
+                true
+            }
+            Err(e) => {
+                eprintln!("[hot-reload] Error re-discovering jobs: {}", e);
                 false
             }
         }
@@ -2906,6 +3191,44 @@ impl Interpreter {
             },
         );
 
+        // @ntnt jobs
+        // @signature jobs(directory: String) -> Int
+        // Auto-discover and register job definitions from .tnt files in a directory.
+        //
+        // Recursively scans the given directory for `.tnt` files and evaluates each one
+        // in the current interpreter context. Any `job` declarations in those files are
+        // registered in the global job runtime. This is the directory-based counterpart
+        // to `routes()` — it provides progressive disclosure for organizing job definitions
+        // across multiple files.
+        //
+        // Files are evaluated in alphabetical order for deterministic registration.
+        // Each file has access to the interpreter's current imports and can use `import`
+        // to pull in shared modules from `lib/`.
+        //
+        // In dev mode (hot-reload), the jobs directory is tracked for changes. New or
+        // modified `.tnt` files are automatically re-evaluated on the next hot-reload cycle.
+        // @param directory Path to the jobs directory, relative to the current .tnt file (e.g., "jobs/")
+        // @returns Number of .tnt files discovered and evaluated
+        // @tags #jobs, #server
+        // @see_also routes, listen
+        // @since v0.4.6
+        // @example jobs("jobs/") => 3 ~ "Auto-discover all job files in the jobs/ directory"
+        self.environment.borrow_mut().define(
+            "jobs".to_string(),
+            Value::NativeFunction {
+                name: "jobs".to_string(),
+                arity: 1,
+                max_arity: 1,
+                requires: None,
+                func: |_args| {
+                    // Placeholder - actual implementation is in sa_jobs_directory
+                    Err(IntentError::runtime_error(
+                        "jobs() must be called directly, not stored in a variable".to_string(),
+                    ))
+                },
+            },
+        );
+
         // @ntnt enable_cors
         // @signature enable_cors(options?: Map) -> Unit
         // Enable CORS (Cross-Origin Resource Sharing) for the HTTP server.
@@ -3840,10 +4163,7 @@ impl Interpreter {
                 perform_body,
                 on_failure,
             } => {
-                // Skip job registration in HotReload mode (same pattern as spawn)
-                if self.execution_mode == ExecutionMode::HotReload {
-                    return Ok(Value::Unit);
-                }
+                // Job registration is idempotent — no need to skip in any mode.
 
                 // Evaluate option expressions and convert to Send-safe types
                 let mut opts = std::collections::HashMap::new();
@@ -3863,14 +4183,21 @@ impl Interpreter {
                 // perform body so workers can re-evaluate the source file and execute
                 // perform blocks with full access to imports and user-defined functions.
                 use crate::stdlib::jobs::{JobDefinition, JOB_RUNTIME};
-                JOB_RUNTIME.register_job(JobDefinition {
+                let job_def = JobDefinition {
                     name: name.clone(),
                     queue: queue.clone(),
                     options: opts,
                     perform_params: perform_params.clone(),
                     perform_body: perform_body.clone(),
                     on_failure: on_failure.clone(),
-                })?;
+                };
+                // In HotReload mode, overwrite to pick up updated perform bodies.
+                // In all other modes, idempotent first-registration-wins.
+                if self.execution_mode == ExecutionMode::HotReload {
+                    JOB_RUNTIME.register_job_overwrite(job_def)?;
+                } else {
+                    JOB_RUNTIME.register_job(job_def)?;
+                }
 
                 // Record the main source file so workers can recreate a full interpreter.
                 // Use main_source_file (not current_file) so jobs defined in imported
@@ -7140,6 +7467,9 @@ impl Interpreter {
             // Hot-reload check: if routes directory changed (new/deleted files)
             self.check_and_reload_routes_dir();
 
+            // Hot-reload check: if jobs directory changed (new/deleted/modified job files)
+            self.check_and_reload_jobs_dir();
+
             // Hot-reload check: if middleware file content changed
             self.check_and_reload_middleware();
 
@@ -7614,6 +7944,9 @@ impl Interpreter {
                     if self.check_and_reload_routes_dir() {
                         sync_routes_to_async(&self.server_state, &async_routes, &sync_rt);
                     }
+
+                    // Hot-reload check: if jobs directory changed (new/deleted/modified job files)
+                    self.check_and_reload_jobs_dir();
 
                     // Hot-reload check: if middleware file content changed
                     if self.check_and_reload_middleware() {
@@ -13216,5 +13549,443 @@ page
             Value::String(s) => assert_eq!(s, "42: Alice"),
             other => panic!("expected String, got {:?}", other),
         }
+    }
+
+    // --- jobs() directory auto-discovery tests ---
+
+    #[test]
+    fn test_jobs_server_action_registered() {
+        let interp = Interpreter::new();
+        assert!(
+            interp.server_actions.contains_key("jobs"),
+            "jobs() should be registered as a server action"
+        );
+    }
+
+    #[test]
+    fn test_jobs_server_action_capability() {
+        let interp = Interpreter::new();
+        assert_eq!(
+            interp.server_actions["jobs"].requires,
+            Some(RuntimeCapability::JobConfig),
+            "jobs() should require JobConfig capability"
+        );
+    }
+
+    /// Helper: create a unique temp directory for job tests (cross-platform).
+    fn make_job_test_dir(test_name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ntnt_job_test_{}_{:x}",
+            test_name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir); // clean up any leftover
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // Shared mutex for all tests that touch the global JOB_RUNTIME.
+    // Use the shared TEST_LOCK from jobs.rs to serialize all tests that touch JOB_RUNTIME.
+    // Without this, interpreter.rs tests race with jobs.rs tests on the global runtime.
+
+    #[test]
+    fn test_jobs_directory_discovers_files() {
+        let _guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let tmp_dir = make_job_test_dir("discovers");
+        let jobs_dir = tmp_dir.join("jobs");
+        std::fs::create_dir_all(&jobs_dir).unwrap();
+
+        std::fs::write(
+            jobs_dir.join("send_email.tnt"),
+            "job SendEmailDisc on emails (retry: 3) {\n    perform(to) {\n        print(to)\n    }\n}\n",
+        ).unwrap();
+
+        std::fs::write(
+            jobs_dir.join("process_order.tnt"),
+            "job ProcessOrderDisc on orders {\n    perform(order_id) {\n        print(order_id)\n    }\n}\n",
+        ).unwrap();
+
+        let main_file = tmp_dir.join("server.tnt");
+        std::fs::write(&main_file, "jobs(\"jobs/\")\n").unwrap();
+
+        let mut interp = Interpreter::new();
+        interp.set_current_file(&main_file.to_string_lossy());
+        interp.set_main_source_file(&main_file.to_string_lossy());
+
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
+
+        let source = std::fs::read_to_string(&main_file).unwrap();
+        let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
+        let ast = crate::parser::Parser::new(tokens).parse().unwrap();
+        let result = interp.eval(&ast);
+        assert!(result.is_ok(), "eval should succeed: {:?}", result);
+
+        let send_email = crate::stdlib::jobs::JOB_RUNTIME
+            .get_job("SendEmailDisc")
+            .unwrap();
+        assert!(
+            send_email.is_some(),
+            "SendEmailDisc job should be registered"
+        );
+        assert_eq!(send_email.unwrap().queue, "emails");
+
+        let process_order = crate::stdlib::jobs::JOB_RUNTIME
+            .get_job("ProcessOrderDisc")
+            .unwrap();
+        assert!(
+            process_order.is_some(),
+            "ProcessOrderDisc job should be registered"
+        );
+        assert_eq!(process_order.unwrap().queue, "orders");
+
+        assert!(interp.jobs_dir.is_some(), "jobs_dir should be set");
+        assert!(
+            !interp.jobs_dir_mtimes.is_empty(),
+            "jobs_dir_mtimes should be populated"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_jobs_directory_recursive_discovery() {
+        let _guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let tmp_dir = make_job_test_dir("recursive");
+        let jobs_dir = tmp_dir.join("jobs");
+        let sub_dir = jobs_dir.join("notifications");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        std::fs::write(
+            jobs_dir.join("cleanup.tnt"),
+            "job CleanupDisc on maintenance {\n    perform() {\n        print(\"cleaning\")\n    }\n}\n",
+        ).unwrap();
+
+        std::fs::write(
+            sub_dir.join("send_sms.tnt"),
+            "job SendSMSDisc on notifications {\n    perform(phone) {\n        print(phone)\n    }\n}\n",
+        ).unwrap();
+
+        let main_file = tmp_dir.join("server.tnt");
+        std::fs::write(&main_file, "jobs(\"jobs/\")\n").unwrap();
+
+        let mut interp = Interpreter::new();
+        interp.set_current_file(&main_file.to_string_lossy());
+        interp.set_main_source_file(&main_file.to_string_lossy());
+
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
+
+        let source = std::fs::read_to_string(&main_file).unwrap();
+        let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
+        let ast = crate::parser::Parser::new(tokens).parse().unwrap();
+        interp.eval(&ast).unwrap();
+
+        assert!(
+            crate::stdlib::jobs::JOB_RUNTIME
+                .get_job("CleanupDisc")
+                .unwrap()
+                .is_some(),
+            "CleanupDisc job should be registered"
+        );
+        assert!(
+            crate::stdlib::jobs::JOB_RUNTIME
+                .get_job("SendSMSDisc")
+                .unwrap()
+                .is_some(),
+            "SendSMSDisc job should be registered (from subdirectory)"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_jobs_directory_nonexistent_errors() {
+        let tmp_dir = make_job_test_dir("nonexistent");
+        let main_file = tmp_dir.join("server.tnt");
+        std::fs::write(&main_file, "jobs(\"nonexistent/\")\n").unwrap();
+
+        let mut interp = Interpreter::new();
+        interp.set_current_file(&main_file.to_string_lossy());
+
+        let source = std::fs::read_to_string(&main_file).unwrap();
+        let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
+        let ast = crate::parser::Parser::new(tokens).parse().unwrap();
+        let result = interp.eval(&ast);
+
+        assert!(result.is_err(), "Should error on nonexistent directory");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("does not exist"),
+            "Error should mention directory not existing: {}",
+            err
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_jobs_runs_in_worker_mode() {
+        let _guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let tmp_dir = make_job_test_dir("worker_mode");
+        let jobs_dir = tmp_dir.join("jobs");
+        std::fs::create_dir_all(&jobs_dir).unwrap();
+
+        std::fs::write(
+            jobs_dir.join("worker_test.tnt"),
+            "job WorkerTestDisc on tasks {\n    perform() {\n        print(\"test\")\n    }\n}\n",
+        )
+        .unwrap();
+
+        let main_file = tmp_dir.join("server.tnt");
+        std::fs::write(&main_file, "jobs(\"jobs/\")\n").unwrap();
+
+        let mut interp = Interpreter::new();
+        interp.set_current_file(&main_file.to_string_lossy());
+        interp.set_main_source_file(&main_file.to_string_lossy());
+        interp.set_execution_mode(ExecutionMode::Worker);
+
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
+
+        let source = std::fs::read_to_string(&main_file).unwrap();
+        let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
+        let ast = crate::parser::Parser::new(tokens).parse().unwrap();
+        let result = interp.eval(&ast);
+        assert!(
+            result.is_ok(),
+            "jobs() should work in Worker mode: {:?}",
+            result
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_jobs_runs_in_job_mode() {
+        let _guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let tmp_dir = make_job_test_dir("job_mode");
+        let jobs_dir = tmp_dir.join("jobs");
+        std::fs::create_dir_all(&jobs_dir).unwrap();
+
+        std::fs::write(
+            jobs_dir.join("job_mode_test.tnt"),
+            "job JobModeDisc on tasks {\n    perform() {\n        print(\"test\")\n    }\n}\n",
+        )
+        .unwrap();
+
+        let main_file = tmp_dir.join("server.tnt");
+        std::fs::write(&main_file, "jobs(\"jobs/\")\n").unwrap();
+
+        let mut interp = Interpreter::new();
+        interp.set_current_file(&main_file.to_string_lossy());
+        interp.set_main_source_file(&main_file.to_string_lossy());
+        // Job mode has JobConfig capability — jobs() should work
+        interp.set_execution_mode(ExecutionMode::Job);
+
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
+
+        let source = std::fs::read_to_string(&main_file).unwrap();
+        let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
+        let ast = crate::parser::Parser::new(tokens).parse().unwrap();
+        let result = interp.eval(&ast);
+        assert!(
+            result.is_ok(),
+            "jobs() should work in Job mode (has JobConfig): {:?}",
+            result
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_jobs_empty_directory() {
+        let tmp_dir = make_job_test_dir("empty");
+        let jobs_dir = tmp_dir.join("jobs");
+        std::fs::create_dir_all(&jobs_dir).unwrap();
+
+        let main_file = tmp_dir.join("server.tnt");
+        std::fs::write(&main_file, "jobs(\"jobs/\")\n").unwrap();
+
+        let mut interp = Interpreter::new();
+        interp.set_current_file(&main_file.to_string_lossy());
+        interp.set_main_source_file(&main_file.to_string_lossy());
+
+        let source = std::fs::read_to_string(&main_file).unwrap();
+        let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
+        let ast = crate::parser::Parser::new(tokens).parse().unwrap();
+        let result = interp.eval(&ast);
+        assert!(
+            result.is_ok(),
+            "Empty jobs directory should succeed: {:?}",
+            result
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_jobs_hot_reload_modified_file() {
+        let _guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let tmp_dir = make_job_test_dir("hot_reload");
+        let jobs_dir = tmp_dir.join("jobs");
+        std::fs::create_dir_all(&jobs_dir).unwrap();
+
+        // Initial load: job with perform body "1"
+        std::fs::write(
+            jobs_dir.join("reload_test.tnt"),
+            "job HotReloadTest on q {\n    perform() {\n        1\n    }\n}\n",
+        )
+        .unwrap();
+
+        let main_file = tmp_dir.join("server.tnt");
+        std::fs::write(&main_file, "jobs(\"jobs/\")\n").unwrap();
+
+        let mut interp = Interpreter::new();
+        interp.set_current_file(&main_file.to_string_lossy());
+        interp.set_main_source_file(&main_file.to_string_lossy());
+        interp.server_state.hot_reload = true;
+
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
+
+        let source = std::fs::read_to_string(&main_file).unwrap();
+        let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
+        let ast = crate::parser::Parser::new(tokens).parse().unwrap();
+        interp.eval(&ast).expect("Initial load failed");
+
+        // Verify initial registration
+        assert!(
+            crate::stdlib::jobs::JOB_RUNTIME
+                .get_job("HotReloadTest")
+                .unwrap()
+                .is_some(),
+            "Job should be registered after initial load"
+        );
+
+        // Modify the file (sleep briefly to ensure mtime changes)
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(
+            jobs_dir.join("reload_test.tnt"),
+            "job HotReloadTest on q {\n    perform() {\n        2\n    }\n}\n",
+        )
+        .unwrap();
+
+        // Hot-reload should detect the change and re-register
+        let reloaded = interp.check_and_reload_jobs_dir();
+        assert!(reloaded, "Hot-reload should detect modified job file");
+
+        // Job should still be registered
+        assert!(
+            crate::stdlib::jobs::JOB_RUNTIME
+                .get_job("HotReloadTest")
+                .unwrap()
+                .is_some(),
+            "Job should still be registered after hot-reload"
+        );
+
+        // Test deletion: remove the file, add a different one
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::remove_file(jobs_dir.join("reload_test.tnt")).unwrap();
+        std::fs::write(
+            jobs_dir.join("new_job.tnt"),
+            "job NewHotJob on q {\n    perform() {\n        3\n    }\n}\n",
+        )
+        .unwrap();
+
+        let reloaded = interp.check_and_reload_jobs_dir();
+        assert!(reloaded, "Hot-reload should detect deleted + new file");
+
+        // Old job remains as a ghost (acceptable in dev mode — never enqueued).
+        // New job should be registered.
+        assert!(
+            crate::stdlib::jobs::JOB_RUNTIME
+                .get_job("NewHotJob")
+                .unwrap()
+                .is_some(),
+            "New job should be registered after hot-reload"
+        );
+
+        // Clean up global state
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_collect_tnt_files_recursive() {
+        let tmp_dir = make_job_test_dir("collect");
+        let base = tmp_dir.join("jobs");
+        let sub = base.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        std::fs::write(base.join("a.tnt"), "").unwrap();
+        std::fs::write(base.join("b.txt"), "").unwrap(); // should be skipped
+        std::fs::write(sub.join("c.tnt"), "").unwrap();
+
+        let files = Interpreter::collect_tnt_files(&base).unwrap();
+        assert_eq!(files.len(), 2, "Should find 2 .tnt files, not .txt");
+        assert!(
+            files[0].file_name().unwrap() == "a.tnt",
+            "First file should be a.tnt"
+        );
+        assert!(
+            files[1].file_name().unwrap() == "c.tnt",
+            "Second file should be c.tnt"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_collect_tnt_files_skips_nonsource_dirs() {
+        let tmp_dir = make_job_test_dir("skip_dirs");
+        let base = tmp_dir.join("jobs");
+        let node_modules = base.join("node_modules");
+        let target_dir = base.join("target");
+        let hidden_dir = base.join(".hidden");
+        let valid_sub = base.join("emails");
+        std::fs::create_dir_all(&node_modules).unwrap();
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::create_dir_all(&hidden_dir).unwrap();
+        std::fs::create_dir_all(&valid_sub).unwrap();
+
+        // Files in skipped dirs should not be found
+        std::fs::write(node_modules.join("junk.tnt"), "").unwrap();
+        std::fs::write(target_dir.join("build.tnt"), "").unwrap();
+        std::fs::write(hidden_dir.join("secret.tnt"), "").unwrap();
+        // Files in valid dirs should be found
+        std::fs::write(base.join("cleanup.tnt"), "").unwrap();
+        std::fs::write(valid_sub.join("send.tnt"), "").unwrap();
+
+        let files = Interpreter::collect_tnt_files(&base).unwrap();
+        assert_eq!(
+            files.len(),
+            2,
+            "Should find 2 .tnt files (skipping node_modules, target, .hidden): {:?}",
+            files
+        );
+
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"cleanup.tnt".to_string()));
+        assert!(names.contains(&"send.tnt".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }
