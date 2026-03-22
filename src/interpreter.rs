@@ -425,10 +425,6 @@ impl Environment {
         keys.dedup();
         keys
     }
-
-    pub(crate) fn parent_clone(&self) -> Option<Rc<RefCell<Environment>>> {
-        self.parent.clone()
-    }
 }
 
 impl Default for Environment {
@@ -1098,14 +1094,25 @@ impl Interpreter {
         self.environment = Rc::new(RefCell::new(Environment::with_parent(parent)));
     }
 
-    /// Pop the current scope, restoring the parent. Panics if no parent exists.
-    pub(crate) fn pop_scope(&mut self) {
-        let parent = self
-            .environment
-            .borrow()
-            .parent_clone()
-            .expect("pop_scope: no parent scope");
-        self.environment = parent;
+    /// Snapshot the current environment for later restoration.
+    /// Use with `restore_env()` for panic-safe scope management — restores
+    /// to the exact depth regardless of how many nested scopes were leaked.
+    pub(crate) fn snapshot_env(&self) -> Rc<RefCell<Environment>> {
+        Rc::clone(&self.environment)
+    }
+
+    /// Restore the environment to a previous snapshot. Unconditionally replaces
+    /// the current scope chain, so it works even if eval_block leaked nested
+    /// scopes on panic.
+    pub(crate) fn restore_env(&mut self, snapshot: Rc<RefCell<Environment>>) {
+        self.environment = snapshot;
+    }
+
+    /// Clear any deferred statements that accumulated during a panicked eval.
+    /// Call after catch_unwind returns Err to prevent stale deferred entries
+    /// from leaking across job executions on a reused interpreter.
+    pub(crate) fn clear_deferred(&mut self) {
+        self.deferred_statements.clear();
     }
 
     /// Define a variable in the current scope.
@@ -12094,34 +12101,48 @@ c")
     }
 
     #[test]
-    fn test_push_pop_scope_isolation() {
+    fn test_snapshot_restore_scope_isolation() {
         let mut interp = Interpreter::new();
         interp.define_global("parent_var".to_string(), Value::Int(1));
 
+        let snapshot = interp.snapshot_env();
         interp.push_scope();
         interp.define_in_scope("child_var".to_string(), Value::Int(2));
 
-        // Child can see parent
+        // Child can see parent and its own var
         assert!(interp.get_global("parent_var").is_some());
-        // Child can see its own var
         assert!(interp.get_global("child_var").is_some());
 
-        interp.pop_scope();
+        // Restore to snapshot
+        interp.restore_env(snapshot);
 
-        // Parent can see its own var
+        // Parent var still visible, child var gone
         assert!(interp.get_global("parent_var").is_some());
-        // Parent cannot see child's var
         assert!(
             interp.get_global("child_var").is_none(),
-            "Child scope vars must not leak to parent"
+            "Child scope vars must not leak to parent after restore"
         );
     }
 
     #[test]
-    #[should_panic(expected = "pop_scope: no parent scope")]
-    fn test_pop_scope_panics_without_parent() {
+    fn test_snapshot_restore_nested_scopes() {
+        // Snapshot + restore works even with multiple nested scopes
         let mut interp = Interpreter::new();
-        interp.pop_scope(); // Should panic — root scope has no parent
+        interp.define_global("root".to_string(), Value::Int(0));
+        let snapshot = interp.snapshot_env();
+
+        interp.push_scope(); // depth 1
+        interp.push_scope(); // depth 2
+        interp.push_scope(); // depth 3
+        interp.define_in_scope("deep".to_string(), Value::Int(3));
+
+        // Restore jumps back to root regardless of depth
+        interp.restore_env(snapshot);
+        assert!(interp.get_global("root").is_some());
+        assert!(
+            interp.get_global("deep").is_none(),
+            "Restore must work at any depth"
+        );
     }
 
     #[test]

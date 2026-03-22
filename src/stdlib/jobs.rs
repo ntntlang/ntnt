@@ -522,14 +522,18 @@ fn create_job_interpreter() -> crate::interpreter::Interpreter {
 
 /// Execute a job's perform block using a pre-initialised interpreter.
 ///
-/// Pushes a child scope, injects perform parameters from the payload map,
-/// evaluates the perform body (which creates its own inner scope for locals),
-/// then always restores the scope — even on panic.
+/// Snapshots the interpreter's environment, pushes a child scope for parameters,
+/// evaluates the perform body, then unconditionally restores the snapshot.
+/// This is depth-independent: even if the perform body has nested blocks that
+/// each push their own scope, a panic at any depth restores correctly.
 fn execute_in_worker(
     interp: &mut crate::interpreter::Interpreter,
     def: &JobDefinition,
     payload: &HashMap<String, Value>,
 ) -> std::result::Result<Value, String> {
+    // Snapshot before any scope manipulation — unconditional restore is depth-safe
+    let snapshot = interp.snapshot_env();
+
     // Push a child scope for this job's parameters
     interp.push_scope();
 
@@ -539,19 +543,19 @@ fn execute_in_worker(
         interp.define_in_scope(param.name.clone(), val);
     }
 
-    // Evaluate the perform body — eval_block() creates its own child scope for locals.
+    // Evaluate the perform body
     let body = def.perform_body.clone();
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interp.eval_block(&body)));
 
-    // If eval_block panicked, it didn't restore its own inner scope.
-    // Pop that leaked scope before we pop our param scope.
-    if result.is_err() {
-        interp.pop_scope(); // pop eval_block's leaked inner scope
-    }
+    // Unconditionally restore to the snapshot — works regardless of how many
+    // nested scopes eval_block leaked on panic.
+    interp.restore_env(snapshot);
 
-    // Restore our param scope — always runs
-    interp.pop_scope();
+    // Clean up deferred statements that may have accumulated during a panic
+    if result.is_err() {
+        interp.clear_deferred();
+    }
 
     match result {
         Ok(Ok(v)) => Ok(v),
@@ -585,6 +589,9 @@ fn execute_on_failure_in_worker(
         return;
     };
 
+    // Snapshot before scope manipulation — depth-safe restore on panic
+    let snapshot = interp.snapshot_env();
+
     interp.push_scope();
 
     // Bind by position: first param → error string, second param → attempt int.
@@ -600,18 +607,15 @@ fn execute_on_failure_in_worker(
     }
 
     let body = body.clone();
-    // Ignore value result — on_failure is best-effort, but detect panics for scope cleanup
     let panic_result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interp.eval_block(&body)));
 
-    // If eval_block panicked, it didn't restore its own inner scope.
-    // Pop that leaked scope before we pop our binding scope.
-    if panic_result.is_err() {
-        interp.pop_scope(); // pop eval_block's leaked inner scope
-    }
+    // Unconditionally restore — depth-safe regardless of nested scope leaks
+    interp.restore_env(snapshot);
 
-    // Restore our binding scope — always runs
-    interp.pop_scope();
+    if panic_result.is_err() {
+        interp.clear_deferred();
+    }
 }
 
 /// Core implementation shared by `enqueue()`, `enqueue_at()`, and `enqueue_in()`.
@@ -4007,6 +4011,56 @@ mod tests {
                 "Worker should recover and run next job: {:?}",
                 result2
             );
+        });
+    }
+
+    #[test]
+    fn test_execute_in_worker_panic_recovery() {
+        // A Rust-level panic in the perform body must not corrupt the interpreter.
+        // This exercises the catch_unwind + snapshot_env/restore_env path — the error
+        // recovery test above only covers ntnt Err (not Rust panic).
+        with_clean_runtime(|| {
+            // Register a native function that panics
+            let mut interp = crate::interpreter::Interpreter::new();
+            interp.define_global(
+                "trigger_panic".to_string(),
+                crate::interpreter::Value::NativeFunction {
+                    name: "trigger_panic".to_string(),
+                    arity: 0,
+                    max_arity: 0,
+                    func: |_| panic!("intentional test panic"),
+                    requires: None,
+                },
+            );
+            interp.define_global("MARKER".to_string(), crate::interpreter::Value::Int(42));
+
+            let def =
+                parse_job_def("job PanicTest on q { perform() { if true { trigger_panic() } } }");
+
+            // Job should fail via panic (caught by catch_unwind)
+            let result = execute_in_worker(&mut interp, &def, &HashMap::new());
+            assert!(
+                result.is_err(),
+                "Panic should be caught and returned as Err"
+            );
+            assert!(
+                result.unwrap_err().contains("intentional test panic"),
+                "Error message should contain the panic message"
+            );
+
+            // Interpreter must remain functional — MARKER accessible, scope at root depth
+            assert!(
+                interp.get_global("MARKER").is_some(),
+                "Interpreter must remain functional after panic"
+            );
+
+            // A subsequent normal job must succeed
+            let def2 = parse_job_def("job AfterPanic on q { perform() { MARKER } }");
+            let result2 = execute_in_worker(&mut interp, &def2, &HashMap::new());
+            match result2 {
+                Ok(crate::interpreter::Value::Int(42)) => {} // correct
+                other => panic!("Expected Int(42) after panic recovery, got {:?}", other),
+            }
         });
     }
 
