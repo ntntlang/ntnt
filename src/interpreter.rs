@@ -495,7 +495,7 @@ impl ExecutionMode {
                 RuntimeCapability::HttpConfig,
                 RuntimeCapability::JobConfig,
             ],
-            ExecutionMode::Job => &[RuntimeCapability::JobWorkers, RuntimeCapability::JobConfig],
+            ExecutionMode::Job => &[RuntimeCapability::JobConfig],
             ExecutionMode::UnitTest => &[
                 RuntimeCapability::TaskSpawning,
                 RuntimeCapability::JobConfig,
@@ -1086,6 +1086,50 @@ impl Interpreter {
     /// Look up a variable in the global environment (for builtins like len, print, str).
     pub fn get_global(&self, name: &str) -> Option<Value> {
         self.environment.borrow().get(name)
+    }
+
+    /// Push a new child scope. Caller must call pop_scope() to restore.
+    pub(crate) fn push_scope(&mut self) {
+        let parent = Rc::clone(&self.environment);
+        self.environment = Rc::new(RefCell::new(Environment::with_parent(parent)));
+    }
+
+    /// Snapshot the current environment for later restoration.
+    /// Use with `restore_env()` for panic-safe scope management — restores
+    /// to the exact depth regardless of how many nested scopes were leaked.
+    pub(crate) fn snapshot_env(&self) -> Rc<RefCell<Environment>> {
+        Rc::clone(&self.environment)
+    }
+
+    /// Restore the environment to a previous snapshot. Unconditionally replaces
+    /// the current scope chain, so it works even if eval_block leaked nested
+    /// scopes on panic.
+    pub(crate) fn restore_env(&mut self, snapshot: Rc<RefCell<Environment>>) {
+        self.environment = snapshot;
+    }
+
+    /// Clear any deferred statements that accumulated during a panicked eval.
+    /// Call after catch_unwind returns Err to prevent stale deferred entries
+    /// from leaking across job executions on a reused interpreter.
+    pub(crate) fn clear_deferred(&mut self) {
+        self.deferred_statements.clear();
+    }
+
+    /// Reset call depth to zero after a panicked eval.
+    ///
+    /// `call_depth` is incremented before each user-function call and decremented
+    /// after. A Rust-level panic unwinds the stack without running the decrement,
+    /// leaving the depth permanently positive. On a reused worker interpreter this
+    /// accumulates across jobs and eventually triggers "Maximum recursion depth
+    /// exceeded" for unrelated jobs. Call this alongside `clear_deferred()` on
+    /// any panic path.
+    pub(crate) fn reset_call_depth(&mut self) {
+        self.call_depth = 0;
+    }
+
+    /// Define a variable in the current scope.
+    pub(crate) fn define_in_scope(&mut self, name: String, value: Value) {
+        self.environment.borrow_mut().define(name, value);
     }
 
     /// Resolve a path relative to the current script's directory
@@ -3816,7 +3860,8 @@ impl Interpreter {
                 }
 
                 // Register in global JOB_RUNTIME — store full definition including
-                // perform body so workers can execute it in a fresh interpreter (PR 2b)
+                // perform body so workers can re-evaluate the source file and execute
+                // perform blocks with full access to imports and user-defined functions.
                 use crate::stdlib::jobs::{JobDefinition, JOB_RUNTIME};
                 JOB_RUNTIME.register_job(JobDefinition {
                     name: name.clone(),
@@ -3826,6 +3871,13 @@ impl Interpreter {
                     perform_body: perform_body.clone(),
                     on_failure: on_failure.clone(),
                 })?;
+
+                // Record the main source file so workers can recreate a full interpreter.
+                // Use main_source_file (not current_file) so jobs defined in imported
+                // modules still point back to the entry-point file.
+                if let Some(ref path) = self.main_source_file {
+                    JOB_RUNTIME.set_source_file(path.clone());
+                }
 
                 Ok(Value::Unit)
             }
@@ -11784,13 +11836,13 @@ c")
     #[test]
     fn test_job_mode_capabilities() {
         let mode = ExecutionMode::Job;
-        assert!(mode.has(RuntimeCapability::JobWorkers));
         assert!(mode.has(RuntimeCapability::JobConfig));
-        // Job mode has no HTTP or concurrency capabilities
+        // Job mode: only JobConfig — no HTTP, no concurrency, no worker spawning
         assert!(!mode.has(RuntimeCapability::HttpServer));
         assert!(!mode.has(RuntimeCapability::HttpConfig));
         assert!(!mode.has(RuntimeCapability::TaskSpawning));
         assert!(!mode.has(RuntimeCapability::Scheduling));
+        assert!(!mode.has(RuntimeCapability::JobWorkers));
     }
 
     #[test]
@@ -11811,8 +11863,8 @@ c")
         // HotReload and Worker have 3 each
         assert_eq!(ExecutionMode::HotReload.capabilities().len(), 3);
         assert_eq!(ExecutionMode::Worker.capabilities().len(), 3);
-        // Job has 2
-        assert_eq!(ExecutionMode::Job.capabilities().len(), 2);
+        // Job has 1 (JobConfig only)
+        assert_eq!(ExecutionMode::Job.capabilities().len(), 1);
         // UnitTest has 2 (TaskSpawning + JobConfig)
         assert_eq!(ExecutionMode::UnitTest.capabilities().len(), 2);
     }
@@ -11958,12 +12010,12 @@ c")
     }
 
     #[test]
-    fn test_capability_gate_job_workers_job_mode_runs() {
+    fn test_capability_gate_job_workers_job_mode_skips() {
         let mut interp = Interpreter::new();
         interp.set_execution_mode(ExecutionMode::Job);
-        // Job mode has JobWorkers capability
+        // Job mode does NOT have JobWorkers — perform blocks should not spawn workers
         let result = call_gated_fn(&mut interp, Some(RuntimeCapability::JobWorkers)).unwrap();
-        assert!(matches!(result, Value::Int(42)));
+        assert!(matches!(result, Value::Unit));
     }
 
     // === Integration tests: eval real ntnt code in non-Normal modes ===
@@ -12058,6 +12110,51 @@ c")
         // Worker has HttpConfig — enable_cors runs
         let result = eval_in_mode("enable_cors()", ExecutionMode::Worker).unwrap();
         assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_snapshot_restore_scope_isolation() {
+        let mut interp = Interpreter::new();
+        interp.define_global("parent_var".to_string(), Value::Int(1));
+
+        let snapshot = interp.snapshot_env();
+        interp.push_scope();
+        interp.define_in_scope("child_var".to_string(), Value::Int(2));
+
+        // Child can see parent and its own var
+        assert!(interp.get_global("parent_var").is_some());
+        assert!(interp.get_global("child_var").is_some());
+
+        // Restore to snapshot
+        interp.restore_env(snapshot);
+
+        // Parent var still visible, child var gone
+        assert!(interp.get_global("parent_var").is_some());
+        assert!(
+            interp.get_global("child_var").is_none(),
+            "Child scope vars must not leak to parent after restore"
+        );
+    }
+
+    #[test]
+    fn test_snapshot_restore_nested_scopes() {
+        // Snapshot + restore works even with multiple nested scopes
+        let mut interp = Interpreter::new();
+        interp.define_global("root".to_string(), Value::Int(0));
+        let snapshot = interp.snapshot_env();
+
+        interp.push_scope(); // depth 1
+        interp.push_scope(); // depth 2
+        interp.push_scope(); // depth 3
+        interp.define_in_scope("deep".to_string(), Value::Int(3));
+
+        // Restore jumps back to root regardless of depth
+        interp.restore_env(snapshot);
+        assert!(interp.get_global("root").is_some());
+        assert!(
+            interp.get_global("deep").is_none(),
+            "Restore must work at any depth"
+        );
     }
 
     #[test]
