@@ -1803,12 +1803,18 @@ impl Interpreter {
         let dir_path = self.jobs_dir.clone().unwrap();
         println!("\n[hot-reload] Jobs directory changed, re-discovering jobs...");
 
-        // Re-evaluate all job files. register_job() is idempotent (first wins),
-        // so unchanged jobs are silently skipped. For updated perform bodies,
-        // Statement::Job uses register_job_overwrite() during hot-reload.
+        // Temporarily switch to HotReload mode so Statement::Job uses
+        // register_job_overwrite() instead of the idempotent register_job().
+        // Without this, modified perform bodies are silently NOT updated
+        // because register_job() skips re-registration (first-wins).
         // Ghost definitions from deleted files remain until server restart —
-        // acceptable in dev mode (they\'re never enqueued).
-        match self.load_jobs_from_directory(&dir_path) {
+        // acceptable in dev mode (they're never enqueued).
+        let previous_mode = self.execution_mode;
+        self.execution_mode = ExecutionMode::HotReload;
+        let reload_result = self.load_jobs_from_directory(&dir_path);
+        self.execution_mode = previous_mode;
+
+        match reload_result {
             Ok(count) => {
                 println!(
                     "[hot-reload] Re-discovered jobs from {} files.",
