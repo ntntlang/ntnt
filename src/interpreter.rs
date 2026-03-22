@@ -1130,43 +1130,64 @@ impl Interpreter {
         // Collect all .tnt files recursively, sorted for deterministic order
         let tnt_files = Self::collect_tnt_files(&base_dir)?;
 
-        // Save current file context so we can restore it after evaluating job files
+        // Save current file context so we can restore it after evaluating job files.
+        // Must be restored on BOTH success AND error paths (early `?` would leak).
         let previous_file = self.current_file.clone();
 
         let mut file_count = 0;
+        let mut eval_error: Option<IntentError> = None;
         for file_path in &tnt_files {
-            let source = fs::read_to_string(file_path).map_err(|e| {
-                IntentError::runtime_error(format!(
-                    "Failed to read job file '{}': {}",
-                    file_path.display(),
-                    e
-                ))
-            })?;
+            let source = match fs::read_to_string(file_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eval_error = Some(IntentError::runtime_error(format!(
+                        "Failed to read job file '{}': {}",
+                        file_path.display(),
+                        e
+                    )));
+                    break;
+                }
+            };
 
             let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
-            let ast = crate::parser::Parser::new(tokens).parse().map_err(|e| {
-                IntentError::runtime_error(format!(
-                    "Failed to parse job file '{}': {}",
-                    file_path.display(),
-                    e
-                ))
-            })?;
+            let ast = match crate::parser::Parser::new(tokens).parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    eval_error = Some(IntentError::runtime_error(format!(
+                        "Failed to parse job file '{}': {}",
+                        file_path.display(),
+                        e
+                    )));
+                    break;
+                }
+            };
 
             // Set current file so imports in the job file resolve correctly
             self.set_current_file(&file_path.to_string_lossy());
 
             // Evaluate the file in the current interpreter — job declarations
             // are registered via Statement::Job handling
-            self.eval(&ast)?;
+            match self.eval(&ast) {
+                Ok(_) => {}
+                Err(e) => {
+                    eval_error = Some(e);
+                    break;
+                }
+            }
 
             file_count += 1;
         }
 
-        // Restore previous file context
+        // Restore previous file context (always — even on error)
         if let Some(prev) = previous_file {
             self.set_current_file(&prev);
         } else {
             self.current_file = None;
+        }
+
+        // Propagate any error that occurred during file processing
+        if let Some(e) = eval_error {
+            return Err(e);
         }
 
         // Track the jobs directory for hot-reload (detect new/changed/deleted files)
