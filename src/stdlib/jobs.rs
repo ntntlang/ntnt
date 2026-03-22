@@ -475,9 +475,11 @@ fn calculate_backoff(strategy: &str, attempt: i64, base_secs: i64) -> i64 {
 /// Create a fully-initialised interpreter for a job worker.
 ///
 /// If a main source file has been recorded via `JOB_RUNTIME.set_source_file()`,
-/// reads, parses, and evaluates it in `Job` execution mode.  This gives the
-/// interpreter access to all imports and user-defined functions from the
-/// application, so job perform blocks can call any helper the user has defined.
+/// reads, parses, and evaluates it in `Worker` execution mode (so that
+/// `work_async()`/`work_jobs()` are no-ops during bootstrap), then switches the
+/// interpreter to `Job` mode for actual job execution.  This gives the interpreter
+/// access to all imports and user-defined functions from the application, so job
+/// perform blocks can call any helper the user has defined.
 ///
 /// If no source file has been set (e.g. in unit tests that call `worker_loop`
 /// directly) a bare interpreter is returned — job perform bodies run with no
@@ -487,6 +489,9 @@ fn calculate_backoff(strategy: &str, attempt: i64, base_secs: i64) -> i64 {
 fn create_job_interpreter() -> crate::interpreter::Interpreter {
     let Some(source_path) = JOB_RUNTIME.get_source_file() else {
         // No source file set — return a bare interpreter (sufficient for tests).
+        // In production this means work_async() was called before any job declarations,
+        // so there's nothing useful for the worker to execute anyway.
+        eprintln!("[ntnt] warning: worker started without source file — jobs will run without app context");
         return crate::interpreter::Interpreter::new();
     };
 
@@ -534,12 +539,18 @@ fn execute_in_worker(
         interp.define_in_scope(param.name.clone(), val);
     }
 
-    // Evaluate the perform body — eval_block() creates its own child scope for locals
+    // Evaluate the perform body — eval_block() creates its own child scope for locals.
     let body = def.perform_body.clone();
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interp.eval_block(&body)));
 
-    // ALWAYS restore scope, even on panic
+    // If eval_block panicked, it didn't restore its own inner scope.
+    // Pop that leaked scope before we pop our param scope.
+    if result.is_err() {
+        interp.pop_scope(); // pop eval_block's leaked inner scope
+    }
+
+    // Restore our param scope — always runs
     interp.pop_scope();
 
     match result {
@@ -589,10 +600,17 @@ fn execute_on_failure_in_worker(
     }
 
     let body = body.clone();
-    // Ignore result — on_failure is best-effort
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interp.eval_block(&body)));
+    // Ignore value result — on_failure is best-effort, but detect panics for scope cleanup
+    let panic_result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interp.eval_block(&body)));
 
-    // ALWAYS restore scope
+    // If eval_block panicked, it didn't restore its own inner scope.
+    // Pop that leaked scope before we pop our binding scope.
+    if panic_result.is_err() {
+        interp.pop_scope(); // pop eval_block's leaked inner scope
+    }
+
+    // Restore our binding scope — always runs
     interp.pop_scope();
 }
 

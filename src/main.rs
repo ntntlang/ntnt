@@ -1178,7 +1178,10 @@ fn run_worker_command(
     let path_str = canonical_path.to_string_lossy();
     interpreter.set_current_file(&path_str);
     interpreter.set_main_source_file(&path_str);
-    interpreter.set_execution_mode(ExecutionMode::Job);
+    // Bootstrap in Worker mode so work_async()/work_jobs() are no-ops during source eval.
+    // The CLI starts workers explicitly after eval — we don't want the source file to
+    // also start workers, which would cause duplicate/recursive worker spawning.
+    interpreter.set_execution_mode(ExecutionMode::Worker);
 
     let lexer = Lexer::new(&source);
     let tokens: Vec<_> = lexer.collect();
