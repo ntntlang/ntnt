@@ -451,9 +451,11 @@ pub enum RuntimeCapability {
     Scheduling,
     /// Job worker runners: work_async, work_jobs, scale_workers
     JobWorkers,
-    /// Job configuration and enqueueing: configure_queue, enqueue, enqueue_in,
-    /// enqueue_at, job_status, cancel_job, retry_job, list_jobs, delete_jobs
+    /// Job configuration and management: configure_queue, job_status,
+    /// cancel_job, retry_job, list_jobs, delete_jobs
     JobConfig,
+    /// Job enqueueing: enqueue, enqueue_in, enqueue_at, enqueue_batch
+    JobEnqueue,
 }
 
 /// Execution mode controls how server-related functions behave
@@ -484,6 +486,7 @@ impl ExecutionMode {
                 RuntimeCapability::Scheduling,
                 RuntimeCapability::JobWorkers,
                 RuntimeCapability::JobConfig,
+                RuntimeCapability::JobEnqueue,
             ],
             ExecutionMode::HotReload => &[
                 RuntimeCapability::HttpServer,
@@ -495,10 +498,11 @@ impl ExecutionMode {
                 RuntimeCapability::HttpConfig,
                 RuntimeCapability::JobConfig,
             ],
-            ExecutionMode::Job => &[RuntimeCapability::JobConfig],
+            ExecutionMode::Job => &[RuntimeCapability::JobConfig, RuntimeCapability::JobEnqueue],
             ExecutionMode::UnitTest => &[
                 RuntimeCapability::TaskSpawning,
                 RuntimeCapability::JobConfig,
+                RuntimeCapability::JobEnqueue,
             ],
         }
     }
@@ -12141,6 +12145,7 @@ c")
         assert!(mode.has(RuntimeCapability::Scheduling));
         assert!(mode.has(RuntimeCapability::JobWorkers));
         assert!(mode.has(RuntimeCapability::JobConfig));
+        assert!(mode.has(RuntimeCapability::JobEnqueue));
     }
 
     #[test]
@@ -12153,6 +12158,7 @@ c")
         assert!(!mode.has(RuntimeCapability::TaskSpawning));
         assert!(!mode.has(RuntimeCapability::Scheduling));
         assert!(!mode.has(RuntimeCapability::JobWorkers));
+        assert!(!mode.has(RuntimeCapability::JobEnqueue));
     }
 
     #[test]
@@ -12164,13 +12170,15 @@ c")
         assert!(!mode.has(RuntimeCapability::TaskSpawning));
         assert!(!mode.has(RuntimeCapability::Scheduling));
         assert!(!mode.has(RuntimeCapability::JobWorkers));
+        assert!(!mode.has(RuntimeCapability::JobEnqueue));
     }
 
     #[test]
     fn test_job_mode_capabilities() {
         let mode = ExecutionMode::Job;
         assert!(mode.has(RuntimeCapability::JobConfig));
-        // Job mode: only JobConfig — no HTTP, no concurrency, no worker spawning
+        assert!(mode.has(RuntimeCapability::JobEnqueue));
+        // Job mode: only job capabilities — no HTTP, no concurrency, no worker spawning
         assert!(!mode.has(RuntimeCapability::HttpServer));
         assert!(!mode.has(RuntimeCapability::HttpConfig));
         assert!(!mode.has(RuntimeCapability::TaskSpawning));
@@ -12182,6 +12190,7 @@ c")
     fn test_unit_test_mode_capabilities() {
         let mode = ExecutionMode::UnitTest;
         assert!(mode.has(RuntimeCapability::JobConfig));
+        assert!(mode.has(RuntimeCapability::JobEnqueue));
         assert!(mode.has(RuntimeCapability::TaskSpawning)); // spawn() works in tests
         assert!(!mode.has(RuntimeCapability::HttpServer));
         assert!(!mode.has(RuntimeCapability::HttpConfig));
@@ -12191,15 +12200,15 @@ c")
 
     #[test]
     fn test_capabilities_returns_correct_slice_lengths() {
-        // Normal has all 6 capabilities
-        assert_eq!(ExecutionMode::Normal.capabilities().len(), 6);
+        // Normal has all 7 capabilities
+        assert_eq!(ExecutionMode::Normal.capabilities().len(), 7);
         // HotReload and Worker have 3 each
         assert_eq!(ExecutionMode::HotReload.capabilities().len(), 3);
         assert_eq!(ExecutionMode::Worker.capabilities().len(), 3);
-        // Job has 1 (JobConfig only)
-        assert_eq!(ExecutionMode::Job.capabilities().len(), 1);
-        // UnitTest has 2 (TaskSpawning + JobConfig)
-        assert_eq!(ExecutionMode::UnitTest.capabilities().len(), 2);
+        // Job has 2 (JobConfig + JobEnqueue)
+        assert_eq!(ExecutionMode::Job.capabilities().len(), 2);
+        // UnitTest has 3 (TaskSpawning + JobConfig + JobEnqueue)
+        assert_eq!(ExecutionMode::UnitTest.capabilities().len(), 3);
     }
 
     // === Capability gate in call_function ===
