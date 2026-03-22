@@ -1053,7 +1053,7 @@ impl Interpreter {
     }
 
     fn sa_on_shutdown(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
-        // on_shutdown() only registered in Normal mode
+        // on_shutdown() is a no-op outside Normal mode (no server to shut down)
         if !matches!(interp.execution_mode, ExecutionMode::Normal) {
             return Ok(Value::Unit);
         }
@@ -1063,7 +1063,7 @@ impl Interpreter {
     }
 
     fn sa_on_error(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
-        // on_error() only registered in Normal mode
+        // on_error() is a no-op outside Normal mode (no server to handle errors for)
         if !matches!(interp.execution_mode, ExecutionMode::Normal) {
             return Ok(Value::Unit);
         }

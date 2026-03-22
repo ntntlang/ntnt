@@ -30,7 +30,7 @@
 //! ```
 
 use crate::error::{IntentError, Result};
-use crate::interpreter::Value;
+use crate::interpreter::{RuntimeCapability, Value};
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -6219,7 +6219,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "enable_auth".to_string(),
             arity: 0, // Variadic: 1-2 args (providers, options?)
             max_arity: 0,
-            requires: None,
+            requires: Some(RuntimeCapability::HttpConfig),
             func: |args| {
                 if args.is_empty() {
                     return Err(IntentError::type_error(
