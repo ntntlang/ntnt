@@ -13518,12 +13518,15 @@ page
         dir
     }
 
+    // Shared mutex for all tests that touch the global JOB_RUNTIME.
+    // Separate statics (JOB_TEST_LOCK, JOB_TEST_LOCK2, etc.) don't serialize
+    // against each other — tests using different statics run concurrently and
+    // race on JOB_RUNTIME.reset()/register_job().
+    static JOB_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_jobs_directory_discovers_files() {
-        // Use a static mutex to serialize tests that share the global JOB_RUNTIME
-        use std::sync::Mutex;
-        static JOB_TEST_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = JOB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = JOB_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let tmp_dir = make_job_test_dir("discovers");
         let jobs_dir = tmp_dir.join("jobs");
@@ -13583,9 +13586,7 @@ page
 
     #[test]
     fn test_jobs_directory_recursive_discovery() {
-        use std::sync::Mutex;
-        static JOB_TEST_LOCK2: Mutex<()> = Mutex::new(());
-        let _guard = JOB_TEST_LOCK2.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = JOB_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let tmp_dir = make_job_test_dir("recursive");
         let jobs_dir = tmp_dir.join("jobs");
@@ -13661,9 +13662,7 @@ page
 
     #[test]
     fn test_jobs_runs_in_worker_mode() {
-        use std::sync::Mutex;
-        static JOB_TEST_LOCK3: Mutex<()> = Mutex::new(());
-        let _guard = JOB_TEST_LOCK3.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = JOB_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let tmp_dir = make_job_test_dir("worker_mode");
         let jobs_dir = tmp_dir.join("jobs");
