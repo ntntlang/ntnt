@@ -13,6 +13,7 @@
 - Recursive bootstrapping: when re-evaluating a .tnt file (workers, hot-reload), verify the eval mode suppresses capabilities that trigger the sub-runtime itself (e.g., worker eval must NOT have JobWorkers, or work_async() recurses infinitely)
 - Panic/error messages must include context (file paths, job names, key names) — "failed to X" without "which Y" is useless in production
 - Mutex poison on critical data (source file, config): use `expect()`, not `.ok()?`. Silent degradation (bare interpreter, missing config) is worse than crashing — at least a crash tells you what happened
+- eval_block() scope leak on panic: `eval_block` pushes a child scope and restores on normal return, but NOT on panic. If you wrap `eval_block` in `catch_unwind`, pop the leaked inner scope on the panic path: `if result.is_err() { interp.pop_scope(); } interp.pop_scope();`
 
 ### Concurrency
 - Lock ordering on JOB_RUNTIME: `band_worker_task_ids` → `band_cancel_arcs` → `active_bands`. Never violate.
