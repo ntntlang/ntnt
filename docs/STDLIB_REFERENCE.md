@@ -7,7 +7,6 @@
 ## Table of Contents
 
 - [Global Builtins](#global-builtins)
-- [server](#server)
 - [std/auth](#stdauth)
 - [std/collections](#stdcollections)
 - [std/concurrent](#stdconcurrent)
@@ -62,6 +61,7 @@ These functions are available everywhere without importing.
 | [`is_ok(res: Result<Any, Any>)`](#isok) | Checks if a Result is Ok. |
 | [`is_some(opt: Option<Any>)`](#issome) | Checks if an Option is Some. |
 | [`is_string(val: Any)`](#isstring) | Returns true if the value is a String. |
+| [`jobs(directory: String)`](#jobs) | Auto-discover and register job definitions from .tnt files in a directory. |
 | [`len(x: String \| Array \| Map)`](#len) | Returns the length of a string, array, or map. |
 | [`listen(port: Int)`](#listen) | Starts an HTTP server on the given port. |
 | [`max(a: Int \| Float, b: Int \| Float)`](#max) | Returns the larger of two numbers. |
@@ -819,6 +819,38 @@ is_string(42)  // => false  // Int is not a string
 
 ---
 
+#### `jobs`
+
+```ntnt
+jobs(directory: String) -> Int
+```
+
+Auto-discover and register job definitions from .tnt files in a directory.
+
+Recursively scans the given directory for `.tnt` files and evaluates each one in the current interpreter context. Any `job` declarations in those files are registered in the global job runtime. This is the directory-based counterpart to `routes()` — it provides progressive disclosure for organizing job definitions across multiple files.
+
+Files are evaluated in alphabetical order for deterministic registration. Each file has access to the interpreter's current imports and can use `import` to pull in shared modules from `lib/`.
+
+In dev mode (hot-reload), the jobs directory is tracked for changes. New or modified `.tnt` files are automatically re-evaluated on the next hot-reload cycle.
+
+**Parameters:**
+
+- `directory` — Path to the jobs directory, relative to the current .tnt file (e.g., "jobs/")
+
+**Returns:** Number of .tnt files discovered and evaluated
+
+**Examples:**
+
+```ntnt
+jobs("jobs/")  // => 3  // Auto-discover all job files in the jobs/ directory
+```
+
+**See also:** `routes`, `listen`
+
+*Since v0.4.6*
+
+---
+
 #### `len`
 
 ```ntnt
@@ -1429,50 +1461,6 @@ unwrap_or(Err("fail"), "fallback")  // => "fallback"  // Default returned for Er
 **See also:** `unwrap`, `is_some`, `is_ok`, `Some`, `Ok`
 
 *Since v0.1.0*
-
----
-
-## server
-
-```ntnt
-import { jobs } from "server"
-```
-
-### Functions
-
-| Function | Description |
-|----------|-------------|
-| [`jobs`](#jobs) | Auto-discover and register job definitions from .tnt files in a directory. |
-
-#### `jobs`
-
-```ntnt
-jobs(directory: String) -> Int
-```
-
-Auto-discover and register job definitions from .tnt files in a directory.
-
-Recursively scans the given directory for `.tnt` files and evaluates each one in the current interpreter context. Any `job` declarations in those files are registered in the global job runtime. This is the directory-based counterpart to `routes()` — it provides progressive disclosure for organizing job definitions across multiple files.
-
-Files are evaluated in alphabetical order for deterministic registration. Each file has access to the interpreter's current imports and can use `import` to pull in shared modules from `lib/`.
-
-In dev mode (hot-reload), the jobs directory is tracked for changes. New or modified `.tnt` files are automatically re-evaluated on the next hot-reload cycle.
-
-**Parameters:**
-
-- `directory` — Path to the jobs directory, relative to the current .tnt file (e.g., "jobs/")
-
-**Returns:** Number of .tnt files discovered and evaluated
-
-**Examples:**
-
-```ntnt
-jobs("jobs/")  // => 3  // Auto-discover all job files in the jobs/ directory
-```
-
-**See also:** `routes`, `listen`
-
-*Since v0.4.6*
 
 ---
 

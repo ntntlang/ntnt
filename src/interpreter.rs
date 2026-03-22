@@ -1136,6 +1136,8 @@ impl Interpreter {
 
         let mut file_count = 0;
         let mut eval_error: Option<IntentError> = None;
+        // Track which names were defined by which file for cross-file collision detection.
+        let mut defined_by: HashMap<String, String> = HashMap::new();
         for file_path in &tnt_files {
             let source = match fs::read_to_string(file_path) {
                 Ok(s) => s,
@@ -1165,6 +1167,10 @@ impl Interpreter {
             // Set current file so imports in the job file resolve correctly
             self.set_current_file(&file_path.to_string_lossy());
 
+            // Snapshot names before eval to detect cross-file collisions
+            let names_before: std::collections::HashSet<String> =
+                self.environment.borrow().values.keys().cloned().collect();
+
             // Evaluate the file in the current interpreter — job declarations
             // are registered via Statement::Job handling
             match self.eval(&ast) {
@@ -1172,6 +1178,24 @@ impl Interpreter {
                 Err(e) => {
                     eval_error = Some(e);
                     break;
+                }
+            }
+
+            // Detect cross-file name collisions (new names that were already defined by another file)
+            let file_label = file_path.to_string_lossy().to_string();
+            {
+                let env = self.environment.borrow();
+                for name in env.values.keys() {
+                    if !names_before.contains(name) {
+                        // New name defined by this file
+                        if let Some(prev_file) = defined_by.get(name) {
+                            eprintln!(
+                                "[warn] jobs(): '{}' defined in '{}' overwrites definition from '{}'",
+                                name, file_label, prev_file
+                            );
+                        }
+                        defined_by.insert(name.clone(), file_label.clone());
+                    }
                 }
             }
 
@@ -1190,9 +1214,11 @@ impl Interpreter {
             return Err(e);
         }
 
-        // Track the jobs directory for hot-reload (detect new/changed/deleted files)
+        // Track the jobs directory for hot-reload (detect new/changed/deleted files).
+        // Uses collect_jobs_mtimes which tracks both directory AND file mtimes,
+        // so editing a job file is detected even when the directory mtime doesn't change.
         self.jobs_dir = Some(base_dir.to_string_lossy().to_string());
-        self.jobs_dir_mtimes = Self::collect_dir_mtimes(&base_dir);
+        self.jobs_dir_mtimes = Self::collect_jobs_mtimes(&base_dir);
 
         Ok(Value::Int(file_count))
     }
@@ -1649,6 +1675,39 @@ impl Interpreter {
         mtimes
     }
 
+    /// Collect mtimes for both directories AND .tnt files in a jobs directory.
+    /// Unlike `collect_dir_mtimes` (directories only), this also tracks individual
+    /// file mtimes so that hot-reload detects edited job files — not just new/deleted ones.
+    fn collect_jobs_mtimes(dir: &std::path::Path) -> HashMap<String, std::time::SystemTime> {
+        let mut mtimes = HashMap::new();
+        if let Ok(metadata) = std::fs::metadata(dir) {
+            if let Ok(mtime) = metadata.modified() {
+                mtimes.insert(dir.to_string_lossy().to_string(), mtime);
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+                    if !dir_name.starts_with('.')
+                        && dir_name != "node_modules"
+                        && dir_name != "target"
+                    {
+                        mtimes.extend(Self::collect_jobs_mtimes(&path));
+                    }
+                } else if path.extension().map(|e| e == "tnt").unwrap_or(false) {
+                    if let Ok(metadata) = std::fs::metadata(&path) {
+                        if let Ok(mtime) = metadata.modified() {
+                            mtimes.insert(path.to_string_lossy().to_string(), mtime);
+                        }
+                    }
+                }
+            }
+        }
+        mtimes
+    }
+
     /// Check if the routes directory structure has changed (new/deleted files).
     /// If so, clear routes and re-discover them.
     /// Returns true if routes were reloaded.
@@ -1740,7 +1799,7 @@ impl Interpreter {
         // Also check for new subdirectories by comparing current dir tree to tracked dirs
         if !changed {
             if let Some(jobs_dir) = &self.jobs_dir {
-                let current_mtimes = Self::collect_dir_mtimes(std::path::Path::new(jobs_dir));
+                let current_mtimes = Self::collect_jobs_mtimes(std::path::Path::new(jobs_dir));
                 if current_mtimes.len() != self.jobs_dir_mtimes.len() {
                     changed = true;
                 }
@@ -1754,10 +1813,11 @@ impl Interpreter {
         let dir_path = self.jobs_dir.clone().unwrap();
         println!("\n[hot-reload] Jobs directory changed, re-discovering jobs...");
 
-        // Clear existing job definitions so re-evaluation picks up updated perform bodies.
-        // Unlike reset(), this only clears definitions — not the queue, workers, or config.
-        // In-flight jobs continue with whatever worker interpreter they already have.
         use crate::stdlib::jobs::JOB_RUNTIME;
+
+        // Snapshot existing definitions so we can roll back on failure.
+        // This avoids the "clear then fail = no jobs registered" problem.
+        let snapshot = JOB_RUNTIME.snapshot_job_definitions();
         JOB_RUNTIME.clear_job_definitions();
 
         // Re-discover jobs from the directory
@@ -1774,10 +1834,10 @@ impl Interpreter {
             }
             Err(e) => {
                 eprintln!("[hot-reload] Error re-discovering jobs: {}", e);
-                // Job definitions were already cleared above — newly enqueued jobs
-                // will fail with "unknown job" until the error is fixed and the next
-                // hot-reload succeeds. In-flight workers retain their own interpreter.
-                // This matches the routes hot-reload pattern (clear → attempt → degrade).
+                // Restore previous definitions so jobs keep running with the old
+                // perform bodies rather than failing with "unknown job".
+                JOB_RUNTIME.restore_job_definitions(snapshot);
+                eprintln!("[hot-reload] Restored previous job definitions.");
                 false
             }
         }
@@ -3143,7 +3203,6 @@ impl Interpreter {
         );
 
         // @ntnt jobs
-        // @module server
         // @signature jobs(directory: String) -> Int
         // Auto-discover and register job definitions from .tnt files in a directory.
         //
@@ -13520,10 +13579,10 @@ page
         );
     }
 
-    /// Helper: create a unique temp directory under /tmp for job tests.
+    /// Helper: create a unique temp directory for job tests (cross-platform).
     fn make_job_test_dir(test_name: &str) -> std::path::PathBuf {
-        let dir = std::path::PathBuf::from(format!(
-            "/tmp/ntnt_job_test_{}_{:x}",
+        let dir = std::env::temp_dir().join(format!(
+            "ntnt_job_test_{}_{:x}",
             test_name,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -13708,6 +13767,44 @@ page
         assert!(
             result.is_ok(),
             "jobs() should work in Worker mode: {:?}",
+            result
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_jobs_runs_in_job_mode() {
+        let _guard = JOB_DIR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let tmp_dir = make_job_test_dir("job_mode");
+        let jobs_dir = tmp_dir.join("jobs");
+        std::fs::create_dir_all(&jobs_dir).unwrap();
+
+        std::fs::write(
+            jobs_dir.join("job_mode_test.tnt"),
+            "job JobModeDisc on tasks {\n    perform() {\n        print(\"test\")\n    }\n}\n",
+        )
+        .unwrap();
+
+        let main_file = tmp_dir.join("server.tnt");
+        std::fs::write(&main_file, "jobs(\"jobs/\")\n").unwrap();
+
+        let mut interp = Interpreter::new();
+        interp.set_current_file(&main_file.to_string_lossy());
+        interp.set_main_source_file(&main_file.to_string_lossy());
+        // Job mode has JobConfig capability — jobs() should work
+        interp.set_execution_mode(ExecutionMode::Job);
+
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
+
+        let source = std::fs::read_to_string(&main_file).unwrap();
+        let tokens: Vec<_> = crate::lexer::Lexer::new(&source).collect();
+        let ast = crate::parser::Parser::new(tokens).parse().unwrap();
+        let result = interp.eval(&ast);
+        assert!(
+            result.is_ok(),
+            "jobs() should work in Job mode (has JobConfig): {:?}",
             result
         );
 

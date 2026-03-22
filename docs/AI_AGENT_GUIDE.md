@@ -1704,7 +1704,7 @@ listen(8080)
 **Medium app — jobs in a separate file, explicitly imported:**
 ```ntnt
 // server.tnt
-import "lib/jobs.tnt"
+import "./lib/jobs.tnt"
 listen(8080)
 ```
 
@@ -1740,7 +1740,7 @@ Each job file is self-contained with its own imports:
 ```ntnt
 // jobs/send_email.tnt
 import { fetch } from "std/http"
-import { notify } from "lib/notifications.tnt"
+import { notify } from "./lib/notifications.tnt"
 
 job SendEmail on emails (retry: 3) {
     perform(to, subject, body) {

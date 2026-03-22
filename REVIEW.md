@@ -20,7 +20,7 @@ Full skill with workflow, examples, and deep review techniques: see ntnt-code-re
 - Check ALL eval paths for the same pattern, not just the one being edited
 
 ### Attribute Placement
-- `#[cfg(test)]` attaches to the next syntactic item — verify no comment/doc block between attribute and intended target. Comments cause it to compile away the wrong method.
+- `#[cfg(test)]` attaches to the next syntactic *item* (fn, struct, impl, etc.) — inserting a new item between the attribute and its intended target silently compiles away the wrong method. When adding code near `#[cfg(test)]`, verify the attribute still applies to the correct item.
 
 ### Hot-Reload & Re-Registration
 - Re-registration paths (hot-reload, re-discovery) must `clear_X()` before `load_X()`. Without clearing, renamed/deleted items persist as ghosts.

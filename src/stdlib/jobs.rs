@@ -379,9 +379,27 @@ impl JobRuntime {
     /// only affects which `perform` body is executed for future jobs, not in-flight
     /// jobs or the queue contents.
     pub fn clear_job_definitions(&self) {
-        if let Ok(mut reg) = self.job_registry.write() {
-            reg.clear();
-        }
+        self.job_registry
+            .write()
+            .expect("Job registry lock poisoned during hot-reload clear")
+            .clear();
+    }
+
+    /// Snapshot the current job definitions for rollback on hot-reload failure.
+    pub fn snapshot_job_definitions(&self) -> HashMap<String, JobDefinition> {
+        self.job_registry
+            .read()
+            .expect("Job registry lock poisoned during snapshot")
+            .clone()
+    }
+
+    /// Restore job definitions from a previous snapshot.
+    pub fn restore_job_definitions(&self, snapshot: HashMap<String, JobDefinition>) {
+        let mut reg = self
+            .job_registry
+            .write()
+            .expect("Job registry lock poisoned during restore");
+        *reg = snapshot;
     }
 
     /// Reset the runtime (for testing).
