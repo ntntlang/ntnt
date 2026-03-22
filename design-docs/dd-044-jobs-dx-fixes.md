@@ -1,11 +1,11 @@
 # DD-044: Jobs DX Fixes — Addressing v0.4.6 Field Findings
 
-**Status:** Partially Complete (4/6 fixes done)
+**Status:** Partially Complete (5/6 fixes done)
 **Author:** Larri
 **Created:** 2026-03-21
 **Source:** [ntnt-findings.md §5](https://app.larri.net/admin/design-docs/dd-005-ntnt-findings) — findings #25-30 from snowgauge.app build
-**Implemented in:** PR #43 (Fixes C, D, E), DD-045 PRs #44-#46 (Fix A superseded)
-**Remaining:** Fix B (schedule smart capture), Fix F (--store CLI flag)
+**Implemented in:** PR #43 (Fixes C, D, E), DD-045 PRs #44-#46 (Fix A superseded), PR #54 (Fix F)
+**Remaining:** Fix B (schedule smart capture)
 
 ---
 
@@ -158,9 +158,9 @@ pub fn register_job(&self, def: JobDefinition) -> Result<()> {
 ---
 
 ### Fix F: `ntnt jobs` CLI — don't re-execute the full app (#30)
-**Status:** ⏳ NOT YET IMPLEMENTED — deferred (medium effort)
+**Status:** ✅ COMPLETE — implemented in PR #54 (1 line — use ExecutionMode::Worker instead of Normal)
 **File:** `src/main.rs` — `jobs_load_kv()`
-**Effort:** Medium (2-3 hours)
+**Effort:** Trivial (leverages DD-045 RuntimeCapability system)
 
 **Problem:** `ntnt jobs list server.tnt` runs `interpreter.eval(&ast)` on the entire file. This re-enqueues jobs, tries to bind the port, and spawns workers. The output is correct but mixed with startup noise.
 
