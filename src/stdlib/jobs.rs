@@ -2445,7 +2445,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "enqueue".to_string(),
             arity: 2,
             max_arity: 2,
-            requires: Some(crate::interpreter::RuntimeCapability::JobEnqueue),
+            requires: None,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::type_error(
@@ -2597,7 +2597,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "enqueue_at".to_string(),
             arity: 3,
             max_arity: 3,
-            requires: Some(crate::interpreter::RuntimeCapability::JobEnqueue),
+            requires: None,
             func: |args| {
                 if args.len() != 3 {
                     return Err(IntentError::type_error(
@@ -2664,7 +2664,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "enqueue_in".to_string(),
             arity: 3,
             max_arity: 3,
-            requires: Some(crate::interpreter::RuntimeCapability::JobEnqueue),
+            requires: None,
             func: |args| {
                 if args.len() != 3 {
                     return Err(IntentError::type_error(
@@ -3195,11 +3195,15 @@ pub fn init() -> HashMap<String, Value> {
                 let mut executed: i64 = 0;
                 let mut errors: Vec<String> = Vec::new();
 
-                // drain_jobs() is a test helper. It should not re-evaluate the
-                // application source file, because top-level drain_jobs() would recurse
-                // through worker bootstrap. Tests register jobs inline, so a bare
-                // interpreter is sufficient here.
-                let mut drain_interp = crate::interpreter::Interpreter::new();
+                // If a source file has been set, build a full interpreter so perform
+                // blocks have access to imports and user functions.  Otherwise fall
+                // back to a naked interpreter (sufficient for tests that don't rely
+                // on application-level imports).
+                let mut drain_interp = if JOB_RUNTIME.get_source_file().is_some() {
+                    create_job_interpreter()
+                } else {
+                    crate::interpreter::Interpreter::new()
+                };
 
                 for job in jobs {
                     let def = match JOB_RUNTIME.get_job(&job.job_type)? {
@@ -3460,7 +3464,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "enqueue_batch".to_string(),
             arity: 2,
             max_arity: 2,
-            requires: Some(crate::interpreter::RuntimeCapability::JobEnqueue),
+            requires: None,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::type_error(
