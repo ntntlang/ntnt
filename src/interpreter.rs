@@ -1747,6 +1747,12 @@ impl Interpreter {
         let dir_path = self.jobs_dir.clone().unwrap();
         println!("\n[hot-reload] Jobs directory changed, re-discovering jobs...");
 
+        // Clear existing job definitions so re-evaluation picks up updated perform bodies.
+        // Unlike reset(), this only clears definitions — not the queue, workers, or config.
+        // In-flight jobs continue with whatever worker interpreter they already have.
+        use crate::stdlib::jobs::JOB_RUNTIME;
+        JOB_RUNTIME.clear_job_definitions();
+
         // Re-discover jobs from the directory
         match self.load_jobs_from_directory(&dir_path) {
             Ok(count) => {

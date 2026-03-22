@@ -372,6 +372,18 @@ impl JobRuntime {
         }
     }
 
+        /// Clear only the job definition registry (not the queue, workers, or config).
+    ///
+    /// Used by hot-reload to allow re-registration of updated job definitions.
+    /// Unlike `reset()`, this is safe to call while the server is running — it
+    /// only affects which `perform` body is executed for future jobs, not in-flight
+    /// jobs or the queue contents.
+    pub fn clear_job_definitions(&self) {
+        if let Ok(mut reg) = self.job_registry.write() {
+            reg.clear();
+        }
+    }
+
     /// Reset the runtime (for testing).
     #[cfg(test)]
     pub fn reset(&self) {
