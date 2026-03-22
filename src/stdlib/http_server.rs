@@ -1252,6 +1252,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "text".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 match &args[0] {
                     Value::String(body) => {
@@ -1303,6 +1304,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "html".to_string(),
             arity: 1,
             max_arity: 3,
+            requires: None,
             func: |args| {
                 if args.is_empty() || args.len() > 3 {
                     return Err(IntentError::type_error(
@@ -1390,6 +1392,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "json".to_string(),
             arity: 1,
             max_arity: 3,
+            requires: None,
             func: |args| {
                 if args.is_empty() || args.len() > 3 {
                     return Err(IntentError::type_error(
@@ -1480,6 +1483,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "status".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::Int(code), Value::String(body)) => {
                     let mut headers = HashMap::new();
@@ -1521,6 +1525,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "redirect".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(url) => {
                     let mut headers = HashMap::new();
@@ -1562,6 +1567,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "redirect_safe".to_string(),
             arity: 1,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::type_error(
@@ -1620,6 +1626,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "not_found".to_string(),
             arity: 0,
             max_arity: 1,
+            requires: None,
             func: |_args| {
                 let mut headers = HashMap::new();
                 headers.insert(
@@ -1651,6 +1658,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "error".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(msg) => {
                     let mut headers = HashMap::new();
@@ -1693,6 +1701,7 @@ pub fn init() -> HashMap<String, Value> {
         name: "static_file".to_string(),
         arity: 2,
         max_arity: 3,
+        requires: None,
         func: |args| {
             if args.len() < 2 || args.len() > 3 {
                 return Err(IntentError::type_error(
@@ -1757,6 +1766,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "response".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| {
                 let status = match &args[0] {
                     Value::Int(code) => *code,
@@ -1819,6 +1829,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "parse_json".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let body = match &args[0] {
                     Value::Map(map) => match map.get("body") {
@@ -1872,6 +1883,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "parse_form".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let body = match &args[0] {
                     Value::Map(map) => match map.get("body") {
@@ -1958,6 +1970,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "set_cookie".to_string(),
             arity: 2,
             max_arity: 3,
+            requires: None,
             func: |args| {
                 if args.len() < 2 || args.len() > 3 {
                     return Err(IntentError::type_error(
@@ -2032,6 +2045,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "get_cookie".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 let headers = match &args[0] {
                     Value::Map(map) => match map.get("headers") {
@@ -2100,6 +2114,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "get_cookies".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let headers = match &args[0] {
                     Value::Map(map) => match map.get("headers") {
@@ -2160,6 +2175,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "delete_cookie".to_string(),
             arity: 1,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::type_error(
@@ -2225,6 +2241,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "with_cookie".to_string(),
             arity: 3,
             max_arity: 4,
+            requires: None,
             func: |args| {
                 if args.len() < 3 || args.len() > 4 {
                     return Err(IntentError::type_error(
@@ -2346,6 +2363,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "parse_multipart".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let (content_type, body) = match &args[0] {
                     Value::Map(map) => {
@@ -2445,6 +2463,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "save_upload".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 let data = match &args[0] {
                     Value::Map(map) => match map.get("data") {
@@ -2523,6 +2542,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "on_error".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |_args| {
                 // Actual implementation is in the interpreter's special handling
                 // This placeholder exists for import resolution

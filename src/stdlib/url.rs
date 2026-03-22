@@ -117,6 +117,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "parse_url".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 match &args[0] {
                     Value::String(url_str) => {
@@ -256,6 +257,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "encode".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let encoded = url_encode(s);
@@ -288,6 +290,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "encode_component".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => {
                     let encoded = url_encode_component(s);
@@ -319,6 +322,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "decode".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(s) => match url_decode(s) {
                     Ok(decoded) => Ok(Value::ok(Value::String(decoded))),
@@ -350,6 +354,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "build_query".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Map(params) => {
                     let pairs: Vec<String> = params
@@ -388,6 +393,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "parse_query".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 match &args[0] {
                     Value::String(query) => {
@@ -441,6 +447,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "join_url".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(base), Value::String(path)) => {
                     let base = base.trim_end_matches('/');
@@ -470,6 +477,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "join".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 eprintln!("[DEPRECATED] join() in std/url is deprecated. Use join_url() instead.");
                 match (&args[0], &args[1]) {

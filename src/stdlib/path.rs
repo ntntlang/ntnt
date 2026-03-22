@@ -27,6 +27,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "join_path".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Array(parts) => {
                     let mut path = PathBuf::new();
@@ -64,6 +65,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "join".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 eprintln!(
                     "[DEPRECATED] join() in std/path is deprecated. Use join_path() instead."
@@ -106,6 +108,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "dirname".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).parent() {
                     Some(p) => Ok(Value::some(Value::String(p.to_string_lossy().to_string()))),
@@ -133,6 +136,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "basename".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).file_name() {
                     Some(name) => Ok(Value::some(Value::String(
@@ -162,6 +166,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "extension".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).extension() {
                     Some(ext) => Ok(Value::some(Value::String(
@@ -191,6 +196,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "stem".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match Path::new(path).file_stem() {
                     Some(stem) => Ok(Value::some(Value::String(
@@ -221,6 +227,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "resolve".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match std::fs::canonicalize(path) {
                     Ok(abs) => Ok(Value::ok(Value::String(abs.to_string_lossy().to_string()))),
@@ -249,6 +256,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_absolute".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(Path::new(path).is_absolute())),
                 _ => Err(IntentError::type_error(
@@ -274,6 +282,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_relative".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(Path::new(path).is_relative())),
                 _ => Err(IntentError::type_error(
@@ -299,6 +308,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "with_extension".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(path), Value::String(ext)) => {
                     let new_path = Path::new(path).with_extension(ext);
@@ -326,6 +336,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "normalize".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => {
                     let p = Path::new(path);

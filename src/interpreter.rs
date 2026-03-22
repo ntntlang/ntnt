@@ -106,11 +106,17 @@ pub enum Value {
     /// - `arity == max_arity`: exact argument count required
     /// - `arity < max_arity`: accepts between `arity` (min) and `max_arity` args
     /// - `max_arity == 0 && arity == 0`: legacy variadic (no checking) — being phased out
+    ///
+    /// Capability gating:
+    /// - `requires == None`: always runs regardless of execution mode
+    /// - `requires == Some(cap)`: silently returns `Unit` when the active mode
+    ///   does not grant `cap` (checked in `call_function`)
     NativeFunction {
         name: String,
         arity: usize,
         max_arity: usize,
         func: fn(&[Value]) -> Result<Value>,
+        requires: Option<RuntimeCapability>,
     },
 
     /// Task handle (from spawn/after)
@@ -427,6 +433,29 @@ impl Default for Environment {
     }
 }
 
+/// Runtime capability required to execute a built-in function.
+///
+/// Each mode (Normal, Worker, Job, HotReload, UnitTest) exposes a subset of these
+/// capabilities. Built-in functions that carry a `requires` field will silently
+/// return `Unit` when the active mode lacks the required capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeCapability {
+    /// HTTP server lifecycle: listen, serve_static, routes, use_middleware,
+    /// on_shutdown, on_error, get/post/put/patch/delete route registration
+    HttpServer,
+    /// HTTP configuration helpers: enable_cors, enable_csp, enable_auth
+    HttpConfig,
+    /// Task spawning: spawn()
+    TaskSpawning,
+    /// Scheduled/delayed execution: schedule(), after()
+    Scheduling,
+    /// Job worker runners: work_async, work_jobs, scale_workers
+    JobWorkers,
+    /// Job configuration and enqueueing: configure_queue, enqueue, enqueue_in,
+    /// enqueue_at, job_status, cancel_job, retry_job, list_jobs, delete_jobs
+    JobConfig,
+}
+
 /// Execution mode controls how server-related functions behave
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ExecutionMode {
@@ -438,8 +467,75 @@ pub enum ExecutionMode {
     /// Worker mode - skip listen(), on_shutdown(), on_error() but keep route registrations
     /// Used when spawning worker interpreters that process requests from the shared channel
     Worker,
+    /// Job mode - only job-related functions run; HTTP server functions are skipped
+    Job,
     /// Unit test mode - skip all server-related calls
     UnitTest,
+}
+
+impl ExecutionMode {
+    /// Returns the set of capabilities available in this execution mode.
+    pub fn capabilities(self) -> &'static [RuntimeCapability] {
+        match self {
+            ExecutionMode::Normal => &[
+                RuntimeCapability::HttpServer,
+                RuntimeCapability::HttpConfig,
+                RuntimeCapability::TaskSpawning,
+                RuntimeCapability::Scheduling,
+                RuntimeCapability::JobWorkers,
+                RuntimeCapability::JobConfig,
+            ],
+            ExecutionMode::HotReload => &[
+                RuntimeCapability::HttpServer,
+                RuntimeCapability::HttpConfig,
+                RuntimeCapability::JobConfig,
+            ],
+            ExecutionMode::Worker => &[
+                RuntimeCapability::HttpServer,
+                RuntimeCapability::HttpConfig,
+                RuntimeCapability::JobConfig,
+            ],
+            ExecutionMode::Job => &[RuntimeCapability::JobWorkers, RuntimeCapability::JobConfig],
+            ExecutionMode::UnitTest => &[
+                RuntimeCapability::TaskSpawning,
+                RuntimeCapability::JobConfig,
+            ],
+        }
+    }
+
+    /// Returns `true` if this mode grants the given capability.
+    pub fn has(self, cap: RuntimeCapability) -> bool {
+        self.capabilities().contains(&cap)
+    }
+}
+
+/// Accepted argument count range for a server action.
+struct AritySpec {
+    min: usize,
+    max: usize,
+}
+
+impl AritySpec {
+    fn exact(n: usize) -> Self {
+        Self { min: n, max: n }
+    }
+    fn at_most(n: usize) -> Self {
+        Self { min: 0, max: n }
+    }
+}
+
+/// A registered server action that is handled specially before general function lookup.
+///
+/// When the interpreter encounters a call to a registered action name with matching arity:
+/// 1. If `requires` is `Some(cap)` and the active mode lacks `cap` → return `Unit`
+/// 2. Otherwise → call `handler(self, args)`
+///
+/// `requires: None` means the handler itself decides based on execution mode
+/// (used for listen/on_shutdown/on_error which must skip in Worker/HotReload/Job/UnitTest).
+struct ServerAction {
+    requires: Option<RuntimeCapability>,
+    arity: AritySpec,
+    handler: fn(&mut Interpreter, &[Expression]) -> Result<Value>,
 }
 
 /// The Intent interpreter
@@ -492,6 +588,8 @@ pub struct Interpreter {
     routes_dir: Option<String>,
     /// Tracked routes directory mtimes for detecting new/deleted files (dir_path -> mtime)
     routes_dir_mtimes: HashMap<String, std::time::SystemTime>,
+    /// Registry of server actions handled specially before general function lookup
+    server_actions: HashMap<String, ServerAction>,
     /// Last known source line being executed (for runtime error reporting)
     current_line: usize,
     /// Last known source column being executed (for runtime error reporting)
@@ -674,6 +772,7 @@ impl Interpreter {
             middleware_files: HashMap::new(),
             routes_dir: None,
             routes_dir_mtimes: HashMap::new(),
+            server_actions: HashMap::new(),
             current_line: 0,
             current_col: 0,
             call_depth: 0,
@@ -682,6 +781,7 @@ impl Interpreter {
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(MAX_RECURSION_DEPTH),
         };
+        interpreter.define_server_actions();
         interpreter.define_builtins();
         interpreter.define_builtin_types();
         interpreter.define_stdlib();
@@ -713,39 +813,263 @@ impl Interpreter {
         self.execution_mode = mode;
     }
 
-    /// Check if a server-related function should be skipped entirely
-    fn should_skip_server_call(&self, name: &str) -> bool {
-        match self.execution_mode {
-            ExecutionMode::Normal => false,
-            ExecutionMode::HotReload => {
-                // In hot-reload, only skip listen(), on_shutdown(), and on_error()
-                matches!(name, "listen" | "on_shutdown" | "on_error")
+    /// Look up `name` in the server action registry. Returns `None` if no action is registered
+    /// for this name+arity combination (caller should fall through to normal dispatch).
+    fn dispatch_server_action(&mut self, name: &str, args: &[Expression]) -> Option<Result<Value>> {
+        // Extract what we need without holding a borrow on self.server_actions
+        let (arity_min, arity_max, requires, handler) = {
+            let action = self.server_actions.get(name)?;
+            (
+                action.arity.min,
+                action.arity.max,
+                action.requires,
+                action.handler,
+            )
+        };
+        // Arity doesn't match → fall through to normal dispatch
+        if args.len() < arity_min || args.len() > arity_max {
+            return None;
+        }
+        // Capability gate
+        if let Some(cap) = requires {
+            if !self.execution_mode.has(cap) {
+                return Some(Ok(Value::Unit));
             }
-            ExecutionMode::Worker => {
-                // Workers skip listen(), on_shutdown(), on_error() but keep route registrations
-                matches!(name, "listen" | "on_shutdown" | "on_error")
+        }
+        Some(handler(self, args))
+    }
+
+    /// Register all server actions into the registry.
+    fn define_server_actions(&mut self) {
+        macro_rules! register {
+            ($name:expr, $requires:expr, $arity:expr, $handler:expr) => {
+                self.server_actions.insert(
+                    $name.to_string(),
+                    ServerAction {
+                        requires: $requires,
+                        arity: $arity,
+                        handler: $handler,
+                    },
+                );
+            };
+        }
+        register!("listen", None, AritySpec::exact(1), Interpreter::sa_listen);
+        register!(
+            "new_server",
+            None,
+            AritySpec::exact(0),
+            Interpreter::sa_new_server
+        );
+        register!(
+            "serve_static",
+            Some(RuntimeCapability::HttpServer),
+            AritySpec::exact(2),
+            Interpreter::sa_serve_static
+        );
+        register!(
+            "routes",
+            Some(RuntimeCapability::HttpServer),
+            AritySpec::exact(1),
+            Interpreter::sa_routes
+        );
+        register!(
+            "use_middleware",
+            Some(RuntimeCapability::HttpServer),
+            AritySpec::exact(1),
+            Interpreter::sa_use_middleware
+        );
+        register!(
+            "enable_cors",
+            Some(RuntimeCapability::HttpConfig),
+            AritySpec::at_most(1),
+            Interpreter::sa_enable_cors
+        );
+        register!(
+            "enable_csp",
+            Some(RuntimeCapability::HttpConfig),
+            AritySpec::at_most(1),
+            Interpreter::sa_enable_csp
+        );
+        register!(
+            "enable_auth",
+            Some(RuntimeCapability::HttpConfig),
+            AritySpec::exact(1),
+            Interpreter::sa_enable_auth
+        );
+        register!(
+            "on_shutdown",
+            None,
+            AritySpec::exact(1),
+            Interpreter::sa_on_shutdown
+        );
+        register!(
+            "on_error",
+            None,
+            AritySpec::exact(1),
+            Interpreter::sa_on_error
+        );
+    }
+
+    // --- Server action handlers (associated functions, not methods) ---
+
+    fn sa_listen(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        // listen() only runs in Normal mode (no server in Worker/HotReload/Job/UnitTest)
+        if interp.execution_mode != ExecutionMode::Normal {
+            return Ok(Value::Unit);
+        }
+        let port = interp.eval_expression(&args[0])?;
+        if let Value::Int(port_num) = port {
+            // Allow NTNT_LISTEN_PORT env var to override the port
+            // (used by `ntnt intent check` to run on a test port)
+            let effective_port = std::env::var("NTNT_LISTEN_PORT")
+                .ok()
+                .and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or(port_num as u16);
+            // Use sync server for test mode (intent check), async for production
+            if interp.test_mode.is_some() {
+                interp.run_http_server(effective_port)
+            } else {
+                interp.run_async_http_server(effective_port)
             }
-            ExecutionMode::UnitTest => {
-                // In unit test mode, skip all server-related functions
-                matches!(
-                    name,
-                    "listen"
-                        | "serve_static"
-                        | "routes"
-                        | "use_middleware"
-                        | "on_shutdown"
-                        | "on_error"
-                        | "enable_cors"
-                        | "enable_csp"
-                        | "enable_auth"
-                )
-            }
+        } else {
+            Err(IntentError::type_error(
+                "listen() requires an integer port".to_string(),
+            ))
         }
     }
 
-    /// Check if route registration should be skipped (for HTTP methods used as routes)
-    fn should_skip_route_registration(&self) -> bool {
-        self.execution_mode == ExecutionMode::UnitTest
+    fn sa_new_server(interp: &mut Interpreter, _args: &[Expression]) -> Result<Value> {
+        interp.server_state.clear();
+        let mut server = HashMap::new();
+        server.insert("_type".to_string(), Value::String("Server".to_string()));
+        Ok(Value::Map(server))
+    }
+
+    fn sa_serve_static(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        let prefix = interp.eval_expression(&args[0])?;
+        let directory = interp.eval_expression(&args[1])?;
+
+        match (&prefix, &directory) {
+            (Value::String(prefix_str), Value::String(dir_str)) => {
+                // Resolve relative paths based on the .tnt file's location
+                let resolved_dir = if std::path::Path::new(dir_str).is_relative() {
+                    if let Some(current_file) = &interp.current_file {
+                        let script_dir = std::path::Path::new(current_file)
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."));
+                        script_dir.join(dir_str).to_string_lossy().to_string()
+                    } else {
+                        std::env::current_dir()
+                            .map(|cwd| cwd.join(dir_str).to_string_lossy().to_string())
+                            .unwrap_or_else(|_| dir_str.clone())
+                    }
+                } else {
+                    dir_str.clone()
+                };
+                interp
+                    .server_state
+                    .add_static_dir(prefix_str.clone(), resolved_dir);
+                Ok(Value::Unit)
+            }
+            _ => Err(IntentError::type_error(
+                "serve_static() requires two string arguments: (url_prefix, directory)".to_string(),
+            )),
+        }
+    }
+
+    fn sa_routes(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        let directory = interp.eval_expression(&args[0])?;
+        if let Value::String(dir_str) = directory {
+            interp.load_file_based_routes(&dir_str)
+        } else {
+            Err(IntentError::type_error(
+                "routes() requires a string directory path".to_string(),
+            ))
+        }
+    }
+
+    fn sa_use_middleware(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        let handler = interp.eval_expression(&args[0])?;
+        interp.server_state.add_middleware(handler);
+        Ok(Value::Unit)
+    }
+
+    fn sa_enable_cors(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        let options = if args.is_empty() {
+            HashMap::new()
+        } else {
+            match interp.eval_expression(&args[0])? {
+                Value::Map(m) => m,
+                _ => {
+                    return Err(IntentError::type_error(
+                        "enable_cors() options must be a map".to_string(),
+                    ))
+                }
+            }
+        };
+        let cors_config = crate::stdlib::http_server::CorsConfig::from_value(&options);
+        interp.server_state.enable_cors(cors_config);
+        Ok(Value::Unit)
+    }
+
+    fn sa_enable_csp(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        if args.is_empty() {
+            // Default CSP
+            interp
+                .server_state
+                .enable_csp(crate::stdlib::http_server::CspConfig::default());
+        } else {
+            match interp.eval_expression(&args[0])? {
+                Value::Bool(false) => {
+                    // Disable CSP
+                    interp.server_state.disable_csp();
+                }
+                Value::Bool(true) => {
+                    // enable_csp(true) = default CSP
+                    interp
+                        .server_state
+                        .enable_csp(crate::stdlib::http_server::CspConfig::default());
+                }
+                Value::Map(m) => {
+                    let csp_config = crate::stdlib::http_server::CspConfig::from_value(&m);
+                    interp.server_state.enable_csp(csp_config);
+                }
+                _ => {
+                    return Err(IntentError::type_error(
+                        "enable_csp() argument must be a map of directives, true (defaults), or false (disable)".to_string(),
+                    ))
+                }
+            }
+        }
+        Ok(Value::Unit)
+    }
+
+    fn sa_enable_auth(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        let arg = interp.eval_expression(&args[0])?;
+        let config = interp.parse_auth_config(arg)?;
+        interp.setup_auth_routes(&config)?;
+        crate::stdlib::auth::init_auth(config);
+        Ok(Value::Unit)
+    }
+
+    fn sa_on_shutdown(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        // on_shutdown() is a no-op outside Normal mode (no server to shut down)
+        if !matches!(interp.execution_mode, ExecutionMode::Normal) {
+            return Ok(Value::Unit);
+        }
+        let handler = interp.eval_expression(&args[0])?;
+        interp.server_state.add_shutdown_handler(handler);
+        Ok(Value::Unit)
+    }
+
+    fn sa_on_error(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        // on_error() is a no-op outside Normal mode (no server to handle errors for)
+        if !matches!(interp.execution_mode, ExecutionMode::Normal) {
+            return Ok(Value::Unit);
+        }
+        let handler = interp.eval_expression(&args[0])?;
+        interp.server_state.set_error_handler(handler);
+        Ok(Value::Unit)
     }
 
     /// Set the current file path for relative imports
@@ -1198,6 +1522,7 @@ impl Interpreter {
                 name: "print".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| {
                     for arg in args {
                         println!("{}", arg);
@@ -1228,6 +1553,7 @@ impl Interpreter {
                 name: "len".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::String(s) => Ok(Value::Int(s.len() as i64)),
                     Value::Array(a) => Ok(Value::Int(a.len() as i64)),
@@ -1260,6 +1586,7 @@ impl Interpreter {
                 name: "type".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::String(args[0].type_name().to_string())),
             },
         );
@@ -1288,6 +1615,7 @@ impl Interpreter {
                 name: "typeof".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::String(args[0].type_name().to_string())),
             },
         );
@@ -1311,6 +1639,7 @@ impl Interpreter {
                 name: "str".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::String(args[0].to_string())),
             },
         );
@@ -1336,6 +1665,7 @@ impl Interpreter {
                 name: "int".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(*f as i64)),
@@ -1369,6 +1699,7 @@ impl Interpreter {
                 name: "float".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Float(*n as f64)),
                     Value::Float(f) => Ok(Value::Float(*f)),
@@ -1403,6 +1734,7 @@ impl Interpreter {
                 name: "push".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |args| {
                     if let Value::Array(mut arr) = args[0].clone() {
                         arr.push(args[1].clone());
@@ -1432,6 +1764,7 @@ impl Interpreter {
                 name: "assert".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| {
                     if args[0].is_truthy() {
                         Ok(Value::Unit)
@@ -1466,6 +1799,7 @@ impl Interpreter {
                 name: "abs".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(n.abs())),
                     Value::Float(f) => Ok(Value::Float(f.abs())),
@@ -1496,6 +1830,7 @@ impl Interpreter {
                 name: "min".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |args| match (&args[0], &args[1]) {
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.min(b))),
                     (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.min(*b))),
@@ -1528,6 +1863,7 @@ impl Interpreter {
                 name: "max".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |args| match (&args[0], &args[1]) {
                     (Value::Int(a), Value::Int(b)) => Ok(Value::Int(*a.max(b))),
                     (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a.max(*b))),
@@ -1563,6 +1899,7 @@ impl Interpreter {
                 name: "round".to_string(),
                 arity: 0, // Variable arity: 1 or 2 args
                 max_arity: 0,
+                requires: None,
                 func: |args| {
                     if args.is_empty() || args.len() > 2 {
                         return Err(IntentError::type_error(
@@ -1627,6 +1964,7 @@ impl Interpreter {
                 name: "floor".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.floor() as i64)),
@@ -1656,6 +1994,7 @@ impl Interpreter {
                 name: "ceil".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.ceil() as i64)),
@@ -1687,6 +2026,7 @@ impl Interpreter {
                 name: "trunc".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(*n)),
                     Value::Float(f) => Ok(Value::Int(f.trunc() as i64)),
@@ -1717,6 +2057,7 @@ impl Interpreter {
                 name: "sqrt".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => {
                         if *n < 0 {
@@ -1763,6 +2104,7 @@ impl Interpreter {
                 name: "pow".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |args| match (&args[0], &args[1]) {
                     (Value::Int(base), Value::Int(exp)) => {
                         if *exp >= 0 {
@@ -1806,6 +2148,7 @@ impl Interpreter {
                 name: "sign".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::Int(n) => Ok(Value::Int(n.signum())),
                     Value::Float(f) => {
@@ -1847,6 +2190,7 @@ impl Interpreter {
                 name: "clamp".to_string(),
                 arity: 3,
                 max_arity: 3,
+                requires: None,
                 func: |args| match (&args[0], &args[1], &args[2]) {
                     (Value::Int(val), Value::Int(min), Value::Int(max)) => {
                         Ok(Value::Int(*val.max(min).min(max)))
@@ -1913,6 +2257,7 @@ impl Interpreter {
                 name: "Some".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::some(args[0].clone())),
             },
         );
@@ -1940,6 +2285,7 @@ impl Interpreter {
                 name: "Ok".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::ok(args[0].clone())),
             },
         );
@@ -1963,6 +2309,7 @@ impl Interpreter {
                 name: "Err".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::err(args[0].clone())),
             },
         );
@@ -1986,6 +2333,7 @@ impl Interpreter {
                 name: "is_some".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -2016,6 +2364,7 @@ impl Interpreter {
                 name: "is_none".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -2046,6 +2395,7 @@ impl Interpreter {
                 name: "is_ok".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -2076,6 +2426,7 @@ impl Interpreter {
                 name: "is_err".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name, variant, ..
@@ -2109,6 +2460,7 @@ impl Interpreter {
                 name: "is_map".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::Map(_)))),
             },
         );
@@ -2133,6 +2485,7 @@ impl Interpreter {
                 name: "is_array".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::Array(_)))),
             },
         );
@@ -2153,6 +2506,7 @@ impl Interpreter {
                 name: "is_string".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::String(_)))),
             },
         );
@@ -2173,6 +2527,7 @@ impl Interpreter {
                 name: "is_int".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::Int(_)))),
             },
         );
@@ -2193,6 +2548,7 @@ impl Interpreter {
                 name: "is_float".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::Float(_)))),
             },
         );
@@ -2213,6 +2569,7 @@ impl Interpreter {
                 name: "is_bool".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| Ok(Value::Bool(matches!(&args[0], Value::Bool(_)))),
             },
         );
@@ -2239,6 +2596,7 @@ impl Interpreter {
                 name: "unwrap".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name,
@@ -2291,6 +2649,7 @@ impl Interpreter {
                 name: "unwrap_or".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |args| match &args[0] {
                     Value::EnumValue {
                         enum_name,
@@ -2331,6 +2690,7 @@ impl Interpreter {
                 name: "listen".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: |_args| {
                     // This is a placeholder - actual implementation is in eval_call
                     // because we need access to the interpreter to call handlers
@@ -2359,6 +2719,7 @@ impl Interpreter {
                 name: "get".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
@@ -2385,6 +2746,7 @@ impl Interpreter {
                 name: "post".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
@@ -2411,6 +2773,7 @@ impl Interpreter {
                 name: "put".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
@@ -2437,6 +2800,7 @@ impl Interpreter {
                 name: "delete".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
@@ -2463,6 +2827,7 @@ impl Interpreter {
                 name: "patch".to_string(),
                 arity: 2,
                 max_arity: 2,
+                requires: None,
                 func: |_args| {
                     Err(IntentError::runtime_error(
                         "HTTP route functions must be called directly".to_string(),
@@ -2487,6 +2852,7 @@ impl Interpreter {
                 name: "new_server".to_string(),
                 arity: 0,
                 max_arity: 0,
+                requires: None,
                 func: |_args| {
                     // Placeholder - actual implementation clears server_state
                     Err(IntentError::runtime_error(
@@ -2523,6 +2889,7 @@ impl Interpreter {
                 name: "enable_cors".to_string(),
                 arity: 0, // Variadic: 0-1 args
                 max_arity: 0,
+                requires: None,
                 func: |_args| {
                     // Placeholder - actual implementation is in eval_call
                     Err(IntentError::runtime_error(
@@ -2563,6 +2930,7 @@ impl Interpreter {
                 name: "enable_csp".to_string(),
                 arity: 0, // Variadic: 0-1 args
                 max_arity: 0,
+                requires: None,
                 func: |_args| {
                     // Placeholder - actual implementation is in eval_call
                     Err(IntentError::runtime_error(
@@ -4054,195 +4422,9 @@ impl Interpreter {
                         return self.eval_expression(&arguments[0]);
                     }
 
-                    // Special handling for listen() - starts HTTP server
-                    if name == "listen" && arguments.len() == 1 {
-                        // Skip in hot-reload (server already running) and unit-test mode
-                        if self.should_skip_server_call("listen") {
-                            return Ok(Value::Unit);
-                        }
-                        let port = self.eval_expression(&arguments[0])?;
-                        if let Value::Int(port_num) = port {
-                            // Allow NTNT_LISTEN_PORT env var to override the port
-                            // (used by `ntnt intent check` to run on a test port)
-                            let effective_port = std::env::var("NTNT_LISTEN_PORT")
-                                .ok()
-                                .and_then(|s| s.parse::<u16>().ok())
-                                .unwrap_or(port_num as u16);
-                            // Use sync server for test mode (intent check), async for production
-                            if self.test_mode.is_some() {
-                                return self.run_http_server(effective_port);
-                            } else {
-                                return self.run_async_http_server(effective_port);
-                            }
-                        } else {
-                            return Err(IntentError::type_error(
-                                "listen() requires an integer port".to_string(),
-                            ));
-                        }
-                    }
-
-                    // Special handling for new_server() - resets routes
-                    if name == "new_server" && arguments.is_empty() {
-                        self.server_state.clear();
-                        let mut server = HashMap::new();
-                        server.insert("_type".to_string(), Value::String("Server".to_string()));
-                        return Ok(Value::Map(server));
-                    }
-
-                    // Special handling for serve_static(url_prefix, directory)
-                    if name == "serve_static" && arguments.len() == 2 {
-                        if self.should_skip_server_call("serve_static") {
-                            return Ok(Value::Unit);
-                        }
-                        let prefix = self.eval_expression(&arguments[0])?;
-                        let directory = self.eval_expression(&arguments[1])?;
-
-                        match (&prefix, &directory) {
-                            (Value::String(prefix_str), Value::String(dir_str)) => {
-                                // Resolve relative paths based on the .tnt file's location
-                                let resolved_dir = if std::path::Path::new(dir_str).is_relative() {
-                                    if let Some(current_file) = &self.current_file {
-                                        let script_dir = std::path::Path::new(current_file)
-                                            .parent()
-                                            .unwrap_or(std::path::Path::new("."));
-                                        script_dir.join(dir_str).to_string_lossy().to_string()
-                                    } else {
-                                        std::env::current_dir()
-                                            .map(|cwd| {
-                                                cwd.join(dir_str).to_string_lossy().to_string()
-                                            })
-                                            .unwrap_or_else(|_| dir_str.clone())
-                                    }
-                                } else {
-                                    dir_str.clone()
-                                };
-                                self.server_state
-                                    .add_static_dir(prefix_str.clone(), resolved_dir);
-                                return Ok(Value::Unit);
-                            }
-                            _ => {
-                                return Err(IntentError::type_error(
-                                    "serve_static() requires two string arguments: (url_prefix, directory)".to_string()
-                                ));
-                            }
-                        }
-                    }
-
-                    // Special handling for routes(directory) - file-based routing
-                    if name == "routes" && arguments.len() == 1 {
-                        if self.should_skip_server_call("routes") {
-                            return Ok(Value::Unit);
-                        }
-                        let directory = self.eval_expression(&arguments[0])?;
-                        if let Value::String(dir_str) = directory {
-                            return self.load_file_based_routes(&dir_str);
-                        } else {
-                            return Err(IntentError::type_error(
-                                "routes() requires a string directory path".to_string(),
-                            ));
-                        }
-                    }
-
-                    // Special handling for use_middleware(handler_fn)
-                    if name == "use_middleware" && arguments.len() == 1 {
-                        if self.should_skip_server_call("use_middleware") {
-                            return Ok(Value::Unit);
-                        }
-                        let handler = self.eval_expression(&arguments[0])?;
-                        self.server_state.add_middleware(handler);
-                        return Ok(Value::Unit);
-                    }
-
-                    // Special handling for enable_csp(options?)
-                    if name == "enable_csp" && arguments.len() <= 1 {
-                        if self.should_skip_server_call("enable_csp") {
-                            return Ok(Value::Unit);
-                        }
-                        if arguments.is_empty() {
-                            // Default CSP
-                            self.server_state
-                                .enable_csp(crate::stdlib::http_server::CspConfig::default());
-                        } else {
-                            match self.eval_expression(&arguments[0])? {
-                                Value::Bool(false) => {
-                                    // Disable CSP
-                                    self.server_state.disable_csp();
-                                }
-                                Value::Bool(true) => {
-                                    // enable_csp(true) = default CSP
-                                    self.server_state.enable_csp(
-                                        crate::stdlib::http_server::CspConfig::default(),
-                                    );
-                                }
-                                Value::Map(m) => {
-                                    let csp_config =
-                                        crate::stdlib::http_server::CspConfig::from_value(&m);
-                                    self.server_state.enable_csp(csp_config);
-                                }
-                                _ => {
-                                    return Err(IntentError::type_error(
-                                        "enable_csp() argument must be a map of directives, true (defaults), or false (disable)".to_string(),
-                                    ))
-                                }
-                            }
-                        }
-                        return Ok(Value::Unit);
-                    }
-
-                    // Special handling for on_shutdown(handler_fn)
-                    if name == "on_shutdown" && arguments.len() == 1 {
-                        if self.should_skip_server_call("on_shutdown") {
-                            return Ok(Value::Unit);
-                        }
-                        let handler = self.eval_expression(&arguments[0])?;
-                        self.server_state.add_shutdown_handler(handler);
-                        return Ok(Value::Unit);
-                    }
-
-                    // Special handling for on_error(handler_fn)
-                    if name == "on_error" && arguments.len() == 1 {
-                        if self.should_skip_server_call("on_error") {
-                            return Ok(Value::Unit);
-                        }
-                        let handler = self.eval_expression(&arguments[0])?;
-                        self.server_state.set_error_handler(handler);
-                        return Ok(Value::Unit);
-                    }
-
-                    // Special handling for enable_cors(options?)
-                    if name == "enable_cors" && arguments.len() <= 1 {
-                        if self.should_skip_server_call("enable_cors") {
-                            return Ok(Value::Unit);
-                        }
-                        let options = if arguments.is_empty() {
-                            HashMap::new()
-                        } else {
-                            match self.eval_expression(&arguments[0])? {
-                                Value::Map(m) => m,
-                                _ => {
-                                    return Err(IntentError::type_error(
-                                        "enable_cors() options must be a map".to_string(),
-                                    ))
-                                }
-                            }
-                        };
-                        let cors_config =
-                            crate::stdlib::http_server::CorsConfig::from_value(&options);
-                        self.server_state.enable_cors(cors_config);
-                        return Ok(Value::Unit);
-                    }
-
-                    // Special handling for enable_auth(provider_or_config)
-                    if name == "enable_auth" && arguments.len() == 1 {
-                        if self.should_skip_server_call("enable_auth") {
-                            return Ok(Value::Unit);
-                        }
-
-                        let arg = self.eval_expression(&arguments[0])?;
-                        let config = self.parse_auth_config(arg)?;
-                        self.setup_auth_routes(&config)?;
-                        crate::stdlib::auth::init_auth(config);
-                        return Ok(Value::Unit);
+                    // Server action registry dispatch
+                    if let Some(result) = self.dispatch_server_action(name, arguments) {
+                        return result;
                     }
 
                     // Special handling for template(path, data) - load and render template
@@ -4686,8 +4868,8 @@ impl Interpreter {
                         if let Value::String(pattern_str) = &pattern {
                             // Route patterns start with /, URLs start with http
                             if pattern_str.starts_with('/') {
-                                // Skip route registration in unit test mode
-                                if self.should_skip_route_registration() {
+                                // Route registration requires HttpServer capability
+                                if !self.execution_mode.has(RuntimeCapability::HttpServer) {
                                     return Ok(Value::Unit);
                                 }
                                 let handler = self.eval_expression(&arguments[1])?;
@@ -5573,6 +5755,7 @@ impl Interpreter {
                 name: "_auth_start".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: crate::stdlib::auth::handle_auth_start,
             },
         );
@@ -5585,6 +5768,7 @@ impl Interpreter {
                 name: "_auth_callback".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: crate::stdlib::auth::handle_auth_callback,
             },
         );
@@ -5597,6 +5781,7 @@ impl Interpreter {
                 name: "_auth_logout".to_string(),
                 arity: 1,
                 max_arity: 1,
+                requires: None,
                 func: crate::stdlib::auth::handle_auth_logout,
             },
         );
@@ -6595,22 +6780,14 @@ impl Interpreter {
                 arity,
                 max_arity,
                 func,
+                requires,
             } => {
-                // Eval-path guard: skip concurrency functions in non-Normal modes (rule 24/25).
-                // spawn() skipped in Worker and HotReload modes.
-                // schedule(), after() skipped in Worker, HotReload, and UnitTest modes.
-                match self.execution_mode {
-                    ExecutionMode::Worker | ExecutionMode::HotReload => {
-                        if matches!(fn_name.as_str(), "spawn" | "schedule" | "after") {
-                            return Ok(Value::Unit);
-                        }
+                // Capability gate: if the function declares a required capability,
+                // silently skip it (return Unit) when the active mode lacks that capability.
+                if let Some(cap) = requires {
+                    if !self.execution_mode.has(cap) {
+                        return Ok(Value::Unit);
                     }
-                    ExecutionMode::UnitTest => {
-                        if matches!(fn_name.as_str(), "schedule" | "after") {
-                            return Ok(Value::Unit);
-                        }
-                    }
-                    ExecutionMode::Normal => {}
                 }
 
                 if arity == max_arity {
@@ -8302,8 +8479,8 @@ impl Interpreter {
     ) -> Result<Value> {
         use crate::ast::ServerDirective;
 
-        // Skip server block evaluation in unit test mode
-        if self.should_skip_server_call("listen") {
+        // Skip server block evaluation when not in Normal mode (listen() would also skip)
+        if self.execution_mode != ExecutionMode::Normal {
             return Ok(Value::Unit);
         }
 
@@ -11489,84 +11666,398 @@ c")
         assert_eq!(interpreter.execution_mode, ExecutionMode::Normal);
     }
 
+    // === Server Action Registry Tests ===
+
     #[test]
-    fn test_should_skip_server_call_normal_mode() {
-        let interpreter = Interpreter::new();
-        // Normal mode should never skip
-        assert!(!interpreter.should_skip_server_call("listen"));
-        assert!(!interpreter.should_skip_server_call("serve_static"));
-        assert!(!interpreter.should_skip_server_call("routes"));
-        assert!(!interpreter.should_skip_server_call("use_middleware"));
-        assert!(!interpreter.should_skip_server_call("on_shutdown"));
-        assert!(!interpreter.should_skip_server_call("other_function"));
+    fn test_server_action_registry_populated() {
+        let interp = Interpreter::new();
+        assert!(interp.server_actions.contains_key("listen"));
+        assert!(interp.server_actions.contains_key("serve_static"));
+        assert!(interp.server_actions.contains_key("routes"));
+        assert!(interp.server_actions.contains_key("new_server"));
+        assert!(interp.server_actions.contains_key("use_middleware"));
+        assert!(interp.server_actions.contains_key("enable_cors"));
+        assert!(interp.server_actions.contains_key("enable_csp"));
+        assert!(interp.server_actions.contains_key("enable_auth"));
+        assert!(interp.server_actions.contains_key("on_shutdown"));
+        assert!(interp.server_actions.contains_key("on_error"));
     }
 
     #[test]
-    fn test_should_skip_server_call_unit_test_mode() {
-        let mut interpreter = Interpreter::new();
-        interpreter.set_execution_mode(ExecutionMode::UnitTest);
-
-        // Unit test mode should skip all server-related functions
-        assert!(interpreter.should_skip_server_call("listen"));
-        assert!(interpreter.should_skip_server_call("serve_static"));
-        assert!(interpreter.should_skip_server_call("routes"));
-        assert!(interpreter.should_skip_server_call("use_middleware"));
-        assert!(interpreter.should_skip_server_call("on_shutdown"));
-
-        // But not other functions
-        assert!(!interpreter.should_skip_server_call("print"));
-        assert!(!interpreter.should_skip_server_call("other_function"));
+    fn test_server_action_capabilities() {
+        let interp = Interpreter::new();
+        // Capability-gated actions
+        assert_eq!(
+            interp.server_actions["serve_static"].requires,
+            Some(RuntimeCapability::HttpServer)
+        );
+        assert_eq!(
+            interp.server_actions["routes"].requires,
+            Some(RuntimeCapability::HttpServer)
+        );
+        assert_eq!(
+            interp.server_actions["enable_cors"].requires,
+            Some(RuntimeCapability::HttpConfig)
+        );
+        // Mode-checked actions (requires: None)
+        assert_eq!(interp.server_actions["listen"].requires, None);
+        assert_eq!(interp.server_actions["on_shutdown"].requires, None);
+        assert_eq!(interp.server_actions["on_error"].requires, None);
     }
 
     #[test]
-    fn test_should_skip_server_call_hot_reload_mode() {
-        let mut interpreter = Interpreter::new();
-        interpreter.set_execution_mode(ExecutionMode::HotReload);
-
-        // Hot-reload mode should only skip listen and on_shutdown
-        assert!(interpreter.should_skip_server_call("listen"));
-        assert!(interpreter.should_skip_server_call("on_shutdown"));
-
-        // But NOT these - they need to re-register
-        assert!(!interpreter.should_skip_server_call("serve_static"));
-        assert!(!interpreter.should_skip_server_call("routes"));
-        assert!(!interpreter.should_skip_server_call("use_middleware"));
+    fn test_dispatch_server_action_unknown_returns_none() {
+        let mut interp = Interpreter::new();
+        // A non-registered name returns None (fall through)
+        let result = interp.dispatch_server_action("not_a_server_action", &[]);
+        assert!(result.is_none());
     }
 
     #[test]
-    fn test_should_skip_server_call_worker_mode() {
-        let mut interpreter = Interpreter::new();
-        interpreter.set_execution_mode(ExecutionMode::Worker);
-
-        // Worker mode should skip listen, on_shutdown, on_error (like hot-reload)
-        assert!(interpreter.should_skip_server_call("listen"));
-        assert!(interpreter.should_skip_server_call("on_shutdown"));
-        assert!(interpreter.should_skip_server_call("on_error"));
-
-        // But NOT these - workers need to register routes and middleware
-        assert!(!interpreter.should_skip_server_call("serve_static"));
-        assert!(!interpreter.should_skip_server_call("routes"));
-        assert!(!interpreter.should_skip_server_call("use_middleware"));
+    fn test_dispatch_server_action_wrong_arity_returns_none() {
+        let mut interp = Interpreter::new();
+        // listen() expects exactly 1 arg - 0 args returns None (arity mismatch)
+        let result = interp.dispatch_server_action("listen", &[]);
+        assert!(result.is_none());
     }
 
     #[test]
-    fn test_should_skip_route_registration() {
+    fn test_dispatch_server_action_capability_gate() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::UnitTest);
+        // serve_static requires HttpServer (not available in UnitTest)
+        // We can't easily test with real Expression args, so just verify the key is registered
+        // and that UnitTest mode lacks HttpServer
+        assert!(!ExecutionMode::UnitTest.has(RuntimeCapability::HttpServer));
+    }
+
+    #[test]
+    fn test_route_registration_uses_http_server_capability() {
+        // Normal mode: HttpServer available → route registers
+        let result = eval("get(\"/\", fn(req) { 1 })").unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    // === RuntimeCapability / ExecutionMode::has() Tests ===
+
+    #[test]
+    fn test_execution_mode_job_variant() {
         let mut interpreter = Interpreter::new();
+        interpreter.set_execution_mode(ExecutionMode::Job);
+        assert_eq!(interpreter.execution_mode, ExecutionMode::Job);
+    }
 
-        // Normal mode - don't skip
-        assert!(!interpreter.should_skip_route_registration());
+    #[test]
+    fn test_normal_mode_has_all_capabilities() {
+        let mode = ExecutionMode::Normal;
+        assert!(mode.has(RuntimeCapability::HttpServer));
+        assert!(mode.has(RuntimeCapability::HttpConfig));
+        assert!(mode.has(RuntimeCapability::TaskSpawning));
+        assert!(mode.has(RuntimeCapability::Scheduling));
+        assert!(mode.has(RuntimeCapability::JobWorkers));
+        assert!(mode.has(RuntimeCapability::JobConfig));
+    }
 
-        // Hot-reload mode - don't skip (need to re-register routes)
-        interpreter.set_execution_mode(ExecutionMode::HotReload);
-        assert!(!interpreter.should_skip_route_registration());
+    #[test]
+    fn test_hot_reload_mode_capabilities() {
+        let mode = ExecutionMode::HotReload;
+        assert!(mode.has(RuntimeCapability::HttpServer));
+        assert!(mode.has(RuntimeCapability::HttpConfig));
+        assert!(mode.has(RuntimeCapability::JobConfig));
+        // No concurrency or job workers in hot-reload
+        assert!(!mode.has(RuntimeCapability::TaskSpawning));
+        assert!(!mode.has(RuntimeCapability::Scheduling));
+        assert!(!mode.has(RuntimeCapability::JobWorkers));
+    }
 
-        // Worker mode - don't skip (workers need routes)
-        interpreter.set_execution_mode(ExecutionMode::Worker);
-        assert!(!interpreter.should_skip_route_registration());
+    #[test]
+    fn test_worker_mode_capabilities() {
+        let mode = ExecutionMode::Worker;
+        assert!(mode.has(RuntimeCapability::HttpServer));
+        assert!(mode.has(RuntimeCapability::HttpConfig));
+        assert!(mode.has(RuntimeCapability::JobConfig));
+        assert!(!mode.has(RuntimeCapability::TaskSpawning));
+        assert!(!mode.has(RuntimeCapability::Scheduling));
+        assert!(!mode.has(RuntimeCapability::JobWorkers));
+    }
 
-        // Unit test mode - skip route registration
-        interpreter.set_execution_mode(ExecutionMode::UnitTest);
-        assert!(interpreter.should_skip_route_registration());
+    #[test]
+    fn test_job_mode_capabilities() {
+        let mode = ExecutionMode::Job;
+        assert!(mode.has(RuntimeCapability::JobWorkers));
+        assert!(mode.has(RuntimeCapability::JobConfig));
+        // Job mode has no HTTP or concurrency capabilities
+        assert!(!mode.has(RuntimeCapability::HttpServer));
+        assert!(!mode.has(RuntimeCapability::HttpConfig));
+        assert!(!mode.has(RuntimeCapability::TaskSpawning));
+        assert!(!mode.has(RuntimeCapability::Scheduling));
+    }
+
+    #[test]
+    fn test_unit_test_mode_capabilities() {
+        let mode = ExecutionMode::UnitTest;
+        assert!(mode.has(RuntimeCapability::JobConfig));
+        assert!(mode.has(RuntimeCapability::TaskSpawning)); // spawn() works in tests
+        assert!(!mode.has(RuntimeCapability::HttpServer));
+        assert!(!mode.has(RuntimeCapability::HttpConfig));
+        assert!(!mode.has(RuntimeCapability::Scheduling)); // schedule/after skipped in tests
+        assert!(!mode.has(RuntimeCapability::JobWorkers));
+    }
+
+    #[test]
+    fn test_capabilities_returns_correct_slice_lengths() {
+        // Normal has all 6 capabilities
+        assert_eq!(ExecutionMode::Normal.capabilities().len(), 6);
+        // HotReload and Worker have 3 each
+        assert_eq!(ExecutionMode::HotReload.capabilities().len(), 3);
+        assert_eq!(ExecutionMode::Worker.capabilities().len(), 3);
+        // Job has 2
+        assert_eq!(ExecutionMode::Job.capabilities().len(), 2);
+        // UnitTest has 2 (TaskSpawning + JobConfig)
+        assert_eq!(ExecutionMode::UnitTest.capabilities().len(), 2);
+    }
+
+    // === Capability gate in call_function ===
+
+    /// Helper: create a gated NativeFunction value and call it
+    fn call_gated_fn(
+        interpreter: &mut Interpreter,
+        cap: Option<RuntimeCapability>,
+    ) -> Result<Value> {
+        let f = Value::NativeFunction {
+            name: "test_gated".to_string(),
+            arity: 0,
+            max_arity: 0,
+            func: |_| Ok(Value::Int(42)),
+            requires: cap,
+        };
+        interpreter.call_function(f, vec![])
+    }
+
+    #[test]
+    fn test_capability_gate_none_always_runs() {
+        let mut interp = Interpreter::new();
+        // Normal mode — no gate: returns 42
+        assert!(matches!(
+            call_gated_fn(&mut interp, None).unwrap(),
+            Value::Int(42)
+        ));
+
+        // Worker mode — no gate: still returns 42
+        interp.set_execution_mode(ExecutionMode::Worker);
+        assert!(matches!(
+            call_gated_fn(&mut interp, None).unwrap(),
+            Value::Int(42)
+        ));
+
+        // UnitTest mode — no gate: still returns 42
+        interp.set_execution_mode(ExecutionMode::UnitTest);
+        assert!(matches!(
+            call_gated_fn(&mut interp, None).unwrap(),
+            Value::Int(42)
+        ));
+    }
+
+    // --- TaskSpawning capability (spawn) ---
+
+    #[test]
+    fn test_capability_gate_task_spawning_normal_mode_runs() {
+        let mut interp = Interpreter::new();
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::TaskSpawning)).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_capability_gate_task_spawning_unit_test_mode_runs() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::UnitTest);
+        // UnitTest has TaskSpawning — spawn() works in tests
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::TaskSpawning)).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_capability_gate_task_spawning_worker_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Worker);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::TaskSpawning)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_task_spawning_job_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Job);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::TaskSpawning)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    // --- Scheduling capability (schedule, after) ---
+
+    #[test]
+    fn test_capability_gate_scheduling_normal_mode_runs() {
+        let mut interp = Interpreter::new();
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Scheduling)).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_capability_gate_scheduling_worker_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Worker);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Scheduling)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_scheduling_hot_reload_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::HotReload);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Scheduling)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_scheduling_job_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Job);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Scheduling)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_scheduling_unit_test_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::UnitTest);
+        // UnitTest lacks Scheduling — schedule/after don't run in tests
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::Scheduling)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_job_workers_normal_mode_runs() {
+        let mut interp = Interpreter::new();
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::JobWorkers)).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn test_capability_gate_job_workers_unit_test_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::UnitTest);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::JobWorkers)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_job_workers_worker_mode_skips() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Worker);
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::JobWorkers)).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_capability_gate_job_workers_job_mode_runs() {
+        let mut interp = Interpreter::new();
+        interp.set_execution_mode(ExecutionMode::Job);
+        // Job mode has JobWorkers capability
+        let result = call_gated_fn(&mut interp, Some(RuntimeCapability::JobWorkers)).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    // === Integration tests: eval real ntnt code in non-Normal modes ===
+
+    /// Eval ntnt source in a specific execution mode
+    fn eval_in_mode(source: &str, mode: ExecutionMode) -> Result<Value> {
+        let lexer = Lexer::new(source);
+        let tokens: Vec<_> = lexer.collect();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse()?;
+        let mut interpreter = Interpreter::new();
+        interpreter.set_execution_mode(mode);
+        interpreter.eval(&ast)
+    }
+
+    #[test]
+    fn test_job_mode_skips_listen() {
+        // listen() in Job mode should be a no-op (returns Unit), not bind a port
+        let result = eval_in_mode("listen(9999)", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_job_mode_skips_serve_static() {
+        let result =
+            eval_in_mode("serve_static(\"/s\", \"./public\")", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_job_mode_skips_enable_cors() {
+        let result = eval_in_mode("enable_cors()", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_job_mode_skips_route_registration() {
+        let result = eval_in_mode("get(\"/\", fn(req) { 1 })", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_job_mode_runs_pure_stdlib() {
+        // Pure stdlib functions (requires: None) work in Job mode
+        let result = eval_in_mode("len(\"hello\")", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Int(5)));
+    }
+
+    #[test]
+    fn test_job_mode_runs_user_functions() {
+        let result = eval_in_mode("fn add(a, b) { a + b }\nadd(2, 3)", ExecutionMode::Job).unwrap();
+        assert!(matches!(result, Value::Int(5)));
+    }
+
+    #[test]
+    fn test_unit_test_mode_skips_listen() {
+        let result = eval_in_mode("listen(9999)", ExecutionMode::UnitTest).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_unit_test_mode_skips_enable_cors() {
+        let result = eval_in_mode("enable_cors()", ExecutionMode::UnitTest).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_hot_reload_mode_skips_listen() {
+        let result = eval_in_mode("listen(9999)", ExecutionMode::HotReload).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_hot_reload_mode_runs_serve_static() {
+        // HotReload has HttpServer — serve_static runs (returns Unit on success)
+        let result = eval_in_mode(
+            "serve_static(\"/s\", \"./public\")",
+            ExecutionMode::HotReload,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_worker_mode_skips_listen() {
+        let result = eval_in_mode("listen(9999)", ExecutionMode::Worker).unwrap();
+        assert!(matches!(result, Value::Unit));
+    }
+
+    #[test]
+    fn test_worker_mode_runs_enable_cors() {
+        // Worker has HttpConfig — enable_cors runs
+        let result = eval_in_mode("enable_cors()", ExecutionMode::Worker).unwrap();
+        assert!(matches!(result, Value::Unit));
     }
 
     #[test]

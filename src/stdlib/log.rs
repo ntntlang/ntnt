@@ -122,6 +122,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "log_debug".to_string(),
             arity: 1,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::type_error(
@@ -173,6 +174,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "log_info".to_string(),
             arity: 1,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::type_error(
@@ -223,6 +225,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "log_warn".to_string(),
             arity: 1,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::type_error(
@@ -273,6 +276,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "log_error".to_string(),
             arity: 1,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::type_error(
@@ -324,6 +328,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "set_log_level".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let level_str = match &args[0] {
                     Value::String(s) => s.clone(),
@@ -367,12 +372,14 @@ pub fn init() -> HashMap<String, Value> {
             name: "request_logger".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| {
                 // Return a native function that can be used as middleware
                 Ok(Value::NativeFunction {
                     name: "request_logger_middleware".to_string(),
                     arity: 1,
                     max_arity: 1,
+                    requires: None,
                     func: |args| {
                         let (method, path) = match &args[0] {
                             Value::Map(map) => {

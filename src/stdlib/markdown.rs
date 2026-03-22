@@ -31,6 +31,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_html".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(md) => Ok(markdown_to_html(md, false)),
                 _ => Err(IntentError::type_error(
@@ -51,6 +52,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "to_html_safe".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(md) => Ok(markdown_to_html(md, true)),
                 _ => Err(IntentError::type_error(

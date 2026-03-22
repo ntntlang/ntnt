@@ -28,6 +28,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "get_env".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(name) => match std::env::var(name) {
                     Ok(val) => Ok(Value::some(Value::String(val))),
@@ -56,6 +57,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "args".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| {
                 let args: Vec<Value> = std::env::args().map(Value::String).collect();
                 Ok(Value::Array(args))
@@ -78,6 +80,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "cwd".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| match std::env::current_dir() {
                 Ok(path) => Ok(Value::String(path.to_string_lossy().to_string())),
                 Err(e) => Err(IntentError::runtime_error(format!(
@@ -108,6 +111,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "load_env".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 match &args[0] {
                     Value::String(path) => {

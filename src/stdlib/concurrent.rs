@@ -43,7 +43,7 @@
 //! Note: `sleep()` from std/time is NOT cancellation-aware.
 
 use crate::error::IntentError;
-use crate::interpreter::Value;
+use crate::interpreter::{RuntimeCapability, Value};
 use crossbeam_channel::{self as crossbeam};
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -1116,6 +1116,7 @@ struct CapturedNativeFn {
     fn_name: String,      // the canonical function name
     arity: usize,
     max_arity: usize,
+    requires: Option<crate::interpreter::RuntimeCapability>,
     func: fn(&[Value]) -> Result<Value>,
 }
 
@@ -1135,12 +1136,14 @@ fn capture_bindings(
                 arity,
                 max_arity,
                 func,
+                requires,
             } => {
                 native_fns.push(CapturedNativeFn {
                     binding_name: key.clone(),
                     fn_name: name.clone(),
                     arity: *arity,
                     max_arity: *max_arity,
+                    requires: *requires,
                     func: *func,
                 });
             }
@@ -1185,6 +1188,7 @@ fn inject_captured(interp: &mut crate::interpreter::Interpreter, captured: &Capt
                 name: cap.fn_name.clone(),
                 arity: cap.arity,
                 max_arity: cap.max_arity,
+                requires: cap.requires,
                 func: cap.func,
             },
         );
@@ -1837,6 +1841,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "channel".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| concurrent_channel(),
         },
     );
@@ -1858,6 +1863,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "send".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| concurrent_send(&args[0], &args[1]),
         },
     );
@@ -1880,6 +1886,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "recv".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| concurrent_recv(&args[0]),
         },
     );
@@ -1902,6 +1909,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "recv_timeout".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match &args[1] {
                 Value::Int(ms) => concurrent_recv_timeout(&args[0], *ms),
                 _ => Err(IntentError::type_error(
@@ -1926,6 +1934,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "try_recv".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| concurrent_try_recv(&args[0]),
         },
     );
@@ -1947,6 +1956,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "close".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| concurrent_close(&args[0]),
         },
     );
@@ -1975,6 +1985,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "select".to_string(),
             arity: 1,
             max_arity: 2,
+            requires: None,
             func: concurrent_select,
         },
     );
@@ -1997,6 +2008,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "spawn".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: Some(RuntimeCapability::TaskSpawning),
             func: |args| concurrent_spawn(&args[0]),
         },
     );
@@ -2018,6 +2030,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "await_task".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| concurrent_await_task(&args[0]),
         },
     );
@@ -2039,6 +2052,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "try_await".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| concurrent_try_await(&args[0]),
         },
     );
@@ -2061,6 +2075,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "cancel_task".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| concurrent_cancel_task(&args[0]),
         },
     );
@@ -2083,6 +2098,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "after".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: Some(RuntimeCapability::Scheduling),
             func: |args| concurrent_after(&args[0], &args[1]),
         },
     );
@@ -2107,6 +2123,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "schedule".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: Some(RuntimeCapability::Scheduling),
             func: |args| concurrent_schedule(&args[0], &args[1]),
         },
     );
@@ -2127,6 +2144,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "cancel_schedule".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| concurrent_cancel_schedule(&args[0]),
         },
     );
@@ -2146,6 +2164,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "sleep_ms".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::Int(ms) => concurrent_sleep_ms(*ms),
                 _ => Err(IntentError::type_error(
@@ -2167,6 +2186,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "thread_count".to_string(),
             arity: 0,
             max_arity: 0,
+            requires: None,
             func: |_args| concurrent_thread_count(),
         },
     );
@@ -2481,6 +2501,7 @@ mod tests {
                 name: "test".to_string(),
                 arity: 0,
                 max_arity: 0,
+                requires: None,
                 func: |_| Ok(Value::Unit),
             },
         );

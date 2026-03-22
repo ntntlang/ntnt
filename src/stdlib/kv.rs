@@ -926,6 +926,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             name: "open".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.len() != 1 {
                     return Err(IntentError::type_error(
@@ -1006,6 +1007,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             name: "get".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::type_error(
@@ -1070,6 +1072,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             name: "set".to_string(),
             arity: 3, // variadic: 3-4 args (kv, key, value, opts?)
             max_arity: 4,
+            requires: None,
             func: |args| {
                 if args.len() < 3 || args.len() > 4 {
                     return Err(IntentError::type_error(
@@ -1146,6 +1149,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             name: "set_nx".to_string(),
             arity: 3,
             max_arity: 4,
+            requires: None,
             func: |args| {
                 if args.len() < 3 {
                     return Err(IntentError::type_error(
@@ -1206,6 +1210,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             name: "del".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::type_error(
@@ -1261,6 +1266,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             name: "has".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::type_error(
@@ -1318,6 +1324,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             name: "list".to_string(),
             arity: 1, // variadic: 1-2 args (kv, prefix?)
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.is_empty() || args.len() > 2 {
                     return Err(IntentError::type_error(
@@ -1381,6 +1388,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             name: "expire".to_string(),
             arity: 3,
             max_arity: 3,
+            requires: None,
             func: |args| {
                 if args.len() != 3 {
                     return Err(IntentError::type_error(
@@ -1445,6 +1453,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             name: "ttl".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 if args.len() != 2 {
                     return Err(IntentError::type_error(
@@ -1504,6 +1513,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
             name: "flush".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 if args.len() != 1 {
                     return Err(IntentError::type_error(

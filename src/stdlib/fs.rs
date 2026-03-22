@@ -31,6 +31,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "read_file".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::read_to_string(path) {
                     Ok(content) => Ok(Value::ok(Value::String(content))),
@@ -64,6 +65,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "read_bytes".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::read(path) {
                     Ok(bytes) => {
@@ -101,6 +103,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "write_file".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(path), Value::String(content)) => match fs::write(path, content) {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
@@ -134,6 +137,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "append_file".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| {
                 use std::fs::OpenOptions;
                 use std::io::Write;
@@ -179,6 +183,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "exists".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).exists())),
                 _ => Err(IntentError::type_error(
@@ -208,6 +213,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_file".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).is_file())),
                 _ => Err(IntentError::type_error(
@@ -236,6 +242,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "is_dir".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => Ok(Value::Bool(std::path::Path::new(path).is_dir())),
                 _ => Err(IntentError::type_error(
@@ -266,6 +273,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "mkdir".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::create_dir(path) {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
@@ -298,6 +306,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "mkdir_all".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::create_dir_all(path) {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
@@ -331,6 +340,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "readdir".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::read_dir(path) {
                     Ok(entries) => {
@@ -369,6 +379,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "remove".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::remove_file(path) {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
@@ -402,6 +413,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "remove_dir".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::remove_dir(path) {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
@@ -435,6 +447,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "remove_dir_all".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::remove_dir_all(path) {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
@@ -470,6 +483,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "rename".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(from), Value::String(to)) => match fs::rename(from, to) {
                     Ok(()) => Ok(Value::ok(Value::Unit)),
@@ -504,6 +518,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "copy".to_string(),
             arity: 2,
             max_arity: 2,
+            requires: None,
             func: |args| match (&args[0], &args[1]) {
                 (Value::String(from), Value::String(to)) => match fs::copy(from, to) {
                     Ok(bytes) => Ok(Value::ok(Value::Int(bytes as i64))),
@@ -536,6 +551,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "file_size".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::metadata(path) {
                     Ok(meta) => Ok(Value::ok(Value::Int(meta.len() as i64))),
@@ -569,6 +585,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "file_stat".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(path) => match fs::metadata(path) {
                     Ok(meta) => {

@@ -105,6 +105,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "parse_json".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| match &args[0] {
                 Value::String(json_str) => {
                     match serde_json::from_str::<serde_json::Value>(json_str) {
@@ -158,6 +159,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "stringify".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let json_val = intent_value_to_json(&args[0]);
                 Ok(Value::String(json_val.to_string()))
@@ -184,6 +186,7 @@ pub fn init() -> HashMap<String, Value> {
             name: "stringify_pretty".to_string(),
             arity: 1,
             max_arity: 1,
+            requires: None,
             func: |args| {
                 let json_val = intent_value_to_json(&args[0]);
                 match serde_json::to_string_pretty(&json_val) {
