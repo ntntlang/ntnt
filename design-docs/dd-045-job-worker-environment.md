@@ -11,6 +11,8 @@
 
 Job perform blocks execute in a full application context. Workers evaluate the entire .tnt source file at startup (with server side-effects suppressed), giving perform blocks access to all imports, functions, constants, and variables defined in the application. This is the same model HTTP server workers use: each worker is an independent interpreter with the complete application loaded.
 
+This DD also introduces a **capability system** that replaces scattered string-matching skip lists with structurally enforced declarations. Functions declare what they require; execution modes declare what they provide. The compiler enforces both.
+
 ---
 
 ## Motivation
@@ -226,10 +228,10 @@ The interpreter currently has ~15 `if name == "X"` blocks for server functions. 
 ```rust
 /// A server action: a named function with a capability requirement and an implementation.
 struct ServerAction {
-    capability: RuntimeCapability,
+    requires: RuntimeCapability,
     /// Expected argument count (for dispatch matching)
     arity: AritySpec,
-    /// The implementation — receives the interpreter and pre-evaluated args
+    /// The implementation — receives the interpreter and unevaluated argument expressions
     handler: fn(&mut Interpreter, &[Expression]) -> Result<Value>,
 }
 
@@ -246,10 +248,11 @@ Registration happens once, in a `define_server_actions()` method:
 fn define_server_actions(&mut self) {
     use RuntimeCapability::*;
 
-    // --- HttpServer: port binding, route registration, static files ---
+    // --- HttpServer: port binding, static files ---
     self.register_action("listen",       HttpServer, Exact(1), Self::action_listen);
     self.register_action("serve_static", HttpServer, Exact(2), Self::action_serve_static);
     self.register_action("routes",       HttpServer, Exact(1), Self::action_routes);
+    self.register_action("new_server",   HttpServer, Exact(0), Self::action_new_server);
 
     // --- HttpConfig: middleware, security, lifecycle handlers ---
     self.register_action("use_middleware", HttpConfig, Exact(1), Self::action_use_middleware);
@@ -262,10 +265,10 @@ fn define_server_actions(&mut self) {
     // --- JobConfig: job directory discovery ---
     self.register_action("jobs",          JobConfig,  Exact(1), Self::action_jobs_directory);
 
-    // Route registration (get, post, put, delete, patch, head, options)
-    for method in &["get", "post", "put", "delete", "patch", "head", "options"] {
-        self.register_action(method, HttpServer, Exact(2), Self::action_route_handler);
-    }
+    // NOTE: get/post/put/delete/patch/head/options are NOT registered here.
+    // They have dual behavior: get("/route", handler) registers a route (HttpServer),
+    // but get("http://...") makes an HTTP client call (no capability needed).
+    // This dual dispatch is handled in the Expression::Call path — see below.
 }
 ```
 
@@ -280,10 +283,28 @@ Expression::Call { function, arguments } => {
     if let Expression::Identifier(name) = function.as_ref() {
         // Server action dispatch — capability check is automatic
         if let Some(action) = self.get_action(name, arguments.len()) {
-            if !self.execution_mode.has(action.capability) {
+            if !self.execution_mode.has(action.requires) {
                 return Ok(Value::Unit);  // silent no-op in this mode
             }
             return (action.handler)(self, arguments);
+        }
+
+        // HTTP method dual dispatch: get/post/etc. with route pattern → HttpServer,
+        // with URL → falls through to normal function call (HTTP client, no capability)
+        if HTTP_METHODS.contains(&name.as_str()) && arguments.len() == 2 {
+            let pattern = self.eval_route_pattern(&arguments[0])?;
+            if let Value::String(s) = &pattern {
+                if s.starts_with('/') {
+                    // Route registration — requires HttpServer
+                    if !self.execution_mode.has(RuntimeCapability::HttpServer) {
+                        return Ok(Value::Unit);
+                    }
+                    let handler = self.eval_expression(&arguments[1])?;
+                    self.server_state.add_route(&name.to_uppercase(), s, handler);
+                    return Ok(Value::Unit);
+                }
+                // URL string — fall through to normal function call (HTTP client)
+            }
         }
     }
 
@@ -291,7 +312,7 @@ Expression::Call { function, arguments } => {
 }
 ```
 
-This replaces the entire chain of `if name == "listen"` / `if name == "serve_static"` / etc. with a single table lookup. The capability check happens automatically — there's no way to bypass it.
+This replaces the entire chain of `if name == "listen"` / `if name == "serve_static"` / etc. with a single table lookup plus the HTTP method dual-dispatch handler. The capability check happens automatically — there's no way to bypass it.
 
 #### NativeFunction Capabilities
 
@@ -343,13 +364,15 @@ Value::NativeFunction { name, func, requires, .. } => {
 
 **Why this works:** When you add a new NativeFunction, the `requires` field is right there in the struct literal. You see it in every existing function. `requires: None` reads as "requires nothing." `requires: Some(HttpServer)` reads as "requires the HTTP server." The compiler enforces the field — forget it and the code won't compile.
 
+**Note on diff size:** Adding `requires: None` to ~350 existing NativeFunction registrations across 21 stdlib files is a large mechanical diff. This is done as a single preparatory commit ("add `requires` field to NativeFunction, default None everywhere") so the capability-specific changes remain small and focused.
+
 #### Why No Checklist Needed
 
 The structure makes the right thing automatic:
 
 1. **Adding a server-action function** → you call `register_action()`, which requires a `RuntimeCapability` parameter. You can't register without declaring the capability. The other registrations in `define_server_actions()` show you exactly how.
 
-2. **Adding a NativeFunction with side effects** → the `capability` field is in the struct literal. Every existing NativeFunction shows the pattern. The compiler requires the field.
+2. **Adding a NativeFunction with side effects** → the `requires` field is in the struct literal. Every existing NativeFunction shows the pattern. The compiler requires the field.
 
 3. **Adding a new execution mode** → `capabilities()` has a non-exhaustive match. The compiler forces you to define what the new mode can do.
 
@@ -359,7 +382,7 @@ There's no separate list to maintain, no documentation to remember, no skip func
 
 ### Per-Job Scoping
 
-`eval_block()` already creates a child environment scope and restores the parent on exit. This means:
+`eval_block()` already creates a child environment scope and restores the parent on exit. For job execution, we create a param scope (to inject payload params), then `eval_block()` creates its own child scope for the body's locals:
 
 ```
 Worker interpreter environment (after eval):
@@ -367,15 +390,15 @@ Worker interpreter environment (after eval):
 ├── constants: API_BASE = "https://..."
 ├── functions: build_headers, notify_slack, ...
 │
-├── Job execution 1 (child scope):
-│   └── order_id = "abc-123"    ← injected from payload
-│   └── order = { ... }         ← local to this job
-│   └── (scope destroyed after job completes)
+├── Job execution 1:
+│   ├── param scope (injected): order_id = "abc-123"
+│   │   └── body scope (via eval_block): order = { ... }, temp locals
+│   └── (both scopes destroyed after job completes)
 │
-├── Job execution 2 (child scope):
-│   └── order_id = "def-456"
-│   └── order = { ... }
-│   └── (scope destroyed after job completes)
+├── Job execution 2:
+│   ├── param scope (injected): order_id = "def-456"
+│   │   └── body scope (via eval_block): order = { ... }, temp locals
+│   └── (both scopes destroyed after job completes)
 ```
 
 Each job runs in an isolated child scope. Locals from one job cannot leak into the next. But the parent scope — with all imports, functions, and constants — is always accessible.
@@ -387,7 +410,7 @@ Each job runs in an isolated child scope. Locals from one job cannot leak into t
 ```rust
 pub struct JobRuntime {
     // ... existing fields ...
-    /// Path to the .tnt source file (set during job registration).
+    /// Path to the entrypoint .tnt file (set during job registration).
     /// Workers read and re-evaluate this file at startup.
     source_file: Mutex<Option<String>>,
 }
@@ -405,7 +428,7 @@ fn execute_in_worker(
     def: &JobDefinition,
     payload: &HashMap<String, Value>,
 ) -> std::result::Result<Value, String> {
-    // Create a child scope for this job execution
+    // Create a child scope for payload parameters
     let previous_env = Rc::clone(&interp.environment);
     interp.environment = Rc::new(RefCell::new(
         Environment::with_parent(Rc::clone(&previous_env))
@@ -417,10 +440,11 @@ fn execute_in_worker(
         interp.environment.borrow_mut().define(param.name.clone(), val);
     }
 
-    // Evaluate the perform body
+    // Evaluate the perform body — eval_block() creates its own child scope
+    // for the body's locals, so params and locals are naturally separated.
     let body = def.perform_body.clone();
     let result = std::panic::catch_unwind(
-        std::panic::AssertUnwindSafe(|| interp.eval_block_inner(&body))
+        std::panic::AssertUnwindSafe(|| interp.eval_block(&body))
     );
 
     // Restore parent scope (cleanup even on panic)
@@ -454,7 +478,7 @@ fn worker_loop(
     queues: Option<Vec<String>>,
 ) {
     // Create a full interpreter for this worker thread
-    let mut interp = create_job_interpreter(&kv_info);
+    let mut interp = create_job_interpreter();
 
     let kv_handle = kv_info.to_value();
     let poll_duration = Duration::from_millis(band.poll_interval_ms);
@@ -474,10 +498,8 @@ fn worker_loop(
     }
 }
 
-fn create_job_interpreter(kv_info: &KvHandleInfo) -> Interpreter {
-    let source_path = JOB_RUNTIME.source_file.lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
+fn create_job_interpreter() -> Interpreter {
+    let source_path = JOB_RUNTIME.get_source_file()
         .expect("source file must be set before workers start");
 
     let source = std::fs::read_to_string(&source_path)
@@ -511,9 +533,8 @@ fn execute_on_failure_in_worker(
 ) {
     let Some((params, body)) = def.on_failure.as_ref() else { return; };
 
-    // Child scope with error + attempt bindings
-    // ... same pattern as execute_in_worker ...
-    // Errors are silently discarded (fire-and-forget)
+    // Child scope with error + attempt bindings — same pattern as execute_in_worker.
+    // Errors are silently discarded (fire-and-forget).
 }
 ```
 
@@ -526,8 +547,8 @@ fn execute_on_failure_in_worker(
 | `execute_job_perform()` | Replaced by `execute_in_worker()` — scoped eval in worker interpreter |
 | `execute_on_failure()` | Replaced by `execute_on_failure_in_worker()` |
 | `should_skip_server_call()` | Replaced by server actions registry — capability check is structural |
-| `should_skip_route_registration()` | Absorbed into action registry (`HttpServer` capability) |
-| NativeFunction string-matching skip block | Replaced by `capability` field on `Value::NativeFunction` |
+| `should_skip_route_registration()` | Absorbed into HTTP method dual-dispatch in `Expression::Call` |
+| NativeFunction string-matching skip block | Replaced by `requires` field on `Value::NativeFunction` |
 | `if name == "listen"` / `"serve_static"` / etc. chain | Replaced by action table dispatch in `Expression::Call` |
 | DD-044 Fix A (import replay) | Unnecessary — worker interpreter already has all imports |
 
@@ -554,41 +575,47 @@ Fix A from DD-044 is no longer needed. The problem it solved (imports unavailabl
 
 ## Implementation Plan
 
-### Step 1: RuntimeCapability Enum, Server Actions Registry, NativeFunction Capability Field
+Steps are ordered so each is independently testable and mergeable. CI catches regressions at each stage.
 
-Replace `should_skip_server_call()` and the scattered `if name ==` chain with structural enforcement:
+### Step 1a: RuntimeCapability Enum + ExecutionMode::Job
+
+Foundational types. No behavioral change yet.
 
 - [ ] Define `RuntimeCapability` enum: `HttpServer`, `HttpConfig`, `Concurrency`, `JobWorkers`, `JobConfig`
 - [ ] Add `ExecutionMode::Job` variant
 - [ ] Implement `ExecutionMode::capabilities() -> &'static [RuntimeCapability]` for all modes
 - [ ] Implement `ExecutionMode::has(RuntimeCapability) -> bool`
-- [ ] Define `ServerAction` struct with `capability`, `arity`, and `handler`
+- [ ] Tests: verify each mode provides exactly the right capabilities (Normal has all, Job has only JobConfig, etc.)
+
+### Step 1b: `requires` Field on NativeFunction
+
+Large mechanical diff — add the field everywhere, defaulting to `None`. Behavioral change only for the 6 functions that get `Some(...)`.
+
+- [ ] Add `requires: Option<RuntimeCapability>` field to `Value::NativeFunction`
+- [ ] Preparatory commit: add `requires: None` to all ~350 NativeFunction registrations across 21 stdlib files
+- [ ] Set `requires: Some(Concurrency)` on `spawn`, `schedule`, `after` in std/concurrent
+- [ ] Set `requires: Some(JobWorkers)` on `work_async`, `work_jobs`, `scale_workers` in std/jobs
+- [ ] Update NativeFunction dispatch to check `requires` automatically
+- [ ] Delete the string-matching skip block for `spawn`/`schedule`/`after` in interpreter
+- [ ] Tests: verify mode-gated functions are no-ops in restricted modes
+- [ ] Tests: verify `requires: None` functions still work in all modes
+
+### Step 1c: Server Actions Registry
+
+Refactor the `if name ==` chain into action table. Same behavior, better structure.
+
+- [ ] Define `ServerAction` struct with `requires`, `arity`, and `handler`
 - [ ] Add action registry (`HashMap<String, ServerAction>`) to `Interpreter`
-- [ ] Implement `register_action()` — requires `RuntimeCapability` parameter (impossible to skip)
-- [ ] Implement `define_server_actions()` — move all `if name == "X"` blocks into registered action handlers
-- [ ] Replace the `if name ==` chain in `Expression::Call` with single action table lookup + automatic capability check
-- [ ] Add `capability: Option<RuntimeCapability>` field to `Value::NativeFunction`
-- [ ] Update all NativeFunction registrations in stdlib modules to include `capability` field
-- [ ] Update NativeFunction dispatch to check `capability` automatically
+- [ ] Implement `register_action()` — requires `RuntimeCapability` parameter
+- [ ] Implement `define_server_actions()` — register `listen`, `serve_static`, `routes`, `new_server`, `use_middleware`, `enable_cors`, `enable_csp`, `enable_auth`, `on_shutdown`, `on_error`
+- [ ] Extract each `if name == "X"` block into a standalone `action_X` method on `Interpreter`
+- [ ] Replace the `if name ==` chain in `Expression::Call` with action table lookup + automatic capability check
+- [ ] Handle HTTP method dual dispatch: `get("/route", handler)` → `HttpServer` capability, `get("http://url")` → fall through to normal function call (no capability)
 - [ ] Delete `should_skip_server_call()` — no longer needed
-- [ ] Delete `should_skip_route_registration()` — absorbed into action registry
-- [ ] Delete NativeFunction string-matching skip block — absorbed into `capability` field
-- [ ] Update all existing `ExecutionMode` tests
-- [ ] Add capability tests: verify each mode provides exactly the right capabilities
-
-### Step 1b: `jobs()` Directory Auto-Discovery
-
-Implement `jobs("jobs/")` following the same pattern as `routes("routes/")`:
-
-- [ ] Add `jobs()` as a server action with `JobConfig` capability
-- [ ] Implement `load_job_directory()` — scan directory recursively for `.tnt` files
-- [ ] Evaluate each job file in the current interpreter (registers jobs via `Statement::Job`)
-- [ ] `lib/` modules available to job files via import (same as route files)
-- [ ] Track file mtimes for hot-reload in dev mode (detect new/changed/deleted job files)
-- [ ] Test: `jobs("jobs/")` discovers and registers jobs from multiple files
-- [ ] Test: job files can import from `lib/` modules
-- [ ] Test: hot-reload picks up new job files added to the directory
-- [ ] Test: `jobs()` works in `ExecutionMode::Job` (workers re-discover on startup)
+- [ ] Delete `should_skip_route_registration()` — absorbed into dual-dispatch handler
+- [ ] Tests: all existing server function tests still pass
+- [ ] Tests: Job mode suppresses all server actions
+- [ ] Tests: `get("http://api.com/data")` still works as HTTP client in Job mode
 
 ### Step 2: Source File Tracking
 
@@ -602,7 +629,7 @@ Store the source file path in `JobRuntime`:
 
 Add `create_job_interpreter()`:
 
-- [ ] Read source file from `JOB_RUNTIME.source_file`
+- [ ] Read source file from `JOB_RUNTIME.get_source_file()`
 - [ ] Parse and evaluate with `ExecutionMode::Job`
 - [ ] Handle errors (file not found, parse error, eval error) with clear messages
 - [ ] Test: verify interpreter has imports, functions, constants after creation
@@ -616,6 +643,7 @@ Add `create_job_interpreter()`:
 Replace `execute_job_perform` with `execute_in_worker`:
 
 - [ ] Implement child-scope creation with parameter injection
+- [ ] `eval_block()` handles body-local scoping (creates its own child scope)
 - [ ] Implement scope cleanup (restore parent on success, error, and panic)
 - [ ] Replace all `execute_job_perform` call sites in `worker_loop`
 - [ ] Delete `execute_job_perform`
@@ -643,7 +671,21 @@ Update `run_worker_command` in `main.rs`:
 - [ ] Workers create their own interpreters via `create_job_interpreter`
 - [ ] Test: `ntnt worker server.tnt` starts cleanly without binding ports or spawning schedules
 
-### Step 7: Documentation
+### Step 7: `jobs()` Directory Auto-Discovery
+
+New feature — depends on `ExecutionMode::Job` existing but independent of worker interpreter changes. Implemented last so the core fix ships without blocking on a new feature.
+
+- [ ] Add `jobs()` as a server action with `JobConfig` capability in `define_server_actions()`
+- [ ] Implement `action_jobs_directory()` — scan directory recursively for `.tnt` files
+- [ ] Evaluate each job file in the current interpreter (registers jobs via `Statement::Job`)
+- [ ] `lib/` modules available to job files via import (same as route files)
+- [ ] Track file mtimes for hot-reload in dev mode (detect new/changed/deleted job files)
+- [ ] Test: `jobs("jobs/")` discovers and registers jobs from multiple files
+- [ ] Test: job files can import from `lib/` modules
+- [ ] Test: hot-reload picks up new job files added to the directory
+- [ ] Test: `jobs()` works in `ExecutionMode::Job` (workers re-discover on startup)
+
+### Step 8: Documentation
 
 - [ ] Update AI_AGENT_GUIDE.md job system section
 - [ ] Update STDLIB_REFERENCE.md
@@ -718,9 +760,10 @@ fn test_job_scope_isolation() {
 }
 
 #[test]
-fn test_job_mode_skips_server_calls() {
+fn test_job_mode_suppresses_server_but_not_http_client() {
     // Evaluate a .tnt file with listen(), serve_static(), work_async()
     // Verify none of them execute (no port binding, no worker spawning)
+    // Verify get("http://...") still works as HTTP client
 }
 
 #[test]
@@ -737,6 +780,7 @@ fn test_job_worker_panic_recovery() {
 - [ ] Top-level constants accessible in perform blocks
 - [ ] `ntnt worker server.tnt` starts without side effects
 - [ ] Multiple workers process jobs correctly (each with independent interpreter)
+- [ ] HTTP client functions (fetch, get/post with URLs) work in job perform blocks
 
 ---
 
@@ -752,14 +796,14 @@ Every function in the language, classified. 22 functions require a capability; e
 | `serve_static()` | `HttpServer` | Registers static file dirs |
 | `routes()` | `HttpServer` | Discovers and registers route handlers |
 | `new_server()` | `HttpServer` | Resets server state |
-| `get/post/put/delete/patch/head/options()` | `HttpServer` | Registers route handlers (7 functions) |
+| `get/post/put/delete/patch/head/options()` | `HttpServer` | Registers route handlers — **only when first arg starts with `/`**. When first arg is a URL, falls through to HTTP client (no capability) |
 | `use_middleware()` | `HttpConfig` | Registers middleware handler |
 | `enable_cors()` | `HttpConfig` | Configures CORS policy |
 | `enable_csp()` | `HttpConfig` | Configures Content Security Policy |
 | `enable_auth()` | `HttpConfig` | Sets up auth routes and providers |
 | `on_shutdown()` | `HttpConfig` | Registers shutdown handler |
 | `on_error()` | `HttpConfig` | Registers error handler |
-| `jobs()` | `JobConfig` | Discovers and registers job files (new) |
+| `jobs()` | `JobConfig` | Discovers and registers job files (new, Step 7) |
 
 **Total: 18 functions** (counting HTTP methods as 7)
 
@@ -837,3 +881,6 @@ A: `schedule()` is a concurrency primitive, not part of the job system. It uses 
 
 **Q: What about top-level mutable state (`let mut`)?**
 A: Each worker has its own interpreter, so `let mut counter = 0` at file level is per-worker state. This is correct — it matches how HTTP server workers and systems like Sidekiq handle per-process state. Workers are independent; shared state goes through KV.
+
+**Q: What about HTTP method dual behavior (`get("/route")` vs `get("http://url")`)?**
+A: HTTP methods (get, post, etc.) are NOT registered in the server actions registry because they have dual behavior. When the first argument starts with `/`, it's a route registration (requires `HttpServer`). When it's a URL, it's an HTTP client call (no capability needed, must work everywhere including job workers). This dual dispatch is handled explicitly in the `Expression::Call` path, right after the action table lookup.
