@@ -74,9 +74,9 @@ CMD ["ntnt", "run", "server.tnt"]
 
 ```yaml
 services:
-  app:
+  web:
     build: .
-    container_name: my-ntnt-app
+    container_name: my-ntnt-web
     restart: unless-stopped
     environment:
       - NTNT_TIMEOUT=${NTNT_TIMEOUT:-30}
@@ -278,7 +278,7 @@ services:
     networks:
       - app-network
 
-  app:
+  web:
     environment:
       - DATABASE_URL=postgres://ntnt:${DB_PASSWORD}@db:5432/myapp
 
@@ -340,7 +340,7 @@ In the tunnel configuration:
 1. **Public Hostname** tab → **Add a public hostname**
 2. Domain: select your domain
 3. Service Type: `HTTP`
-4. URL: `app:8080` (Docker service name + port)
+4. URL: `web:8080` (Docker service name + port)
 
 ### SSL/TLS Settings
 
@@ -447,6 +447,18 @@ networks:
 volumes:
   pg-data:
   redis-data:
+```
+
+**Note:** ntnt does not read `DATABASE_URL` or `REDIS_URL` automatically. Your app must read them explicitly:
+
+```ntnt
+// server.tnt
+import { get_env } from "std/env"
+import { configure_queue } from "std/jobs"
+import { connect } from "std/db/postgres"
+
+let db = unwrap(connect(get_env("DATABASE_URL") ?? "postgres://localhost/myapp"))
+configure_queue(map { "store": get_env("REDIS_URL") ?? "sqlite:./jobs.db" })
 ```
 
 ---
@@ -559,7 +571,7 @@ Hot-reload is disabled in production (`NTNT_ENV=production`).
 ### Jobs not processing
 - Verify workers are running: `docker compose logs worker`
 - Check job status: `ntnt jobs status server.tnt`
-- Verify web and workers connect to the same Redis: check `REDIS_URL`
+- Verify web and workers use the same Redis URL in `configure_queue()`
 - Check for dead jobs: `ntnt jobs list server.tnt --status=dead`
 
 ### Workers crashing on startup

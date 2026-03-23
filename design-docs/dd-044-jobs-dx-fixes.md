@@ -296,7 +296,7 @@ schedule(3600000, fn() {
 
 ---
 
-### Fix F: `ntnt jobs` CLI re-executes the full app (#30) — ✅ COMPLETE (PR #54)
+### Fix F: `ntnt jobs` CLI re-executes the full app (#30) — ✅ COMPLETE (PR #54, pending merge)
 
 **Problem:** `ntnt jobs list server.tnt` evaluates in Normal mode — fires `listen()`, `enqueue()`, `work_async()`.
 
