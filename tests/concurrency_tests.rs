@@ -578,6 +578,59 @@ print("schedule survived errors")
     );
 }
 
+#[test]
+fn test_schedule_ignores_unused_user_functions_in_scope() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { schedule, cancel_schedule, sleep_ms, channel, send, recv_timeout } from "std/concurrent"
+
+fn unused_helper() { 999 }
+let payload = "scheduled"
+let [tx, rx] = channel()
+
+let sched = schedule(50, fn() {
+    send(tx, payload)
+})
+
+sleep_ms(140)
+cancel_schedule(sched)
+
+let result = recv_timeout(rx, 200)
+match result {
+    Some(v) => print("ok: " + str(v)),
+    None => print("missing")
+}
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("ok: scheduled"), "stdout: {}", stdout);
+}
+
+#[test]
+fn test_schedule_reports_only_referenced_user_defined_function() {
+    let (_stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { schedule } from "std/concurrent"
+
+fn unused_helper() { 1 }
+fn used_helper() { 2 }
+
+let sched = schedule(50, fn() { used_helper() })
+"#,
+    );
+    assert_ne!(code, 0, "schedule should fail");
+    assert!(
+        stderr.contains("used_helper"),
+        "stderr should mention the referenced function: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("unused_helper"),
+        "stderr should not mention unused functions: {}",
+        stderr
+    );
+}
+
 // =============================================================================
 // Serialization tests
 // =============================================================================
@@ -626,6 +679,48 @@ match result {
         "Should get Ok result with array length 3, got: {}",
         stdout
     );
+}
+
+#[test]
+fn test_spawn_ignores_unused_user_functions_in_scope() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+
+fn unused_helper() { 999 }
+let payload = 41
+
+let task = spawn(fn() { payload + 1 })
+let result = await_task(task)
+match result {
+    Ok(val) => print("ok: " + str(val)),
+    Err(e) => print("err: " + str(e))
+}
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("ok: 42"), "stdout: {}", stdout);
+}
+
+#[test]
+fn test_after_ignores_unused_user_functions_in_scope() {
+    let (stdout, stderr, code) = run_ntnt_code(
+        r#"
+import { after, await_task } from "std/concurrent"
+
+fn unused_helper() { 999 }
+let payload = "after ok"
+
+let task = after(10, fn() { payload })
+let result = await_task(task)
+match result {
+    Ok(val) => print("ok: " + str(val)),
+    Err(e) => print("err: " + str(e))
+}
+"#,
+    );
+    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("ok: after ok"), "stdout: {}", stdout);
 }
 
 // =============================================================================

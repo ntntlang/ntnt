@@ -1199,6 +1199,474 @@ fn inject_captured(interp: &mut crate::interpreter::Interpreter, captured: &Capt
 // Shared helpers for spawn/after/schedule
 // =============================================================================
 
+fn free_variables(body: &crate::ast::Block) -> HashSet<String> {
+    let mut referenced = HashSet::new();
+    let mut bound = HashSet::new();
+    collect_free_vars(&body.statements, &mut referenced, &mut bound);
+    referenced
+}
+
+fn collect_free_vars(
+    statements: &[crate::ast::Statement],
+    referenced: &mut HashSet<String>,
+    bound: &mut HashSet<String>,
+) {
+    use crate::ast::{ServerDirective, Statement};
+
+    for stmt in statements {
+        match stmt {
+            Statement::Let {
+                name,
+                value,
+                pattern,
+                otherwise,
+                ..
+            } => {
+                if let Some(value) = value {
+                    collect_free_vars_expr(value, referenced, bound);
+                }
+
+                if let Some(otherwise) = otherwise {
+                    let mut otherwise_bound = bound.clone();
+                    otherwise_bound.insert("err".to_string());
+                    collect_free_vars(&otherwise.statements, referenced, &mut otherwise_bound);
+                }
+
+                if let Some(pattern) = pattern {
+                    bound.extend(names_bound_by_pattern(pattern));
+                } else {
+                    bound.insert(name.clone());
+                }
+            }
+            Statement::Function {
+                name,
+                params,
+                body,
+                contract,
+                ..
+            } => {
+                bound.insert(name.clone());
+
+                let mut fn_bound = bound.clone();
+                bind_parameter_defaults_and_names(params, referenced, &mut fn_bound);
+
+                if let Some(contract) = contract {
+                    for expr in &contract.requires {
+                        collect_free_vars_expr(expr, referenced, &fn_bound);
+                    }
+                    for expr in &contract.ensures {
+                        collect_free_vars_expr(expr, referenced, &fn_bound);
+                    }
+                }
+
+                let mut body_bound = fn_bound.clone();
+                collect_free_vars(&body.statements, referenced, &mut body_bound);
+            }
+            Statement::Expression(expr) => collect_free_vars_expr(expr, referenced, bound),
+            Statement::Return(Some(expr)) => collect_free_vars_expr(expr, referenced, bound),
+            Statement::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                collect_free_vars_expr(condition, referenced, bound);
+
+                let mut then_bound = bound.clone();
+                collect_free_vars(&then_branch.statements, referenced, &mut then_bound);
+
+                if let Some(else_branch) = else_branch {
+                    let mut else_bound = bound.clone();
+                    collect_free_vars(&else_branch.statements, referenced, &mut else_bound);
+                }
+            }
+            Statement::While { condition, body } => {
+                collect_free_vars_expr(condition, referenced, bound);
+                let mut body_bound = bound.clone();
+                collect_free_vars(&body.statements, referenced, &mut body_bound);
+            }
+            Statement::ForIn {
+                variable,
+                pattern,
+                iterable,
+                body,
+            } => {
+                collect_free_vars_expr(iterable, referenced, bound);
+                let mut body_bound = bound.clone();
+                if let Some(pattern) = pattern {
+                    body_bound.extend(names_bound_by_pattern(pattern));
+                } else {
+                    body_bound.insert(variable.clone());
+                }
+                collect_free_vars(&body.statements, referenced, &mut body_bound);
+            }
+            Statement::Loop { body } => {
+                let mut body_bound = bound.clone();
+                collect_free_vars(&body.statements, referenced, &mut body_bound);
+            }
+            Statement::Defer(expr) => collect_free_vars_expr(expr, referenced, bound),
+            Statement::Intent { target, .. } => {
+                collect_free_vars(std::slice::from_ref(target.as_ref()), referenced, bound);
+            }
+            Statement::Impl {
+                methods,
+                invariants,
+                ..
+            } => {
+                for method in methods {
+                    collect_free_vars(std::slice::from_ref(method), referenced, bound);
+                }
+                for invariant in invariants {
+                    collect_free_vars_expr(invariant, referenced, bound);
+                }
+            }
+            Statement::Module { body, .. } => collect_free_vars(body, referenced, bound),
+            Statement::Export { statement, .. } => {
+                if let Some(statement) = statement {
+                    collect_free_vars(std::slice::from_ref(statement.as_ref()), referenced, bound);
+                }
+            }
+            Statement::Server {
+                port,
+                directives,
+                routes,
+                groups,
+            } => {
+                collect_free_vars_expr(port, referenced, bound);
+                for directive in directives {
+                    match directive {
+                        ServerDirective::Cors(expr) | ServerDirective::Middleware(expr) => {
+                            collect_free_vars_expr(expr, referenced, bound);
+                        }
+                        ServerDirective::Static { .. } => {}
+                    }
+                }
+                for route in routes {
+                    collect_free_vars_expr(&route.handler, referenced, bound);
+                }
+                collect_free_vars_server_groups(groups, referenced, bound);
+            }
+            Statement::Job {
+                options,
+                perform_params,
+                perform_body,
+                on_failure,
+                ..
+            } => {
+                for (_, expr) in options {
+                    collect_free_vars_expr(expr, referenced, bound);
+                }
+
+                let mut perform_bound = bound.clone();
+                bind_parameter_defaults_and_names(perform_params, referenced, &mut perform_bound);
+                let mut perform_body_bound = perform_bound.clone();
+                collect_free_vars(
+                    &perform_body.statements,
+                    referenced,
+                    &mut perform_body_bound,
+                );
+
+                if let Some((failure_params, failure_body)) = on_failure {
+                    let mut failure_bound = bound.clone();
+                    bind_parameter_defaults_and_names(
+                        failure_params,
+                        referenced,
+                        &mut failure_bound,
+                    );
+                    let mut failure_body_bound = failure_bound.clone();
+                    collect_free_vars(
+                        &failure_body.statements,
+                        referenced,
+                        &mut failure_body_bound,
+                    );
+                }
+            }
+            Statement::Located { stmt, .. } => {
+                collect_free_vars(std::slice::from_ref(stmt.as_ref()), referenced, bound);
+            }
+            Statement::Return(None)
+            | Statement::Break
+            | Statement::Continue
+            | Statement::Import { .. }
+            | Statement::Use { .. }
+            | Statement::TypeAlias { .. }
+            | Statement::Struct { .. }
+            | Statement::Enum { .. }
+            | Statement::Trait { .. } => {}
+        }
+    }
+}
+
+fn collect_free_vars_expr(
+    expr: &crate::ast::Expression,
+    referenced: &mut HashSet<String>,
+    bound: &HashSet<String>,
+) {
+    use crate::ast::{Expression, StringPart};
+
+    match expr {
+        Expression::Identifier(name) => {
+            if !bound.contains(name) {
+                referenced.insert(name.clone());
+            }
+        }
+        Expression::Call {
+            function,
+            arguments,
+        } => {
+            collect_free_vars_expr(function, referenced, bound);
+            for arg in arguments {
+                collect_free_vars_expr(arg, referenced, bound);
+            }
+        }
+        Expression::MethodCall {
+            object,
+            method,
+            arguments,
+        } => {
+            collect_free_vars_expr(object, referenced, bound);
+            if !bound.contains(method) {
+                referenced.insert(method.clone());
+            }
+            for arg in arguments {
+                collect_free_vars_expr(arg, referenced, bound);
+            }
+        }
+        Expression::Binary { left, right, .. } => {
+            collect_free_vars_expr(left, referenced, bound);
+            collect_free_vars_expr(right, referenced, bound);
+        }
+        Expression::Unary { operand, .. } => {
+            collect_free_vars_expr(operand, referenced, bound);
+        }
+        Expression::FieldAccess { object, .. } => {
+            collect_free_vars_expr(object, referenced, bound);
+        }
+        Expression::Index { object, index } => {
+            collect_free_vars_expr(object, referenced, bound);
+            collect_free_vars_expr(index, referenced, bound);
+        }
+        Expression::Array(items) => {
+            for item in items {
+                collect_free_vars_expr(item, referenced, bound);
+            }
+        }
+        Expression::MapLiteral(pairs) => {
+            for (key, value) in pairs {
+                collect_free_vars_expr(key, referenced, bound);
+                collect_free_vars_expr(value, referenced, bound);
+            }
+        }
+        Expression::Range { start, end, .. } => {
+            collect_free_vars_expr(start, referenced, bound);
+            collect_free_vars_expr(end, referenced, bound);
+        }
+        Expression::InterpolatedString(parts) => {
+            for part in parts {
+                if let StringPart::Expr(expr) = part {
+                    collect_free_vars_expr(expr, referenced, bound);
+                }
+            }
+        }
+        Expression::TemplateString(parts) => {
+            collect_free_vars_template_parts(parts, referenced, bound);
+        }
+        Expression::StructLiteral { fields, .. } => {
+            for (_, value) in fields {
+                collect_free_vars_expr(value, referenced, bound);
+            }
+        }
+        Expression::EnumVariant { arguments, .. } => {
+            for arg in arguments {
+                collect_free_vars_expr(arg, referenced, bound);
+            }
+        }
+        Expression::Lambda { params, body } => {
+            let mut lambda_bound = bound.clone();
+            bind_parameter_defaults_and_names(params, referenced, &mut lambda_bound);
+            let mut body_bound = lambda_bound.clone();
+            collect_free_vars(&body.statements, referenced, &mut body_bound);
+        }
+        Expression::Block(block) => {
+            let mut block_bound = bound.clone();
+            collect_free_vars(&block.statements, referenced, &mut block_bound);
+        }
+        Expression::IfExpr {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_free_vars_expr(condition, referenced, bound);
+            collect_free_vars_expr(then_branch, referenced, bound);
+            collect_free_vars_expr(else_branch, referenced, bound);
+        }
+        Expression::Match { scrutinee, arms } => {
+            collect_free_vars_expr(scrutinee, referenced, bound);
+            for arm in arms {
+                let mut arm_bound = bound.clone();
+                arm_bound.extend(names_bound_by_pattern(&arm.pattern));
+                if let Some(guard) = &arm.guard {
+                    collect_free_vars_expr(guard, referenced, &arm_bound);
+                }
+                collect_free_vars_expr(&arm.body, referenced, &arm_bound);
+            }
+        }
+        Expression::Assign { target, value } => {
+            collect_free_vars_expr(target, referenced, bound);
+            collect_free_vars_expr(value, referenced, bound);
+        }
+        Expression::Await(inner) | Expression::Try(inner) => {
+            collect_free_vars_expr(inner, referenced, bound);
+        }
+        Expression::TryCatch { body } => {
+            let mut body_bound = bound.clone();
+            collect_free_vars(&body.statements, referenced, &mut body_bound);
+        }
+        Expression::Integer(_)
+        | Expression::Float(_)
+        | Expression::String(_)
+        | Expression::Bool(_)
+        | Expression::Unit => {}
+    }
+}
+
+fn collect_free_vars_template_parts(
+    parts: &[crate::ast::TemplatePart],
+    referenced: &mut HashSet<String>,
+    bound: &HashSet<String>,
+) {
+    use crate::ast::TemplatePart;
+
+    for part in parts {
+        match part {
+            TemplatePart::Literal(_) => {}
+            TemplatePart::Expr(expr) | TemplatePart::RawExpr(expr) => {
+                collect_free_vars_expr(expr, referenced, bound);
+            }
+            TemplatePart::FilteredExpr { expr, filters }
+            | TemplatePart::RawFilteredExpr { expr, filters } => {
+                collect_free_vars_expr(expr, referenced, bound);
+                for filter in filters {
+                    for arg in &filter.args {
+                        collect_free_vars_expr(arg, referenced, bound);
+                    }
+                }
+            }
+            TemplatePart::ForLoop {
+                var,
+                iterable,
+                body,
+                empty_body,
+            } => {
+                collect_free_vars_expr(iterable, referenced, bound);
+
+                let mut body_bound = bound.clone();
+                body_bound.insert(var.clone());
+                for implicit in [
+                    "@index", "@index1", "@first", "@last", "@length", "@even", "@odd",
+                ] {
+                    body_bound.insert(implicit.to_string());
+                }
+                collect_free_vars_template_parts(body, referenced, &body_bound);
+
+                let empty_bound = bound.clone();
+                collect_free_vars_template_parts(empty_body, referenced, &empty_bound);
+            }
+            TemplatePart::IfBlock {
+                condition,
+                then_parts,
+                elif_chains,
+                else_parts,
+            } => {
+                collect_free_vars_expr(condition, referenced, bound);
+                collect_free_vars_template_parts(then_parts, referenced, bound);
+                for (elif_cond, elif_body) in elif_chains {
+                    collect_free_vars_expr(elif_cond, referenced, bound);
+                    collect_free_vars_template_parts(elif_body, referenced, bound);
+                }
+                collect_free_vars_template_parts(else_parts, referenced, bound);
+            }
+            TemplatePart::Partial { data_expr, .. } => {
+                if let Some(data_expr) = data_expr {
+                    collect_free_vars_expr(data_expr, referenced, bound);
+                }
+            }
+        }
+    }
+}
+
+fn collect_free_vars_server_groups(
+    groups: &[crate::ast::ServerGroup],
+    referenced: &mut HashSet<String>,
+    bound: &HashSet<String>,
+) {
+    for group in groups {
+        for middleware in &group.middleware {
+            collect_free_vars_expr(middleware, referenced, bound);
+        }
+        for route in &group.routes {
+            collect_free_vars_expr(&route.handler, referenced, bound);
+        }
+        collect_free_vars_server_groups(&group.groups, referenced, bound);
+    }
+}
+
+fn bind_parameter_defaults_and_names(
+    params: &[crate::ast::Parameter],
+    referenced: &mut HashSet<String>,
+    bound: &mut HashSet<String>,
+) {
+    for param in params {
+        if let Some(default) = &param.default {
+            collect_free_vars_expr(default, referenced, bound);
+        }
+        bound.extend(names_bound_by_parameter(param));
+    }
+}
+
+fn names_bound_by_parameter(param: &crate::ast::Parameter) -> HashSet<String> {
+    if let Some(pattern) = &param.pattern {
+        names_bound_by_pattern(pattern)
+    } else {
+        HashSet::from([param.name.clone()])
+    }
+}
+
+fn names_bound_by_pattern(pattern: &crate::ast::Pattern) -> HashSet<String> {
+    use crate::ast::Pattern;
+
+    match pattern {
+        Pattern::Variable(name) => HashSet::from([name.clone()]),
+        Pattern::Wildcard | Pattern::Literal(_) => HashSet::new(),
+        Pattern::Array { elements, rest } => {
+            let mut names: HashSet<String> =
+                elements.iter().flat_map(names_bound_by_pattern).collect();
+            if let Some(rest) = rest {
+                names.insert(rest.clone());
+            }
+            names
+        }
+        Pattern::Map { fields, rest } => {
+            let mut names: HashSet<String> = fields
+                .iter()
+                .flat_map(|(_, pattern)| names_bound_by_pattern(pattern))
+                .collect();
+            if let Some(rest) = rest {
+                names.insert(rest.clone());
+            }
+            names
+        }
+        Pattern::Struct { fields, .. } => fields
+            .iter()
+            .flat_map(|(_, pattern)| names_bound_by_pattern(pattern))
+            .collect(),
+        Pattern::Variant { fields, .. } => fields
+            .as_ref()
+            .map(|fields| fields.iter().flat_map(names_bound_by_pattern).collect())
+            .unwrap_or_default(),
+        Pattern::Tuple(patterns) => patterns.iter().flat_map(names_bound_by_pattern).collect(),
+    }
+}
+
 /// Validate a handler is a zero-parameter Function, capture its bindings, and return
 /// the captured bindings + cloned body. Used by spawn(), after(), and schedule().
 fn validate_and_capture(
@@ -1218,11 +1686,18 @@ fn validate_and_capture(
                     caller
                 )));
             }
-            let bindings = closure.borrow().all_bindings();
-            let captured = capture_bindings(&bindings).map_err(|names| {
+            let free_vars = free_variables(body);
+            let needed: HashMap<String, Value> = closure
+                .borrow()
+                .all_bindings()
+                .into_iter()
+                .filter(|(name, _)| free_vars.contains(name))
+                .collect();
+            let captured = capture_bindings(&needed).map_err(|names| {
                 IntentError::runtime_error(format!(
                     "Cannot capture user-defined function(s) across task boundaries: {}. \
-                     Use closure capture for data, not function references.",
+                     These functions use Rc<RefCell> which cannot be sent between threads. \
+                     Inline the function body into the closure, or call a native function instead.",
                     names.join(", ")
                 ))
             })?;
@@ -2197,6 +2672,28 @@ pub fn init() -> HashMap<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{
+        BinaryOp, Block, Expression, MatchArm, Parameter, Pattern, Statement, StringPart,
+        TemplateFilter, TemplatePart,
+    };
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::rc::Rc;
+
+    fn ids(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    fn no_param_function(body: Block) -> Value {
+        Value::Function {
+            name: "handler".to_string(),
+            params: vec![],
+            body,
+            closure: Rc::new(RefCell::new(crate::interpreter::Environment::new())),
+            contract: None,
+            type_params: vec![],
+        }
+    }
 
     #[test]
     fn test_module_init() {
@@ -2518,5 +3015,415 @@ mod tests {
                 && cap.fn_name == "test"
                 && cap.arity == 0
                 && cap.max_arity == 0));
+    }
+
+    #[test]
+    fn test_free_variables_handles_expression_variants() {
+        let body = Block {
+            statements: vec![
+                Statement::Let {
+                    name: "bound".to_string(),
+                    mutable: false,
+                    type_annotation: None,
+                    value: Some(Expression::Identifier("seed".to_string())),
+                    pattern: None,
+                    otherwise: Some(Block {
+                        statements: vec![Statement::Return(Some(Expression::Binary {
+                            left: Box::new(Expression::Identifier("err".to_string())),
+                            operator: BinaryOp::Add,
+                            right: Box::new(Expression::Identifier("fallback".to_string())),
+                        }))],
+                    }),
+                },
+                Statement::Expression(Expression::Call {
+                    function: Box::new(Expression::Identifier("callee".to_string())),
+                    arguments: vec![
+                        Expression::MethodCall {
+                            object: Box::new(Expression::Identifier("receiver".to_string())),
+                            method: "method_lookup".to_string(),
+                            arguments: vec![Expression::Identifier("method_arg".to_string())],
+                        },
+                        Expression::FieldAccess {
+                            object: Box::new(Expression::Identifier("record".to_string())),
+                            field: "name".to_string(),
+                        },
+                        Expression::Index {
+                            object: Box::new(Expression::Identifier("items".to_string())),
+                            index: Box::new(Expression::Identifier("idx".to_string())),
+                        },
+                        Expression::Array(vec![Expression::Identifier("array_item".to_string())]),
+                        Expression::MapLiteral(vec![(
+                            Expression::Identifier("map_key".to_string()),
+                            Expression::Identifier("map_value".to_string()),
+                        )]),
+                        Expression::Range {
+                            start: Box::new(Expression::Identifier("range_start".to_string())),
+                            end: Box::new(Expression::Identifier("range_end".to_string())),
+                            inclusive: true,
+                        },
+                        Expression::InterpolatedString(vec![
+                            StringPart::Literal("hello ".to_string()),
+                            StringPart::Expr(Expression::Identifier("interpolated".to_string())),
+                        ]),
+                        Expression::TemplateString(vec![
+                            TemplatePart::Expr(Expression::Identifier("template_expr".to_string())),
+                            TemplatePart::RawExpr(Expression::Identifier(
+                                "template_raw".to_string(),
+                            )),
+                            TemplatePart::FilteredExpr {
+                                expr: Expression::Identifier("template_filtered".to_string()),
+                                filters: vec![TemplateFilter {
+                                    name: "fmt".to_string(),
+                                    args: vec![Expression::Identifier(
+                                        "template_filter_arg".to_string(),
+                                    )],
+                                }],
+                            },
+                            TemplatePart::RawFilteredExpr {
+                                expr: Expression::Identifier("template_raw_filtered".to_string()),
+                                filters: vec![TemplateFilter {
+                                    name: "raw".to_string(),
+                                    args: vec![Expression::Identifier(
+                                        "template_raw_filter_arg".to_string(),
+                                    )],
+                                }],
+                            },
+                            TemplatePart::ForLoop {
+                                var: "item".to_string(),
+                                iterable: Expression::Identifier("template_iter".to_string()),
+                                body: vec![TemplatePart::Expr(Expression::Binary {
+                                    left: Box::new(Expression::Identifier("item".to_string())),
+                                    operator: BinaryOp::Add,
+                                    right: Box::new(Expression::Binary {
+                                        left: Box::new(Expression::Identifier(
+                                            "@index".to_string(),
+                                        )),
+                                        operator: BinaryOp::Add,
+                                        right: Box::new(Expression::Identifier(
+                                            "template_outer".to_string(),
+                                        )),
+                                    }),
+                                })],
+                                empty_body: vec![TemplatePart::Expr(Expression::Identifier(
+                                    "template_empty".to_string(),
+                                ))],
+                            },
+                            TemplatePart::IfBlock {
+                                condition: Expression::Identifier("template_if".to_string()),
+                                then_parts: vec![TemplatePart::Expr(Expression::Identifier(
+                                    "template_then".to_string(),
+                                ))],
+                                elif_chains: vec![(
+                                    Expression::Identifier("template_elif".to_string()),
+                                    vec![TemplatePart::Expr(Expression::Identifier(
+                                        "template_elif_body".to_string(),
+                                    ))],
+                                )],
+                                else_parts: vec![TemplatePart::Expr(Expression::Identifier(
+                                    "template_else".to_string(),
+                                ))],
+                            },
+                            TemplatePart::Partial {
+                                name: "card".to_string(),
+                                data_expr: Some(Expression::Identifier(
+                                    "template_partial".to_string(),
+                                )),
+                            },
+                        ]),
+                        Expression::StructLiteral {
+                            name: "Point".to_string(),
+                            fields: vec![(
+                                "x".to_string(),
+                                Expression::Identifier("struct_value".to_string()),
+                            )],
+                        },
+                        Expression::EnumVariant {
+                            enum_name: "Result".to_string(),
+                            variant: "Ok".to_string(),
+                            arguments: vec![Expression::Identifier("enum_arg".to_string())],
+                        },
+                        Expression::Lambda {
+                            params: vec![
+                                Parameter {
+                                    name: "first".to_string(),
+                                    type_annotation: None,
+                                    default: Some(Expression::Identifier(
+                                        "lambda_default".to_string(),
+                                    )),
+                                    pattern: None,
+                                },
+                                Parameter {
+                                    name: "_tuple".to_string(),
+                                    type_annotation: None,
+                                    default: Some(Expression::Identifier(
+                                        "lambda_pattern_default".to_string(),
+                                    )),
+                                    pattern: Some(Pattern::Tuple(vec![
+                                        Pattern::Variable("left".to_string()),
+                                        Pattern::Variable("right".to_string()),
+                                    ])),
+                                },
+                            ],
+                            body: Block {
+                                statements: vec![Statement::Expression(Expression::Binary {
+                                    left: Box::new(Expression::Identifier("first".to_string())),
+                                    operator: BinaryOp::Add,
+                                    right: Box::new(Expression::Binary {
+                                        left: Box::new(Expression::Identifier("right".to_string())),
+                                        operator: BinaryOp::Add,
+                                        right: Box::new(Expression::Identifier(
+                                            "lambda_free".to_string(),
+                                        )),
+                                    }),
+                                })],
+                            },
+                        },
+                        Expression::Block(Block {
+                            statements: vec![
+                                Statement::Let {
+                                    name: "block_local".to_string(),
+                                    mutable: false,
+                                    type_annotation: None,
+                                    value: Some(Expression::Identifier("block_init".to_string())),
+                                    pattern: None,
+                                    otherwise: None,
+                                },
+                                Statement::Expression(Expression::Identifier(
+                                    "block_free".to_string(),
+                                )),
+                            ],
+                        }),
+                        Expression::IfExpr {
+                            condition: Box::new(Expression::Identifier("if_cond".to_string())),
+                            then_branch: Box::new(Expression::Identifier("if_then".to_string())),
+                            else_branch: Box::new(Expression::Identifier("if_else".to_string())),
+                        },
+                        Expression::Match {
+                            scrutinee: Box::new(Expression::Identifier("match_input".to_string())),
+                            arms: vec![MatchArm {
+                                pattern: Pattern::Tuple(vec![
+                                    Pattern::Variable("match_left".to_string()),
+                                    Pattern::Variable("match_right".to_string()),
+                                ]),
+                                guard: Some(Expression::Identifier("match_guard".to_string())),
+                                body: Expression::Binary {
+                                    left: Box::new(Expression::Identifier(
+                                        "match_left".to_string(),
+                                    )),
+                                    operator: BinaryOp::Add,
+                                    right: Box::new(Expression::Identifier(
+                                        "match_body_free".to_string(),
+                                    )),
+                                },
+                            }],
+                        },
+                        Expression::Assign {
+                            target: Box::new(Expression::Identifier("assign_target".to_string())),
+                            value: Box::new(Expression::Identifier("assign_value".to_string())),
+                        },
+                        Expression::Await(Box::new(Expression::Identifier("awaited".to_string()))),
+                        Expression::Try(Box::new(Expression::Identifier("tried".to_string()))),
+                        Expression::TryCatch {
+                            body: Block {
+                                statements: vec![Statement::Expression(Expression::Identifier(
+                                    "catch_free".to_string(),
+                                ))],
+                            },
+                        },
+                    ],
+                }),
+            ],
+        };
+
+        let free = free_variables(&body);
+        let expected = ids(&[
+            "array_item",
+            "assign_target",
+            "assign_value",
+            "awaited",
+            "block_free",
+            "block_init",
+            "callee",
+            "catch_free",
+            "enum_arg",
+            "fallback",
+            "if_cond",
+            "if_else",
+            "if_then",
+            "idx",
+            "interpolated",
+            "items",
+            "lambda_default",
+            "lambda_free",
+            "lambda_pattern_default",
+            "map_key",
+            "map_value",
+            "match_body_free",
+            "match_guard",
+            "match_input",
+            "method_arg",
+            "method_lookup",
+            "range_end",
+            "range_start",
+            "receiver",
+            "record",
+            "seed",
+            "struct_value",
+            "template_elif",
+            "template_elif_body",
+            "template_else",
+            "template_empty",
+            "template_expr",
+            "template_filter_arg",
+            "template_filtered",
+            "template_if",
+            "template_iter",
+            "template_outer",
+            "template_partial",
+            "template_raw",
+            "template_raw_filter_arg",
+            "template_raw_filtered",
+            "template_then",
+            "tried",
+        ]);
+
+        assert_eq!(free, expected);
+        assert!(!free.contains("bound"));
+        assert!(!free.contains("err"));
+        assert!(!free.contains("item"));
+        assert!(!free.contains("@index"));
+        assert!(!free.contains("first"));
+        assert!(!free.contains("right"));
+        assert!(!free.contains("match_left"));
+        assert!(!free.contains("Point"));
+        assert!(!free.contains("Result"));
+    }
+
+    #[test]
+    fn test_free_variables_nested_closures_do_not_leak_inner_bindings() {
+        let body = Block {
+            statements: vec![
+                Statement::Expression(Expression::Lambda {
+                    params: vec![],
+                    body: Block {
+                        statements: vec![Statement::Let {
+                            name: "inner_only".to_string(),
+                            mutable: false,
+                            type_annotation: None,
+                            value: Some(Expression::Identifier("captured".to_string())),
+                            pattern: None,
+                            otherwise: None,
+                        }],
+                    },
+                }),
+                Statement::Expression(Expression::Identifier("inner_only".to_string())),
+            ],
+        };
+
+        assert_eq!(free_variables(&body), ids(&["captured", "inner_only"]));
+    }
+
+    #[test]
+    fn test_free_variables_destructuring_patterns_bind_names() {
+        let body = Block {
+            statements: vec![
+                Statement::Let {
+                    name: "_tuple".to_string(),
+                    mutable: false,
+                    type_annotation: None,
+                    value: Some(Expression::Identifier("source".to_string())),
+                    pattern: Some(Pattern::Tuple(vec![
+                        Pattern::Variable("left".to_string()),
+                        Pattern::Map {
+                            fields: vec![(
+                                "name".to_string(),
+                                Pattern::Variable("right".to_string()),
+                            )],
+                            rest: Some("rest".to_string()),
+                        },
+                    ])),
+                    otherwise: None,
+                },
+                Statement::Expression(Expression::Binary {
+                    left: Box::new(Expression::Identifier("left".to_string())),
+                    operator: BinaryOp::Add,
+                    right: Box::new(Expression::Binary {
+                        left: Box::new(Expression::Identifier("right".to_string())),
+                        operator: BinaryOp::Add,
+                        right: Box::new(Expression::Identifier("rest".to_string())),
+                    }),
+                }),
+            ],
+        };
+
+        assert_eq!(free_variables(&body), ids(&["source"]));
+    }
+
+    #[test]
+    fn test_free_variables_match_arm_bindings_scoped_correctly() {
+        let body = Block {
+            statements: vec![
+                Statement::Expression(Expression::Match {
+                    scrutinee: Box::new(Expression::Identifier("input".to_string())),
+                    arms: vec![
+                        MatchArm {
+                            pattern: Pattern::Variable("value".to_string()),
+                            guard: Some(Expression::Binary {
+                                left: Box::new(Expression::Identifier("value".to_string())),
+                                operator: BinaryOp::Add,
+                                right: Box::new(Expression::Identifier("guard_free".to_string())),
+                            }),
+                            body: Expression::Binary {
+                                left: Box::new(Expression::Identifier("value".to_string())),
+                                operator: BinaryOp::Add,
+                                right: Box::new(Expression::Identifier("body_free".to_string())),
+                            },
+                        },
+                        MatchArm {
+                            pattern: Pattern::Wildcard,
+                            guard: None,
+                            body: Expression::Identifier("fallback".to_string()),
+                        },
+                    ],
+                }),
+                Statement::Expression(Expression::Identifier("value".to_string())),
+            ],
+        };
+
+        assert_eq!(
+            free_variables(&body),
+            ids(&["body_free", "fallback", "guard_free", "input", "value"])
+        );
+    }
+
+    #[test]
+    fn test_validate_and_capture_filters_unused_user_functions() {
+        let mut env = crate::interpreter::Environment::new();
+        env.define("used_data".to_string(), Value::Int(7));
+        env.define("unused_data".to_string(), Value::Int(99));
+        env.define(
+            "unused_user_fn".to_string(),
+            no_param_function(Block {
+                statements: vec![Statement::Expression(Expression::Integer(1))],
+            }),
+        );
+
+        let handler = Value::Function {
+            name: "handler".to_string(),
+            params: vec![],
+            body: Block {
+                statements: vec![Statement::Expression(Expression::Identifier(
+                    "used_data".to_string(),
+                ))],
+            },
+            closure: Rc::new(RefCell::new(env)),
+            contract: None,
+            type_params: vec![],
+        };
+
+        let (captured, _) = validate_and_capture("spawn", &handler).expect("capture should work");
+        assert!(captured.values.contains_key("used_data"));
+        assert!(!captured.values.contains_key("unused_data"));
+        assert!(captured.native_fns.is_empty());
     }
 }
