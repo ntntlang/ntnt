@@ -1499,10 +1499,10 @@ fn jobs_load_kv(path: &PathBuf) -> anyhow::Result<ntnt::interpreter::Value> {
         std::process::exit(1);
     }
 
-    let eval_result = interpreter.eval(&ast);
-    // Shutdown concurrency runtime to prevent leaked tasks/schedules from eval
-    ntnt::stdlib::concurrent::RUNTIME.shutdown();
-    eval_result?;
+    // Evaluate in Worker mode — suppresses listen(), work_async(), enqueue(),
+    // schedule(), etc. Only configure_queue() and job definitions run.
+    interpreter.set_execution_mode(ExecutionMode::Worker);
+    interpreter.eval(&ast)?;
     let kv_handle = ntnt::stdlib::jobs::JOB_RUNTIME.get_or_init_kv()?;
     Ok(kv_handle)
 }
