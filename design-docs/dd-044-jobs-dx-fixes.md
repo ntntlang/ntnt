@@ -124,10 +124,10 @@ A naive `bound.insert("x")` would persist across the `if` boundary, incorrectly 
 | `MapLiteral(pairs)` | Recurse keys + values | |
 | `Range { start, end }` | Recurse both | |
 | `InterpolatedString(parts)` | Recurse `StringPart::Expr` parts | |
-| `TemplateString(parts)` | Recurse all embedded expressions | Including `ForLoop` (binds `var`), `IfBlock`, `Partial`, filter args |
+| `TemplateString(parts)` | Recurse all embedded expressions | `ForLoop` binds `var` + 7 implicit loop metadata variables (`@index`, `@index1`, `@first`, `@last`, `@length`, `@even`, `@odd`) in the body scope. Also handle `IfBlock`, `Partial`, filter args. |
 | `StructLiteral { name, fields }` | `name` is a type ref (skip), recurse field values | |
 | `EnumVariant { arguments }` | Recurse arguments | `enum_name`/`variant` are type refs |
-| `Lambda { params, body }` | **New scope**: bind param names, recurse body with cloned `bound` | Nested closure — inner bindings must NOT leak to outer |
+| `Lambda { params, body }` | **New scope**: bind param names (including pattern names), recurse param defaults left-to-right (each default only sees earlier params), recurse body with cloned `bound` | Nested closure — inner bindings must NOT leak to outer. Param defaults can reference free variables. |
 | `Block(block)` | **New scope**: clone `bound`, recurse | |
 | `IfExpr { condition, then, else }` | Recurse all three | |
 | `Match { scrutinee, arms }` | Recurse scrutinee; for each arm: bind pattern names, recurse guard + body | Pattern bindings are scoped to the arm |
@@ -140,8 +140,8 @@ A naive `bound.insert("x")` would persist across the `if` boundary, incorrectly 
 
 | Statement | Bindings | Sub-expressions | Notes |
 |-----------|----------|-----------------|-------|
-| `Let { name, pattern, value, otherwise }` | Bind `name`, bind pattern names | Recurse `value`, `otherwise` block | `otherwise` introduces implicit `err` in its block |
-| `Function { name, params, body, contract }` | Bind `name` in enclosing scope; bind params in body scope | Recurse body, contract requires/ensures, param defaults | **New scope** for body |
+| `Let { name, pattern, value, otherwise }` | Bind `name`/pattern names AFTER recursing value | **Order matters:** (1) recurse `value` first (initializer can't reference its own binding), (2) recurse `otherwise` in a **fresh scope** containing only `err` (the `let` name is NOT in scope there), (3) THEN add `name`/pattern bindings to `bound` for subsequent sibling statements | `otherwise` block sees `err` but not the `let` binding |
+| `Function { name, params, body, contract }` | Bind `name` in enclosing scope; bind params (including pattern names) in body scope | **Param defaults evaluated left-to-right** — each default only sees earlier params as bound. Recurse defaults, contract requires/ensures, body. Destructured params bind pattern names, not the synthetic `param.name`. | **New scope** for body |
 | `Expression(expr)` | — | Recurse | |
 | `Return(Some(expr))` | — | Recurse | |
 | `If { condition, then, else }` | — | Recurse all; **clone bound** for each branch | Bindings in one branch don't leak to siblings |
@@ -151,6 +151,7 @@ A naive `bound.insert("x")` would persist across the `if` boundary, incorrectly 
 | `Defer(expr)` | — | Recurse | |
 | `Module { body }` | — | Recurse statements | |
 | `Export { statement }` | — | Recurse inner statement | |
+| `Intent { target }` | — | Recurse into `target` statement | Desugars to eval of target |
 | `Impl { methods, invariants }` | — | Recurse | |
 | `Server { port, directives, routes, groups }` | — | Recurse all expressions | |
 | `Job { perform_body, on_failure, options }` | Bind perform params in body; bind on_failure params | Recurse bodies and option expressions | |
@@ -243,6 +244,12 @@ schedule(3600000, fn() {
 - [ ] Handle `TemplateString` embedded expressions including `ForLoop.var` binding
 - [ ] Handle `otherwise` implicit `err` binding
 - [ ] Handle `Statement::Located` unwrapping
+- [ ] Handle `Statement::Intent` — recurse into `target`
+- [ ] Handle `Let` ordering: recurse value → recurse otherwise (fresh scope with `err`) → bind name/pattern
+- [ ] Handle `Function` param defaults left-to-right (each default only sees earlier params)
+- [ ] Handle `Lambda` param defaults (same semantics as Function)
+- [ ] Handle destructured param patterns (bind pattern names, not synthetic param.name)
+- [ ] Handle template `ForLoop` implicit bindings (`@index`, `@index1`, `@first`, `@last`, `@length`, `@even`, `@odd`)
 - [ ] Update `validate_and_capture()` to filter bindings through `free_vars`
 - [ ] Tests: `schedule()` succeeds with native fns + data when user functions exist in scope
 - [ ] Tests: `schedule()` fails with clear error when closure references a user-defined function
