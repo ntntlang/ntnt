@@ -33,23 +33,24 @@ Six issues found building snowgauge.app on `std/jobs`. All have been addressed e
 ### Fix B: `schedule()` captures entire scope, fails on user functions (#26) — ⏳ OPEN
 
 **File:** `src/stdlib/concurrent.rs` — `validate_and_capture()` / `capture_bindings()`
+**Effort:** Medium-Large (4-6 hours including tests)
+**Risk:** Medium — under-capture causes runtime failures instead of compile-time errors
 
-#### The Scenario
+---
+
+#### Scenario
 
 A developer builds a web app with scheduled background work:
 
 ```ntnt
 import { fetch } from "std/http"
-import { stringify } from "std/json"
 import { html } from "std/http/server"
 
 let API_URL = "https://api.weather.gov/stations"
 
-// Route handlers (user-defined functions)
 fn home(req) { return html("<h1>Weather</h1>") }
 fn dashboard(req) { return html("<h1>Dashboard</h1>") }
 
-// Background task — refresh weather data every hour
 fn refresh_weather() {
     let data = fetch(API_URL)
     // ... store in KV ...
@@ -64,160 +65,193 @@ schedule(3600000, fn() { refresh_weather() })
 listen(8080)
 ```
 
-#### The Problem
+#### Problem
 
-`schedule()` needs to move the closure to a new thread. To do this, `validate_and_capture()` calls `closure.borrow().all_bindings()` which grabs **everything** in the current scope — not just what the closure references. This includes:
+`schedule()` moves the closure to a new thread. `validate_and_capture()` calls `closure.borrow().all_bindings()` which grabs **everything** in scope:
 
-| Binding | Type | Referenced by closure? | Can cross thread? |
-|---------|------|----------------------|-------------------|
-| `fetch` | NativeFunction | No | ✅ Yes |
-| `stringify` | NativeFunction | No | ✅ Yes |
-| `html` | NativeFunction | No | ✅ Yes |
-| `API_URL` | String | No | ✅ Yes |
-| `home` | Function (Rc\<RefCell\>) | No | ❌ No |
-| `dashboard` | Function (Rc\<RefCell\>) | No | ❌ No |
-| `refresh_weather` | Function (Rc\<RefCell\>) | **Yes** | ❌ No |
+| Binding | Type | Used by closure? | Can cross thread? |
+|---------|------|:---:|:---:|
+| `fetch` | NativeFunction | No | ✅ |
+| `html` | NativeFunction | No | ✅ |
+| `API_URL` | String | No | ✅ |
+| `home` | Function (Rc\<RefCell\>) | **No** | ❌ |
+| `dashboard` | Function (Rc\<RefCell\>) | **No** | ❌ |
+| `refresh_weather` | Function (Rc\<RefCell\>) | **Yes** | ❌ |
 
-`capture_bindings()` hits `home` and `dashboard`, sees they're `Value::Function` (which contains `Rc<RefCell<Environment>>` — not `Send`), and fails with: "Cannot capture user-defined function(s) across task boundaries: home, dashboard, refresh_weather."
+`capture_bindings()` hits `home` and `dashboard` — user functions the closure never references — and fails. The error message lists all three functions, obscuring which one the closure actually needs.
 
-The developer's closure only needs `refresh_weather`, but the capture system grabs everything and chokes on unrelated route handlers.
+#### Fix: Scope-Aware Free-Variable Analysis
 
-#### The Fix: Free-Variable Analysis
+Compute the set of identifiers the closure body actually references (free variables), then only capture those bindings from the scope. This is a standard compiler technique but must be implemented correctly for ntnt's AST.
 
-Only capture bindings that the closure body actually references. This is a standard compiler technique — walk the AST, collect identifier references, subtract locally-bound names.
+**Key insight:** `collect_used_names()` in `main.rs` (line 4557) already walks the entire AST for import analysis. We adapt this with scope tracking — names bound locally are subtracted from the free set.
 
-**Step 1:** Add `free_variables(body: &Block) -> HashSet<String>` to `concurrent.rs`:
+##### Architecture
 
-```rust
-/// Walk a block's AST and collect all referenced identifiers,
-/// minus names bound locally (let, for, fn params). What remains
-/// are free variables that must be captured from the enclosing scope.
-fn free_variables(body: &Block) -> HashSet<String> {
-    let mut referenced = HashSet::new();
-    let mut locally_bound = HashSet::new();
-    collect_free_vars(&body.statements, &mut referenced, &mut locally_bound);
-    referenced.difference(&locally_bound).cloned().collect()
-}
-
-fn collect_free_vars(
-    stmts: &[Statement],
-    referenced: &mut HashSet<String>,
-    bound: &mut HashSet<String>,
-) {
-    for stmt in stmts {
-        match stmt {
-            Statement::Let { name, value, .. } => {
-                // Visit the value expression first (it can reference outer scope)
-                collect_free_vars_expr(value, referenced, bound);
-                // Then bind the name (not visible to the value expression)
-                bound.insert(name.clone());
-            }
-            Statement::Expression(expr) => {
-                collect_free_vars_expr(expr, referenced, bound);
-            }
-            // ... handle For, If, Return, etc.
-        }
-    }
-}
-
-fn collect_free_vars_expr(
-    expr: &Expression,
-    referenced: &mut HashSet<String>,
-    bound: &mut HashSet<String>,
-) {
-    match expr {
-        Expression::Identifier(name) => {
-            if !bound.contains(name) {
-                referenced.insert(name.clone());
-            }
-        }
-        Expression::Call { function, arguments } => {
-            collect_free_vars_expr(function, referenced, bound);
-            for arg in arguments {
-                collect_free_vars_expr(arg, referenced, bound);
-            }
-        }
-        // ... handle other expression types
-    }
-}
+```
+free_variables(body: &Block) -> HashSet<String>
+  └── collect_free_vars(stmts, referenced, bound)     // statement walker
+        └── collect_free_vars_expr(expr, referenced, bound)  // expression walker
+              └── names_bound_by_pattern(pattern) -> HashSet<String>  // pattern helper
 ```
 
-**Step 2:** Use it in `validate_and_capture()`:
+##### Critical Design Decision: Scope Snapshots
 
-```rust
-fn validate_and_capture(caller: &str, handler: &Value) -> Result<(CapturedBindings, Block)> {
-    match handler {
-        Value::Function { params, closure, body, .. } => {
-            // ... existing param check ...
-
-            // Only capture what the closure body actually references
-            let free_vars = free_variables(body);
-            let all_bindings = closure.borrow().all_bindings();
-            let needed: HashMap<String, Value> = all_bindings
-                .into_iter()
-                .filter(|(k, _)| free_vars.contains(k))
-                .collect();
-
-            let captured = capture_bindings(&needed).map_err(|names| {
-                // Error now only fires for functions the closure ACTUALLY uses
-                IntentError::runtime_error(format!(
-                    "Cannot capture user-defined function(s) across task boundaries: {}. \
-                     These functions use Rc<RefCell> which is not Send. \
-                     Consider moving the logic into the closure body or using a native function.",
-                    names.join(", ")
-                ))
-            })?;
-            Ok((captured, body.clone()))
-        }
-        // ...
-    }
-}
-```
-
-#### Result After Fix
-
-The same code now works:
+The `bound` set must be **snapshot/restored at scope boundaries**, not shared mutably across siblings. Without this:
 
 ```ntnt
-// This succeeds ✅
+fn() {
+    if cond {
+        let x = 1    // binds x in this branch
+    }
+    print(x)          // x is FREE here — not bound in this scope
+}
+```
+
+A naive `bound.insert("x")` would persist across the `if` boundary, incorrectly marking the outer `x` reference as locally bound. Fix: clone `bound` before entering each scope-forming construct (Block, If branches, While, Loop, ForIn, Lambda, Function, Match arms, TryCatch).
+
+##### Expression Variants to Handle
+
+| Expression | Action | Notes |
+|-----------|--------|-------|
+| `Identifier(name)` | Add to `referenced` if not in `bound` | Core case |
+| `Call { function, arguments }` | Recurse into both | |
+| `MethodCall { object, method, arguments }` | Recurse object + args, **add `method` to `referenced`** | ntnt looks up `method` in environment (interpreter.rs:5868) |
+| `FieldAccess { object, field }` | Recurse object only | `field` is a property name, not a variable |
+| `Binary`, `Unary` | Recurse operands | |
+| `Index { object, index }` | Recurse both | |
+| `Array(items)` | Recurse each | |
+| `MapLiteral(pairs)` | Recurse keys + values | |
+| `Range { start, end }` | Recurse both | |
+| `InterpolatedString(parts)` | Recurse `StringPart::Expr` parts | |
+| `TemplateString(parts)` | Recurse all embedded expressions | Including `ForLoop` (binds `var`), `IfBlock`, `Partial`, filter args |
+| `StructLiteral { name, fields }` | `name` is a type ref (skip), recurse field values | |
+| `EnumVariant { arguments }` | Recurse arguments | `enum_name`/`variant` are type refs |
+| `Lambda { params, body }` | **New scope**: bind param names, recurse body with cloned `bound` | Nested closure — inner bindings must NOT leak to outer |
+| `Block(block)` | **New scope**: clone `bound`, recurse | |
+| `IfExpr { condition, then, else }` | Recurse all three | |
+| `Match { scrutinee, arms }` | Recurse scrutinee; for each arm: bind pattern names, recurse guard + body | Pattern bindings are scoped to the arm |
+| `Assign { target, value }` | Recurse both | |
+| `Await(inner)`, `Try(inner)` | Recurse | |
+| `TryCatch { body }` | **New scope**: recurse | |
+| Literals (`Integer`, `Float`, `String`, `Bool`, `Unit`) | Skip | |
+
+##### Statement Variants to Handle
+
+| Statement | Bindings | Sub-expressions | Notes |
+|-----------|----------|-----------------|-------|
+| `Let { name, pattern, value, otherwise }` | Bind `name`, bind pattern names | Recurse `value`, `otherwise` block | `otherwise` introduces implicit `err` in its block |
+| `Function { name, params, body, contract }` | Bind `name` in enclosing scope; bind params in body scope | Recurse body, contract requires/ensures, param defaults | **New scope** for body |
+| `Expression(expr)` | — | Recurse | |
+| `Return(Some(expr))` | — | Recurse | |
+| `If { condition, then, else }` | — | Recurse all; **clone bound** for each branch | Bindings in one branch don't leak to siblings |
+| `While { condition, body }` | — | Recurse; **new scope** for body | |
+| `ForIn { variable, pattern, iterable, body }` | Bind `variable` or pattern names **in body scope** | Recurse iterable, body | |
+| `Loop { body }` | — | **New scope** for body | |
+| `Defer(expr)` | — | Recurse | |
+| `Module { body }` | — | Recurse statements | |
+| `Export { statement }` | — | Recurse inner statement | |
+| `Impl { methods, invariants }` | — | Recurse | |
+| `Server { port, directives, routes, groups }` | — | Recurse all expressions | |
+| `Job { perform_body, on_failure, options }` | Bind perform params in body; bind on_failure params | Recurse bodies and option expressions | |
+| `Located { stmt }` | — | **Unwrap and recurse** | |
+| `Break`, `Continue`, `Return(None)` | — | — | |
+| `Import`, `Use`, `TypeAlias`, `Struct`, `Enum`, `Trait` | — | — | No runtime variable references |
+
+##### Pattern Name Extraction
+
+```rust
+fn names_bound_by_pattern(pattern: &Pattern) -> HashSet<String> {
+    match pattern {
+        Pattern::Variable(name) => [name.clone()].into(),
+        Pattern::Wildcard => HashSet::new(),
+        Pattern::Literal(_) => HashSet::new(),
+        Pattern::Array { elements, rest } => {
+            let mut names: HashSet<_> = elements.iter()
+                .flat_map(|p| names_bound_by_pattern(p)).collect();
+            if let Some(rest_name) = rest { names.insert(rest_name.clone()); }
+            names
+        }
+        Pattern::Map { fields, rest } => {
+            let mut names: HashSet<_> = fields.iter()
+                .flat_map(|(_, p)| names_bound_by_pattern(p)).collect();
+            if let Some(rest_name) = rest { names.insert(rest_name.clone()); }
+            names
+        }
+        Pattern::Struct { fields, .. } => fields.iter()
+            .flat_map(|(_, p)| names_bound_by_pattern(p)).collect(),
+        Pattern::Variant { fields, .. } => fields.as_ref()
+            .map(|fs| fs.iter().flat_map(|p| names_bound_by_pattern(p)).collect())
+            .unwrap_or_default(),
+        Pattern::Tuple(patterns) => patterns.iter()
+            .flat_map(|p| names_bound_by_pattern(p)).collect(),
+    }
+}
+```
+
+##### Integration Point
+
+In `validate_and_capture()` (concurrent.rs:1204):
+
+```rust
+let free_vars = free_variables(body);
+let all_bindings = closure.borrow().all_bindings();
+let needed: HashMap<_, _> = all_bindings.into_iter()
+    .filter(|(k, _)| free_vars.contains(k))
+    .collect();
+let captured = capture_bindings(&needed).map_err(|names| {
+    // Error now only lists functions the closure ACTUALLY references
+    IntentError::runtime_error(format!(
+        "Cannot capture user-defined function(s) across task boundaries: {}. \
+         These functions use Rc<RefCell> which cannot be sent between threads. \
+         Inline the function body into the closure, or call a native function instead.",
+        names.join(", ")
+    ))
+})?;
+```
+
+##### Result After Fix
+
+```ntnt
+// Works ✅ — only captures refresh_weather, not home/dashboard
 schedule(3600000, fn() { refresh_weather() })
-```
-
-Free-variable analysis determines the closure only references `refresh_weather`. `home` and `dashboard` are never touched. `capture_bindings()` only sees `refresh_weather` — which IS a user function the closure needs. Since it can't cross threads, the error message is now accurate and actionable:
-
-"Cannot capture user-defined function 'refresh_weather' across task boundaries."
-
-The developer knows exactly which function is the problem and can inline its logic:
-
-```ntnt
-// Inlined — works ✅
+// Error is accurate: "Cannot capture 'refresh_weather'"
+// Developer inlines the logic:
 schedule(3600000, fn() {
     let data = fetch(API_URL)
-    // ... store in KV ...
+    // ...
 })
+// Works ✅ — only captures fetch (native) and API_URL (string)
 ```
 
-And closures that only use native functions + data work without any changes:
+##### Risks
 
-```ntnt
-// Only references native fetch + string API_URL — works ✅
-schedule(3600000, fn() {
-    fetch("#{API_URL}/refresh")
-})
-```
+1. **Under-capture** — if the walker misses a free variable, the error shifts from capture-time ("cannot capture X") to runtime ("undefined variable X"). Mitigation: comprehensive test coverage for every AST node type.
+2. **MethodCall.method** — easy to miss. ntnt resolves `obj.method(args)` by looking up `method` in the environment (interpreter.rs:5868). The walker must treat `method` as a referenced identifier.
+3. **Pipe operator** — NOT a separate AST node. Desugared to `Call` during parsing (parser.rs:1415). No special handling needed.
 
-#### Implementation
+---
 
-- [ ] Add `free_variables(body: &Block) -> HashSet<String>` — AST walker (~30-40 lines)
-- [ ] Add `collect_free_vars()` and `collect_free_vars_expr()` — recursive helpers
+#### Implementation Checklist
+
+- [ ] Add `free_variables(body: &Block) -> HashSet<String>` in `concurrent.rs`
+- [ ] Add `collect_free_vars(stmts, referenced, bound)` — statement walker with scope cloning
+- [ ] Add `collect_free_vars_expr(expr, referenced, bound)` — expression walker (all variants from table above)
+- [ ] Add `names_bound_by_pattern(pattern) -> HashSet<String>` — pattern helper
+- [ ] Handle scope boundaries: clone `bound` at Block, If branches, While, Loop, ForIn, Lambda, Function, Match arms, TryCatch
+- [ ] Handle `MethodCall.method` as a referenced identifier
+- [ ] Handle `TemplateString` embedded expressions including `ForLoop.var` binding
+- [ ] Handle `otherwise` implicit `err` binding
+- [ ] Handle `Statement::Located` unwrapping
 - [ ] Update `validate_and_capture()` to filter bindings through `free_vars`
-- [ ] Tests: `schedule()` works when closure uses only native functions + data, even with user functions in scope
+- [ ] Tests: `schedule()` succeeds with native fns + data when user functions exist in scope
 - [ ] Tests: `schedule()` fails with clear error when closure references a user-defined function
 - [ ] Tests: `spawn()` and `after()` also benefit (same code path)
 - [ ] Tests: captured data values still work correctly
-- [ ] Tests: free_variables correctly identifies identifiers in nested blocks, calls, and control flow
-
----
+- [ ] Tests: nested closures don't leak inner bindings to outer scope
+- [ ] Tests: destructuring patterns correctly bind names
+- [ ] Tests: match arm bindings scoped correctly
+- [ ] Tests: free_variables handles all expression types (Identifier, Call, MethodCall, FieldAccess, etc.)
 
 ### Fix C: `parse_json(None)` returns `Err` instead of throwing (#27) — ✅ COMPLETE (PR #43)
 
