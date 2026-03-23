@@ -34,31 +34,188 @@ Six issues found building snowgauge.app on `std/jobs`. All have been addressed e
 
 **File:** `src/stdlib/concurrent.rs` — `validate_and_capture()` / `capture_bindings()`
 
-**Problem:** `schedule(3600000, fn() { enqueue_all_sites() })` fails because `capture_bindings()` walks `closure.borrow().all_bindings()` — the entire environment. User-defined functions (like route handlers) can't cross thread boundaries (`Rc<RefCell>` is not `Send`), so `schedule()` fails even when the closure never references them.
+#### The Scenario
 
-**Current workaround:** Use `enqueue_in()` self-scheduling pattern instead of `schedule()`.
+A developer builds a web app with scheduled background work:
 
-**Proposed fix (simplified):** Instead of full free-variable analysis (AST walking), skip user-defined functions during capture instead of failing on them. If the closure actually references a skipped function, it gets a clear "undefined variable" runtime error at execution time.
+```ntnt
+import { fetch } from "std/http"
+import { stringify } from "std/json"
+import { html } from "std/http/server"
+
+let API_URL = "https://api.weather.gov/stations"
+
+// Route handlers (user-defined functions)
+fn home(req) { return html("<h1>Weather</h1>") }
+fn dashboard(req) { return html("<h1>Dashboard</h1>") }
+
+// Background task — refresh weather data every hour
+fn refresh_weather() {
+    let data = fetch(API_URL)
+    // ... store in KV ...
+}
+
+get("/", home)
+get("/dashboard", dashboard)
+
+// This fails ❌
+schedule(3600000, fn() { refresh_weather() })
+
+listen(8080)
+```
+
+#### The Problem
+
+`schedule()` needs to move the closure to a new thread. To do this, `validate_and_capture()` calls `closure.borrow().all_bindings()` which grabs **everything** in the current scope — not just what the closure references. This includes:
+
+| Binding | Type | Referenced by closure? | Can cross thread? |
+|---------|------|----------------------|-------------------|
+| `fetch` | NativeFunction | No | ✅ Yes |
+| `stringify` | NativeFunction | No | ✅ Yes |
+| `html` | NativeFunction | No | ✅ Yes |
+| `API_URL` | String | No | ✅ Yes |
+| `home` | Function (Rc\<RefCell\>) | No | ❌ No |
+| `dashboard` | Function (Rc\<RefCell\>) | No | ❌ No |
+| `refresh_weather` | Function (Rc\<RefCell\>) | **Yes** | ❌ No |
+
+`capture_bindings()` hits `home` and `dashboard`, sees they're `Value::Function` (which contains `Rc<RefCell<Environment>>` — not `Send`), and fails with: "Cannot capture user-defined function(s) across task boundaries: home, dashboard, refresh_weather."
+
+The developer's closure only needs `refresh_weather`, but the capture system grabs everything and chokes on unrelated route handlers.
+
+#### The Fix: Free-Variable Analysis
+
+Only capture bindings that the closure body actually references. This is a standard compiler technique — walk the AST, collect identifier references, subtract locally-bound names.
+
+**Step 1:** Add `free_variables(body: &Block) -> HashSet<String>` to `concurrent.rs`:
 
 ```rust
-// In capture_bindings(): change user-defined function handling from error to skip
-Value::Function { .. } => {
-    // Skip — can't cross threads. If the closure body references this,
-    // it will fail at runtime with "undefined variable" (clear error).
-    skipped_fns.push(key.clone());
+/// Walk a block's AST and collect all referenced identifiers,
+/// minus names bound locally (let, for, fn params). What remains
+/// are free variables that must be captured from the enclosing scope.
+fn free_variables(body: &Block) -> HashSet<String> {
+    let mut referenced = HashSet::new();
+    let mut locally_bound = HashSet::new();
+    collect_free_vars(&body.statements, &mut referenced, &mut locally_bound);
+    referenced.difference(&locally_bound).cloned().collect()
+}
+
+fn collect_free_vars(
+    stmts: &[Statement],
+    referenced: &mut HashSet<String>,
+    bound: &mut HashSet<String>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Statement::Let { name, value, .. } => {
+                // Visit the value expression first (it can reference outer scope)
+                collect_free_vars_expr(value, referenced, bound);
+                // Then bind the name (not visible to the value expression)
+                bound.insert(name.clone());
+            }
+            Statement::Expression(expr) => {
+                collect_free_vars_expr(expr, referenced, bound);
+            }
+            // ... handle For, If, Return, etc.
+        }
+    }
+}
+
+fn collect_free_vars_expr(
+    expr: &Expression,
+    referenced: &mut HashSet<String>,
+    bound: &mut HashSet<String>,
+) {
+    match expr {
+        Expression::Identifier(name) => {
+            if !bound.contains(name) {
+                referenced.insert(name.clone());
+            }
+        }
+        Expression::Call { function, arguments } => {
+            collect_free_vars_expr(function, referenced, bound);
+            for arg in arguments {
+                collect_free_vars_expr(arg, referenced, bound);
+            }
+        }
+        // ... handle other expression types
+    }
 }
 ```
 
-**Why simpler than free-variable analysis:**
-- No AST walking needed, no new `free_variables()` function
-- Change isolated to `capture_bindings()` — one function
-- Dev-mode warning lists what was skipped
+**Step 2:** Use it in `validate_and_capture()`:
 
-- [ ] `schedule()` works when closure references only native functions + data, even if user functions exist in scope
-- [ ] `schedule()` closure that references a user-defined function fails with "undefined" error at runtime
-- [ ] `spawn()` and `after()` also benefit (same code path)
-- [ ] Captured data values still work correctly
-- [ ] Dev warning printed listing skipped functions
+```rust
+fn validate_and_capture(caller: &str, handler: &Value) -> Result<(CapturedBindings, Block)> {
+    match handler {
+        Value::Function { params, closure, body, .. } => {
+            // ... existing param check ...
+
+            // Only capture what the closure body actually references
+            let free_vars = free_variables(body);
+            let all_bindings = closure.borrow().all_bindings();
+            let needed: HashMap<String, Value> = all_bindings
+                .into_iter()
+                .filter(|(k, _)| free_vars.contains(k))
+                .collect();
+
+            let captured = capture_bindings(&needed).map_err(|names| {
+                // Error now only fires for functions the closure ACTUALLY uses
+                IntentError::runtime_error(format!(
+                    "Cannot capture user-defined function(s) across task boundaries: {}. \
+                     These functions use Rc<RefCell> which is not Send. \
+                     Consider moving the logic into the closure body or using a native function.",
+                    names.join(", ")
+                ))
+            })?;
+            Ok((captured, body.clone()))
+        }
+        // ...
+    }
+}
+```
+
+#### Result After Fix
+
+The same code now works:
+
+```ntnt
+// This succeeds ✅
+schedule(3600000, fn() { refresh_weather() })
+```
+
+Free-variable analysis determines the closure only references `refresh_weather`. `home` and `dashboard` are never touched. `capture_bindings()` only sees `refresh_weather` — which IS a user function the closure needs. Since it can't cross threads, the error message is now accurate and actionable:
+
+"Cannot capture user-defined function 'refresh_weather' across task boundaries."
+
+The developer knows exactly which function is the problem and can inline its logic:
+
+```ntnt
+// Inlined — works ✅
+schedule(3600000, fn() {
+    let data = fetch(API_URL)
+    // ... store in KV ...
+})
+```
+
+And closures that only use native functions + data work without any changes:
+
+```ntnt
+// Only references native fetch + string API_URL — works ✅
+schedule(3600000, fn() {
+    fetch("#{API_URL}/refresh")
+})
+```
+
+#### Implementation
+
+- [ ] Add `free_variables(body: &Block) -> HashSet<String>` — AST walker (~30-40 lines)
+- [ ] Add `collect_free_vars()` and `collect_free_vars_expr()` — recursive helpers
+- [ ] Update `validate_and_capture()` to filter bindings through `free_vars`
+- [ ] Tests: `schedule()` works when closure uses only native functions + data, even with user functions in scope
+- [ ] Tests: `schedule()` fails with clear error when closure references a user-defined function
+- [ ] Tests: `spawn()` and `after()` also benefit (same code path)
+- [ ] Tests: captured data values still work correctly
+- [ ] Tests: free_variables correctly identifies identifiers in nested blocks, calls, and control flow
 
 ---
 
