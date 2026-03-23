@@ -1325,6 +1325,15 @@ fn collect_free_vars(
                     collect_free_vars(std::slice::from_ref(statement.as_ref()), referenced, bound);
                 }
             }
+            Statement::Import { items, alias, .. } => {
+                if let Some(alias) = alias {
+                    bound.insert(alias.clone());
+                } else {
+                    for item in items {
+                        bound.insert(item.alias.clone().unwrap_or_else(|| item.name.clone()));
+                    }
+                }
+            }
             Statement::Server {
                 port,
                 directives,
@@ -1383,14 +1392,18 @@ fn collect_free_vars(
             Statement::Located { stmt, .. } => {
                 collect_free_vars(std::slice::from_ref(stmt.as_ref()), referenced, bound);
             }
+            Statement::Enum { name, variants, .. } => {
+                bound.insert(name.clone());
+                for variant in variants {
+                    bound.insert(variant.name.clone());
+                }
+            }
             Statement::Return(None)
             | Statement::Break
             | Statement::Continue
-            | Statement::Import { .. }
             | Statement::Use { .. }
             | Statement::TypeAlias { .. }
             | Statement::Struct { .. }
-            | Statement::Enum { .. }
             | Statement::Trait { .. } => {}
         }
     }

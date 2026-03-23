@@ -582,8 +582,7 @@ print("schedule survived errors")
 fn test_schedule_ignores_unused_user_functions_in_scope() {
     let (stdout, stderr, code) = run_ntnt_code(
         r#"
-import { schedule, cancel_schedule, sleep_ms, channel, send, recv_timeout } from "std/concurrent"
-
+import { schedule, cancel_schedule, channel, send, recv_timeout } from "std/concurrent"
 fn unused_helper() { 999 }
 let payload = "scheduled"
 let [tx, rx] = channel()
@@ -592,10 +591,8 @@ let sched = schedule(50, fn() {
     send(tx, payload)
 })
 
-sleep_ms(140)
+let result = recv_timeout(rx, 1000)
 cancel_schedule(sched)
-
-let result = recv_timeout(rx, 200)
 match result {
     Some(v) => print("ok: " + str(v)),
     None => print("missing")
