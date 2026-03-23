@@ -1,9 +1,10 @@
 # DD-045: Job Worker Environment — Full App Context
 
-**Status:** Draft
+**Status:** Complete
 **Author:** Larri
 **Created:** 2026-03-21
-**Branch:** `feat/job-worker-env`
+**Completed:** 2026-03-22
+**PRs:** #44 (RuntimeCapability), #45 (worker interpreter), #46 (jobs() discovery), #49 (enqueue gating)
 
 ---
 
@@ -588,95 +589,95 @@ Steps are ordered so each is independently testable and mergeable. CI catches re
 
 Foundational types. No behavioral change yet.
 
-- [ ] Define `RuntimeCapability` enum: `HttpServer`, `HttpConfig`, `Concurrency`, `JobWorkers`, `JobConfig`
-- [ ] Add `ExecutionMode::Job` variant
-- [ ] Implement `ExecutionMode::capabilities() -> &'static [RuntimeCapability]` for all modes
-- [ ] Implement `ExecutionMode::has(RuntimeCapability) -> bool`
-- [ ] Tests: verify each mode provides exactly the right capabilities (Normal has all, Job has only JobConfig, etc.)
+- [x] Define `RuntimeCapability` enum: `HttpServer`, `HttpConfig`, `Concurrency`, `JobWorkers`, `JobConfig`
+- [x] Add `ExecutionMode::Job` variant
+- [x] Implement `ExecutionMode::capabilities() -> &'static [RuntimeCapability]` for all modes
+- [x] Implement `ExecutionMode::has(RuntimeCapability) -> bool`
+- [x] Tests: verify each mode provides exactly the right capabilities (Normal has all, Job has only JobConfig, etc.)
 
 ### Step 1b: `requires` Field on NativeFunction
 
 Large mechanical diff — add the field everywhere, defaulting to `None`. Behavioral change only for the 6 functions that get `Some(...)`.
 
-- [ ] Add `requires: Option<RuntimeCapability>` field to `Value::NativeFunction`
-- [ ] Preparatory commit: add `requires: None` to all ~350 NativeFunction registrations across 21 stdlib files
-- [ ] Set `requires: Some(Concurrency)` on `spawn`, `schedule`, `after` in std/concurrent
-- [ ] Set `requires: Some(JobWorkers)` on `work_async`, `work_jobs`, `scale_workers` in std/jobs
-- [ ] Update NativeFunction dispatch to check `requires` automatically
-- [ ] Delete the string-matching skip block for `spawn`/`schedule`/`after` in interpreter
-- [ ] Tests: verify mode-gated functions are no-ops in restricted modes
-- [ ] Tests: verify `requires: None` functions still work in all modes
+- [x] Add `requires: Option<RuntimeCapability>` field to `Value::NativeFunction`
+- [x] Preparatory commit: add `requires: None` to all ~350 NativeFunction registrations across 21 stdlib files
+- [x] Set `requires: Some(Concurrency)` on `spawn`, `schedule`, `after` in std/concurrent
+- [x] Set `requires: Some(JobWorkers)` on `work_async`, `work_jobs`, `scale_workers` in std/jobs
+- [x] Update NativeFunction dispatch to check `requires` automatically
+- [x] Delete the string-matching skip block for `spawn`/`schedule`/`after` in interpreter
+- [x] Tests: verify mode-gated functions are no-ops in restricted modes
+- [x] Tests: verify `requires: None` functions still work in all modes
 
 ### Step 1c: Server Actions Registry
 
 Refactor the `if name ==` chain into action table. Same behavior, better structure.
 
-- [ ] Define `ServerAction` struct with `requires`, `arity`, and `handler`
-- [ ] Add action registry (`HashMap<String, ServerAction>`) to `Interpreter`
-- [ ] Implement `register_action()` — requires `RuntimeCapability` parameter
-- [ ] Implement `define_server_actions()` — register `listen`, `serve_static`, `routes`, `new_server`, `use_middleware`, `enable_cors`, `enable_csp`, `enable_auth`, `on_shutdown`, `on_error`
-- [ ] Extract each `if name == "X"` block into a standalone `action_X` method on `Interpreter`
-- [ ] Replace the `if name ==` chain in `Expression::Call` with action table lookup + automatic capability check
-- [ ] Handle HTTP method dual dispatch: `get("/route", handler)` → `HttpServer` capability, `get("http://url")` → fall through to normal function call (no capability)
-- [ ] Delete `should_skip_server_call()` — no longer needed
-- [ ] Delete `should_skip_route_registration()` — absorbed into dual-dispatch handler
-- [ ] Tests: all existing server function tests still pass
-- [ ] Tests: Job mode suppresses all server actions
-- [ ] Tests: `get("http://api.com/data")` still works as HTTP client in Job mode
+- [x] Define `ServerAction` struct with `requires`, `arity`, and `handler`
+- [x] Add action registry (`HashMap<String, ServerAction>`) to `Interpreter`
+- [x] Implement `register_action()` — requires `RuntimeCapability` parameter
+- [x] Implement `define_server_actions()` — register `listen`, `serve_static`, `routes`, `new_server`, `use_middleware`, `enable_cors`, `enable_csp`, `enable_auth`, `on_shutdown`, `on_error`
+- [x] Extract each `if name == "X"` block into a standalone `action_X` method on `Interpreter`
+- [x] Replace the `if name ==` chain in `Expression::Call` with action table lookup + automatic capability check
+- [x] Handle HTTP method dual dispatch: `get("/route", handler)` → `HttpServer` capability, `get("http://url")` → fall through to normal function call (no capability)
+- [x] Delete `should_skip_server_call()` — no longer needed
+- [x] Delete `should_skip_route_registration()` — absorbed into dual-dispatch handler
+- [x] Tests: all existing server function tests still pass
+- [x] Tests: Job mode suppresses all server actions
+- [x] Tests: `get("http://api.com/data")` still works as HTTP client in Job mode
 
 ### Step 2: Source File Tracking
 
 Store the source file path in `JobRuntime`:
 
-- [ ] Add `source_file: Mutex<Option<String>>` to `JobRuntime`
-- [ ] Set `source_file` during `Statement::Job` evaluation (from `interpreter.main_source_file`)
-- [ ] Add `JOB_RUNTIME.get_source_file() -> Option<String>` accessor
+- [x] Add `source_file: Mutex<Option<String>>` to `JobRuntime`
+- [x] Set `source_file` during `Statement::Job` evaluation (from `interpreter.main_source_file`)
+- [x] Add `JOB_RUNTIME.get_source_file() -> Option<String>` accessor
 
 ### Step 3: Worker Interpreter Creation
 
 Add `create_job_interpreter()`:
 
-- [ ] Read source file from `JOB_RUNTIME.get_source_file()`
-- [ ] Parse and evaluate with `ExecutionMode::Worker` (bootstrap), then switch to `ExecutionMode::Job`
-- [ ] Handle errors (file not found, parse error, eval error) with clear messages
-- [ ] Test: verify interpreter has imports, functions, constants after creation
-- [ ] Test: verify `HttpServer` functions are suppressed (listen, serve_static, routes)
-- [ ] Test: verify `Concurrency` functions are suppressed (spawn, schedule, after)
-- [ ] Test: verify `JobWorkers` functions are suppressed (work_async, work_jobs)
-- [ ] Test: verify `JobConfig` functions run normally (configure_queue)
+- [x] Read source file from `JOB_RUNTIME.get_source_file()`
+- [x] Parse and evaluate with `ExecutionMode::Worker` (bootstrap), then switch to `ExecutionMode::Job`
+- [x] Handle errors (file not found, parse error, eval error) with clear messages
+- [x] Test: verify interpreter has imports, functions, constants after creation
+- [x] Test: verify `HttpServer` functions are suppressed (listen, serve_static, routes)
+- [x] Test: verify `Concurrency` functions are suppressed (spawn, schedule, after)
+- [x] Test: verify `JobWorkers` functions are suppressed (work_async, work_jobs)
+- [x] Test: verify `JobConfig` functions run normally (configure_queue)
 
 ### Step 4: Scoped Job Execution
 
 Replace `execute_job_perform` with `execute_in_worker`:
 
-- [ ] Implement child-scope creation with parameter injection
-- [ ] `eval_block()` handles body-local scoping (creates its own child scope)
-- [ ] Implement scope cleanup (restore parent on success, error, and panic)
-- [ ] Replace all `execute_job_perform` call sites in `worker_loop`
-- [ ] Delete `execute_job_perform`
-- [ ] Test: perform block can call imported functions
-- [ ] Test: perform block can call user-defined functions from the file
-- [ ] Test: perform block can access top-level constants
-- [ ] Test: locals from one job execution don't leak to the next
-- [ ] Test: panic in perform block doesn't corrupt the worker interpreter
+- [x] Implement child-scope creation with parameter injection
+- [x] `eval_block()` handles body-local scoping (creates its own child scope)
+- [x] Implement scope cleanup (restore parent on success, error, and panic)
+- [x] Replace all `execute_job_perform` call sites in `worker_loop`
+- [x] Delete `execute_job_perform`
+- [x] Test: perform block can call imported functions
+- [x] Test: perform block can call user-defined functions from the file
+- [x] Test: perform block can access top-level constants
+- [x] Test: locals from one job execution don't leak to the next
+- [x] Test: panic in perform block doesn't corrupt the worker interpreter
 
 ### Step 5: on_failure in Worker Context
 
 Replace `execute_on_failure` with worker-scoped version:
 
-- [ ] Implement `execute_on_failure_in_worker` with child scope
-- [ ] Replace all `execute_on_failure` call sites
-- [ ] Delete `execute_on_failure`
-- [ ] Test: on_failure can call helper functions
-- [ ] Test: errors in on_failure don't affect subsequent job execution
+- [x] Implement `execute_on_failure_in_worker` with child scope
+- [x] Replace all `execute_on_failure` call sites
+- [x] Delete `execute_on_failure`
+- [x] Test: on_failure can call helper functions
+- [x] Test: errors in on_failure don't affect subsequent job execution
 
 ### Step 6: ntnt worker CLI
 
 Update `run_worker_command` in `main.rs`:
 
-- [ ] Set `ExecutionMode::Worker` when evaluating the source file (not Job — prevents recursive worker spawning)
-- [ ] Workers create their own interpreters via `create_job_interpreter`
-- [ ] Test: `ntnt worker server.tnt` starts cleanly without binding ports or spawning schedules
+- [x] Set `ExecutionMode::Worker` when evaluating the source file (not Job — prevents recursive worker spawning)
+- [x] Workers create their own interpreters via `create_job_interpreter`
+- [x] Test: `ntnt worker server.tnt` starts cleanly without binding ports or spawning schedules
 
 ### Step 7: `jobs()` Directory Auto-Discovery
 
@@ -688,8 +689,8 @@ New feature — depends on `ExecutionMode::Job` existing but independent of work
 - [x] `lib/` modules available to job files via import (same as route files)
 - [x] Track file mtimes for hot-reload in dev mode (detect new/changed/deleted job files)
 - [x] Test: `jobs("jobs/")` discovers and registers jobs from multiple files
-- [ ] Test: job files can import from `lib/` modules
-- [ ] Test: hot-reload picks up new job files added to the directory
+- [x] Test: job files can import from `lib/` modules
+- [x] Test: hot-reload picks up new job files added to the directory
 - [x] Test: `jobs()` works in `ExecutionMode::Job` (workers re-discover on startup)
 
 ### Step 8: Documentation
@@ -697,8 +698,8 @@ New feature — depends on `ExecutionMode::Job` existing but independent of work
 - [x] Update AI_AGENT_GUIDE.md job system section
 - [x] Update STDLIB_REFERENCE.md
 - [x] Run `ntnt docs --generate`
-- [ ] Update DD-037 (main concurrency/jobs DD) to reflect the worker environment model and capability system
-- [ ] Remove DD-044 Fix A references (no longer applicable)
+- [x] Update DD-037 (main concurrency/jobs DD) to reflect the worker environment model and capability system
+- [x] Remove DD-044 Fix A references (no longer applicable)
 
 ---
 
@@ -782,12 +783,12 @@ fn test_job_worker_panic_recovery() {
 
 ### Integration Tests
 
-- [ ] Snowgauge app works with no imports inside perform blocks
-- [ ] Helper functions callable from perform blocks
-- [ ] Top-level constants accessible in perform blocks
-- [ ] `ntnt worker server.tnt` starts without side effects
-- [ ] Multiple workers process jobs correctly (each with independent interpreter)
-- [ ] HTTP client functions (fetch, get/post with URLs) work in job perform blocks
+- [x] Snowgauge app works with no imports inside perform blocks
+- [x] Helper functions callable from perform blocks
+- [x] Top-level constants accessible in perform blocks
+- [x] `ntnt worker server.tnt` starts without side effects
+- [x] Multiple workers process jobs correctly (each with independent interpreter)
+- [x] HTTP client functions (fetch, get/post with URLs) work in job perform blocks
 
 ---
 
