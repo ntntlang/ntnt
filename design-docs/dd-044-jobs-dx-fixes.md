@@ -1,11 +1,11 @@
 # DD-044: Jobs DX Fixes — Addressing v0.4.6 Field Findings
 
-**Status:** Nearly Complete (5/6 fixes done)
+**Status:** ✅ Complete — All 6 fixes shipped
 **Author:** Larri
 **Created:** 2026-03-21
+**Completed:** 2026-03-23
 **Source:** [ntnt-findings.md §5](https://app.larri.net/admin/design-docs/dd-005-ntnt-findings) — findings #25-30 from snowgauge.app build
-**Implemented in:** PR #43 (Fixes C, D, E), DD-045 PRs #44-#46 (Fix A superseded), PR #54 (Fix F)
-**Remaining:** Fix B (schedule smart capture)
+**Implemented in:** PR #43 (Fixes C, D, E), DD-045 PRs #44-#46 (Fix A superseded), PR #54 (Fix F), PR #55 (Fix B)
 
 ---
 
@@ -30,11 +30,11 @@ Six issues found building snowgauge.app on `std/jobs`. All have been addressed e
 
 ---
 
-### Fix B: `schedule()` captures entire scope, fails on user functions (#26) — ⏳ OPEN
+### Fix B: `schedule()` captures entire scope, fails on user functions (#26) — ✅ COMPLETE (PR #55)
 
 **File:** `src/stdlib/concurrent.rs` — `validate_and_capture()` / `capture_bindings()`
-**Effort:** Medium-Large (4-6 hours including tests)
-**Risk:** Medium — under-capture causes runtime failures instead of compile-time errors
+**Implemented:** PR #55 (merged 2026-03-23)
+**Approach:** Scope-aware free-variable analysis — AST walker collects referenced identifiers, subtracts locally-bound names, captures only what's needed.
 
 ---
 
@@ -235,30 +235,30 @@ schedule(3600000, fn() {
 
 #### Implementation Checklist
 
-- [ ] Add `free_variables(body: &Block) -> HashSet<String>` in `concurrent.rs`
-- [ ] Add `collect_free_vars(stmts, referenced, bound)` — statement walker with scope cloning
-- [ ] Add `collect_free_vars_expr(expr, referenced, bound)` — expression walker (all variants from table above)
-- [ ] Add `names_bound_by_pattern(pattern) -> HashSet<String>` — pattern helper
-- [ ] Handle scope boundaries: clone `bound` at Block, If branches, While, Loop, ForIn, Lambda, Function, Match arms, TryCatch
-- [ ] Handle `MethodCall.method` as a referenced identifier
-- [ ] Handle `TemplateString` embedded expressions including `ForLoop.var` binding
-- [ ] Handle `otherwise` implicit `err` binding
-- [ ] Handle `Statement::Located` unwrapping
-- [ ] Handle `Statement::Intent` — recurse into `target`
-- [ ] Handle `Let` ordering: recurse value → recurse otherwise (fresh scope with `err`) → bind name/pattern
-- [ ] Handle `Function` param defaults left-to-right (each default only sees earlier params)
-- [ ] Handle `Lambda` param defaults (same semantics as Function)
-- [ ] Handle destructured param patterns (bind pattern names, not synthetic param.name)
-- [ ] Handle template `ForLoop` implicit bindings (`@index`, `@index1`, `@first`, `@last`, `@length`, `@even`, `@odd`)
-- [ ] Update `validate_and_capture()` to filter bindings through `free_vars`
-- [ ] Tests: `schedule()` succeeds with native fns + data when user functions exist in scope
-- [ ] Tests: `schedule()` fails with clear error when closure references a user-defined function
-- [ ] Tests: `spawn()` and `after()` also benefit (same code path)
-- [ ] Tests: captured data values still work correctly
-- [ ] Tests: nested closures don't leak inner bindings to outer scope
-- [ ] Tests: destructuring patterns correctly bind names
-- [ ] Tests: match arm bindings scoped correctly
-- [ ] Tests: free_variables handles all expression types (Identifier, Call, MethodCall, FieldAccess, etc.)
+- [x] Add `free_variables(body: &Block) -> HashSet<String>` in `concurrent.rs`
+- [x] Add `collect_free_vars(stmts, referenced, bound)` — statement walker with scope cloning
+- [x] Add `collect_free_vars_expr(expr, referenced, bound)` — expression walker (all variants from table above)
+- [x] Add `names_bound_by_pattern(pattern) -> HashSet<String>` — pattern helper
+- [x] Handle scope boundaries: clone `bound` at Block, If branches, While, Loop, ForIn, Lambda, Function, Match arms, TryCatch
+- [x] Handle `MethodCall.method` as a referenced identifier
+- [x] Handle `TemplateString` embedded expressions including `ForLoop.var` binding
+- [x] Handle `otherwise` implicit `err` binding
+- [x] Handle `Statement::Located` unwrapping
+- [x] Handle `Statement::Intent` — recurse into `target`
+- [x] Handle `Let` ordering: recurse value → recurse otherwise (fresh scope with `err`) → bind name/pattern
+- [x] Handle `Function` param defaults left-to-right (each default only sees earlier params)
+- [x] Handle `Lambda` param defaults (same semantics as Function)
+- [x] Handle destructured param patterns (bind pattern names, not synthetic param.name)
+- [x] Handle template `ForLoop` implicit bindings (`@index`, `@index1`, `@first`, `@last`, `@length`, `@even`, `@odd`)
+- [x] Update `validate_and_capture()` to filter bindings through `free_vars`
+- [x] Tests: `schedule()` succeeds with native fns + data when user functions exist in scope
+- [x] Tests: `schedule()` fails with clear error when closure references a user-defined function
+- [x] Tests: `spawn()` and `after()` also benefit (same code path)
+- [x] Tests: captured data values still work correctly
+- [x] Tests: nested closures don't leak inner bindings to outer scope
+- [x] Tests: destructuring patterns correctly bind names
+- [x] Tests: match arm bindings scoped correctly
+- [x] Tests: free_variables handles all expression types (Identifier, Call, MethodCall, FieldAccess, etc.)
 
 ### Fix C: `parse_json(None)` returns `Err` instead of throwing (#27) — ✅ COMPLETE (PR #43)
 
@@ -312,8 +312,10 @@ schedule(3600000, fn() {
 
 After all fixes, snowgauge.app should:
 1. ~~Work without any imports inside `perform` blocks~~ ✅ (DD-045)
-2. Use `schedule()` directly instead of the `enqueue_in` self-scheduling workaround (Fix B — pending)
+2. ~~Use `schedule()` directly instead of the `enqueue_in` self-scheduling workaround~~ ✅ (Fix B — PR #55)
 3. ~~Use `parse_json(get(kv, key))` without guards~~ ✅ (Fix C)
 4. ~~Get a helpful error if `unwrap()` is forgotten on `open()`~~ ✅ (Fix D)
 5. ~~Start cleanly with no "Duplicate job" warnings~~ ✅ (Fix E)
 6. ~~`ntnt jobs list server.tnt` runs without side effects~~ ✅ (Fix F)
+
+**All 6 validation criteria met. DD-044 is complete.**

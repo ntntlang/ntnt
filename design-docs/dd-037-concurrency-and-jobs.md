@@ -1,9 +1,9 @@
 # DD-037: Concurrency & Job System
 
-**Status:** Phases 0-3, 6 Complete, Phases 4-5, 7-8 Planned
+**Status:** Phases 0-3, 6 Complete. Priority Queues, Control Socket, Worker Environment, DX Fixes all shipped. Phases 4-5, 7-8 Planned.
 **Author:** Larri
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-20
+**Last Updated:** 2026-03-23
 **Supersedes:** `background_jobs.md`, `dd-037-structured-tasks.md`
 
 ---
@@ -189,15 +189,24 @@ Single global instance (`LazyLock<ConcurrencyRuntime>`) owns all state:
 ### Overview
 
 ```
-Phase 0  ✅  Concurrency Primitives                    spawn, channels, schedules
-Phase 1  ✅  Primitive Hardening                        handle types, select(), reaper
-Phase 2  ✅  Job DSL + KV Backend                       PR 2a/2b/2c — declarative jobs, workers, testing, CLI
-Phase 3  ✅  Job System Advanced Features               Lua claim, scheduled optimization, dedup, expiration, batch enqueue
-Phase 4  📋  Composition Layer                          parallel, race, task groups
-Phase 5  📋  Dashboard + Production Hardening            real-time UI, simulation, contracts
-Phase 6  ✅  Observability CLI                          PR #35 — list/inspect/retry/cancel/clear + dedup refactor
-Phase 7  📋  Event Dispatch (std/events)                pub/sub fan-out over the job system
-Phase 8  📋  Job Audit Log & Observability Pipeline    structured logs, sinks, webhooks, web viewer
+Phase 0   ✅  Concurrency Primitives                    spawn, channels, schedules
+Phase 1   ✅  Primitive Hardening                        handle types, select(), reaper
+Phase 2   ✅  Job DSL + KV Backend                       PR 2a/2b/2c — declarative jobs, workers, testing, CLI
+Phase 3   ✅  Job System Advanced Features               Lua claim, scheduled optimization, dedup, expiration, batch enqueue
+Phase 3b  ✅  Priority Queues + Atomic Dedup             PR #41 — named priorities, worker bands, kv_set_nx
+Phase 3c  ✅  Control Socket + CLI                       PR #42 — .ntnt.sock, ntnt workers status/scale
+Phase 4   📋  Composition Layer                          parallel, race, task groups
+Phase 5   📋  Dashboard + Production Hardening            real-time UI, simulation, contracts
+Phase 6   ✅  Observability CLI                          PR #35 — list/inspect/retry/cancel/clear + dedup refactor
+Phase 7   📋  Event Dispatch (std/events)                pub/sub fan-out over the job system
+Phase 8   📋  Job Audit Log & Observability Pipeline    structured logs, sinks, webhooks, web viewer
+```
+
+### Cross-Cutting Work (shipped alongside phases)
+
+```
+DD-044  ✅  Jobs DX Fixes                               PRs #43, #54, #55 — all 6 findings resolved
+DD-045  ✅  Job Worker Environment                       PRs #44, #45, #46, #49 — RuntimeCapability, full app context, jobs() discovery
 ```
 
 ### Phase Status Table
@@ -208,11 +217,15 @@ Phase 8  📋  Job Audit Log & Observability Pipeline    structured logs, sinks,
 | 1 | Primitive Hardening | ✅ Done | 2 Copilot reviews, 16/16 resolved |
 | 2 | Job DSL + KV Backend | ✅ Done | PR #32 (parser/registry), #33 (workers/retry), #34 (DX/CLI/docs). See [dd-037-phase-2-implementation.md](dd-037-phase-2-implementation.md) |
 | 3 | Job System Advanced Features | ✅ Done | PR #36 (atomic claim + scheduled opt), #38 (dedup + expiration), #39 (batch enqueue). See [dd-037-phase-3-plan.md](dd-037-phase-3-plan.md) |
+| 3b | Priority Queues + Atomic Dedup | ✅ Done | PR #41 merged. Named priorities (critical/high/normal/low), worker bands with independent thread pools, `kv_set_nx`, `scale_workers()`, `worker_status()`, band validation. See [dd-037-priority-and-atomic-dedup-plan.md](dd-037-priority-and-atomic-dedup-plan.md) |
+| 3c | Control Socket + CLI | ✅ Done | PR #42 merged. `.ntnt.sock` Unix domain socket, `ntnt workers status`, `ntnt workers scale <band> <n>`, poisoned lock recovery. |
 | 4 | Composition Layer | 📋 Planned | parallel, race, task groups |
 | 5 | Dashboard + Production Hardening | 📋 Planned | Dashboard, simulation, contracts, intent testing |
 | 6 | Observability CLI | ✅ Done | PR #35 merged. list/inspect/retry/cancel/clear + CLI/stdlib dedup refactor. `tail`, `replay`, `workers` deferred. |
 | 7 | Event Dispatch (`std/events`) | 📋 Planned | pub/sub fan-out over the job system |
 | 8 | Job Audit Log & Observability Pipeline | 📋 Planned | See [dd-042-job-audit-log.md](dd-042-job-audit-log.md) |
+| — | DD-044: Jobs DX Fixes | ✅ Done | All 6 fixes shipped. PRs #43 (Fixes C/D/E), #54 (Fix F), #55 (Fix B). Fix A superseded by DD-045. See [dd-044-jobs-dx-fixes.md](dd-044-jobs-dx-fixes.md) |
+| — | DD-045: Worker Environment | ✅ Done | PRs #44 (RuntimeCapability), #45 (worker interpreter), #46 (jobs() discovery), #49 (enqueue gating). See [dd-045-job-worker-environment.md](dd-045-job-worker-environment.md) |
 
 ---
 
@@ -273,10 +286,10 @@ Phase 8  📋  Job Audit Log & Observability Pipeline    structured logs, sinks,
 
 **Remaining items (deferred to on-demand, not blocking):**
 - [ ] `on_job_event(handler)` — user callback for job events (cross-thread closure design needed)
-- [ ] Priority queues (`priority: N`)
+- [x] ~~Priority queues (`priority: N`)~~ — shipped in PR #41 (Phase 3b)
 - [ ] Worker heartbeat refresh (for jobs running >5 minutes)
 - [ ] Graceful shutdown drain timeout
-- [ ] Atomic dedup via `SET NX` (current is best-effort get+set)
+- [x] ~~Atomic dedup via `SET NX` (current is best-effort get+set)~~ — shipped in PR #41 (`kv_set_nx`)
 - [ ] Redis SCAN in Lua (replace `KEYS` for large keyspaces)
 
 ---
@@ -396,7 +409,7 @@ Feature: Welcome Email Job
 - [ ] Queue pause/resume — `Queue.pause("emails")` / `Queue.resume("emails")`
 - [ ] Cron expressions — `schedule("0 9 * * MON-FRI", fn)` with distributed lock
 - [ ] Dead job caps — 10K max, auto-prune oldest
-- [ ] Idempotency — `idempotent: true` with key-based dedup
+- [x] ~~Idempotency~~ — shipped as `unique: N` in Phase 3 (PR #38)
 
 ---
 
@@ -431,7 +444,7 @@ Extends the basic `ntnt jobs` CLI (shipped in Phase 2c) with full observability 
 
 ### Deferred Items (not blocking any phase)
 
-- [ ] **Closure capture DX** — explicit capture syntax: `spawn(capture: [x, y], fn() { ... })`. Error messages already good.
+- [x] ~~**Closure capture DX**~~ — solved via free-variable analysis in PR #55 (DD-044 Fix B). `schedule()`, `spawn()`, `after()` now only capture bindings the closure actually references. No more failures from unrelated user functions in scope.
 - [ ] **Schedule string validation** — lint warning for unparseable intervals. Pure polish.
 - [ ] **Configurable reaper TTL** — currently 5min hardcoded. Low priority.
 - [ ] **Bounded channels** — `channel(capacity)` for backpressure. crossbeam supports it, just needs exposure.
@@ -673,6 +686,13 @@ For production apps with existing user auth. The dashboard becomes another admin
 | NativeFunction capture | Don't capture; child uses own stdlib | Avoids name ambiguity across modules |
 | Handle serialization | Capturable at spawn, not sendable via channels | spawn(fn() { send(ch,...) }) works; send(ch, another_ch) doesn't |
 | Reaper scope | All terminal states incl. Consumed | Prevents memory leak in long-running servers |
+| Priority system | Named (critical/high/normal/low) + raw 0-99 | Progressive disclosure — simple API, full control available |
+| Worker bands | Independent thread pools per priority range | No starvation, obvious scaling knob, configurable per band |
+| KV key format | `jobs:pending:<priority:02>:<timestamp>:<id>` | Lexicographic ordering = FIFO within band, priority across bands |
+| Execution mode enforcement | RuntimeCapability enum + action registry | Structural enforcement — compiler prevents missing skip checks |
+| Worker interpreter | Full source file eval in Worker mode | Workers have complete app context — all imports, functions, constants |
+| Closure capture | Free-variable analysis (AST walker) | Only captures referenced bindings — unrelated functions don't cause failures |
+| Control socket | Unix domain socket (`.ntnt.sock`) | Same-user access, no auth needed, works with Docker exec |
 
 ---
 
@@ -687,7 +707,7 @@ For production apps with existing user auth. The dashboard becomes another admin
 | Configuration | 1 line | YAML + initializer | Ecto config + migrations | JS config | Docker compose + env |
 | Backend flexibility | Memory/Redis/SQLite/Valkey | Redis only | PG only | Redis only | Redis only |
 | Dashboard | Built-in, secure | Built-in (open) | $49/mo (Oban Web) | Bull Board (separate) | Custom-built |
-| Unique jobs | `unique: 3600` | $250/mo (Enterprise) | Free | Free | Custom code |
+| Unique jobs | `unique: 3600` ✅ | $250/mo (Enterprise) | Free | Free | Custom code |
 | Simulation/dry-run | `effect` blocks | ❌ | ❌ | ❌ | ❌ |
 | Job contracts | `requires`/`ensures` | ❌ | ❌ | ❌ | ❌ |
 | Intent testing | `.intent` files | RSpec (manual) | ExUnit (manual) | Jest (manual) | PHPUnit (manual) |
@@ -697,7 +717,9 @@ For production apps with existing user auth. The dashboard becomes another admin
 | Scaling | Same binary, add processes | Separate process | Built into Phoenix | Separate process | Docker containers |
 | Event-driven dispatch | `std/events` subscribe/publish | `ActiveSupport::Notifications` (no durability) | ❌ (pub/sub separate) | ❌ (separate) | Custom event bus |
 
-**ntnt wins on:** job definition simplicity, backend flexibility, simulation mode, job contracts, intent testing, dashboard (free + secure), streaming logs.
+**ntnt wins on:** job definition simplicity, backend flexibility, priority queues (free, built-in, with named priorities), simulation mode (planned), job contracts (planned), intent testing (planned), dashboard (free + secure, planned), streaming logs, runtime worker scaling, free-variable analysis for closures.
+
+**What ntnt already matches:** Priority queues (Sidekiq Enterprise $250/mo), unique/dedup jobs (Sidekiq Enterprise), batch enqueue, runtime scaling, control CLI, worker bands.
 
 **What ntnt needs to match:** Sidekiq's raw throughput (Redis Streams), Oban's transactional guarantees (PG ACID). KV backend trades these for simplicity and flexibility — good tradeoff for 99% of apps.
 
@@ -738,6 +760,30 @@ For production apps with existing user auth. The dashboard becomes another admin
 | In-memory or persistent backend? | Persistent from day one via std/kv (SQLite default, Redis for prod) | 2026-03-17 |
 | `on_job_event` handler storage? | Deferred to Phase 3 — user closures (Rc) are not Send, need captured bindings or channel design | 2026-03-17 |
 
+### Resolved (Phase 3b — Priority + Atomic Dedup)
+
+| Question | Decision | Date |
+|----------|----------|------|
+| Priority range? | 0-99, zero-padded in KV keys for lexicographic ordering | 2026-03-20 |
+| Default priority? | 50 ("normal") — midpoint of normal band | 2026-03-20 |
+| Named priorities? | critical=5, high=25, normal=50, low=85 | 2026-03-20 |
+| Worker model for bands? | Independent thread pools per band — prevents starvation | 2026-03-20 |
+| Custom bands? | Replace defaults entirely, no partial overrides | 2026-03-20 |
+| Band validation? | Reject overlaps, gaps, bad values at startup. Full 0-99 coverage required. | 2026-03-20 |
+| Atomic dedup? | `kv_set_nx` (SET NX / INSERT OR IGNORE) — closes race window | 2026-03-20 |
+| Queue name optional? | Yes — defaults to "default". Parser updated. | 2026-03-20 |
+| Control plane? | Stdlib functions + Unix domain socket + CLI (separate PRs) | 2026-03-20 |
+
+### Resolved (DD-045 — Worker Environment)
+
+| Question | Decision | Date |
+|----------|----------|------|
+| Worker execution model? | Full app context — workers evaluate entire .tnt source file, then process jobs | 2026-03-21 |
+| Execution mode enforcement? | RuntimeCapability system — functions declare requirements, modes declare provisions, compiler enforces | 2026-03-21 |
+| Closure capture DX? | Free-variable analysis — scope-aware AST walker captures only referenced bindings (PR #55) | 2026-03-22 |
+| Job imports problem? | Dissolved — workers have the full app loaded. DD-044 Fix A unnecessary. | 2026-03-21 |
+| Enqueue in worker bootstrap? | Gated behind `JobEnqueue` capability — workers can't fire side-effect enqueues during file eval (PR #49) | 2026-03-22 |
+
 ### Open
 
 | Question | Options | Notes |
@@ -766,4 +812,11 @@ For production apps with existing user auth. The dashboard becomes another admin
 | 2026-03-17 | PR #34 merged: Greptile review fixes — drain_jobs collects all errors (no silent job loss), timeout always overrides exec error, --concurrency 0 rejected, stderr JSON key order documented. Phase 2 fully complete. |
 | 2026-03-18 | Phase 8 added: Job Audit Log & Observability Pipeline (DD-042). Structured logs with KV/file/stderr/webhook sinks, configurable verbosity, TTL, CLI tail, programmatic API. |
 | 2026-03-17 | Phase 2 merged: PR #34 merged after Greptile review fixes (drain_jobs fail-fast, timeout-wins-over-error, --concurrency 0 guard). All 3 Phase 2 PRs now on main. |
-| 2026-03-20 | Phase 3 complete: PR #36 (atomic Lua claim + scheduled optimization), #38 (dedup + expiration), #39 (batch enqueue) — all merged. Remaining items (priority queues, heartbeat refresh, on_job_event, drain timeout) deferred to on-demand. |
+| 2026-03-20 | Phase 3 complete: PR #36 (atomic Lua claim + scheduled optimization), #38 (dedup + expiration), #39 (batch enqueue) — all merged. Remaining items (heartbeat refresh, on_job_event, drain timeout) deferred to on-demand. |
+| 2026-03-20 | Phase 3b: PR #41 merged — priority queues with worker bands (critical/high/normal/low), `kv_set_nx` atomic dedup, `scale_workers()`, `worker_status()`, optional queue syntax, band validation. |
+| 2026-03-21 | Phase 3c: PR #42 merged — control socket (`.ntnt.sock`), `ntnt workers status`, `ntnt workers scale`, poisoned lock recovery. |
+| 2026-03-21 | DD-044 Fixes C/D/E: PR #43 merged — idempotent job registration, `parse_json(None)` returns Err, KV handle hint for missing `unwrap()`. |
+| 2026-03-22 | DD-045 complete: PRs #44 (RuntimeCapability system), #45 (worker interpreter with full app context), #46 (jobs() directory auto-discovery), #49 (enqueue gating behind JobEnqueue capability). Workers now evaluate the entire .tnt source file — perform blocks have access to all imports, functions, and constants. |
+| 2026-03-22 | DD-044 Fix F: PR #54 merged — `ntnt jobs` CLI evaluates in Worker mode (no side effects). |
+| 2026-03-23 | DD-044 Fix B: PR #55 merged — free-variable analysis for `schedule()`/`spawn()`/`after()` closures. Scope-aware AST walker captures only referenced bindings. All DD-044 fixes now complete. |
+| 2026-03-23 | DD-037 v8: Updated roadmap, phase status table, resolved questions, architecture decisions, competitive analysis. All shipped work accurately reflected. 1,241 tests on main. |
