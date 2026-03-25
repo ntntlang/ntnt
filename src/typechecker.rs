@@ -1156,9 +1156,9 @@ impl TypeContext {
                 items,
                 source,
                 alias,
-                ..
+                wildcard,
             } => {
-                self.register_import(items, source, alias.as_deref());
+                self.register_import(items, source, alias.as_deref(), *wildcard);
             }
 
             // Already handled in Pass 1
@@ -3080,10 +3080,34 @@ impl TypeContext {
         exports
     }
 
-    fn register_import(&mut self, items: &[ImportItem], source: &str, alias: Option<&str>) {
+    fn register_import(
+        &mut self,
+        items: &[ImportItem],
+        source: &str,
+        alias: Option<&str>,
+        wildcard: bool,
+    ) {
         // If it's a module alias import, bind the module name
         if let Some(alias_name) = alias {
             self.bind(alias_name, Type::Any);
+            return;
+        }
+
+        if wildcard {
+            let module_sigs = get_module_signatures(source);
+            if !module_sigs.is_empty() {
+                for (name, sig) in module_sigs {
+                    self.builtin_sigs.insert(name, sig);
+                }
+                return;
+            }
+
+            if let Some(file_path) = self.resolve_import_path(source) {
+                let exports = self.extract_file_exports(&file_path);
+                for (name, sig) in exports.functions {
+                    self.builtin_sigs.insert(name, sig);
+                }
+            }
             return;
         }
 

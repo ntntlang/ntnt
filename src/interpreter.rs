@@ -1804,6 +1804,10 @@ impl Interpreter {
             }
         }
 
+        // Restore any builtins that may have been shadowed and removed during undefine.
+        self.define_builtins();
+        self.define_builtin_types();
+
         true
     }
 
