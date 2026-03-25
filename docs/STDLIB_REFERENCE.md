@@ -2561,6 +2561,8 @@ import { push, pop, first } from "std/collections"
 | [`push`](#push) | Returns a new array with the item appended. |
 | [`reverse`](#reverse) | Returns a new array with elements in reverse order. |
 | [`slice`](#slice) | Extracts a section of an array from start to end (exclusive). |
+| [`sort`](#sort) | Returns a new array with elements in sorted order. |
+| [`sort_by`](#sortby) | Returns a new array sorted by a custom comparator. |
 | [`values`](#values) | Returns an array of all values in the map. |
 
 #### `concat`
@@ -3123,6 +3125,64 @@ slice([1, 2, 3, 4], 1, 3)  // => [2, 3]  // Slice from index 1 to 3
 **See also:** `concat`, `reverse`, `first`, `last`
 
 *Since v0.1.0*
+
+---
+
+#### `sort`
+
+```ntnt
+sort(arr: Array) -> Array
+```
+
+Returns a new array with elements in sorted order.
+
+Supports arrays of Int, Float, or String. Mixed-type arrays are sorted lexicographically by string representation. Does not mutate the original array.
+
+**Parameters:**
+
+- `arr` — The source array
+
+**Returns:** A new array with elements sorted
+
+**Examples:**
+
+```ntnt
+sort([3, 1, 2])  // => [1, 2, 3]  // Sort integers
+sort(["b", "a"])  // => ["a", "b"]  // Sort strings
+```
+
+**See also:** `reverse`, `sort_by`, `slice`
+
+*Since v0.4.6*
+
+---
+
+#### `sort_by`
+
+```ntnt
+sort_by(arr: Array, comparator: Function) -> Array
+```
+
+Returns a new array sorted by a custom comparator.
+
+The comparator takes two values and returns an Int: negative = a first, positive = b first, 0 = equal. Does not mutate the original array.
+
+**Parameters:**
+
+- `arr` — The source array
+- `comparator` — A function(a, b) -> Int
+
+**Returns:** A new array with elements sorted
+
+**Examples:**
+
+```ntnt
+sort_by([3, 1, 2], fn(a, b) { a - b })  // => [1, 2, 3]  // Custom comparator
+```
+
+**See also:** `sort`, `reverse`
+
+*Since v0.4.6*
 
 ---
 
@@ -6649,7 +6709,7 @@ stringify_pretty(map { "a": 1 })  // Pretty-printed with newlines and indentatio
 Key-value store with SQLite and Redis/Valkey backends
 
 ```ntnt
-import { open, get, set } from "std/kv"
+import { open, get, get_int } from "std/kv"
 ```
 
 ### Functions
@@ -6660,6 +6720,10 @@ import { open, get, set } from "std/kv"
 | [`expire`](#expire) | Set a TTL (time-to-live) on an existing key. |
 | [`flush`](#flush) | Delete all keys from the KV store. |
 | [`get`](#get) | Get a value by key from the KV store. |
+| [`get_float`](#getfloat) | Get a value by key and convert it to a float. |
+| [`get_int`](#getint) | Get a value by key and convert it to an integer. |
+| [`get_json`](#getjson) | Get a value by key and parse it as JSON. |
+| [`get_str`](#getstr) | Get a value by key and convert it to a string. |
 | [`has`](#has) | Check if a key exists in the KV store. |
 | [`list`](#list) | List keys in the KV store, optionally filtered by prefix. |
 | [`open`](#open) | Open a KV store connection. |
@@ -6764,6 +6828,114 @@ Returns None if the key doesn't exist or has expired. Values are automatically d
 ```ntnt
 get(cache, "user:123")  // Get user by key
 get(cache, "session:abc")  // Get session data
+```
+
+---
+
+#### `get_float`
+
+```ntnt
+get_float(kv: KVStore, key: String, default?: Float) -> Float
+```
+
+Get a value by key and convert it to a float.
+
+Returns the default (or 0.0) if the key is missing or the value cannot be parsed.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to retrieve
+- `default` — (optional) Float to return on miss or parse failure
+
+**Returns:** The parsed float or default
+
+**Examples:**
+
+```ntnt
+get_float(cache, "stats:rate")  // => 0.0  // Missing key returns 0.0
+get_float(cache, "stats:rate", 1.5)  // => 1.5  // Default on miss
+```
+
+---
+
+#### `get_int`
+
+```ntnt
+get_int(kv: KVStore, key: String, default?: Int) -> Int
+```
+
+Get a value by key and convert it to an integer.
+
+Returns the default (or 0) if the key is missing or the value cannot be parsed.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to retrieve
+- `default` — (optional) Integer to return on miss or parse failure
+
+**Returns:** The parsed integer or default
+
+**Examples:**
+
+```ntnt
+get_int(cache, "stats:success")  // => 0  // Missing key returns 0
+get_int(cache, "stats:success", 42)  // => 42  // Default on miss
+```
+
+---
+
+#### `get_json`
+
+```ntnt
+get_json(kv: KVStore, key: String, default?: Any) -> Any
+```
+
+Get a value by key and parse it as JSON.
+
+Returns the default (or None) if the key is missing or JSON parsing fails.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to retrieve
+- `default` — (optional) Value to return on miss or parse failure
+
+**Returns:** The parsed JSON value or default
+
+**Examples:**
+
+```ntnt
+get_json(cache, "cache:site", None)  // => None  // Missing key returns None
+get_json(cache, "cache:site", map {})  // => map {}  // Default on parse failure
+```
+
+---
+
+#### `get_str`
+
+```ntnt
+get_str(kv: KVStore, key: String, default?: String) -> String
+```
+
+Get a value by key and convert it to a string.
+
+Returns the default (or empty string) if the key is missing or the value is empty/"none".
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to retrieve
+- `default` — (optional) String to return on miss or empty value
+
+**Returns:** The string value or default
+
+**Examples:**
+
+```ntnt
+get_str(cache, "user:name")  // => ""  // Missing key returns empty string
+get_str(cache, "user:name", "guest")  // => "guest"  // Default on miss
 ```
 
 ---
