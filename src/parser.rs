@@ -682,8 +682,23 @@ impl Parser {
                 items,
                 source,
                 alias,
+                wildcard: false,
             })
         } else if let Some(token) = self.peek() {
+            // Wildcard import: import * from "module"
+            if matches!(token.kind, TokenKind::Star) {
+                self.advance();
+                self.consume(&TokenKind::From, "Expected 'from' after import *")?;
+                let source = self.parse_module_source()?;
+                self.match_token(&[TokenKind::Semicolon]);
+                return Ok(Statement::Import {
+                    items: vec![],
+                    source,
+                    alias: None,
+                    wildcard: true,
+                });
+            }
+
             // Check for string literal: import "module" as alias
             if let TokenKind::String(ref s) = token.kind {
                 let source = s.clone();
@@ -699,7 +714,27 @@ impl Parser {
                     items: vec![],
                     source,
                     alias,
+                    wildcard: false,
                 });
+            }
+
+            // Namespace import: import name from "module"
+            if let TokenKind::Identifier(ref name) = token.kind {
+                if let Some(next) = self.tokens.get(self.current + 1) {
+                    if matches!(next.kind, TokenKind::From) {
+                        let alias_name = name.clone();
+                        self.advance();
+                        self.consume(&TokenKind::From, "Expected 'from' after import name")?;
+                        let source = self.parse_module_source()?;
+                        self.match_token(&[TokenKind::Semicolon]);
+                        return Ok(Statement::Import {
+                            items: vec![],
+                            source,
+                            alias: Some(alias_name),
+                            wildcard: false,
+                        });
+                    }
+                }
             }
 
             // Import entire module by name: import http as web from "module"
@@ -715,6 +750,7 @@ impl Parser {
                     items: vec![],
                     source: name,
                     alias,
+                    wildcard: false,
                 });
             }
 
@@ -735,6 +771,7 @@ impl Parser {
                 items,
                 source,
                 alias: None,
+                wildcard: false,
             })
         } else {
             Err(IntentError::ParserError {

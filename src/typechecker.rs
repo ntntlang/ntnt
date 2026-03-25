@@ -1156,6 +1156,7 @@ impl TypeContext {
                 items,
                 source,
                 alias,
+                ..
             } => {
                 self.register_import(items, source, alias.as_deref());
             }
@@ -3245,6 +3246,7 @@ impl TypeContext {
         sig!("use_middleware", ["handler" => Type::Any], Type::Unit);
         sig!("on_shutdown", ["handler" => Type::Any], Type::Unit);
         sig!("routes", ["dir" => Type::String], Type::Unit);
+        sig!("libs", ["dir" => Type::String], Type::Unit);
         sig!("template", ["path" => Type::String, "vars" => Type::Any], Type::String);
 
         // Utility

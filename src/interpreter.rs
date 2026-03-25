@@ -366,6 +366,16 @@ impl Environment {
         self.values.insert(name, value);
     }
 
+    pub fn undefine(&mut self, name: &str) {
+        self.values.remove(name);
+        self.mutable_vars.remove(name);
+    }
+
+    pub fn remove(&mut self, name: &str) {
+        self.values.remove(name);
+        self.mutable_vars.remove(name);
+    }
+
     pub fn define_mutable(&mut self, name: String, value: Value) {
         self.values.insert(name.clone(), value);
         self.mutable_vars.insert(name);
@@ -456,6 +466,8 @@ pub enum RuntimeCapability {
     JobConfig,
     /// Job enqueueing: enqueue, enqueue_in, enqueue_at, enqueue_batch
     JobEnqueue,
+    /// Server action helpers: libs()
+    ServerAction,
 }
 
 /// Execution mode controls how server-related functions behave
@@ -487,16 +499,19 @@ impl ExecutionMode {
                 RuntimeCapability::JobWorkers,
                 RuntimeCapability::JobConfig,
                 RuntimeCapability::JobEnqueue,
+                RuntimeCapability::ServerAction,
             ],
             ExecutionMode::HotReload => &[
                 RuntimeCapability::HttpServer,
                 RuntimeCapability::HttpConfig,
                 RuntimeCapability::JobConfig,
+                RuntimeCapability::ServerAction,
             ],
             ExecutionMode::Worker => &[
                 RuntimeCapability::HttpServer,
                 RuntimeCapability::HttpConfig,
                 RuntimeCapability::JobConfig,
+                RuntimeCapability::ServerAction,
             ],
             ExecutionMode::Job => &[RuntimeCapability::JobConfig, RuntimeCapability::JobEnqueue],
             ExecutionMode::UnitTest => &[
@@ -586,6 +601,11 @@ pub struct Interpreter {
     lib_modules: HashMap<String, HashMap<String, Value>>,
     /// Tracked lib module files for hot-reload (file_path -> mtime)
     lib_module_files: HashMap<String, std::time::SystemTime>,
+    /// Directories loaded via libs() or lib/ discovery (for hot-reload rescans)
+    libs_directories: Vec<std::path::PathBuf>,
+    /// Tracks which export names each lib file injected (source_key -> set of names)
+    /// Used to undefine stale bindings when a lib file is deleted or its exports change.
+    lib_injected_names: HashMap<String, std::collections::HashSet<String>>,
     /// Tracked middleware files for hot-reload (file_path -> mtime)
     middleware_files: HashMap<String, std::time::SystemTime>,
     /// Routes directory path for hot-reload directory watching
@@ -777,6 +797,8 @@ impl Interpreter {
             execution_mode: ExecutionMode::Normal,
             lib_modules: HashMap::new(),
             lib_module_files: HashMap::new(),
+            libs_directories: Vec::new(),
+            lib_injected_names: HashMap::new(),
             middleware_files: HashMap::new(),
             routes_dir: None,
             routes_dir_mtimes: HashMap::new(),
@@ -881,6 +903,12 @@ impl Interpreter {
             Some(RuntimeCapability::HttpServer),
             AritySpec::exact(1),
             Interpreter::sa_routes
+        );
+        register!(
+            "libs",
+            Some(RuntimeCapability::ServerAction),
+            AritySpec::exact(1),
+            Interpreter::sa_libs
         );
         register!(
             "use_middleware",
@@ -1000,6 +1028,17 @@ impl Interpreter {
         } else {
             Err(IntentError::type_error(
                 "routes() requires a string directory path".to_string(),
+            ))
+        }
+    }
+
+    fn sa_libs(interp: &mut Interpreter, args: &[Expression]) -> Result<Value> {
+        let directory = interp.eval_expression(&args[0])?;
+        if let Value::String(dir_str) = directory {
+            interp.load_libs_from_directory(&dir_str)
+        } else {
+            Err(IntentError::type_error(
+                "libs() requires a string directory path".to_string(),
             ))
         }
     }
@@ -1202,6 +1241,109 @@ impl Interpreter {
         Ok(Value::Int(file_count))
     }
 
+    /// Load and evaluate all .tnt files from a libs directory.
+    ///
+    /// Recursively scans the directory for .tnt files, evaluates each one in a fresh
+    /// environment, and injects all exports into the current environment. Exports are
+    /// injected flat (no namespace). Also caches module exports and tracks file mtimes
+    /// for hot-reload support.
+    fn load_libs_from_directory(&mut self, dir_path: &str) -> Result<Value> {
+        use std::fs;
+
+        // Resolve the directory path relative to the current .tnt file's location
+        let base_dir = if std::path::Path::new(dir_path).is_relative() {
+            if let Some(current_file) = &self.current_file {
+                let script_dir = std::path::Path::new(current_file)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."));
+                script_dir.join(dir_path)
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(dir_path))
+                    .unwrap_or_else(|_| std::path::PathBuf::from(dir_path))
+            }
+        } else {
+            std::path::PathBuf::from(dir_path)
+        };
+
+        if !base_dir.exists() || !base_dir.is_dir() {
+            return Err(IntentError::runtime_error(format!(
+                "Libs directory does not exist: {}",
+                base_dir.display()
+            )));
+        }
+
+        let canonical_dir = Self::canonicalize_path(&base_dir);
+        if !self.libs_directories.iter().any(|d| d == &canonical_dir) {
+            self.libs_directories.push(canonical_dir);
+        }
+
+        // Collect all .tnt files recursively, sorted for deterministic order
+        let tnt_files = Self::collect_tnt_files(&base_dir)?;
+
+        let mut seen_exports: HashMap<String, String> = HashMap::new();
+
+        for file_path in &tnt_files {
+            let canonical_path = Self::canonicalize_path(file_path);
+            let source_key = canonical_path.to_string_lossy().to_string();
+
+            // Friendly display name for warnings (filename only, not full path)
+            let display_name = canonical_path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| source_key.clone());
+
+            let exports = if let Some(module) = self.loaded_modules.get(&source_key).cloned() {
+                module
+            } else {
+                let module_exports = self.load_module_exports(&canonical_path).map_err(|e| {
+                    // Annotate error with the filename so users know which lib file failed
+                    IntentError::runtime_error(format!(
+                        "Error loading lib file '{}': {}",
+                        display_name, e
+                    ))
+                })?;
+                self.loaded_modules
+                    .insert(source_key.clone(), module_exports.clone());
+                module_exports
+            };
+
+            let module_name = canonical_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            self.lib_modules.insert(module_name, exports.clone());
+
+            // Track file mtime for hot-reload
+            if let Ok(metadata) = fs::metadata(&canonical_path) {
+                if let Ok(mtime) = metadata.modified() {
+                    self.lib_module_files.insert(source_key.clone(), mtime);
+                }
+            }
+
+            // Inject exports into the current environment (flat)
+            let mut injected: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (name, value) in &exports {
+                if let Some(prev_display) = seen_exports.get(name) {
+                    if !is_production_mode() {
+                        eprintln!(
+                            "[warn] libs: '{}' in {} overwrites definition from {}",
+                            name, display_name, prev_display
+                        );
+                    }
+                }
+                self.environment
+                    .borrow_mut()
+                    .define(name.clone(), value.clone());
+                seen_exports.insert(name.clone(), display_name.clone());
+                injected.insert(name.clone());
+            }
+            self.lib_injected_names.insert(source_key.clone(), injected);
+        }
+
+        Ok(Value::Unit)
+    }
+
     /// Recursively collect all .tnt files in a directory, sorted for deterministic order.
     fn collect_tnt_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
         use std::fs;
@@ -1215,7 +1357,7 @@ impl Interpreter {
         let mut entries: Vec<_> = fs::read_dir(dir)
             .map_err(|e| {
                 IntentError::runtime_error(format!(
-                    "Failed to read jobs directory '{}': {}",
+                    "Failed to read directory '{}': {}",
                     dir.display(),
                     e
                 ))
@@ -1244,6 +1386,10 @@ impl Interpreter {
         }
 
         Ok(files)
+    }
+
+    fn canonicalize_path(path: &std::path::Path) -> std::path::PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
     /// Set the current file path for relative imports
@@ -1519,43 +1665,86 @@ impl Interpreter {
     /// Check if any lib module file has changed, and reload if so.
     /// Returns true if any lib modules were reloaded.
     fn check_and_reload_lib_modules(&mut self) -> bool {
-        if !self.server_state.hot_reload || self.lib_module_files.is_empty() {
+        if !self.server_state.hot_reload
+            || (self.lib_module_files.is_empty() && self.libs_directories.is_empty())
+        {
             return false;
         }
 
-        // Check if any lib module file has changed
-        let mut changed_file: Option<String> = None;
-        for (file_path, cached_mtime) in &self.lib_module_files {
+        use std::collections::HashSet;
+
+        // Rescan all libs directories to detect new/deleted files
+        let mut current_files: Vec<std::path::PathBuf> = Vec::new();
+        for dir in &self.libs_directories {
+            if let Ok(files) = Self::collect_tnt_files(dir) {
+                current_files.extend(files);
+            }
+        }
+
+        let mut current_set: HashSet<String> = HashSet::new();
+        for path in current_files {
+            let canonical = Self::canonicalize_path(&path);
+            current_set.insert(canonical.to_string_lossy().to_string());
+        }
+
+        let tracked_set: HashSet<String> = self.lib_module_files.keys().cloned().collect();
+
+        let mut new_files: Vec<String> = current_set.difference(&tracked_set).cloned().collect();
+        let mut deleted_files: Vec<String> =
+            tracked_set.difference(&current_set).cloned().collect();
+
+        let mut changed_files: Vec<String> = Vec::new();
+        for file_path in tracked_set.intersection(&current_set) {
             if let Ok(metadata) = std::fs::metadata(file_path) {
                 if let Ok(current_mtime) = metadata.modified() {
-                    if current_mtime > *cached_mtime {
-                        changed_file = Some(file_path.clone());
-                        break;
+                    if let Some(cached_mtime) = self.lib_module_files.get(file_path) {
+                        if current_mtime > *cached_mtime {
+                            changed_files.push(file_path.clone());
+                        }
                     }
                 }
             }
         }
 
-        let changed_file = match changed_file {
-            Some(f) => f,
-            None => return false,
-        };
+        if new_files.is_empty() && deleted_files.is_empty() && changed_files.is_empty() {
+            return false;
+        }
+
+        new_files.sort();
+        deleted_files.sort();
+        changed_files.sort();
+
+        let summary = new_files
+            .first()
+            .or_else(|| changed_files.first())
+            .or_else(|| deleted_files.first())
+            .cloned()
+            .unwrap_or_else(|| "lib modules".to_string());
 
         println!(
             "\n[hot-reload] {} changed, reloading lib modules...",
-            changed_file
+            summary
         );
 
-        // Reload all lib modules from disk
-        let mut new_lib_modules: HashMap<String, HashMap<String, Value>> = HashMap::new();
-        let mut new_lib_mtimes: HashMap<String, std::time::SystemTime> = HashMap::new();
-
-        // Collect file paths first to avoid borrow conflict with self
-        let lib_files: Vec<String> = self.lib_module_files.keys().cloned().collect();
-
-        // Re-read every tracked lib file
-        for file_path in &lib_files {
+        // Remove deleted files from tracking
+        for file_path in &deleted_files {
             let path = std::path::Path::new(file_path);
+            let module_name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            self.lib_module_files.remove(file_path);
+            self.loaded_modules.remove(file_path);
+            self.lib_modules.remove(&module_name);
+        }
+
+        // Reload new and changed files
+        let mut reload_files = Vec::new();
+        reload_files.extend(new_files);
+        reload_files.extend(changed_files);
+
+        for file_path in reload_files {
+            let path = std::path::Path::new(&file_path);
             let module_name = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
@@ -1563,10 +1752,12 @@ impl Interpreter {
 
             match self.load_module_exports(path) {
                 Ok(exports) => {
-                    new_lib_modules.insert(module_name, exports);
+                    self.lib_modules.insert(module_name, exports.clone());
+                    self.loaded_modules
+                        .insert(file_path.clone(), exports.clone());
                     if let Ok(metadata) = std::fs::metadata(path) {
                         if let Ok(mtime) = metadata.modified() {
-                            new_lib_mtimes.insert(file_path.clone(), mtime);
+                            self.lib_module_files.insert(file_path.clone(), mtime);
                         }
                     }
                 }
@@ -1580,8 +1771,32 @@ impl Interpreter {
             }
         }
 
-        self.lib_modules = new_lib_modules;
-        self.lib_module_files = new_lib_mtimes;
+        // Clear stale lib exports from the environment before re-injecting.
+        // This ensures deleted modules' exports don't remain callable.
+        for (_module_name, exports) in &self.lib_modules {
+            for name in exports.keys() {
+                self.environment.borrow_mut().undefine(name);
+            }
+        }
+
+        // Re-inject ALL lib exports in sorted order to maintain deterministic
+        // collision semantics and clear stale bindings from deleted modules.
+        // This is the same sorted-path injection order used by load_libs_from_directory.
+        // Also rebuild lib_injected_names to match the new state.
+        self.lib_injected_names.clear();
+        let mut all_lib_files: Vec<String> = self.lib_module_files.keys().cloned().collect();
+        all_lib_files.sort();
+        for file_path in &all_lib_files {
+            if let Some(exports) = self.loaded_modules.get(file_path).cloned() {
+                let mut injected: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for (name, value) in exports {
+                    self.environment.borrow_mut().define(name.clone(), value);
+                    injected.insert(name);
+                }
+                self.lib_injected_names.insert(file_path.clone(), injected);
+            }
+        }
 
         true
     }
@@ -3233,6 +3448,38 @@ impl Interpreter {
             },
         );
 
+        // @ntnt libs
+        // @signature libs(directory: String) -> Unit
+        // Auto-import all .tnt files from a directory.
+        //
+        // Recursively scans the given directory for `.tnt` files and evaluates each one
+        // in a fresh module environment. All exports are injected flat into the current
+        // scope (no namespace), so you can call functions directly.
+        //
+        // Files are evaluated in alphabetical order for deterministic resolution. In dev
+        // mode, collisions emit a warning and the last-loaded definition wins.
+        // @param directory Path to the libs directory, relative to the current .tnt file (e.g., "lib/")
+        // @returns Unit
+        // @tags #server
+        // @see_also routes, jobs, import
+        // @since v0.4.7
+        // @example libs("lib/") ~ "Auto-load all lib files into the current scope"
+        self.environment.borrow_mut().define(
+            "libs".to_string(),
+            Value::NativeFunction {
+                name: "libs".to_string(),
+                arity: 1,
+                max_arity: 1,
+                requires: None,
+                func: |_args| {
+                    // Placeholder - actual implementation is in sa_libs
+                    Err(IntentError::runtime_error(
+                        "libs() must be called directly, not stored in a variable".to_string(),
+                    ))
+                },
+            },
+        );
+
         // @ntnt enable_cors
         // @signature enable_cors(options?: Map) -> Unit
         // Enable CORS (Cross-Origin Resource Sharing) for the HTTP server.
@@ -3334,19 +3581,26 @@ impl Interpreter {
         items: &[ImportItem],
         source: &str,
         alias: Option<&str>,
+        wildcard: bool,
     ) -> Result<Value> {
         // Check if it's a standard library module
         if source.starts_with("std/") {
-            return self.import_std_module(items, source, alias);
+            return self.import_std_module(items, source, alias, wildcard);
         }
 
         // Check if it's already loaded
         if let Some(module) = self.loaded_modules.get(source).cloned() {
-            return self.bind_imports(items, &module, source, alias);
+            return self.bind_imports(items, &module, source, alias, wildcard);
+        }
+
+        // Check canonicalized file path cache (prevents double evaluation)
+        let canonical_source = self.canonical_module_key(source);
+        if let Some(module) = self.loaded_modules.get(&canonical_source).cloned() {
+            return self.bind_imports(items, &module, &canonical_source, alias, wildcard);
         }
 
         // Try to load from file
-        self.import_file_module(items, source, alias)
+        self.import_file_module(items, source, alias, wildcard)
     }
 
     fn import_std_module(
@@ -3354,6 +3608,7 @@ impl Interpreter {
         items: &[ImportItem],
         source: &str,
         alias: Option<&str>,
+        wildcard: bool,
     ) -> Result<Value> {
         let module = self.loaded_modules.get(source).cloned().ok_or_else(|| {
             let module_names: Vec<String> = self.loaded_modules.keys().cloned().collect();
@@ -3365,7 +3620,7 @@ impl Interpreter {
             IntentError::runtime_error(msg)
         })?;
 
-        self.bind_imports(items, &module, source, alias)
+        self.bind_imports(items, &module, source, alias, wildcard)
     }
 
     fn bind_imports(
@@ -3374,9 +3629,17 @@ impl Interpreter {
         module: &HashMap<String, Value>,
         source: &str,
         alias: Option<&str>,
+        wildcard: bool,
     ) -> Result<Value> {
-        if items.is_empty() {
-            // Import entire module
+        if wildcard && items.is_empty() && alias.is_none() {
+            // Wildcard import: inject all exports flat into the current scope
+            for (name, value) in module {
+                self.environment
+                    .borrow_mut()
+                    .define(name.clone(), value.clone());
+            }
+        } else if items.is_empty() {
+            // Import entire module as namespace
             let module_name = alias.unwrap_or_else(|| source.rsplit('/').next().unwrap_or(source));
             // Create a struct-like value for the module
             let mut fields = HashMap::new();
@@ -3424,25 +3687,14 @@ impl Interpreter {
         items: &[ImportItem],
         source: &str,
         alias: Option<&str>,
+        wildcard: bool,
     ) -> Result<Value> {
         use crate::lexer::Lexer;
         use crate::parser::Parser;
         use std::fs;
 
         // Resolve the file path
-        let file_path = if source.starts_with("./") || source.starts_with("../") {
-            // Relative import
-            if let Some(ref current) = self.current_file {
-                let current_dir = std::path::Path::new(current)
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."));
-                current_dir.join(source)
-            } else {
-                std::path::PathBuf::from(source)
-            }
-        } else {
-            std::path::PathBuf::from(source)
-        };
+        let file_path = self.resolve_import_path(source);
 
         // Add .tnt extension if not present
         let file_path = if file_path.extension().is_none() {
@@ -3450,6 +3702,9 @@ impl Interpreter {
         } else {
             file_path
         };
+
+        let canonical_path = Self::canonicalize_path(&file_path);
+        let source_key = canonical_path.to_string_lossy().to_string();
 
         // Read and parse the file
         let source_code = fs::read_to_string(&file_path).map_err(|e| {
@@ -3470,14 +3725,20 @@ impl Interpreter {
         let previous_file = self.current_file.clone();
 
         self.environment = Rc::new(RefCell::new(Environment::new()));
-        self.current_file = Some(file_path.to_string_lossy().to_string());
+        self.current_file = Some(source_key.clone());
 
         // Define builtins and types in the module environment
         self.define_builtins();
         self.define_builtin_types();
 
         // Evaluate the module
-        self.eval(&ast)?;
+        let eval_result = self.eval(&ast);
+        if let Err(e) = eval_result {
+            // Restore environment on error
+            self.environment = previous_env;
+            self.current_file = previous_file;
+            return Err(e);
+        }
 
         // Collect exported items
         let mut module_exports: HashMap<String, Value> = HashMap::new();
@@ -3495,7 +3756,6 @@ impl Interpreter {
         self.current_file = previous_file;
 
         // Cache the module
-        let source_key = file_path.to_string_lossy().to_string();
         self.loaded_modules
             .insert(source_key.clone(), module_exports.clone());
 
@@ -3507,7 +3767,35 @@ impl Interpreter {
         }
 
         // Bind imports
-        self.bind_imports(items, &module_exports, &source_key, alias)
+        self.bind_imports(items, &module_exports, &source_key, alias, wildcard)
+    }
+
+    fn resolve_import_path(&self, source: &str) -> std::path::PathBuf {
+        if source.starts_with("./") || source.starts_with("../") {
+            // Relative import
+            if let Some(ref current) = self.current_file {
+                let current_dir = std::path::Path::new(current)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."));
+                current_dir.join(source)
+            } else {
+                std::path::PathBuf::from(source)
+            }
+        } else {
+            std::path::PathBuf::from(source)
+        }
+    }
+
+    fn canonical_module_key(&self, source: &str) -> String {
+        let file_path = self.resolve_import_path(source);
+        let file_path = if file_path.extension().is_none() {
+            file_path.with_extension("tnt")
+        } else {
+            file_path
+        };
+        Self::canonicalize_path(&file_path)
+            .to_string_lossy()
+            .to_string()
     }
 
     /// Load file-based routes from a directory
@@ -3549,26 +3837,29 @@ impl Interpreter {
             .map(|p| p.join("lib"))
             .unwrap_or_else(|| std::path::PathBuf::from("lib"));
 
-        let mut lib_modules: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        let mut lib_modules: HashMap<String, HashMap<String, Value>> = self.lib_modules.clone();
 
         if lib_dir.exists() && lib_dir.is_dir() {
-            if let Ok(entries) = fs::read_dir(&lib_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().map(|e| e == "tnt").unwrap_or(false) {
-                        let module_name = path
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().to_string())
-                            .unwrap_or_default();
+            let canonical_dir = Self::canonicalize_path(&lib_dir);
+            if !self.libs_directories.iter().any(|d| d == &canonical_dir) {
+                self.libs_directories.push(canonical_dir);
+            }
 
-                        if let Ok(exports) = self.load_module_exports(&path) {
-                            lib_modules.insert(module_name, exports);
-                            // Track file mtime for hot-reload
-                            if let Ok(metadata) = std::fs::metadata(&path) {
-                                if let Ok(mtime) = metadata.modified() {
-                                    self.lib_module_files
-                                        .insert(path.to_string_lossy().to_string(), mtime);
-                                }
+            if let Ok(files) = Self::collect_tnt_files(&lib_dir) {
+                for path in files {
+                    let canonical_path = Self::canonicalize_path(&path);
+                    let source_key = canonical_path.to_string_lossy().to_string();
+                    let module_name = canonical_path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                        .unwrap_or_default();
+
+                    if let Ok(exports) = self.load_module_exports(&canonical_path) {
+                        lib_modules.insert(module_name, exports);
+                        // Track file mtime for hot-reload
+                        if let Ok(metadata) = std::fs::metadata(&canonical_path) {
+                            if let Ok(mtime) = metadata.modified() {
+                                self.lib_module_files.insert(source_key, mtime);
                             }
                         }
                     }
@@ -3665,6 +3956,8 @@ impl Interpreter {
         use crate::parser::Parser;
         use std::fs;
 
+        let canonical_path = Self::canonicalize_path(file_path);
+
         let source_code = fs::read_to_string(file_path).map_err(|e| {
             IntentError::runtime_error(format!("Failed to read '{}': {}", file_path.display(), e))
         })?;
@@ -3679,7 +3972,7 @@ impl Interpreter {
         let previous_file = self.current_file.clone();
 
         self.environment = Rc::new(RefCell::new(Environment::new()));
-        self.current_file = Some(file_path.to_string_lossy().to_string());
+        self.current_file = Some(canonical_path.to_string_lossy().to_string());
 
         // Re-define builtins, types, and stdlib in the new environment
         // (lib modules should have the same execution context as route handlers)
@@ -3688,7 +3981,13 @@ impl Interpreter {
         self.define_stdlib();
 
         // Evaluate the module
-        self.eval(&ast)?;
+        let eval_result = self.eval(&ast);
+        if let Err(e) = eval_result {
+            // Restore environment on error
+            self.environment = previous_env;
+            self.current_file = previous_file;
+            return Err(e);
+        }
 
         // Collect exports (everything defined at module level)
         let mut exports: HashMap<String, Value> = HashMap::new();
@@ -4405,7 +4704,8 @@ impl Interpreter {
                 items,
                 source,
                 alias,
-            } => self.handle_import(items, source, alias.as_deref()),
+                wildcard,
+            } => self.handle_import(items, source, alias.as_deref(), *wildcard),
 
             Statement::Export {
                 items: _,
@@ -12063,6 +12363,7 @@ c")
         assert!(interp.server_actions.contains_key("listen"));
         assert!(interp.server_actions.contains_key("serve_static"));
         assert!(interp.server_actions.contains_key("routes"));
+        assert!(interp.server_actions.contains_key("libs"));
         assert!(interp.server_actions.contains_key("new_server"));
         assert!(interp.server_actions.contains_key("use_middleware"));
         assert!(interp.server_actions.contains_key("enable_cors"));
@@ -12083,6 +12384,10 @@ c")
         assert_eq!(
             interp.server_actions["routes"].requires,
             Some(RuntimeCapability::HttpServer)
+        );
+        assert_eq!(
+            interp.server_actions["libs"].requires,
+            Some(RuntimeCapability::ServerAction)
         );
         assert_eq!(
             interp.server_actions["enable_cors"].requires,
@@ -12146,6 +12451,7 @@ c")
         assert!(mode.has(RuntimeCapability::JobWorkers));
         assert!(mode.has(RuntimeCapability::JobConfig));
         assert!(mode.has(RuntimeCapability::JobEnqueue));
+        assert!(mode.has(RuntimeCapability::ServerAction));
     }
 
     #[test]
@@ -12154,6 +12460,7 @@ c")
         assert!(mode.has(RuntimeCapability::HttpServer));
         assert!(mode.has(RuntimeCapability::HttpConfig));
         assert!(mode.has(RuntimeCapability::JobConfig));
+        assert!(mode.has(RuntimeCapability::ServerAction));
         // No concurrency or job workers in hot-reload
         assert!(!mode.has(RuntimeCapability::TaskSpawning));
         assert!(!mode.has(RuntimeCapability::Scheduling));
@@ -12167,6 +12474,7 @@ c")
         assert!(mode.has(RuntimeCapability::HttpServer));
         assert!(mode.has(RuntimeCapability::HttpConfig));
         assert!(mode.has(RuntimeCapability::JobConfig));
+        assert!(mode.has(RuntimeCapability::ServerAction));
         assert!(!mode.has(RuntimeCapability::TaskSpawning));
         assert!(!mode.has(RuntimeCapability::Scheduling));
         assert!(!mode.has(RuntimeCapability::JobWorkers));
@@ -12184,6 +12492,7 @@ c")
         assert!(!mode.has(RuntimeCapability::TaskSpawning));
         assert!(!mode.has(RuntimeCapability::Scheduling));
         assert!(!mode.has(RuntimeCapability::JobWorkers));
+        assert!(!mode.has(RuntimeCapability::ServerAction));
     }
 
     #[test]
@@ -12196,15 +12505,16 @@ c")
         assert!(!mode.has(RuntimeCapability::HttpConfig));
         assert!(!mode.has(RuntimeCapability::Scheduling)); // schedule/after skipped in tests
         assert!(!mode.has(RuntimeCapability::JobWorkers));
+        assert!(!mode.has(RuntimeCapability::ServerAction));
     }
 
     #[test]
     fn test_capabilities_returns_correct_slice_lengths() {
-        // Normal has all 7 capabilities
-        assert_eq!(ExecutionMode::Normal.capabilities().len(), 7);
-        // HotReload and Worker have 3 each
-        assert_eq!(ExecutionMode::HotReload.capabilities().len(), 3);
-        assert_eq!(ExecutionMode::Worker.capabilities().len(), 3);
+        // Normal has all 8 capabilities
+        assert_eq!(ExecutionMode::Normal.capabilities().len(), 8);
+        // HotReload and Worker have 4 each
+        assert_eq!(ExecutionMode::HotReload.capabilities().len(), 4);
+        assert_eq!(ExecutionMode::Worker.capabilities().len(), 4);
         // Job has 2 (JobConfig + JobEnqueue)
         assert_eq!(ExecutionMode::Job.capabilities().len(), 2);
         // UnitTest has 3 (TaskSpawning + JobConfig + JobEnqueue)
