@@ -712,6 +712,97 @@ print(page)
     assert!(stdout.contains("<html>"), "Should preserve HTML tags");
 }
 
+/// Fix #56: #{expr} interpolation in triple-quoted strings
+#[test]
+fn test_template_string_hash_interpolation() {
+    let code = r#"
+let name = "World"
+let result = """Hello, #{name}!"""
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "#{{}} interpolation should work in triple-quoted strings"
+    );
+    assert!(
+        stdout.contains("Hello, World!"),
+        "Should interpolate #{{}} in template strings, got: {}",
+        stdout
+    );
+}
+
+/// Fix #56: CSS hex colors must remain literal (not trigger interpolation)
+#[test]
+fn test_template_string_hash_interp_with_css_hex() {
+    let code = r#"
+let error_str = "timeout after 30s"
+let cell = """<td style="color:#ff6b6b">#{error_str}</td>"""
+print(cell)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "CSS hex color and #{{}} interp should coexist"
+    );
+    assert!(
+        stdout.contains("<td style=\"color:#ff6b6b\">timeout after 30s</td>"),
+        "CSS hex color must be literal and #{{}} must interpolate, got: {}",
+        stdout
+    );
+}
+
+/// Fix #56: both {{expr}} and #{expr} can coexist in same template string
+#[test]
+fn test_template_string_hash_interp_mixed() {
+    let code = r#"
+let a = "mustache"
+let b = "hash"
+let result = """{{a}} and #{b}"""
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Mixed interpolation styles should work");
+    assert!(
+        stdout.contains("mustache and hash"),
+        "Both {{{{}}}} and #{{}} should interpolate, got: {}",
+        stdout
+    );
+}
+
+/// Fix #56: \#{expr} should be a literal #{expr} (escaped)
+#[test]
+fn test_template_string_hash_interp_escaped() {
+    let code = r#"
+let name = "World"
+let result = """literal \#{name} here"""
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Escaped #{{}} should be literal");
+    assert!(
+        stdout.contains("literal #{name} here"),
+        "\\#{{}} should produce literal #{{...}}, got: {}",
+        stdout
+    );
+}
+
+/// Fix #56: \# not followed by { should preserve both characters
+#[test]
+fn test_template_string_backslash_hash_not_brace() {
+    let code = r#"
+let result = """color is \#ff6b6b"""
+print(result)
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "\\# not followed by {{ should work");
+    assert!(
+        stdout.contains("color is \\#ff6b6b"),
+        "\\# not followed by {{ should preserve backslash, got: {}",
+        stdout
+    );
+}
+
 /// @since v0.3.16
 /// Finding #35: Template filter aliases (upper/lower) and space-separated args
 #[test]

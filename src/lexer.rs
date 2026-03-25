@@ -562,9 +562,43 @@ impl<'a> Lexer<'a> {
                     } else {
                         literal.push('}');
                     }
+                } else if chars.peek() == Some(&'#') {
+                    chars.next(); // consume '#'
+                    if chars.peek() == Some(&'{') {
+                        // \#{ → literal "#{", prevents #{} interpolation
+                        literal.push('#');
+                    } else {
+                        // \# not followed by { → preserve both characters
+                        literal.push('\\');
+                        literal.push('#');
+                    }
                 } else {
                     literal.push('\\');
                 }
+            } else if ch == '#' && chars.peek() == Some(&'{') {
+                // #{expr} interpolation (same as in regular strings)
+                chars.next(); // consume '{'
+                if !literal.is_empty() {
+                    parts.push(TemplatePart::Literal(literal.clone()));
+                    literal.clear();
+                }
+                let mut expr = String::new();
+                let mut brace_depth = 1;
+                while let Some(c) = chars.next() {
+                    if c == '{' {
+                        brace_depth += 1;
+                        expr.push(c);
+                    } else if c == '}' {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            break;
+                        }
+                        expr.push(c);
+                    } else {
+                        expr.push(c);
+                    }
+                }
+                parts.push(TemplatePart::Expr(expr));
             } else if ch == '{' && chars.peek() == Some(&'{') {
                 chars.next(); // consume second {
 
