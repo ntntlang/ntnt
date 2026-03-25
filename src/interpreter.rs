@@ -1878,25 +1878,29 @@ impl Interpreter {
             self.environment.borrow_mut().undefine(&name);
         }
 
-        // Re-inject ALL lib exports in sorted order to maintain deterministic
-        // collision semantics and clear stale bindings from deleted modules.
-        // This is the same sorted-path injection order used by load_libs_from_directory.
-        // Also rebuild lib_injected_names to match the new state.
+        // Re-inject flat lib exports preserving original libs() call order.
+        // Iterate libs_flat_directories in insertion order (same as original libs() calls),
+        // then collect_tnt_files per directory (sorted within each dir). This ensures
+        // collision resolution matches the initial load, not a global sort across all dirs.
         self.lib_injected_names.clear();
-        let mut all_lib_files: Vec<String> = self.lib_module_files.keys().cloned().collect();
-        all_lib_files.sort();
-        for file_path in &all_lib_files {
-            if !self.libs_flat_files.contains(file_path) {
-                continue;
-            }
-            if let Some(exports) = self.loaded_modules.get(file_path).cloned() {
-                let mut injected: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                for (name, value) in exports {
-                    self.environment.borrow_mut().define(name.clone(), value);
-                    injected.insert(name);
+        for dir in &self.libs_flat_directories.clone() {
+            if let Ok(files) = Self::collect_tnt_files(dir) {
+                for path in files {
+                    let canonical = Self::canonicalize_path(&path);
+                    let source_key = canonical.to_string_lossy().to_string();
+                    if !self.libs_flat_files.contains(&source_key) {
+                        continue;
+                    }
+                    if let Some(exports) = self.loaded_modules.get(&source_key).cloned() {
+                        let mut injected: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        for (name, value) in exports {
+                            self.environment.borrow_mut().define(name.clone(), value);
+                            injected.insert(name);
+                        }
+                        self.lib_injected_names.insert(source_key.clone(), injected);
+                    }
                 }
-                self.lib_injected_names.insert(file_path.clone(), injected);
             }
         }
 

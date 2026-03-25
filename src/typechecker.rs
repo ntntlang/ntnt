@@ -3107,6 +3107,17 @@ impl TypeContext {
                 for (name, sig) in exports.functions {
                     self.builtin_sigs.insert(name, sig);
                 }
+                for (name, fields) in exports.structs {
+                    self.structs.insert(name.clone(), fields);
+                    self.bind(&name, Type::Named(name.clone()));
+                }
+                for (name, variants) in exports.enums {
+                    self.enums.insert(name.clone(), variants);
+                    self.bind(&name, Type::Named(name.clone()));
+                }
+                for (name, typ) in exports.type_aliases {
+                    self.type_aliases.insert(name, typ);
+                }
             }
             return;
         }
