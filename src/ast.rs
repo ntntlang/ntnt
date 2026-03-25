@@ -121,6 +121,8 @@ pub enum Statement {
         source: String,
         /// Optional alias for entire module: `import http as web`
         alias: Option<String>,
+        /// Wildcard import: `import * from "module"`
+        wildcard: bool,
     },
 
     /// Export statement: `export fn foo()` or `export { a, b }`

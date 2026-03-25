@@ -63,6 +63,7 @@ These functions are available everywhere without importing.
 | [`is_string(val: Any)`](#isstring) | Returns true if the value is a String. |
 | [`jobs(directory: String)`](#jobs) | Auto-discover and register job definitions from .tnt files in a directory. |
 | [`len(x: String \| Array \| Map)`](#len) | Returns the length of a string, array, or map. |
+| [`libs(directory: String)`](#libs) | Auto-import all .tnt files from a directory. |
 | [`listen(port: Int)`](#listen) | Starts an HTTP server on the given port. |
 | [`max(a: Int \| Float, b: Int \| Float)`](#max) | Returns the larger of two numbers. |
 | [`min(a: Int \| Float, b: Int \| Float)`](#min) | Returns the smaller of two numbers. |
@@ -882,6 +883,36 @@ len(map { "a": 1, "b": 2 })  // => 2  // Map length
 **See also:** `type`, `is_empty`
 
 *Since v0.1.0*
+
+---
+
+#### `libs`
+
+```ntnt
+libs(directory: String) -> Unit
+```
+
+Auto-import all .tnt files from a directory.
+
+Recursively scans the given directory for `.tnt` files and evaluates each one in a fresh module environment. All exports are injected flat into the current scope (no namespace), so you can call functions directly.
+
+Files are evaluated in alphabetical order for deterministic resolution. In dev mode, collisions emit a warning and the last-loaded definition wins.
+
+**Parameters:**
+
+- `directory` — Path to the libs directory, relative to the current .tnt file (e.g., "lib/")
+
+**Returns:** Unit
+
+**Examples:**
+
+```ntnt
+libs("lib/")  // Auto-load all lib files into the current scope
+```
+
+**See also:** `routes`, `jobs`, `import`
+
+*Since v0.4.7*
 
 ---
 

@@ -29,6 +29,59 @@ fn unique_test_file(prefix: &str) -> String {
         .to_string()
 }
 
+/// Generate a unique test directory path
+fn unique_test_dir(prefix: &str) -> std::path::PathBuf {
+    let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let thread_id = format!("{:?}", std::thread::current().id());
+    let temp_dir = std::env::temp_dir();
+    temp_dir.join(format!(
+        "ntnt_{}_{}_{}_{}",
+        prefix,
+        std::process::id(),
+        thread_id.replace(|c: char| !c.is_alphanumeric(), "_"),
+        counter
+    ))
+}
+
+fn write_test_file(path: &std::path::Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("Failed to create parent directory");
+    }
+    let mut file = fs::File::create(path).expect("Failed to create test file");
+    writeln!(file, "{}", contents).expect("Failed to write test file");
+}
+
+fn run_ntnt_file(path: &std::path::Path, env_vars: &[(&str, &str)]) -> (String, String, i32) {
+    let exe = std::env::consts::EXE_SUFFIX;
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let debug_path = manifest.join(format!("target/debug/ntnt{}", exe));
+    let release_path = manifest.join(format!("target/release/ntnt{}", exe));
+
+    let binary = if debug_path.exists() {
+        debug_path
+    } else if release_path.exists() {
+        release_path
+    } else {
+        panic!("No ntnt binary found. Run 'cargo build' first.");
+    };
+
+    let mut cmd = Command::new(binary);
+    cmd.arg("run")
+        .arg(path)
+        .current_dir(env!("CARGO_MANIFEST_DIR"));
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+
+    let output = cmd.output().expect("Failed to execute ntnt");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    (stdout, stderr, exit_code)
+}
+
 /// Helper to run ntnt with a code string
 fn run_ntnt_code(code: &str) -> (String, String, i32) {
     let test_file = unique_test_file("feature_test");
@@ -5090,4 +5143,292 @@ print(is_err(result))
         "true",
         "file_stat on missing file should return Err"
     );
+}
+
+#[test]
+fn test_libs_basic() {
+    let temp_dir = unique_test_dir("libs_basic");
+    let lib_dir = temp_dir.join("lib");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+
+    write_test_file(
+        &lib_dir.join("math.tnt"),
+        r#"
+fn add(a, b) {
+  return a + b
+}
+"#,
+    );
+
+    let app_path = temp_dir.join("app.tnt");
+    write_test_file(
+        &app_path,
+        r#"
+libs("lib/")
+print(add(1, 2))
+"#,
+    );
+
+    let (stdout, stderr, exit) = run_ntnt_file(&app_path, &[]);
+    assert_eq!(exit, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("3"), "expected 3, got: {}", stdout);
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_libs_recursive() {
+    let temp_dir = unique_test_dir("libs_recursive");
+    let lib_dir = temp_dir.join("lib/subdir");
+    fs::create_dir_all(&lib_dir).expect("create lib subdir");
+
+    write_test_file(
+        &lib_dir.join("extra.tnt"),
+        r#"
+fn extra() {
+  return 7
+}
+"#,
+    );
+
+    let app_path = temp_dir.join("app.tnt");
+    write_test_file(
+        &app_path,
+        r#"
+libs("lib/")
+print(extra())
+"#,
+    );
+
+    let (stdout, stderr, exit) = run_ntnt_file(&app_path, &[]);
+    assert_eq!(exit, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("7"), "expected 7, got: {}", stdout);
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_libs_collision_warning() {
+    let temp_dir = unique_test_dir("libs_collision");
+    let lib_dir = temp_dir.join("lib");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+
+    write_test_file(
+        &lib_dir.join("a.tnt"),
+        r#"
+fn collide() {
+  return "a"
+}
+"#,
+    );
+    write_test_file(
+        &lib_dir.join("b.tnt"),
+        r#"
+fn collide() {
+  return "b"
+}
+"#,
+    );
+
+    let app_path = temp_dir.join("app.tnt");
+    write_test_file(&app_path, r#"libs("lib/")"#);
+
+    let (_stdout, stderr, exit) = run_ntnt_file(&app_path, &[]);
+    assert_eq!(exit, 0, "stderr: {}", stderr);
+    assert!(
+        stderr.contains("[warn]") && stderr.contains("overwrites") && stderr.contains("libs:"),
+        "expected libs collision warning, got: {}",
+        stderr
+    );
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_libs_missing_directory() {
+    let temp_dir = unique_test_dir("libs_missing");
+    fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+    let app_path = temp_dir.join("app.tnt");
+    write_test_file(&app_path, r#"libs("missing/")"#);
+
+    let (_stdout, stderr, exit) = run_ntnt_file(&app_path, &[]);
+    assert_ne!(exit, 0, "expected error for missing directory");
+    assert!(
+        stderr.contains("Libs directory does not exist"),
+        "unexpected stderr: {}",
+        stderr
+    );
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_libs_empty_directory() {
+    let temp_dir = unique_test_dir("libs_empty");
+    let lib_dir = temp_dir.join("lib");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+
+    let app_path = temp_dir.join("app.tnt");
+    write_test_file(
+        &app_path,
+        r#"
+libs("lib/")
+print("ok")
+"#,
+    );
+
+    let (stdout, stderr, exit) = run_ntnt_file(&app_path, &[]);
+    assert_eq!(exit, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("ok"), "expected ok, got: {}", stdout);
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_libs_with_explicit_import() {
+    let temp_dir = unique_test_dir("libs_with_import");
+    let lib_dir = temp_dir.join("lib");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+
+    write_test_file(
+        &lib_dir.join("foo.tnt"),
+        r#"
+print("loaded")
+fn foo() {
+  return 1
+}
+"#,
+    );
+
+    let app_path = temp_dir.join("app.tnt");
+    write_test_file(
+        &app_path,
+        r#"
+libs("lib/")
+import { foo } from "./lib/foo.tnt"
+print(foo())
+"#,
+    );
+
+    let (stdout, stderr, exit) = run_ntnt_file(&app_path, &[]);
+    assert_eq!(exit, 0, "stderr: {}", stderr);
+    assert_eq!(stdout.matches("loaded").count(), 1, "stdout: {}", stdout);
+    assert!(stdout.contains("1"), "expected 1, got: {}", stdout);
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_import_namespace() {
+    let temp_dir = unique_test_dir("import_namespace");
+    let lib_dir = temp_dir.join("lib");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+
+    write_test_file(
+        &lib_dir.join("config.tnt"),
+        r#"
+let FIELD = "ok"
+"#,
+    );
+
+    let app_path = temp_dir.join("app.tnt");
+    write_test_file(
+        &app_path,
+        r#"
+import config from "./lib/config.tnt"
+print(config.FIELD)
+"#,
+    );
+
+    let (stdout, stderr, exit) = run_ntnt_file(&app_path, &[]);
+    assert_eq!(exit, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("ok"), "expected ok, got: {}", stdout);
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_import_namespace_stdlib() {
+    let temp_dir = unique_test_dir("import_namespace_stdlib");
+    fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+    let app_path = temp_dir.join("app.tnt");
+    write_test_file(
+        &app_path,
+        r#"
+import collections from "std/collections"
+let m = map { "a": 1 }
+print(collections.has_key(m, "a"))
+"#,
+    );
+
+    let (stdout, stderr, exit) = run_ntnt_file(&app_path, &[]);
+    assert_eq!(exit, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("true"), "expected true, got: {}", stdout);
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_import_as_still_works() {
+    let temp_dir = unique_test_dir("import_as");
+    let lib_dir = temp_dir.join("lib");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+
+    write_test_file(
+        &lib_dir.join("config.tnt"),
+        r#"
+let FIELD = "ok"
+"#,
+    );
+
+    let app_path = temp_dir.join("app.tnt");
+    write_test_file(
+        &app_path,
+        r#"
+import "./lib/config.tnt" as config
+print(config.FIELD)
+"#,
+    );
+
+    let (stdout, stderr, exit) = run_ntnt_file(&app_path, &[]);
+    assert_eq!(exit, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("ok"), "expected ok, got: {}", stdout);
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn test_import_wildcard() {
+    let temp_dir = unique_test_dir("import_wildcard");
+    let lib_dir = temp_dir.join("lib");
+    fs::create_dir_all(&lib_dir).expect("create lib dir");
+
+    write_test_file(
+        &lib_dir.join("utils.tnt"),
+        r#"
+let MAGIC = 42
+fn double(x) {
+  return x * 2
+}
+"#,
+    );
+
+    let app_path = temp_dir.join("app.tnt");
+    write_test_file(
+        &app_path,
+        r#"
+import * from "./lib/utils.tnt"
+print(MAGIC)
+print(double(5))
+"#,
+    );
+
+    let (stdout, stderr, exit) = run_ntnt_file(&app_path, &[]);
+    assert_eq!(exit, 0, "stderr: {}", stderr);
+    assert!(stdout.contains("42"), "expected 42, got: {}", stdout);
+    assert!(stdout.contains("10"), "expected 10, got: {}", stdout);
+
+    fs::remove_dir_all(&temp_dir).ok();
 }

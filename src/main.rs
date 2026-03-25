@@ -2429,6 +2429,7 @@ fn inspect_project(path: &PathBuf, pretty: bool) -> anyhow::Result<()> {
                     items,
                     source,
                     alias,
+                    ..
                 } => {
                     let import_json = json!({
                         "source": source,

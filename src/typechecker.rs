@@ -1156,8 +1156,9 @@ impl TypeContext {
                 items,
                 source,
                 alias,
+                wildcard,
             } => {
-                self.register_import(items, source, alias.as_deref());
+                self.register_import(items, source, alias.as_deref(), *wildcard);
             }
 
             // Already handled in Pass 1
@@ -3079,10 +3080,45 @@ impl TypeContext {
         exports
     }
 
-    fn register_import(&mut self, items: &[ImportItem], source: &str, alias: Option<&str>) {
+    fn register_import(
+        &mut self,
+        items: &[ImportItem],
+        source: &str,
+        alias: Option<&str>,
+        wildcard: bool,
+    ) {
         // If it's a module alias import, bind the module name
         if let Some(alias_name) = alias {
             self.bind(alias_name, Type::Any);
+            return;
+        }
+
+        if wildcard {
+            let module_sigs = get_module_signatures(source);
+            if !module_sigs.is_empty() {
+                for (name, sig) in module_sigs {
+                    self.builtin_sigs.insert(name, sig);
+                }
+                return;
+            }
+
+            if let Some(file_path) = self.resolve_import_path(source) {
+                let exports = self.extract_file_exports(&file_path);
+                for (name, sig) in exports.functions {
+                    self.builtin_sigs.insert(name, sig);
+                }
+                for (name, fields) in exports.structs {
+                    self.structs.insert(name.clone(), fields);
+                    self.bind(&name, Type::Named(name.clone()));
+                }
+                for (name, variants) in exports.enums {
+                    self.enums.insert(name.clone(), variants);
+                    self.bind(&name, Type::Named(name.clone()));
+                }
+                for (name, typ) in exports.type_aliases {
+                    self.type_aliases.insert(name, typ);
+                }
+            }
             return;
         }
 
@@ -3245,6 +3281,7 @@ impl TypeContext {
         sig!("use_middleware", ["handler" => Type::Any], Type::Unit);
         sig!("on_shutdown", ["handler" => Type::Any], Type::Unit);
         sig!("routes", ["dir" => Type::String], Type::Unit);
+        sig!("libs", ["dir" => Type::String], Type::Unit);
         sig!("template", ["path" => Type::String, "vars" => Type::Any], Type::String);
 
         // Utility
