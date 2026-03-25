@@ -53,12 +53,13 @@ fn write_test_file(path: &std::path::Path, contents: &str) {
 
 fn run_ntnt_file(path: &std::path::Path, env_vars: &[(&str, &str)]) -> (String, String, i32) {
     let exe = std::env::consts::EXE_SUFFIX;
-    let debug_path = format!("./target/debug/ntnt{}", exe);
-    let release_path = format!("./target/release/ntnt{}", exe);
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let debug_path = manifest.join(format!("target/debug/ntnt{}", exe));
+    let release_path = manifest.join(format!("target/release/ntnt{}", exe));
 
-    let binary = if std::path::Path::new(&debug_path).exists() {
+    let binary = if debug_path.exists() {
         debug_path
-    } else if std::path::Path::new(&release_path).exists() {
+    } else if release_path.exists() {
         release_path
     } else {
         panic!("No ntnt binary found. Run 'cargo build' first.");

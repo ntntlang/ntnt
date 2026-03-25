@@ -596,8 +596,14 @@ pub struct Interpreter {
     lib_modules: HashMap<String, HashMap<String, Value>>,
     /// Tracked lib module files for hot-reload (file_path -> mtime)
     lib_module_files: HashMap<String, std::time::SystemTime>,
+    /// Snapshot of builtin/builtin-type bindings for restoring after hot-reload
+    builtin_bindings: HashMap<String, Value>,
     /// Directories loaded via libs() or lib/ discovery (for hot-reload rescans)
     libs_directories: Vec<std::path::PathBuf>,
+    /// Directories loaded via libs() that should inject exports flat
+    libs_flat_directories: Vec<std::path::PathBuf>,
+    /// Tracks which lib files were loaded via libs() (flat injection)
+    libs_flat_files: std::collections::HashSet<String>,
     /// Tracks which export names each lib file injected (source_key -> set of names)
     /// Used to undefine stale bindings when a lib file is deleted or its exports change.
     lib_injected_names: HashMap<String, std::collections::HashSet<String>>,
@@ -792,7 +798,10 @@ impl Interpreter {
             execution_mode: ExecutionMode::Normal,
             lib_modules: HashMap::new(),
             lib_module_files: HashMap::new(),
+            builtin_bindings: HashMap::new(),
             libs_directories: Vec::new(),
+            libs_flat_directories: Vec::new(),
+            libs_flat_files: std::collections::HashSet::new(),
             lib_injected_names: HashMap::new(),
             middleware_files: HashMap::new(),
             routes_dir: None,
@@ -811,6 +820,7 @@ impl Interpreter {
         interpreter.define_server_actions();
         interpreter.define_builtins();
         interpreter.define_builtin_types();
+        interpreter.builtin_bindings = interpreter.environment.borrow().values.clone();
         interpreter.define_stdlib();
         interpreter
     }
@@ -1270,7 +1280,14 @@ impl Interpreter {
 
         let canonical_dir = Self::canonicalize_path(&base_dir);
         if !self.libs_directories.iter().any(|d| d == &canonical_dir) {
-            self.libs_directories.push(canonical_dir);
+            self.libs_directories.push(canonical_dir.clone());
+        }
+        if !self
+            .libs_flat_directories
+            .iter()
+            .any(|d| d == &canonical_dir)
+        {
+            self.libs_flat_directories.push(canonical_dir.clone());
         }
 
         // Collect all .tnt files recursively, sorted for deterministic order
@@ -1303,10 +1320,7 @@ impl Interpreter {
                 module_exports
             };
 
-            let module_name = canonical_path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
+            let module_name = Self::lib_module_name_from_root(&canonical_path, &canonical_dir);
             self.lib_modules.insert(module_name, exports.clone());
 
             // Track file mtime for hot-reload
@@ -1315,6 +1329,7 @@ impl Interpreter {
                     self.lib_module_files.insert(source_key.clone(), mtime);
                 }
             }
+            self.libs_flat_files.insert(source_key.clone());
 
             // Inject exports into the current environment (flat)
             let mut injected: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1385,6 +1400,58 @@ impl Interpreter {
 
     fn canonicalize_path(path: &std::path::Path) -> std::path::PathBuf {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    fn lib_module_name_from_root(
+        file_path: &std::path::Path,
+        lib_root: &std::path::Path,
+    ) -> String {
+        let relative = file_path.strip_prefix(lib_root).unwrap_or(file_path);
+        let without_ext = relative.with_extension("");
+        let mut parts = Vec::new();
+        for comp in without_ext.components() {
+            if let std::path::Component::Normal(os) = comp {
+                parts.push(os.to_string_lossy().to_string());
+            }
+        }
+        if parts.is_empty() {
+            file_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        } else {
+            parts.join("/")
+        }
+    }
+
+    fn lib_module_name_for_path(&self, file_path: &std::path::Path) -> String {
+        let canonical = Self::canonicalize_path(file_path);
+        let mut best_root: Option<&std::path::PathBuf> = None;
+        let mut best_depth = 0usize;
+        for root in &self.libs_directories {
+            if canonical.starts_with(root) {
+                let depth = root.components().count();
+                if depth > best_depth {
+                    best_depth = depth;
+                    best_root = Some(root);
+                }
+            }
+        }
+        if let Some(root) = best_root {
+            Self::lib_module_name_from_root(&canonical, root)
+        } else {
+            canonical
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
+        }
+    }
+
+    fn is_flat_lib_file(&self, file_path: &std::path::Path) -> bool {
+        let canonical = Self::canonicalize_path(file_path);
+        self.libs_flat_directories
+            .iter()
+            .any(|dir| canonical.starts_with(dir))
     }
 
     /// Set the current file path for relative imports
@@ -1723,22 +1790,38 @@ impl Interpreter {
 
         let mut deleted_export_names: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut stale_export_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut old_exports_by_file: HashMap<String, std::collections::HashSet<String>> =
+            HashMap::new();
+
+        for file_path in &changed_files {
+            let path = std::path::Path::new(file_path);
+            if !self.is_flat_lib_file(path) {
+                continue;
+            }
+            let module_name = self.lib_module_name_for_path(path);
+            if let Some(exports) = self.lib_modules.get(&module_name) {
+                let names = exports.keys().cloned().collect();
+                old_exports_by_file.insert(file_path.clone(), names);
+            }
+        }
 
         // Remove deleted files from tracking
         for file_path in &deleted_files {
             let path = std::path::Path::new(file_path);
-            let module_name = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if let Some(exports) = self.lib_modules.get(&module_name) {
-                for name in exports.keys() {
-                    deleted_export_names.insert(name.clone());
+            let module_name = self.lib_module_name_for_path(path);
+            if self.is_flat_lib_file(path) {
+                if let Some(exports) = self.lib_modules.get(&module_name) {
+                    for name in exports.keys() {
+                        deleted_export_names.insert(name.clone());
+                    }
                 }
             }
             self.lib_module_files.remove(file_path);
             self.loaded_modules.remove(file_path);
             self.lib_modules.remove(&module_name);
+            self.libs_flat_files.remove(file_path);
         }
 
         // Reload new and changed files
@@ -1748,13 +1831,17 @@ impl Interpreter {
 
         for file_path in reload_files {
             let path = std::path::Path::new(&file_path);
-            let module_name = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
+            let module_name = self.lib_module_name_for_path(path);
 
             match self.load_module_exports(path) {
                 Ok(exports) => {
+                    if let Some(old_names) = old_exports_by_file.get(&file_path) {
+                        let new_names: std::collections::HashSet<String> =
+                            exports.keys().cloned().collect();
+                        for name in old_names.difference(&new_names) {
+                            stale_export_names.insert(name.clone());
+                        }
+                    }
                     self.lib_modules.insert(module_name, exports.clone());
                     self.loaded_modules
                         .insert(file_path.clone(), exports.clone());
@@ -1762,6 +1849,9 @@ impl Interpreter {
                         if let Ok(mtime) = metadata.modified() {
                             self.lib_module_files.insert(file_path.clone(), mtime);
                         }
+                    }
+                    if self.is_flat_lib_file(path) {
+                        self.libs_flat_files.insert(file_path.clone());
                     }
                 }
                 Err(e) => {
@@ -1776,12 +1866,15 @@ impl Interpreter {
 
         // Clear stale lib exports from the environment before re-injecting.
         // This ensures deleted modules' exports don't remain callable.
-        for (_module_name, exports) in &self.lib_modules {
-            for name in exports.keys() {
+        for (_file_path, exports) in &self.lib_injected_names {
+            for name in exports {
                 self.environment.borrow_mut().undefine(name);
             }
         }
         for name in deleted_export_names {
+            self.environment.borrow_mut().undefine(&name);
+        }
+        for name in stale_export_names {
             self.environment.borrow_mut().undefine(&name);
         }
 
@@ -1793,6 +1886,9 @@ impl Interpreter {
         let mut all_lib_files: Vec<String> = self.lib_module_files.keys().cloned().collect();
         all_lib_files.sort();
         for file_path in &all_lib_files {
+            if !self.libs_flat_files.contains(file_path) {
+                continue;
+            }
             if let Some(exports) = self.loaded_modules.get(file_path).cloned() {
                 let mut injected: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
@@ -1804,9 +1900,14 @@ impl Interpreter {
             }
         }
 
-        // Restore any builtins that may have been shadowed and removed during undefine.
-        self.define_builtins();
-        self.define_builtin_types();
+        // Restore any builtins that were removed during undefine but not redefined.
+        for (name, value) in &self.builtin_bindings {
+            if self.environment.borrow().get(name).is_none() {
+                self.environment
+                    .borrow_mut()
+                    .define(name.clone(), value.clone());
+            }
+        }
 
         true
     }
@@ -3852,17 +3953,15 @@ impl Interpreter {
         if lib_dir.exists() && lib_dir.is_dir() {
             let canonical_dir = Self::canonicalize_path(&lib_dir);
             if !self.libs_directories.iter().any(|d| d == &canonical_dir) {
-                self.libs_directories.push(canonical_dir);
+                self.libs_directories.push(canonical_dir.clone());
             }
 
             if let Ok(files) = Self::collect_tnt_files(&lib_dir) {
                 for path in files {
                     let canonical_path = Self::canonicalize_path(&path);
                     let source_key = canonical_path.to_string_lossy().to_string();
-                    let module_name = canonical_path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().to_string())
-                        .unwrap_or_default();
+                    let module_name =
+                        Self::lib_module_name_from_root(&canonical_path, &canonical_dir);
 
                     let exports = if let Some(module) =
                         self.loaded_modules.get(&source_key).cloned()
