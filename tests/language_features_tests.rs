@@ -4209,6 +4209,92 @@ print(includes(flags, false))
     assert_eq!(lines[1], "true", "false is in [true, false]");
 }
 
+#[test]
+fn test_collections_sort_ints_and_immutability() {
+    let code = r#"
+import { sort } from "std/collections"
+let nums = [3, 1, 2]
+let sorted = sort(nums)
+print(sorted[0])
+print(sorted[2])
+print(nums[0])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "sort() should sort ints without mutating input"
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "3");
+    assert_eq!(lines[2], "3");
+}
+
+#[test]
+fn test_collections_sort_mixed_types() {
+    let code = r#"
+import { sort } from "std/collections"
+let mixed = [2, "10", 1]
+let sorted = sort(mixed)
+print(sorted[0])
+print(sorted[1])
+print(sorted[2])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "sort() should sort mixed types lexicographically"
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "10");
+    assert_eq!(lines[2], "2");
+}
+
+#[test]
+fn test_collections_sort_by_comparator() {
+    let code = r#"
+import { sort_by } from "std/collections"
+let nums = [3, 1, 2]
+let sorted = sort_by(nums, fn(a, b) { a - b })
+print(sorted[0])
+print(sorted[2])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "sort_by() should use comparator");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "3");
+}
+
+#[test]
+fn test_prelude_functions_available_without_imports() {
+    let code = r#"
+let parts = split(" a,b ", ",")
+print(trim(parts[0]))
+
+let parsed = parse_json("{\"a\": 1}")
+match parsed {
+    Ok(v) => print(v["a"])
+    Err(_) => print("parse_error")
+}
+
+let m = map { "x": 1, "y": 2 }
+let ks = keys(m)
+print(len(ks))
+
+let sorted = sort([3, 1, 2])
+print(sorted[0])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "prelude functions should be available");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "a");
+    assert_eq!(lines[1], "1");
+    assert_eq!(lines[2], "2");
+    assert_eq!(lines[3], "1");
+}
+
 // =============================================================================
 // Raw string smart delimiter tests (fixes #1.3, #1.4)
 // =============================================================================

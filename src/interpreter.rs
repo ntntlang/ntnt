@@ -820,8 +820,9 @@ impl Interpreter {
         interpreter.define_server_actions();
         interpreter.define_builtins();
         interpreter.define_builtin_types();
-        interpreter.builtin_bindings = interpreter.environment.borrow().values.clone();
         interpreter.define_stdlib();
+        interpreter.define_prelude();
+        interpreter.builtin_bindings = interpreter.environment.borrow().values.clone();
         interpreter
     }
 
@@ -1689,6 +1690,8 @@ impl Interpreter {
         self.define_builtins();
         self.define_builtin_types();
         self.define_stdlib(); // Re-populate stdlib modules after clearing
+        self.define_prelude();
+        self.builtin_bindings = self.environment.borrow().values.clone();
 
         // Re-set the current file for imports
         self.current_file = Some(file_path.clone());
@@ -3690,6 +3693,60 @@ impl Interpreter {
         }
     }
 
+    fn define_prelude(&mut self) {
+        let prelude_modules: [(&str, &[&str]); 7] = [
+            (
+                "std/string",
+                &[
+                    "split",
+                    "trim",
+                    "contains",
+                    "replace",
+                    "join",
+                    "starts_with",
+                    "ends_with",
+                    "to_lower",
+                    "to_upper",
+                ],
+            ),
+            ("std/json", &["parse_json", "stringify"]),
+            (
+                "std/collections",
+                &[
+                    "keys", "values", "entries", "has_key", "get_key", "reverse", "sort",
+                ],
+            ),
+            (
+                "std/http/server",
+                &[
+                    "json",
+                    "html",
+                    "text",
+                    "redirect",
+                    "status",
+                    "not_found",
+                    "error",
+                    "parse_form",
+                ],
+            ),
+            ("std/env", &["get_env", "load_env"]),
+            ("std/time", &["now", "format"]),
+            ("std/crypto", &["uuid", "sha256"]),
+        ];
+
+        for (module_name, func_names) in prelude_modules {
+            if let Some(module) = self.loaded_modules.get(module_name) {
+                for func_name in func_names {
+                    if let Some(value) = module.get(*func_name) {
+                        self.environment
+                            .borrow_mut()
+                            .define(func_name.to_string(), value.clone());
+                    }
+                }
+            }
+        }
+    }
+
     /// Handle import statement
     fn handle_import(
         &mut self,
@@ -3845,6 +3902,7 @@ impl Interpreter {
         // Define builtins and types in the module environment
         self.define_builtins();
         self.define_builtin_types();
+        self.define_prelude();
 
         // Evaluate the module
         let eval_result = self.eval(&ast);
@@ -4105,6 +4163,7 @@ impl Interpreter {
         self.define_builtins();
         self.define_builtin_types();
         self.define_stdlib();
+        self.define_prelude();
 
         // Evaluate the module
         let eval_result = self.eval(&ast);
@@ -4240,6 +4299,7 @@ impl Interpreter {
         self.define_builtins();
         self.define_builtin_types();
         self.define_stdlib();
+        self.define_prelude();
 
         // Inject lib modules into the environment
         for (name, exports) in lib_modules {
@@ -5471,42 +5531,115 @@ impl Interpreter {
                         }
                     }
 
-                    // Special handling for sort(arr, key_or_fn?) - higher-order function
-                    if name == "sort" && (arguments.len() == 1 || arguments.len() == 2) {
+                    // Special handling for sort(arr) - higher-order function
+                    if name == "sort" {
+                        if arguments.len() != 1 {
+                            return Err(IntentError::type_error(
+                                "sort() requires 1 argument (arr)".to_string(),
+                            ));
+                        }
+
                         let arr = self.eval_expression(&arguments[0])?;
-                        let key_or_fn = if arguments.len() == 2 {
-                            Some(self.eval_expression(&arguments[1])?)
-                        } else {
-                            None
-                        };
 
                         if let Value::Array(mut items) = arr {
-                            // Extract sort keys for each element
-                            let mut keyed: Vec<(Value, Value)> = Vec::new();
+                            let mut all_int = true;
+                            let mut all_float = true;
+                            let mut all_string = true;
+
                             for item in &items {
-                                let key = match &key_or_fn {
-                                    None => item.clone(),
-                                    Some(Value::String(field)) => {
-                                        if let Value::Map(m) = item {
-                                            m.get(field).cloned().unwrap_or(Value::Unit)
-                                        } else {
-                                            item.clone()
-                                        }
+                                match item {
+                                    Value::Int(_) => {
+                                        all_float = false;
+                                        all_string = false;
                                     }
-                                    Some(
-                                        func @ (Value::Function { .. }
-                                        | Value::NativeFunction { .. }),
-                                    ) => self.call_function(func.clone(), vec![item.clone()])?,
-                                    _ => item.clone(),
-                                };
-                                keyed.push((key, item.clone()));
+                                    Value::Float(_) => {
+                                        all_int = false;
+                                        all_string = false;
+                                    }
+                                    Value::String(_) => {
+                                        all_int = false;
+                                        all_float = false;
+                                    }
+                                    _ => {
+                                        all_int = false;
+                                        all_float = false;
+                                        all_string = false;
+                                        break;
+                                    }
+                                }
                             }
-                            keyed.sort_by(|(a, _), (b, _)| Self::compare_values(a, b));
-                            items = keyed.into_iter().map(|(_, v)| v).collect();
+
+                            if all_int {
+                                items.sort_by(|a, b| match (a, b) {
+                                    (Value::Int(ai), Value::Int(bi)) => ai.cmp(bi),
+                                    _ => std::cmp::Ordering::Equal,
+                                });
+                            } else if all_float {
+                                items.sort_by(|a, b| match (a, b) {
+                                    (Value::Float(af), Value::Float(bf)) => {
+                                        af.partial_cmp(bf).unwrap_or(std::cmp::Ordering::Equal)
+                                    }
+                                    _ => std::cmp::Ordering::Equal,
+                                });
+                            } else if all_string {
+                                items.sort_by(|a, b| match (a, b) {
+                                    (Value::String(sa), Value::String(sb)) => sa.cmp(sb),
+                                    _ => std::cmp::Ordering::Equal,
+                                });
+                            } else {
+                                items.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                            }
+
                             return Ok(Value::Array(items));
                         } else {
                             return Err(IntentError::type_error(
                                 "sort() requires an array as first argument".to_string(),
+                            ));
+                        }
+                    }
+
+                    // Special handling for sort_by(arr, comparator) - higher-order function
+                    if name == "sort_by" {
+                        if arguments.len() != 2 {
+                            return Err(IntentError::type_error(
+                                "sort_by() requires 2 arguments (arr, comparator)".to_string(),
+                            ));
+                        }
+
+                        let arr = self.eval_expression(&arguments[0])?;
+                        let comparator = self.eval_expression(&arguments[1])?;
+
+                        if let Value::Array(mut items) = arr {
+                            let mut compare_error: Option<IntentError> = None;
+                            items.sort_by(|a, b| {
+                                if compare_error.is_some() {
+                                    return std::cmp::Ordering::Equal;
+                                }
+                                match self
+                                    .call_function(comparator.clone(), vec![a.clone(), b.clone()])
+                                {
+                                    Ok(Value::Int(n)) => n.cmp(&0),
+                                    Ok(_) => {
+                                        compare_error = Some(IntentError::type_error(
+                                            "sort_by() comparator must return an int".to_string(),
+                                        ));
+                                        std::cmp::Ordering::Equal
+                                    }
+                                    Err(err) => {
+                                        compare_error = Some(err);
+                                        std::cmp::Ordering::Equal
+                                    }
+                                }
+                            });
+
+                            if let Some(err) = compare_error {
+                                return Err(err);
+                            }
+
+                            return Ok(Value::Array(items));
+                        } else {
+                            return Err(IntentError::type_error(
+                                "sort_by() requires an array as first argument".to_string(),
                             ));
                         }
                     }
@@ -10897,25 +11030,12 @@ c")
     }
 
     #[test]
-    fn test_sort_by_key() {
+    fn test_sort_by_comparator() {
         let result = eval(
             r#"
-            let items = [map{"name":"Bob"}, map{"name":"Alice"}, map{"name":"Charlie"}]
-            let sorted = sort(items, "name")
-            sorted[0]["name"]
-        "#,
-        )
-        .unwrap();
-        assert!(matches!(result, Value::String(s) if s == "Alice"));
-    }
-
-    #[test]
-    fn test_sort_by_fn() {
-        let result = eval(
-            r#"
-            let items = [map{"v": 3}, map{"v": 1}, map{"v": 2}]
-            let sorted = sort(items, fn(x) { x["v"] })
-            sorted[0]["v"]
+            let items = [3, 1, 2]
+            let sorted = sort_by(items, fn(a, b) { a - b })
+            sorted[0]
         "#,
         )
         .unwrap();

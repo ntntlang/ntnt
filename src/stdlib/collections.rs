@@ -227,6 +227,165 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt sort
+    // @module std/collections
+    // @signature sort(arr: Array) -> Array
+    // Returns a new array with elements in sorted order.
+    //
+    // Supports arrays of Int, Float, or String. Mixed-type arrays
+    // are sorted lexicographically by string representation.
+    // Does not mutate the original array.
+    // @param arr The source array
+    // @returns A new array with elements sorted
+    // @see_also reverse, sort_by, slice
+    // @since v0.4.6
+    // @tags #pure, #deterministic
+    // @example sort([3, 1, 2]) => [1, 2, 3] ~ "Sort integers"
+    // @example sort(["b", "a"]) => ["a", "b"] ~ "Sort strings"
+    module.insert(
+        "sort".to_string(),
+        Value::NativeFunction {
+            name: "sort".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| match &args[0] {
+                Value::Array(arr) => {
+                    let mut new_arr = arr.clone();
+                    let mut all_int = true;
+                    let mut all_float = true;
+                    let mut all_string = true;
+
+                    for item in &new_arr {
+                        match item {
+                            Value::Int(_) => {
+                                all_float = false;
+                                all_string = false;
+                            }
+                            Value::Float(_) => {
+                                all_int = false;
+                                all_string = false;
+                            }
+                            Value::String(_) => {
+                                all_int = false;
+                                all_float = false;
+                            }
+                            _ => {
+                                all_int = false;
+                                all_float = false;
+                                all_string = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if all_int {
+                        new_arr.sort_by(|a, b| match (a, b) {
+                            (Value::Int(ai), Value::Int(bi)) => ai.cmp(bi),
+                            _ => std::cmp::Ordering::Equal,
+                        });
+                    } else if all_float {
+                        new_arr.sort_by(|a, b| match (a, b) {
+                            (Value::Float(af), Value::Float(bf)) => {
+                                af.partial_cmp(bf).unwrap_or(std::cmp::Ordering::Equal)
+                            }
+                            _ => std::cmp::Ordering::Equal,
+                        });
+                    } else if all_string {
+                        new_arr.sort_by(|a, b| match (a, b) {
+                            (Value::String(sa), Value::String(sb)) => sa.cmp(sb),
+                            _ => std::cmp::Ordering::Equal,
+                        });
+                    } else {
+                        new_arr.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                    }
+
+                    Ok(Value::Array(new_arr))
+                }
+                _ => Err(IntentError::type_error(
+                    "sort() requires an array".to_string(),
+                )),
+            },
+        },
+    );
+
+    // @ntnt sort_by
+    // @module std/collections
+    // @signature sort_by(arr: Array, comparator: Function) -> Array
+    // Returns a new array sorted by a custom comparator.
+    //
+    // The comparator takes two values and returns an Int:
+    // negative = a first, positive = b first, 0 = equal.
+    // Does not mutate the original array.
+    // @param arr The source array
+    // @param comparator A function(a, b) -> Int
+    // @returns A new array with elements sorted
+    // @see_also sort, reverse
+    // @since v0.4.6
+    // @tags #pure
+    // @example sort_by([3, 1, 2], fn(a, b) { a - b }) => [1, 2, 3] ~ "Custom comparator"
+    module.insert(
+        "sort_by".to_string(),
+        Value::NativeFunction {
+            name: "sort_by".to_string(),
+            arity: 2,
+            max_arity: 2,
+            requires: None,
+            func: |args| {
+                if args.len() != 2 {
+                    return Err(IntentError::type_error(
+                        "sort_by() requires 2 arguments (arr, comparator)".to_string(),
+                    ));
+                }
+
+                let arr = match &args[0] {
+                    Value::Array(arr) => arr.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "sort_by() requires an array".to_string(),
+                        ))
+                    }
+                };
+
+                let comparator = match &args[1] {
+                    Value::NativeFunction { func, .. } => *func,
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "sort_by() requires a comparator function".to_string(),
+                        ))
+                    }
+                };
+
+                let mut new_arr = arr;
+                let mut compare_error: Option<IntentError> = None;
+                new_arr.sort_by(|a, b| {
+                    if compare_error.is_some() {
+                        return std::cmp::Ordering::Equal;
+                    }
+                    match comparator(&[a.clone(), b.clone()]) {
+                        Ok(Value::Int(n)) => n.cmp(&0),
+                        Ok(_) => {
+                            compare_error = Some(IntentError::type_error(
+                                "sort_by() comparator must return an int".to_string(),
+                            ));
+                            std::cmp::Ordering::Equal
+                        }
+                        Err(err) => {
+                            compare_error = Some(err);
+                            std::cmp::Ordering::Equal
+                        }
+                    }
+                });
+
+                if let Some(err) = compare_error {
+                    return Err(err);
+                }
+
+                Ok(Value::Array(new_arr))
+            },
+        },
+    );
+
     // @ntnt slice
     // @module std/collections
     // @signature slice(arr: Array, start: Int, end: Int) -> Array

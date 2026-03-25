@@ -13,6 +13,7 @@
 
 use crate::error::{IntentError, Result};
 use crate::interpreter::Value;
+use crate::stdlib::json::json_to_intent_value;
 use redis::Commands;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
@@ -1052,6 +1053,329 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt get_int
+    // @module std/kv
+    // @signature get_int(kv: KVStore, key: String, default?: Int) -> Int
+    // Get a value by key and convert it to an integer.
+    //
+    // Returns the default (or 0) if the key is missing or the value cannot be parsed.
+    // @param kv The KV store handle from open()
+    // @param key The key to retrieve
+    // @param default (optional) Integer to return on miss or parse failure
+    // @returns The parsed integer or default
+    // @example get_int(cache, "stats:success") => 0 ~ "Missing key returns 0"
+    // @example get_int(cache, "stats:success", 42) => 42 ~ "Default on miss"
+    module.insert(
+        "get_int".to_string(),
+        Value::NativeFunction {
+            name: "get_int".to_string(),
+            arity: 0, // Variable: 2 or 3 args
+            max_arity: 0,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "get_int() requires 2 or 3 arguments (kv, key, default?)".to_string(),
+                    ));
+                }
+
+                let key = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "get_int() requires a string key".to_string(),
+                        ))
+                    }
+                };
+
+                let default_value = if args.len() == 3 {
+                    match &args[2] {
+                        Value::Int(i) => *i,
+                        _ => {
+                            return Err(IntentError::type_error(
+                                "get_int() default must be an int".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    0
+                };
+
+                let backend = get_backend_type(&args[0])?;
+                let result = match backend {
+                    KVBackend::SQLite => {
+                        let kv_arc = get_sqlite_kv(&args[0])?;
+                        let kv = kv_arc.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
+                        })?;
+                        kv.get(&key)?
+                    }
+                    KVBackend::Redis => {
+                        let kv_arc = get_redis_kv(&args[0])?;
+                        let mut kv = kv_arc.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
+                        })?;
+                        kv.get(&key)?
+                    }
+                };
+
+                let raw = match result {
+                    Some(v) => v.to_string(),
+                    None => return Ok(Value::Int(default_value)),
+                };
+                let raw_trimmed = raw.trim();
+                if raw_trimmed.is_empty() || raw_trimmed == "none" {
+                    return Ok(Value::Int(default_value));
+                }
+
+                match raw_trimmed.parse::<i64>() {
+                    Ok(n) => Ok(Value::Int(n)),
+                    Err(_) => Ok(Value::Int(default_value)),
+                }
+            },
+        },
+    );
+
+    // @ntnt get_float
+    // @module std/kv
+    // @signature get_float(kv: KVStore, key: String, default?: Float) -> Float
+    // Get a value by key and convert it to a float.
+    //
+    // Returns the default (or 0.0) if the key is missing or the value cannot be parsed.
+    // @param kv The KV store handle from open()
+    // @param key The key to retrieve
+    // @param default (optional) Float to return on miss or parse failure
+    // @returns The parsed float or default
+    // @example get_float(cache, "stats:rate") => 0.0 ~ "Missing key returns 0.0"
+    // @example get_float(cache, "stats:rate", 1.5) => 1.5 ~ "Default on miss"
+    module.insert(
+        "get_float".to_string(),
+        Value::NativeFunction {
+            name: "get_float".to_string(),
+            arity: 0, // Variable: 2 or 3 args
+            max_arity: 0,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "get_float() requires 2 or 3 arguments (kv, key, default?)".to_string(),
+                    ));
+                }
+
+                let key = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "get_float() requires a string key".to_string(),
+                        ))
+                    }
+                };
+
+                let default_value = if args.len() == 3 {
+                    match &args[2] {
+                        Value::Float(f) => *f,
+                        Value::Int(i) => *i as f64,
+                        _ => {
+                            return Err(IntentError::type_error(
+                                "get_float() default must be a float".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    0.0
+                };
+
+                let backend = get_backend_type(&args[0])?;
+                let result = match backend {
+                    KVBackend::SQLite => {
+                        let kv_arc = get_sqlite_kv(&args[0])?;
+                        let kv = kv_arc.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
+                        })?;
+                        kv.get(&key)?
+                    }
+                    KVBackend::Redis => {
+                        let kv_arc = get_redis_kv(&args[0])?;
+                        let mut kv = kv_arc.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
+                        })?;
+                        kv.get(&key)?
+                    }
+                };
+
+                let raw = match result {
+                    Some(v) => v.to_string(),
+                    None => return Ok(Value::Float(default_value)),
+                };
+                let raw_trimmed = raw.trim();
+                if raw_trimmed.is_empty() || raw_trimmed == "none" {
+                    return Ok(Value::Float(default_value));
+                }
+
+                match raw_trimmed.parse::<f64>() {
+                    Ok(n) => Ok(Value::Float(n)),
+                    Err(_) => Ok(Value::Float(default_value)),
+                }
+            },
+        },
+    );
+
+    // @ntnt get_json
+    // @module std/kv
+    // @signature get_json(kv: KVStore, key: String, default?: Any) -> Any
+    // Get a value by key and parse it as JSON.
+    //
+    // Returns the default (or None) if the key is missing or JSON parsing fails.
+    // @param kv The KV store handle from open()
+    // @param key The key to retrieve
+    // @param default (optional) Value to return on miss or parse failure
+    // @returns The parsed JSON value or default
+    // @example get_json(cache, "cache:site", None) => None ~ "Missing key returns None"
+    // @example get_json(cache, "cache:site", map {}) => map {} ~ "Default on parse failure"
+    module.insert(
+        "get_json".to_string(),
+        Value::NativeFunction {
+            name: "get_json".to_string(),
+            arity: 0, // Variable: 2 or 3 args
+            max_arity: 0,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "get_json() requires 2 or 3 arguments (kv, key, default?)".to_string(),
+                    ));
+                }
+
+                let key = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "get_json() requires a string key".to_string(),
+                        ))
+                    }
+                };
+
+                let default_value = if args.len() == 3 {
+                    args[2].clone()
+                } else {
+                    Value::none()
+                };
+
+                let backend = get_backend_type(&args[0])?;
+                let result = match backend {
+                    KVBackend::SQLite => {
+                        let kv_arc = get_sqlite_kv(&args[0])?;
+                        let kv = kv_arc.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
+                        })?;
+                        kv.get(&key)?
+                    }
+                    KVBackend::Redis => {
+                        let kv_arc = get_redis_kv(&args[0])?;
+                        let mut kv = kv_arc.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
+                        })?;
+                        kv.get(&key)?
+                    }
+                };
+
+                let raw = match result {
+                    Some(v) => v.to_string(),
+                    None => return Ok(default_value),
+                };
+                let raw_trimmed = raw.trim();
+                if raw_trimmed.is_empty() || raw_trimmed == "none" {
+                    return Ok(default_value);
+                }
+
+                match serde_json::from_str::<serde_json::Value>(raw_trimmed) {
+                    Ok(json_val) => Ok(json_to_intent_value(&json_val)),
+                    Err(_) => Ok(default_value),
+                }
+            },
+        },
+    );
+
+    // @ntnt get_str
+    // @module std/kv
+    // @signature get_str(kv: KVStore, key: String, default?: String) -> String
+    // Get a value by key and convert it to a string.
+    //
+    // Returns the default (or empty string) if the key is missing or the value is empty/"none".
+    // @param kv The KV store handle from open()
+    // @param key The key to retrieve
+    // @param default (optional) String to return on miss or empty value
+    // @returns The string value or default
+    // @example get_str(cache, "user:name") => "" ~ "Missing key returns empty string"
+    // @example get_str(cache, "user:name", "guest") => "guest" ~ "Default on miss"
+    module.insert(
+        "get_str".to_string(),
+        Value::NativeFunction {
+            name: "get_str".to_string(),
+            arity: 0, // Variable: 2 or 3 args
+            max_arity: 0,
+            requires: None,
+            func: |args| {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(IntentError::type_error(
+                        "get_str() requires 2 or 3 arguments (kv, key, default?)".to_string(),
+                    ));
+                }
+
+                let key = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "get_str() requires a string key".to_string(),
+                        ))
+                    }
+                };
+
+                let default_value = if args.len() == 3 {
+                    match &args[2] {
+                        Value::String(s) => s.clone(),
+                        _ => {
+                            return Err(IntentError::type_error(
+                                "get_str() default must be a string".to_string(),
+                            ))
+                        }
+                    }
+                } else {
+                    "".to_string()
+                };
+
+                let backend = get_backend_type(&args[0])?;
+                let result = match backend {
+                    KVBackend::SQLite => {
+                        let kv_arc = get_sqlite_kv(&args[0])?;
+                        let kv = kv_arc.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
+                        })?;
+                        kv.get(&key)?
+                    }
+                    KVBackend::Redis => {
+                        let kv_arc = get_redis_kv(&args[0])?;
+                        let mut kv = kv_arc.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
+                        })?;
+                        kv.get(&key)?
+                    }
+                };
+
+                let raw = match result {
+                    Some(v) => v.to_string(),
+                    None => return Ok(Value::String(default_value)),
+                };
+                let raw_trimmed = raw.trim();
+                if raw_trimmed.is_empty() || raw_trimmed == "none" {
+                    return Ok(Value::String(default_value));
+                }
+
+                Ok(Value::String(raw))
+            },
+        },
+    );
+
     // @ntnt set
     // @module std/kv
     // @signature set(kv: KVStore, key: String, value: Any, opts?: Map) -> Result<Unit, String>
@@ -1746,6 +2070,25 @@ pub fn kv_set_nx(handle: &Value, key: &str, value: &Value, ttl: Option<i64>) -> 
 mod tests {
     use super::*;
 
+    fn get_fn(
+        module: &HashMap<String, Value>,
+        name: &str,
+    ) -> fn(&[Value]) -> crate::error::Result<Value> {
+        match module.get(name) {
+            Some(Value::NativeFunction { func, .. }) => *func,
+            _ => panic!("Function {} not found", name),
+        }
+    }
+
+    fn unwrap_ok(value: Value) -> Value {
+        match value {
+            Value::EnumValue {
+                variant, values, ..
+            } if variant == "Ok" => values.into_iter().next().unwrap_or(Value::Unit),
+            other => panic!("Expected Ok result, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_sqlite_kv_basic_operations() {
         let kv = SQLiteKV::new(":memory:").unwrap();
@@ -1855,6 +2198,105 @@ mod tests {
         assert!(!kv.has("key1").unwrap());
         assert!(!kv.has("key2").unwrap());
         assert_eq!(kv.list(None).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_kv_get_int_float_json_str_helpers() {
+        let module = create_kv_module();
+        let open = get_fn(&module, "open");
+        let set = get_fn(&module, "set");
+        let get_int = get_fn(&module, "get_int");
+        let get_float = get_fn(&module, "get_float");
+        let get_json = get_fn(&module, "get_json");
+        let get_str = get_fn(&module, "get_str");
+
+        let kv = unwrap_ok(open(&[Value::String(":memory:".to_string())]).unwrap());
+
+        // Seed values
+        set(&[
+            kv.clone(),
+            Value::String("int_key".to_string()),
+            Value::Int(42),
+        ])
+        .unwrap();
+        set(&[
+            kv.clone(),
+            Value::String("float_key".to_string()),
+            Value::String("3.14".to_string()),
+        ])
+        .unwrap();
+        set(&[
+            kv.clone(),
+            Value::String("json_key".to_string()),
+            Value::String(r#"{"a": 1}"#.to_string()),
+        ])
+        .unwrap();
+        set(&[
+            kv.clone(),
+            Value::String("str_key".to_string()),
+            Value::String("hello".to_string()),
+        ])
+        .unwrap();
+        set(&[
+            kv.clone(),
+            Value::String("bad_int".to_string()),
+            Value::String("nope".to_string()),
+        ])
+        .unwrap();
+        set(&[
+            kv.clone(),
+            Value::String("empty_str".to_string()),
+            Value::String("".to_string()),
+        ])
+        .unwrap();
+
+        let result = get_int(&[kv.clone(), Value::String("int_key".to_string())]).unwrap();
+        assert!(matches!(result, Value::Int(42)));
+
+        let result = get_int(&[
+            kv.clone(),
+            Value::String("bad_int".to_string()),
+            Value::Int(7),
+        ])
+        .unwrap();
+        assert!(matches!(result, Value::Int(7)));
+
+        let result = get_int(&[kv.clone(), Value::String("missing".to_string())]).unwrap();
+        assert!(matches!(result, Value::Int(0)));
+
+        let result = get_float(&[kv.clone(), Value::String("float_key".to_string())]).unwrap();
+        assert!(matches!(result, Value::Float(f) if (f - 3.14).abs() < 0.0001));
+
+        let result = get_float(&[
+            kv.clone(),
+            Value::String("missing_float".to_string()),
+            Value::Float(1.5),
+        ])
+        .unwrap();
+        assert!(matches!(result, Value::Float(f) if (f - 1.5).abs() < 0.0001));
+
+        let result = get_json(&[kv.clone(), Value::String("json_key".to_string())]).unwrap();
+        match result {
+            Value::Map(m) => match m.get("a") {
+                Some(Value::Int(1)) => {}
+                other => panic!("Expected a=1, got {:?}", other),
+            },
+            other => panic!("Expected Map, got {:?}", other),
+        }
+
+        let result = get_json(&[kv.clone(), Value::String("missing_json".to_string())]).unwrap();
+        assert!(matches!(result, Value::EnumValue { variant, .. } if variant == "None"));
+
+        let result = get_str(&[kv.clone(), Value::String("str_key".to_string())]).unwrap();
+        assert!(matches!(result, Value::String(s) if s == "hello"));
+
+        let result = get_str(&[
+            kv.clone(),
+            Value::String("empty_str".to_string()),
+            Value::String("fallback".to_string()),
+        ])
+        .unwrap();
+        assert!(matches!(result, Value::String(s) if s == "fallback"));
     }
 
     // Note: Redis tests require a running Redis server
