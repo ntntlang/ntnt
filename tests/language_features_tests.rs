@@ -65,7 +65,8 @@ fn run_ntnt_file(path: &std::path::Path, env_vars: &[(&str, &str)]) -> (String, 
     };
 
     let mut cmd = Command::new(binary);
-    cmd.args(&["run", &path.to_string_lossy()])
+    cmd.arg("run")
+        .arg(path)
         .current_dir(env!("CARGO_MANIFEST_DIR"));
     for (k, v) in env_vars {
         cmd.env(k, v);

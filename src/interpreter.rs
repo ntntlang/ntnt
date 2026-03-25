@@ -371,11 +371,6 @@ impl Environment {
         self.mutable_vars.remove(name);
     }
 
-    pub fn remove(&mut self, name: &str) {
-        self.values.remove(name);
-        self.mutable_vars.remove(name);
-    }
-
     pub fn define_mutable(&mut self, name: String, value: Value) {
         self.values.insert(name.clone(), value);
         self.mutable_vars.insert(name);
@@ -1726,6 +1721,9 @@ impl Interpreter {
             summary
         );
 
+        let mut deleted_export_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         // Remove deleted files from tracking
         for file_path in &deleted_files {
             let path = std::path::Path::new(file_path);
@@ -1733,6 +1731,11 @@ impl Interpreter {
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
+            if let Some(exports) = self.lib_modules.get(&module_name) {
+                for name in exports.keys() {
+                    deleted_export_names.insert(name.clone());
+                }
+            }
             self.lib_module_files.remove(file_path);
             self.loaded_modules.remove(file_path);
             self.lib_modules.remove(&module_name);
@@ -1777,6 +1780,9 @@ impl Interpreter {
             for name in exports.keys() {
                 self.environment.borrow_mut().undefine(name);
             }
+        }
+        for name in deleted_export_names {
+            self.environment.borrow_mut().undefine(&name);
         }
 
         // Re-inject ALL lib exports in sorted order to maintain deterministic
@@ -3854,13 +3860,23 @@ impl Interpreter {
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_default();
 
-                    if let Ok(exports) = self.load_module_exports(&canonical_path) {
-                        lib_modules.insert(module_name, exports);
-                        // Track file mtime for hot-reload
-                        if let Ok(metadata) = std::fs::metadata(&canonical_path) {
-                            if let Ok(mtime) = metadata.modified() {
-                                self.lib_module_files.insert(source_key, mtime);
-                            }
+                    let exports = if let Some(module) =
+                        self.loaded_modules.get(&source_key).cloned()
+                    {
+                        module
+                    } else if let Ok(module_exports) = self.load_module_exports(&canonical_path) {
+                        self.loaded_modules
+                            .insert(source_key.clone(), module_exports.clone());
+                        module_exports
+                    } else {
+                        continue;
+                    };
+
+                    lib_modules.insert(module_name, exports);
+                    // Track file mtime for hot-reload
+                    if let Ok(metadata) = std::fs::metadata(&canonical_path) {
+                        if let Ok(mtime) = metadata.modified() {
+                            self.lib_module_files.insert(source_key, mtime);
                         }
                     }
                 }

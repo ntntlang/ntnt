@@ -743,6 +743,14 @@ impl Parser {
                 alias = Some(self.consume_identifier("Expected alias name")?);
             }
 
+            if alias.is_some() && self.check(&TokenKind::From) {
+                return Err(IntentError::ParserError {
+                    line: self.current_line(),
+                    column: self.current_column(),
+                    message: "Cannot use 'as' with 'from' in this position. Use 'import { name as alias } from ...' instead.".to_string(),
+                });
+            }
+
             // If there's no 'from', the name itself is the source
             if !self.check(&TokenKind::From) {
                 self.match_token(&[TokenKind::Semicolon]);
