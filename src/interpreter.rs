@@ -3855,13 +3855,16 @@ impl Interpreter {
             return Err(e);
         }
 
-        // Collect exported items
+        // Collect exported items (skip builtins by name and NativeFunction by type)
         let mut module_exports: HashMap<String, Value> = HashMap::new();
-
-        // For now, export everything defined at module level
-        // In the future, we'd track explicit exports
         let env = self.environment.borrow();
         for (name, value) in env.values.iter() {
+            if matches!(value, Value::NativeFunction { .. }) {
+                continue;
+            }
+            if self.builtin_bindings.contains_key(name) {
+                continue;
+            }
             module_exports.insert(name.clone(), value.clone());
         }
         drop(env);
@@ -4113,13 +4116,18 @@ impl Interpreter {
         }
 
         // Collect exports (everything defined at module level)
+        // Skip builtins: filter out NativeFunction values AND any name that exists
+        // in the builtin_bindings snapshot (catches EnumValues like None, Some, etc.)
         let mut exports: HashMap<String, Value> = HashMap::new();
         let env = self.environment.borrow();
         for (name, value) in env.values.iter() {
-            // Skip builtins
-            if !matches!(value, Value::NativeFunction { .. }) {
-                exports.insert(name.clone(), value.clone());
+            if matches!(value, Value::NativeFunction { .. }) {
+                continue;
             }
+            if self.builtin_bindings.contains_key(name) {
+                continue;
+            }
+            exports.insert(name.clone(), value.clone());
         }
         drop(env);
 
