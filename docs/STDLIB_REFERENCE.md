@@ -3131,16 +3131,17 @@ slice([1, 2, 3, 4], 1, 3)  // => [2, 3]  // Slice from index 1 to 3
 #### `sort`
 
 ```ntnt
-sort(arr: Array) -> Array
+sort(arr: Array, key_or_fn?: String | Function) -> Array
 ```
 
 Returns a new array with elements in sorted order.
 
-Supports arrays of Int, Float, or String. Mixed-type arrays are sorted lexicographically by string representation. Does not mutate the original array.
+Supports arrays of Int, Float, or String. Mixed-type arrays are sorted lexicographically by string representation. When a key string is provided, sorts by that map field. When a function is provided, sorts by the computed key. Does not mutate the original array.
 
 **Parameters:**
 
 - `arr` — The source array
+- `key_or_fn` — Optional map field name or function(item) -> key
 
 **Returns:** A new array with elements sorted
 
@@ -3149,6 +3150,7 @@ Supports arrays of Int, Float, or String. Mixed-type arrays are sorted lexicogra
 ```ntnt
 sort([3, 1, 2])  // => [1, 2, 3]  // Sort integers
 sort(["b", "a"])  // => ["a", "b"]  // Sort strings
+sort([map { "t": 3 }, map { "t": 1 }], "t")  // => [map { "t": 1 }, map { "t": 3 }]  // Sort by map field
 ```
 
 **See also:** `reverse`, `sort_by`, `slice`
@@ -12333,4 +12335,3 @@ parse_url("https://example.com/path?q=1")  // Parse URL into components map
 *Since v0.2.0*
 
 ---
-

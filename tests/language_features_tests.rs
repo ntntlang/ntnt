@@ -4285,6 +4285,82 @@ sorter([3,1,2], fn(a, b) { a - b })
 }
 
 #[test]
+fn test_collections_sort_floats() {
+    let code = r#"
+import { sort } from "std/collections"
+let nums = [3.2, 1.5, 2.1]
+let sorted = sort(nums)
+print(sorted[0])
+print(sorted[2])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "sort() should sort floats");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1.5");
+    assert_eq!(lines[1], "3.2");
+}
+
+#[test]
+fn test_collections_sort_empty() {
+    let code = r#"
+import { sort } from "std/collections"
+let sorted = sort([])
+print(len(sorted))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "sort() should handle empty arrays");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "0");
+}
+
+#[test]
+fn test_collections_sort_by_comparator_error() {
+    let code = r#"
+import { sort_by } from "std/collections"
+let nums = [3, 1, 2]
+sort_by(nums, fn(a, b) { "nope" })
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "sort_by() should fail on non-int comparator");
+    assert!(
+        stderr.contains("sort_by") || stderr.contains("comparator"),
+        "error should mention sort_by comparator, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_kv_get_int_invalid_handle() {
+    let code = r#"
+import { get_int } from "std/kv"
+get_int(123, "k")
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "get_int() should fail on non-handle");
+    assert!(
+        stderr.contains("KV store handle") || stderr.contains("Expected a KV store handle"),
+        "error should mention KV handle, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_prelude_import_shadowing() {
+    let code = r#"
+import { split } from "std/string"
+let parts = split("a,b", ",")
+print(parts[0])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "explicit import should work even with prelude bindings"
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "a");
+}
+
+#[test]
 fn test_prelude_functions_available_without_imports() {
     let code = r#"
 let parts = split(" a,b ", ",")

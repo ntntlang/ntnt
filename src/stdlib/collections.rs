@@ -229,13 +229,16 @@ pub fn init() -> HashMap<String, Value> {
 
     // @ntnt sort
     // @module std/collections
-    // @signature sort(arr: Array) -> Array
+    // @signature sort(arr: Array, key_or_fn?: String | Function) -> Array
     // Returns a new array with elements in sorted order.
     //
     // Supports arrays of Int, Float, or String. Mixed-type arrays
-    // are sorted lexicographically by string representation.
+    // are sorted lexicographically by string representation. When a
+    // key string is provided, sorts by that map field. When a function
+    // is provided, sorts by the computed key.
     // Does not mutate the original array.
     // @param arr The source array
+    // @param key_or_fn Optional map field name or function(item) -> key
     // @returns A new array with elements sorted
     // @see_also reverse, sort_by, slice
     // @since v0.4.6

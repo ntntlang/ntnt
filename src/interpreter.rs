@@ -3747,6 +3747,21 @@ impl Interpreter {
         }
     }
 
+    fn is_builtin_export(&self, name: &str, value: &Value) -> bool {
+        if matches!(value, Value::NativeFunction { .. }) {
+            return true;
+        }
+
+        if !self.builtin_bindings.contains_key(name) {
+            return false;
+        }
+
+        matches!(
+            value,
+            Value::EnumValue { .. } | Value::EnumConstructor { .. }
+        )
+    }
+
     /// Handle import statement
     fn handle_import(
         &mut self,
@@ -3917,10 +3932,7 @@ impl Interpreter {
         let mut module_exports: HashMap<String, Value> = HashMap::new();
         let env = self.environment.borrow();
         for (name, value) in env.values.iter() {
-            if matches!(value, Value::NativeFunction { .. }) {
-                continue;
-            }
-            if self.builtin_bindings.contains_key(name) {
+            if self.is_builtin_export(name, value) {
                 continue;
             }
             module_exports.insert(name.clone(), value.clone());
@@ -4175,15 +4187,11 @@ impl Interpreter {
         }
 
         // Collect exports (everything defined at module level)
-        // Skip builtins: filter out NativeFunction values AND any name that exists
-        // in the builtin_bindings snapshot (catches EnumValues like None, Some, etc.)
+        // Skip builtins: filter out NativeFunction values AND enum bindings from builtin_bindings.
         let mut exports: HashMap<String, Value> = HashMap::new();
         let env = self.environment.borrow();
         for (name, value) in env.values.iter() {
-            if matches!(value, Value::NativeFunction { .. }) {
-                continue;
-            }
-            if self.builtin_bindings.contains_key(name) {
+            if self.is_builtin_export(name, value) {
                 continue;
             }
             exports.insert(name.clone(), value.clone());

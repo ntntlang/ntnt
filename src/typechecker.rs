@@ -3456,7 +3456,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     "array" => Type::Array(Box::new(Type::Any)),
                     "comparator" => Type::Function {
                         params: vec![Type::Any, Type::Any],
-                        return_type: Box::new(Type::Any),
+                        return_type: Box::new(Type::Int),
                     }
                 ],
                 Type::Array(Box::new(Type::Any))
