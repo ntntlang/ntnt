@@ -5645,40 +5645,7 @@ impl Interpreter {
 
                         let arr = self.eval_expression(&arguments[0])?;
                         let comparator = self.eval_expression(&arguments[1])?;
-
-                        if let Value::Array(mut items) = arr {
-                            let mut compare_error: Option<IntentError> = None;
-                            items.sort_by(|a, b| {
-                                if compare_error.is_some() {
-                                    return std::cmp::Ordering::Equal;
-                                }
-                                match self
-                                    .call_function(comparator.clone(), vec![a.clone(), b.clone()])
-                                {
-                                    Ok(Value::Int(n)) => n.cmp(&0),
-                                    Ok(_) => {
-                                        compare_error = Some(IntentError::type_error(
-                                            "sort_by() comparator must return an int".to_string(),
-                                        ));
-                                        std::cmp::Ordering::Equal
-                                    }
-                                    Err(err) => {
-                                        compare_error = Some(err);
-                                        std::cmp::Ordering::Equal
-                                    }
-                                }
-                            });
-
-                            if let Some(err) = compare_error {
-                                return Err(err);
-                            }
-
-                            return Ok(Value::Array(items));
-                        } else {
-                            return Err(IntentError::type_error(
-                                "sort_by() requires an array as first argument".to_string(),
-                            ));
-                        }
+                        return self.sort_by_hof(arr, comparator);
                     }
 
                     // Special handling for sort_desc(arr, key_or_fn?) - higher-order function
@@ -5867,7 +5834,6 @@ impl Interpreter {
                 }
 
                 let callee = self.eval_expression(function)?;
-                let callee_is_identifier = matches!(function.as_ref(), Expression::Identifier(_));
                 let args: Result<Vec<Value>> = arguments
                     .iter()
                     .map(|arg| self.eval_expression(arg))
@@ -5875,7 +5841,7 @@ impl Interpreter {
                 let args = args?;
 
                 if let Value::NativeFunction { name, .. } = &callee {
-                    if name == "sort_by" && !callee_is_identifier {
+                    if name == "sort_by" {
                         if args.len() != 2 {
                             return Err(IntentError::type_error(
                                 "sort_by() requires 2 arguments (arr, comparator)".to_string(),
@@ -5884,40 +5850,7 @@ impl Interpreter {
 
                         let arr = args[0].clone();
                         let comparator = args[1].clone();
-
-                        if let Value::Array(mut items) = arr {
-                            let mut compare_error: Option<IntentError> = None;
-                            items.sort_by(|a, b| {
-                                if compare_error.is_some() {
-                                    return std::cmp::Ordering::Equal;
-                                }
-                                match self
-                                    .call_function(comparator.clone(), vec![a.clone(), b.clone()])
-                                {
-                                    Ok(Value::Int(n)) => n.cmp(&0),
-                                    Ok(_) => {
-                                        compare_error = Some(IntentError::type_error(
-                                            "sort_by() comparator must return an int".to_string(),
-                                        ));
-                                        std::cmp::Ordering::Equal
-                                    }
-                                    Err(err) => {
-                                        compare_error = Some(err);
-                                        std::cmp::Ordering::Equal
-                                    }
-                                }
-                            });
-
-                            if let Some(err) = compare_error {
-                                return Err(err);
-                            }
-
-                            return Ok(Value::Array(items));
-                        } else {
-                            return Err(IntentError::type_error(
-                                "sort_by() requires an array as first argument".to_string(),
-                            ));
-                        }
+                        return self.sort_by_hof(arr, comparator);
                     }
                 }
 
@@ -9021,6 +8954,40 @@ impl Interpreter {
                 Value::Array(arr.iter().map(|v| self.stored_to_value(v)).collect())
             }
             StoredValue::Unit => Value::Unit,
+        }
+    }
+
+    fn sort_by_hof(&mut self, arr: Value, comparator: Value) -> Result<Value> {
+        if let Value::Array(mut items) = arr {
+            let mut compare_error: Option<IntentError> = None;
+            items.sort_by(|a, b| {
+                if compare_error.is_some() {
+                    return std::cmp::Ordering::Equal;
+                }
+                match self.call_function(comparator.clone(), vec![a.clone(), b.clone()]) {
+                    Ok(Value::Int(n)) => n.cmp(&0),
+                    Ok(_) => {
+                        compare_error = Some(IntentError::type_error(
+                            "sort_by() comparator must return an int".to_string(),
+                        ));
+                        std::cmp::Ordering::Equal
+                    }
+                    Err(err) => {
+                        compare_error = Some(err);
+                        std::cmp::Ordering::Equal
+                    }
+                }
+            });
+
+            if let Some(err) = compare_error {
+                return Err(err);
+            }
+
+            Ok(Value::Array(items))
+        } else {
+            Err(IntentError::type_error(
+                "sort_by() requires an array as first argument".to_string(),
+            ))
         }
     }
 

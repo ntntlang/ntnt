@@ -1282,18 +1282,30 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     }
                 };
 
-                let raw = match result {
-                    Some(v) => v.to_string(),
+                let value = match result {
+                    Some(v) => v,
                     None => return Ok(default_value),
                 };
-                let raw_trimmed = raw.trim();
-                if raw_trimmed.is_empty() || raw_trimmed == "none" {
-                    return Ok(default_value);
-                }
 
-                match serde_json::from_str::<serde_json::Value>(raw_trimmed) {
-                    Ok(json_val) => Ok(json_to_intent_value(&json_val)),
-                    Err(_) => Ok(default_value),
+                match value {
+                    Value::Map(_)
+                    | Value::Array(_)
+                    | Value::Int(_)
+                    | Value::Float(_)
+                    | Value::Bool(_) => Ok(value),
+                    Value::String(raw) => {
+                        let raw_trimmed = raw.trim();
+                        if raw_trimmed.is_empty() || raw_trimmed == "none" {
+                            return Ok(default_value);
+                        }
+
+                        match serde_json::from_str::<serde_json::Value>(raw_trimmed) {
+                            Ok(json_val) => Ok(json_to_intent_value(&json_val)),
+                            Err(_) => Ok(default_value),
+                        }
+                    }
+                    Value::Unit => Ok(default_value),
+                    other => Ok(other),
                 }
             },
         },

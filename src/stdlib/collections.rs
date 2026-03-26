@@ -4,6 +4,19 @@ use crate::error::IntentError;
 use crate::interpreter::Value;
 use std::collections::HashMap;
 
+fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Int(a), Value::Int(b)) => a.cmp(b),
+        (Value::Float(a), Value::Float(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+        (Value::Int(a), Value::Float(b)) => (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal),
+        (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal),
+        (Value::String(a), Value::String(b)) => a.cmp(b),
+        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        _ => a.to_string().cmp(&b.to_string()),
+    }
+}
+
 /// Initialize the std/collections module
 pub fn init() -> HashMap<String, Value> {
     let mut module: HashMap<String, Value> = HashMap::new();
@@ -250,64 +263,97 @@ pub fn init() -> HashMap<String, Value> {
         Value::NativeFunction {
             name: "sort".to_string(),
             arity: 1,
-            max_arity: 1,
+            max_arity: 2,
             requires: None,
-            func: |args| match &args[0] {
-                Value::Array(arr) => {
-                    let mut new_arr = arr.clone();
-                    let mut all_int = true;
-                    let mut all_float = true;
-                    let mut all_string = true;
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::type_error(
+                        "sort() requires 1 or 2 arguments (arr, key_or_fn?)".to_string(),
+                    ));
+                }
 
-                    for item in &new_arr {
-                        match item {
-                            Value::Int(_) => {
-                                all_float = false;
-                                all_string = false;
-                            }
-                            Value::Float(_) => {
-                                all_int = false;
-                                all_string = false;
-                            }
-                            Value::String(_) => {
-                                all_int = false;
-                                all_float = false;
-                            }
-                            _ => {
-                                all_int = false;
-                                all_float = false;
-                                all_string = false;
-                                break;
+                match &args[0] {
+                    Value::Array(arr) => {
+                        let mut new_arr = arr.clone();
+                        if let Some(key_or_fn) = args.get(1) {
+                            match key_or_fn {
+                                Value::String(field) => {
+                                    let mut keyed: Vec<(Value, Value)> = Vec::new();
+                                    for item in &new_arr {
+                                        let key = if let Value::Map(m) = item {
+                                            m.get(field).cloned().unwrap_or(Value::Unit)
+                                        } else {
+                                            item.clone()
+                                        };
+                                        keyed.push((key, item.clone()));
+                                    }
+                                    keyed.sort_by(|(a, _), (b, _)| compare_values(a, b));
+                                    new_arr = keyed.into_iter().map(|(_, v)| v).collect();
+                                    return Ok(Value::Array(new_arr));
+                                }
+                                Value::Function { .. } | Value::NativeFunction { .. } => {
+                                    return Err(IntentError::type_error(
+                                        "sort() with a function key must be called directly — NativeFunction bodies cannot invoke user-defined functions.".to_string(),
+                                    ))
+                                }
+                                _ => {}
                             }
                         }
-                    }
 
-                    if all_int {
-                        new_arr.sort_by(|a, b| match (a, b) {
-                            (Value::Int(ai), Value::Int(bi)) => ai.cmp(bi),
-                            _ => std::cmp::Ordering::Equal,
-                        });
-                    } else if all_float {
-                        new_arr.sort_by(|a, b| match (a, b) {
-                            (Value::Float(af), Value::Float(bf)) => {
-                                af.partial_cmp(bf).unwrap_or(std::cmp::Ordering::Equal)
+                        let mut all_int = true;
+                        let mut all_float = true;
+                        let mut all_string = true;
+
+                        for item in &new_arr {
+                            match item {
+                                Value::Int(_) => {
+                                    all_float = false;
+                                    all_string = false;
+                                }
+                                Value::Float(_) => {
+                                    all_int = false;
+                                    all_string = false;
+                                }
+                                Value::String(_) => {
+                                    all_int = false;
+                                    all_float = false;
+                                }
+                                _ => {
+                                    all_int = false;
+                                    all_float = false;
+                                    all_string = false;
+                                    break;
+                                }
                             }
-                            _ => std::cmp::Ordering::Equal,
-                        });
-                    } else if all_string {
-                        new_arr.sort_by(|a, b| match (a, b) {
-                            (Value::String(sa), Value::String(sb)) => sa.cmp(sb),
-                            _ => std::cmp::Ordering::Equal,
-                        });
-                    } else {
-                        new_arr.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
-                    }
+                        }
 
-                    Ok(Value::Array(new_arr))
+                        if all_int {
+                            new_arr.sort_by(|a, b| match (a, b) {
+                                (Value::Int(ai), Value::Int(bi)) => ai.cmp(bi),
+                                _ => std::cmp::Ordering::Equal,
+                            });
+                        } else if all_float {
+                            new_arr.sort_by(|a, b| match (a, b) {
+                                (Value::Float(af), Value::Float(bf)) => {
+                                    af.partial_cmp(bf).unwrap_or(std::cmp::Ordering::Equal)
+                                }
+                                _ => std::cmp::Ordering::Equal,
+                            });
+                        } else if all_string {
+                            new_arr.sort_by(|a, b| match (a, b) {
+                                (Value::String(sa), Value::String(sb)) => sa.cmp(sb),
+                                _ => std::cmp::Ordering::Equal,
+                            });
+                        } else {
+                            new_arr.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                        }
+
+                        Ok(Value::Array(new_arr))
+                    }
+                    _ => Err(IntentError::type_error(
+                        "sort() requires an array".to_string(),
+                    )),
                 }
-                _ => Err(IntentError::type_error(
-                    "sort() requires an array".to_string(),
-                )),
             },
         },
     );

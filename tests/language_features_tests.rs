@@ -4268,20 +4268,19 @@ print(sorted[2])
 }
 
 #[test]
-fn test_sort_by_indirect_produces_clear_error() {
-    // Test that using sort_by as a first-class value produces a clear error message
+fn test_sort_by_indirect_works() {
     let code = r#"
 import { sort_by } from "std/collections"
 let sorter = sort_by
-sorter([3,1,2], fn(a, b) { a - b })
+let sorted = sorter([3,1,2], fn(a, b) { a - b })
+print(sorted[0])
+print(sorted[2])
 "#;
-    let (_, stderr, exit_code) = run_ntnt_code(code);
-    assert_ne!(exit_code, 0, "indirect sort_by should produce an error");
-    assert!(
-        stderr.contains("sort_by") || stderr.contains("comparator"),
-        "error should mention sort_by limitation, got: {}",
-        stderr
-    );
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "indirect sort_by should work");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "3");
 }
 
 #[test]
