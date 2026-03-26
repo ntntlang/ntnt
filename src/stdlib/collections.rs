@@ -400,7 +400,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::NativeFunction { func, .. } => *func,
                     _ => {
                         return Err(IntentError::type_error(
-                            "sort_by() with a closure comparator must be called directly — indirect calls (e.g. `let f = sort_by; f(arr, ...)`) are not supported for user-defined comparators.".to_string(),
+                            "sort_by() comparator must be a function — user-defined closures require interpreter context and are handled via the HOF dispatch path.".to_string(),
                         ))
                     }
                 };
