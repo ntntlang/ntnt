@@ -50,3 +50,4 @@ examples/snowgauge
 notes/
 .plans/
 examples/auth_demo/sessions.db
+jobs.db
