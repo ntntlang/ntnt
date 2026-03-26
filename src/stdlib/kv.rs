@@ -1069,8 +1069,8 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         "get_int".to_string(),
         Value::NativeFunction {
             name: "get_int".to_string(),
-            arity: 0, // Variable: 2 or 3 args
-            max_arity: 0,
+            arity: 2, // Variable: 2 or 3 args
+            max_arity: 3,
             requires: None,
             func: |args| {
                 if args.len() < 2 || args.len() > 3 {
@@ -1152,8 +1152,8 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         "get_float".to_string(),
         Value::NativeFunction {
             name: "get_float".to_string(),
-            arity: 0, // Variable: 2 or 3 args
-            max_arity: 0,
+            arity: 2, // Variable: 2 or 3 args
+            max_arity: 3,
             requires: None,
             func: |args| {
                 if args.len() < 2 || args.len() > 3 {
@@ -1236,8 +1236,8 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         "get_json".to_string(),
         Value::NativeFunction {
             name: "get_json".to_string(),
-            arity: 0, // Variable: 2 or 3 args
-            max_arity: 0,
+            arity: 2, // Variable: 2 or 3 args
+            max_arity: 3,
             requires: None,
             func: |args| {
                 if args.len() < 2 || args.len() > 3 {
@@ -1312,8 +1312,8 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         "get_str".to_string(),
         Value::NativeFunction {
             name: "get_str".to_string(),
-            arity: 0, // Variable: 2 or 3 args
-            max_arity: 0,
+            arity: 2, // Variable: 2 or 3 args
+            max_arity: 3,
             requires: None,
             func: |args| {
                 if args.len() < 2 || args.len() > 3 {
@@ -1371,7 +1371,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
                     return Ok(Value::String(default_value));
                 }
 
-                Ok(Value::String(raw))
+                Ok(Value::String(raw_trimmed.to_string()))
             },
         },
     );

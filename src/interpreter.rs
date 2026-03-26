@@ -5533,15 +5533,44 @@ impl Interpreter {
 
                     // Special handling for sort(arr) - higher-order function
                     if name == "sort" {
-                        if arguments.len() != 1 {
+                        if arguments.len() != 1 && arguments.len() != 2 {
                             return Err(IntentError::type_error(
-                                "sort() requires 1 argument (arr)".to_string(),
+                                "sort() requires 1 or 2 arguments (arr, key_or_fn?)".to_string(),
                             ));
                         }
 
                         let arr = self.eval_expression(&arguments[0])?;
+                        let key_or_fn = if arguments.len() == 2 {
+                            Some(self.eval_expression(&arguments[1])?)
+                        } else {
+                            None
+                        };
 
                         if let Value::Array(mut items) = arr {
+                            if let Some(key_or_fn) = key_or_fn {
+                                let mut keyed: Vec<(Value, Value)> = Vec::new();
+                                for item in &items {
+                                    let key = match &key_or_fn {
+                                        Value::String(field) => {
+                                            if let Value::Map(m) = item {
+                                                m.get(field).cloned().unwrap_or(Value::Unit)
+                                            } else {
+                                                item.clone()
+                                            }
+                                        }
+                                        func @ (Value::Function { .. }
+                                        | Value::NativeFunction { .. }) => {
+                                            self.call_function(func.clone(), vec![item.clone()])?
+                                        }
+                                        _ => item.clone(),
+                                    };
+                                    keyed.push((key, item.clone()));
+                                }
+                                keyed.sort_by(|(a, _), (b, _)| Self::compare_values(a, b));
+                                items = keyed.into_iter().map(|(_, v)| v).collect();
+                                return Ok(Value::Array(items));
+                            }
+
                             let mut all_int = true;
                             let mut all_float = true;
                             let mut all_string = true;
@@ -5830,11 +5859,59 @@ impl Interpreter {
                 }
 
                 let callee = self.eval_expression(function)?;
+                let callee_is_identifier = matches!(function.as_ref(), Expression::Identifier(_));
                 let args: Result<Vec<Value>> = arguments
                     .iter()
                     .map(|arg| self.eval_expression(arg))
                     .collect();
                 let args = args?;
+
+                if let Value::NativeFunction { name, .. } = &callee {
+                    if name == "sort_by" && !callee_is_identifier {
+                        if args.len() != 2 {
+                            return Err(IntentError::type_error(
+                                "sort_by() requires 2 arguments (arr, comparator)".to_string(),
+                            ));
+                        }
+
+                        let arr = args[0].clone();
+                        let comparator = args[1].clone();
+
+                        if let Value::Array(mut items) = arr {
+                            let mut compare_error: Option<IntentError> = None;
+                            items.sort_by(|a, b| {
+                                if compare_error.is_some() {
+                                    return std::cmp::Ordering::Equal;
+                                }
+                                match self
+                                    .call_function(comparator.clone(), vec![a.clone(), b.clone()])
+                                {
+                                    Ok(Value::Int(n)) => n.cmp(&0),
+                                    Ok(_) => {
+                                        compare_error = Some(IntentError::type_error(
+                                            "sort_by() comparator must return an int".to_string(),
+                                        ));
+                                        std::cmp::Ordering::Equal
+                                    }
+                                    Err(err) => {
+                                        compare_error = Some(err);
+                                        std::cmp::Ordering::Equal
+                                    }
+                                }
+                            });
+
+                            if let Some(err) = compare_error {
+                                return Err(err);
+                            }
+
+                            return Ok(Value::Array(items));
+                        } else {
+                            return Err(IntentError::type_error(
+                                "sort_by() requires an array as first argument".to_string(),
+                            ));
+                        }
+                    }
+                }
 
                 self.call_function(callee, args)
             }
@@ -11027,6 +11104,32 @@ c")
         } else {
             panic!("Expected array");
         }
+    }
+
+    #[test]
+    fn test_sort_by_key() {
+        let result = eval(
+            r#"
+            let items = [map{"t":3}, map{"t":1}, map{"t":2}]
+            let sorted = sort(items, "t")
+            sorted[0]["t"]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(1)));
+    }
+
+    #[test]
+    fn test_sort_by_fn() {
+        let result = eval(
+            r#"
+            let items = [map{"v":3}, map{"v":1}, map{"v":2}]
+            let sorted = sort(items, fn(x) { x["v"] })
+            sorted[0]["v"]
+        "#,
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(1)));
     }
 
     #[test]

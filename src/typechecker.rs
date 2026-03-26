@@ -3450,6 +3450,17 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("concat", ["a" => Type::Any, "b" => Type::Any], Type::Any);
             sig!("slice", ["array" => Type::Array(Box::new(Type::Any)), "start" => Type::Int], Type::Array(Box::new(Type::Any)), variadic);
             sig!("sort", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
+            sig!(
+                "sort_by",
+                [
+                    "array" => Type::Array(Box::new(Type::Any)),
+                    "comparator" => Type::Function {
+                        params: vec![Type::Any, Type::Any],
+                        return_type: Box::new(Type::Any),
+                    }
+                ],
+                Type::Array(Box::new(Type::Any))
+            );
             sig!("sort_desc", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
             sig!("merge", ["map1" => Type::Any, "map2" => Type::Any], Type::Any);
             sig!("get_or", ["map" => Type::Any, "key" => Type::String, "default" => Type::Any], Type::Any);
