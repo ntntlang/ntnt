@@ -3150,7 +3150,6 @@ Supports arrays of Int, Float, or String. Mixed-type arrays are sorted lexicogra
 ```ntnt
 sort([3, 1, 2])  // => [1, 2, 3]  // Sort integers
 sort(["b", "a"])  // => ["a", "b"]  // Sort strings
-sort([map { "t": 3 }, map { "t": 1 }], "t")  // => [map { "t": 1 }, map { "t": 3 }]  // Sort by map field
 ```
 
 **See also:** `reverse`, `sort_by`, `slice`
@@ -12335,3 +12334,4 @@ parse_url("https://example.com/path?q=1")  // Parse URL into components map
 *Since v0.2.0*
 
 ---
+
