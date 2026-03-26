@@ -4388,6 +4388,26 @@ print(sorted[0])
     assert_eq!(lines[3], "1");
 }
 
+#[test]
+fn test_sort_by_works_via_hof_interception() {
+    // sort_by is NOT in the prelude, but the interpreter's HOF special-case
+    // intercepts direct calls by name. This test verifies that works.
+    let code = r#"
+let nums = [3, 1, 2]
+let sorted = sort_by(nums, fn(a, b) { a - b })
+print(sorted[0])
+print(sorted[2])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "sort_by should work via HOF interception even without import"
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "3");
+}
+
 // =============================================================================
 // Raw string smart delimiter tests (fixes #1.3, #1.4)
 // =============================================================================

@@ -1065,6 +1065,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
     // @returns The parsed integer or default
     // @example get_int(cache, "stats:success") => 0 ~ "Missing key returns 0"
     // @example get_int(cache, "stats:success", 42) => 42 ~ "Default on miss"
+    // @example get_int(cache, "stats:success", 7) => 7 ~ "\"none\" returns default"
     module.insert(
         "get_int".to_string(),
         Value::NativeFunction {
@@ -1148,6 +1149,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
     // @returns The parsed float or default
     // @example get_float(cache, "stats:rate") => 0.0 ~ "Missing key returns 0.0"
     // @example get_float(cache, "stats:rate", 1.5) => 1.5 ~ "Default on miss"
+    // @example get_float(cache, "stats:rate", 2.5) => 2.5 ~ "\"none\" returns default"
     module.insert(
         "get_float".to_string(),
         Value::NativeFunction {
@@ -1232,6 +1234,7 @@ pub fn create_kv_module() -> HashMap<String, Value> {
     // @returns The parsed JSON value or default
     // @example get_json(cache, "cache:site", None) => None ~ "Missing key returns None"
     // @example get_json(cache, "cache:site", map {}) => map {} ~ "Default on parse failure"
+    // @example get_json(cache, "cache:site", map {}) => map {} ~ "\"none\" returns default"
     module.insert(
         "get_json".to_string(),
         Value::NativeFunction {
@@ -1301,13 +1304,15 @@ pub fn create_kv_module() -> HashMap<String, Value> {
     // @signature get_str(kv: KVStore, key: String, default?: String) -> String
     // Get a value by key and convert it to a string.
     //
-    // Returns the default (or empty string) if the key is missing or the value is empty/"none".
+    // Returns the default (or empty string) if the key is missing or the value is empty/"none" after trimming.
     // @param kv The KV store handle from open()
     // @param key The key to retrieve
     // @param default (optional) String to return on miss or empty value
     // @returns The string value or default
     // @example get_str(cache, "user:name") => "" ~ "Missing key returns empty string"
     // @example get_str(cache, "user:name", "guest") => "guest" ~ "Default on miss"
+    // @example get_str(cache, "user:name", "guest") => "guest" ~ "\"none\" returns default"
+    // @example get_str(cache, "user:name") => "alice" ~ "Whitespace is trimmed"
     module.insert(
         "get_str".to_string(),
         Value::NativeFunction {
@@ -2249,6 +2254,12 @@ mod tests {
             Value::String("".to_string()),
         ])
         .unwrap();
+        set(&[
+            kv.clone(),
+            Value::String("none_str".to_string()),
+            Value::String("none".to_string()),
+        ])
+        .unwrap();
 
         let result = get_int(&[kv.clone(), Value::String("int_key".to_string())]).unwrap();
         assert!(matches!(result, Value::Int(42)));
@@ -2293,6 +2304,14 @@ mod tests {
         let result = get_str(&[
             kv.clone(),
             Value::String("empty_str".to_string()),
+            Value::String("fallback".to_string()),
+        ])
+        .unwrap();
+        assert!(matches!(result, Value::String(s) if s == "fallback"));
+
+        let result = get_str(&[
+            kv.clone(),
+            Value::String("none_str".to_string()),
             Value::String("fallback".to_string()),
         ])
         .unwrap();

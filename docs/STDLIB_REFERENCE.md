@@ -6856,6 +6856,7 @@ Returns the default (or 0.0) if the key is missing or the value cannot be parsed
 ```ntnt
 get_float(cache, "stats:rate")  // => 0.0  // Missing key returns 0.0
 get_float(cache, "stats:rate", 1.5)  // => 1.5  // Default on miss
+get_float(cache, "stats:rate", 2.5)  // => 2.5  // \"none\" returns default
 ```
 
 ---
@@ -6883,6 +6884,7 @@ Returns the default (or 0) if the key is missing or the value cannot be parsed.
 ```ntnt
 get_int(cache, "stats:success")  // => 0  // Missing key returns 0
 get_int(cache, "stats:success", 42)  // => 42  // Default on miss
+get_int(cache, "stats:success", 7)  // => 7  // \"none\" returns default
 ```
 
 ---
@@ -6910,6 +6912,7 @@ Returns the default (or None) if the key is missing or JSON parsing fails.
 ```ntnt
 get_json(cache, "cache:site", None)  // => None  // Missing key returns None
 get_json(cache, "cache:site", map {})  // => map {}  // Default on parse failure
+get_json(cache, "cache:site", map {})  // => map {}  // \"none\" returns default
 ```
 
 ---
@@ -6922,7 +6925,7 @@ get_str(kv: KVStore, key: String, default?: String) -> String
 
 Get a value by key and convert it to a string.
 
-Returns the default (or empty string) if the key is missing or the value is empty/"none".
+Returns the default (or empty string) if the key is missing or the value is empty/"none" after trimming.
 
 **Parameters:**
 
@@ -6937,6 +6940,8 @@ Returns the default (or empty string) if the key is missing or the value is empt
 ```ntnt
 get_str(cache, "user:name")  // => ""  // Missing key returns empty string
 get_str(cache, "user:name", "guest")  // => "guest"  // Default on miss
+get_str(cache, "user:name", "guest")  // => "guest"  // \"none\" returns default
+get_str(cache, "user:name")  // => "alice"  // Whitespace is trimmed
 ```
 
 ---
