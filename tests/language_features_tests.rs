@@ -4209,6 +4209,204 @@ print(includes(flags, false))
     assert_eq!(lines[1], "true", "false is in [true, false]");
 }
 
+#[test]
+fn test_collections_sort_ints_and_immutability() {
+    let code = r#"
+import { sort } from "std/collections"
+let nums = [3, 1, 2]
+let sorted = sort(nums)
+print(sorted[0])
+print(sorted[2])
+print(nums[0])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "sort() should sort ints without mutating input"
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "3");
+    assert_eq!(lines[2], "3");
+}
+
+#[test]
+fn test_collections_sort_mixed_types() {
+    let code = r#"
+import { sort } from "std/collections"
+let mixed = [2, "10", 1]
+let sorted = sort(mixed)
+print(sorted[0])
+print(sorted[1])
+print(sorted[2])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "sort() should sort mixed types lexicographically"
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "10");
+    assert_eq!(lines[2], "2");
+}
+
+#[test]
+fn test_collections_sort_by_comparator() {
+    let code = r#"
+import { sort_by } from "std/collections"
+let nums = [3, 1, 2]
+let sorted = sort_by(nums, fn(a, b) { a - b })
+print(sorted[0])
+print(sorted[2])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "sort_by() should use comparator");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "3");
+}
+
+#[test]
+fn test_sort_by_indirect_works() {
+    let code = r#"
+import { sort_by } from "std/collections"
+let sorter = sort_by
+let sorted = sorter([3,1,2], fn(a, b) { a - b })
+print(sorted[0])
+print(sorted[2])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "indirect sort_by should work");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "3");
+}
+
+#[test]
+fn test_collections_sort_floats() {
+    let code = r#"
+import { sort } from "std/collections"
+let nums = [3.2, 1.5, 2.1]
+let sorted = sort(nums)
+print(sorted[0])
+print(sorted[2])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "sort() should sort floats");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1.5");
+    assert_eq!(lines[1], "3.2");
+}
+
+#[test]
+fn test_collections_sort_empty() {
+    let code = r#"
+import { sort } from "std/collections"
+let sorted = sort([])
+print(len(sorted))
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "sort() should handle empty arrays");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "0");
+}
+
+#[test]
+fn test_collections_sort_by_comparator_error() {
+    let code = r#"
+import { sort_by } from "std/collections"
+let nums = [3, 1, 2]
+sort_by(nums, fn(a, b) { "nope" })
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "sort_by() should fail on non-int comparator");
+    assert!(
+        stderr.contains("sort_by") || stderr.contains("comparator"),
+        "error should mention sort_by comparator, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_kv_get_int_invalid_handle() {
+    let code = r#"
+import { get_int } from "std/kv"
+get_int(123, "k")
+"#;
+    let (_, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "get_int() should fail on non-handle");
+    assert!(
+        stderr.contains("KV store handle") || stderr.contains("Expected a KV store handle"),
+        "error should mention KV handle, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_prelude_import_shadowing() {
+    let code = r#"
+import { split } from "std/string"
+let parts = split("a,b", ",")
+print(parts[0])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "explicit import should work even with prelude bindings"
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "a");
+}
+
+#[test]
+fn test_prelude_functions_available_without_imports() {
+    let code = r#"
+let parts = split(" a,b ", ",")
+print(trim(parts[0]))
+
+let parsed = parse_json("{\"a\": 1}")
+match parsed {
+    Ok(v) => print(v["a"])
+    Err(_) => print("parse_error")
+}
+
+let m = map { "x": 1, "y": 2 }
+let ks = keys(m)
+print(len(ks))
+
+let sorted = sort([3, 1, 2])
+print(sorted[0])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "prelude functions should be available");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "a");
+    assert_eq!(lines[1], "1");
+    assert_eq!(lines[2], "2");
+    assert_eq!(lines[3], "1");
+}
+
+#[test]
+fn test_sort_by_works_via_hof_interception() {
+    // sort_by is NOT in the prelude, but the interpreter's HOF special-case
+    // intercepts direct calls by name. This test verifies that works.
+    let code = r#"
+let nums = [3, 1, 2]
+let sorted = sort_by(nums, fn(a, b) { a - b })
+print(sorted[0])
+print(sorted[2])
+"#;
+    let (stdout, _, exit_code) = run_ntnt_code(code);
+    assert_eq!(
+        exit_code, 0,
+        "sort_by should work via HOF interception even without import"
+    );
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "3");
+}
+
 // =============================================================================
 // Raw string smart delimiter tests (fixes #1.3, #1.4)
 // =============================================================================

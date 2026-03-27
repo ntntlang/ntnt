@@ -3239,7 +3239,15 @@ impl TypeContext {
         sig!("has_key", ["map" => Type::Any, "key" => Type::String], Type::Bool);
         sig!("get_key", ["map" => Type::Any, "key" => Type::String], Type::Any);
         sig!("get_index", ["array" => Type::Array(Box::new(Type::Any)), "index" => Type::Int], Type::Any);
-        sig!("sort", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
+        sig!(
+            "sort",
+            [
+                "array" => Type::Array(Box::new(Type::Any)),
+                "key_or_fn" => Type::Any
+            ],
+            Type::Array(Box::new(Type::Any)),
+            required(1)
+        );
         sig!("sort_desc", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
         sig!("reverse", ["value" => Type::Any], Type::Any);
         sig!("includes", ["haystack" => Type::Any, "needle" => Type::Any], Type::Bool);
@@ -3449,7 +3457,26 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("last", ["array" => Type::Array(Box::new(Type::Any))], Type::Any, variadic);
             sig!("concat", ["a" => Type::Any, "b" => Type::Any], Type::Any);
             sig!("slice", ["array" => Type::Array(Box::new(Type::Any)), "start" => Type::Int], Type::Array(Box::new(Type::Any)), variadic);
-            sig!("sort", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
+            sig!(
+                "sort",
+                [
+                    "array" => Type::Array(Box::new(Type::Any)),
+                    "key_or_fn" => Type::Any
+                ],
+                Type::Array(Box::new(Type::Any)),
+                required(1)
+            );
+            sig!(
+                "sort_by",
+                [
+                    "array" => Type::Array(Box::new(Type::Any)),
+                    "comparator" => Type::Function {
+                        params: vec![Type::Any, Type::Any],
+                        return_type: Box::new(Type::Int),
+                    }
+                ],
+                Type::Array(Box::new(Type::Any))
+            );
             sig!("sort_desc", ["array" => Type::Array(Box::new(Type::Any))], Type::Array(Box::new(Type::Any)), variadic);
             sig!("merge", ["map1" => Type::Any, "map2" => Type::Any], Type::Any);
             sig!("get_or", ["map" => Type::Any, "key" => Type::String, "default" => Type::Any], Type::Any);
@@ -3464,6 +3491,12 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("parse", ["s" => Type::String], Type::Any);
             sig!("stringify", ["value" => Type::Any], Type::String);
             sig!("stringify_pretty", ["value" => Type::Any], Type::String);
+        }
+        "std/kv" => {
+            sig!("get_int", ["kv" => Type::Any, "key" => Type::String, "default" => Type::Int], Type::Int, required(2));
+            sig!("get_float", ["kv" => Type::Any, "key" => Type::String, "default" => Type::Float], Type::Float, required(2));
+            sig!("get_json", ["kv" => Type::Any, "key" => Type::String, "default" => Type::Any], Type::Any, required(2));
+            sig!("get_str", ["kv" => Type::Any, "key" => Type::String, "default" => Type::String], Type::String, required(2));
         }
         "std/fs" => {
             sig!("read_file", ["path" => Type::String], Type::String);
