@@ -1,9 +1,9 @@
 # DD-037 Phase 3: Implementation Plan
 
-**Status:** ✅ Complete — All 3 PRs merged
+**Status:** ✅ Complete — All 3 core PRs merged. Priority/dedup shipped in PR #41. Atomic dedup shipped in PR #41. 3 Tier 3 items remain open.
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md) · [Phase 3 Design](dd-037-phase-3-implementation.md)
 **Created:** 2026-03-18
-**Last Updated:** 2026-03-20
+**Last Updated:** 2026-03-27
 **Depends on:** Phase 2 ✅, Phase 6 ✅
 
 ---
@@ -68,20 +68,13 @@
 
 ## Remaining Tier 3 (on demand, not planned)
 
-Each item is independently shippable. Can wait for real usage patterns.
+Items shipped in later PRs are marked. Remaining items are independently shippable and can wait for real usage patterns.
 
-### Priority Queues (`priority: N`)
-**Why:** Some jobs are more important than others. But most systems don't need this until scale.
+### ~~Priority Queues (`priority: N`)~~ — ✅ Shipped in Phase 3b (PR #41)
 
-- [ ] Change pending key format from `jobs:pending:<timestamp>:<id>` to `jobs:pending:<priority>:<timestamp>:<id>`
-- [ ] Default priority: 5 (middle of 0-9 range, lower = higher priority)
-- [ ] `enqueue_internal()`: include priority in pending key
-- [ ] Backward compat: detect old-format keys (2 segments after `jobs:pending:`) and treat as priority 5
-- [ ] Handle both key formats during transition period
+Named priorities (critical/high/normal/low), 0-99 numeric range, worker bands with independent thread pools, band validation. See [dd-037-priority-and-atomic-dedup-plan.md](dd-037-priority-and-atomic-dedup-plan.md).
 
-**Effort:** ~1 day (mostly migration handling)
-
-### Worker Heartbeat Refresh
+### Worker Heartbeat Refresh — 📋 Open
 **Why:** Jobs running >5 minutes lose visibility timeout protection. Only matters for long-running jobs.
 
 - [ ] `worker_loop()`: spawn a timer thread per job execution that refreshes `jobs:active:<id>` TTL every 30s
@@ -90,7 +83,7 @@ Each item is independently shippable. Can wait for real usage patterns.
 
 **Effort:** ~0.5 day
 
-### Graceful Shutdown Drain Timeout
+### Graceful Shutdown Drain Timeout — 📋 Open
 **Why:** Currently Ctrl-C immediately stops workers. With drain timeout, in-flight jobs finish before shutdown.
 
 - [ ] `work_jobs(map { "drain_timeout": 30 })` option
@@ -99,7 +92,7 @@ Each item is independently shippable. Can wait for real usage patterns.
 
 **Effort:** ~0.5 day
 
-### `on_job_event` User Hook
+### `on_job_event` User Hook — 📋 Open
 **Why:** Programmatic integration — trigger custom logic on job lifecycle events. Currently only stderr JSON.
 
 **Recommended approach:** Channel-based (cleanest separation of concerns)
@@ -111,16 +104,11 @@ See [dd-037-phase-3-implementation.md](dd-037-phase-3-implementation.md) for 3 d
 
 **Effort:** ~1 day
 
-### Atomic Dedup (SET NX)
-**Why:** Current dedup is best-effort (kv_get then kv_set). Under high-concurrency identical enqueues, two callers can both miss and create separate jobs.
+### ~~Atomic Dedup (SET NX)~~ — ✅ Shipped in Phase 3b (PR #41)
 
-- [ ] Add `kv_set_nx` (set-if-not-exists) to `std/kv` — `SET NX EX` for Redis, `INSERT OR IGNORE` for SQLite
-- [ ] Use in dedup check instead of separate get+set
-- [ ] Returns whether the key was actually set (true = we won the race)
+`kv_set_nx` added to both backends. Used in dedup path to close the race window. See [dd-037-priority-and-atomic-dedup-plan.md](dd-037-priority-and-atomic-dedup-plan.md).
 
-**Effort:** ~0.5 day
-
-### Redis SCAN in Lua
+### Redis SCAN in Lua — 📋 Open
 **Why:** `KEYS` scans the entire Redis keyspace (O(total keys)). For Redis instances with millions of non-job keys, this blocks the event loop.
 
 - [ ] Replace `KEYS` with cursor-based `SCAN` inside the Lua script

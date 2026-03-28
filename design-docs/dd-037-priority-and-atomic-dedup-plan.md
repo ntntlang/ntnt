@@ -1,9 +1,9 @@
 # DD-037: Priority Queues + Atomic Dedup — Implementation Plan
 
-**Status:** Design approved  
+**Status:** ✅ Complete — shipped in PR #41 (merged 2026-03-20)  
 **Parent:** [DD-037 Phase 3](dd-037-phase-3-plan.md)  
 **Created:** 2026-03-20  
-**Last Updated:** 2026-03-20  
+**Last Updated:** 2026-03-27  
 **Branch:** `feat/priority-and-atomic-dedup`
 
 ---
@@ -408,43 +408,43 @@ kv_claim(&kv_handle, "jobs:pending:", Some(&floor), Some(&ceiling))
 
 ## Priority & Bands
 
-- [ ] Priority ordering within a band: enqueue at priorities 40, 50, 60 → claimed in order 40, 50, 60
-- [ ] Band isolation: enqueue critical (5) and low (85) → critical worker claims 5, low worker claims 85, neither crosses
-- [ ] Default priority: enqueue without priority → pending key contains `:50:`
-- [ ] Named priority: `priority: "high"` → pending key contains `:25:`
-- [ ] Unknown named priority: `priority: "urgent"` → runtime error listing valid names
-- [ ] Invalid numeric priority: `priority: -1` and `priority: 100` → runtime error
-- [ ] Default bands: `work_jobs()` with no config → 4 bands, 10 total workers
-- [ ] Custom bands: custom band config → overrides defaults entirely
-- [ ] Floor+ceiling in kv_claim: claim with floor/ceiling → only returns keys in range
-- [ ] Priority in job_data: enqueued job's data map contains `priority` and `band` fields
-- [ ] Batch with priority: `enqueue_batch` for a job with `priority: "high"` → all keys contain `:25:`
-- [ ] Scale up: `scale_workers("low", 4)` → band has 4 workers
-- [ ] Scale down: `scale_workers("low", 1)` → excess workers exit after current job
-- [ ] Overlapping band ranges → rejected at work_jobs() startup
-- [ ] Gap in band ranges → rejected at work_jobs() startup
-- [ ] Incomplete coverage (doesn't span 0-99) → rejected
-- [ ] Concurrency 0 → rejected
-- [ ] Poll interval below 100ms → rejected
-- [ ] Range outside 0-99 → rejected
-- [ ] Range min > max → rejected
+- [x] Priority ordering within a band: enqueue at priorities 40, 50, 60 → claimed in order 40, 50, 60
+- [x] Band isolation: enqueue critical (5) and low (85) → critical worker claims 5, low worker claims 85, neither crosses
+- [x] Default priority: enqueue without priority → pending key contains `:50:`
+- [x] Named priority: `priority: "high"` → pending key contains `:25:`
+- [x] Unknown named priority: `priority: "urgent"` → runtime error listing valid names
+- [x] Invalid numeric priority: `priority: -1` and `priority: 100` → runtime error
+- [x] Default bands: `work_jobs()` with no config → 4 bands, 10 total workers
+- [x] Custom bands: custom band config → overrides defaults entirely
+- [x] Floor+ceiling in kv_claim: claim with floor/ceiling → only returns keys in range
+- [x] Priority in job_data: enqueued job's data map contains `priority` and `band` fields
+- [x] Batch with priority: `enqueue_batch` for a job with `priority: "high"` → all keys contain `:25:`
+- [x] Scale up: `scale_workers("low", 4)` → band has 4 workers
+- [x] Scale down: `scale_workers("low", 1)` → excess workers exit after current job
+- [x] Overlapping band ranges → rejected at work_jobs() startup
+- [x] Gap in band ranges → rejected at work_jobs() startup
+- [x] Incomplete coverage (doesn't span 0-99) → rejected
+- [x] Concurrency 0 → rejected
+- [x] Poll interval below 100ms → rejected
+- [x] Range outside 0-99 → rejected
+- [x] Range min > max → rejected
 
 ## Parser
 
-- [ ] Optional queue: `job Foo { ... }` → queue is "default"
-- [ ] Explicit queue: `job Foo on emails { ... }` → queue is "emails"
-- [ ] Queue + priority: `job Foo (priority: "high") { ... }` → queue "default", priority "high"
-- [ ] Queue + priority + options: `job Foo on emails (priority: "high", retry: 3) { ... }` → all correct
+- [x] Optional queue: `job Foo { ... }` → queue is "default"
+- [x] Explicit queue: `job Foo on emails { ... }` → queue is "emails"
+- [x] Queue + priority: `job Foo (priority: "high") { ... }` → queue "default", priority "high"
+- [x] Queue + priority + options: `job Foo on emails (priority: "high", retry: 3) { ... }` → all correct
 
 ## Atomic Dedup
 
-- [ ] `set_nx` on empty key → returns true, value stored
-- [ ] `set_nx` on existing key → returns false, original value preserved
-- [ ] `set_nx` with TTL → key expires, subsequent `set_nx` succeeds
-- [ ] `set_nx` with expired key (SQLite) → treats as not existing
-- [ ] Dedup atomic: enqueue same job twice → second returns existing ID
-- [ ] Dedup terminal replacement: enqueue, cancel job, enqueue again → new job created
-- [ ] Dedup key written before job data: if enqueue fails after dedup write, next attempt cleans up
+- [x] `set_nx` on empty key → returns true, value stored
+- [x] `set_nx` on existing key → returns false, original value preserved
+- [x] `set_nx` with TTL → key expires, subsequent `set_nx` succeeds
+- [x] `set_nx` with expired key (SQLite) → treats as not existing
+- [x] Dedup atomic: enqueue same job twice → second returns existing ID
+- [x] Dedup terminal replacement: enqueue, cancel job, enqueue again → new job created
+- [x] Dedup key written before job data: if enqueue fails after dedup write, next attempt cleans up
 
 ---
 

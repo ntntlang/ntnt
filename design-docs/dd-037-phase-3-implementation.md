@@ -1,8 +1,9 @@
 # DD-037 Phase 3: Job System — Advanced Features
 
-**Status:** ✅ Complete (core items shipped in PRs #36, #38, #39)
+**Status:** ✅ Complete (core: PRs #36, #38, #39. Priority/dedup: PR #41. Observability CLI: PR #35. 3 items remain open.)
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md)
 **Created:** 2026-03-17
+**Last Updated:** 2026-03-27
 **Depends on:** Phase 2 ✅ (all 3 PRs merged)
 
 ---
@@ -17,71 +18,35 @@ These items were identified during PR 2b/2c review as "not blocking shippable" a
 
 ## Items Deferred from Phase 2
 
-### Atomic Claim Audit — All Backends
+### ~~Atomic Claim Audit — All Backends~~ — ✅ Shipped (PR #36)
 
-Job claiming must be atomic across all KV backends. Two concurrent workers must never claim the same job.
+Redis atomic claim via Lua `EVAL` script. SQLite already atomic. See [dd-037-phase-3-plan.md](dd-037-phase-3-plan.md).
 
-**SQLite:** Already atomic — `BEGIN IMMEDIATE` acquires exclusive write lock. No changes needed.
+### ~~Scheduled Job Claim Optimization~~ — ✅ Shipped (PR #36)
 
-**Redis / Valkey / Dragonfly:** Current `claim()` uses SCAN+GET+DEL (3 separate commands) which is not atomic. Two workers can double-claim. Replace with a single `EVAL` Lua script that atomically finds and deletes the first matching key.
+`ceiling` parameter on both backends. Workers skip future-scheduled jobs at KV layer. No more re-enqueue churn.
 
-**File:** `src/stdlib/kv.rs` — `RedisKV::claim()`
-**Priority:** High — needed before anyone runs multi-worker Redis in production
-**See:** [dd-037-phase-3-plan.md](dd-037-phase-3-plan.md) for full Lua script and implementation details
+### ~~Deduplication~~ — ✅ Shipped (PR #38)
 
-### Scheduled Job Claim Optimization
+`unique: N` with SHA-256 hash dedup, TTL, live-job validation, cleanup on terminal states. Atomic dedup via `kv_set_nx` shipped in PR #41.
 
-Worker currently claims all pending keys including future-scheduled ones, then re-enqueues if not ready (KV churn on every poll). Use timestamp-prefix-aware claiming:
+### ~~Job Expiration~~ — ✅ Shipped (PR #38)
 
-- **SQLite:** Add `WHERE key < ?` bound to the claim query using current timestamp prefix
-- **Redis:** Filter keys client-side before claiming based on timestamp portion
+`expires: N` — worker skips stale jobs, marks "expired".
 
-**File:** `src/stdlib/kv.rs` + `src/stdlib/jobs.rs` worker_loop
-**Priority:** Medium — only impacts queues with many scheduled-future jobs
+### ~~Batch Enqueue~~ — ✅ Shipped (PR #39)
 
-### Deduplication
+`enqueue_batch()` with upfront validation, FIFO ordering, 10K limit, item-indexed errors.
 
-`unique: 3600` job option — skip enqueue if identical job (same type + SHA256 of payload args) was enqueued within N seconds.
+### ~~Priority Queues~~ — ✅ Shipped (PR #41, Phase 3b)
 
-- Dedup key in KV: `jobs:unique:<type>:<sha256>` with TTL = unique duration
-- Check on enqueue: if dedup key exists, skip enqueue, return existing job ID
-- Set dedup key on successful enqueue
+Named priorities (critical/high/normal/low), 0-99 numeric range, worker bands with independent thread pools, `kv_set_nx`. See [dd-037-priority-and-atomic-dedup-plan.md](dd-037-priority-and-atomic-dedup-plan.md).
 
-**File:** `src/stdlib/jobs.rs` — `enqueue_internal()`
-**Priority:** Medium — prevents duplicate work from retry storms or double-clicks
+### ~~`ntnt jobs list` CLI~~ — ✅ Shipped (PR #35, Phase 6)
 
-### Job Expiration
+`ntnt jobs list` with --status, --queue, --limit, --format filters. Plus inspect, retry, cancel, clear.
 
-`expires: 300` job option — discard jobs that have been pending for longer than N seconds.
-
-- Worker checks `created_at + expires < now` before execution
-- Expired jobs: status → "expired", no execution, no retry
-
-**File:** `src/stdlib/jobs.rs` — `worker_loop()`
-**Priority:** Low — most jobs should be processed quickly
-
-### Batch Enqueue
-
-`enqueue_batch(job_name, array_of_args)` — enqueue N jobs in one call.
-
-- Single KV round-trip where possible (SQLite: single transaction wrapping N inserts)
-- Returns array of job IDs
-
-**File:** `src/stdlib/jobs.rs` — new function
-**Priority:** Low — convenience, not blocking
-
-### Priority Queues
-
-Job-level priority: `job X on q (priority: 1) { ... }` (lower = higher priority).
-
-- Priority encoded in pending key: `jobs:pending:<priority>:<timestamp>:<id>`
-- Lexicographic ordering gives priority-first, then FIFO within priority
-- Requires key layout migration from current `jobs:pending:<timestamp>:<id>`
-
-**File:** `src/stdlib/jobs.rs` — `enqueue_internal()` + `worker_loop()`
-**Priority:** Low — most job systems don't need priority until scale
-
-### Worker Heartbeat Refresh
+### Worker Heartbeat Refresh — 📋 Open
 
 Periodically refresh `jobs:active:<id>` TTL during long-running jobs (e.g., every 30s). Currently TTL is set once on claim (300s), meaning jobs running longer than 5 minutes lose their visibility timeout protection.
 
@@ -92,7 +57,7 @@ Periodically refresh `jobs:active:<id>` TTL during long-running jobs (e.g., ever
 **File:** `src/stdlib/jobs.rs` — `worker_loop()` execution section
 **Priority:** Low — only matters for jobs running > 5 minutes
 
-### Graceful Shutdown Drain Timeout
+### Graceful Shutdown Drain Timeout — 📋 Open
 
 Configurable drain timeout (default 30s) for `work_jobs()`. After timeout, in-flight jobs are abandoned and become re-claimable via visibility timeout expiry.
 
@@ -102,18 +67,7 @@ Configurable drain timeout (default 30s) for `work_jobs()`. After timeout, in-fl
 **File:** `src/stdlib/jobs.rs` — `work_jobs()` + `worker_loop()`
 **Priority:** Low — Ctrl-C immediate stop is acceptable for most use cases
 
-### `ntnt jobs list` CLI
-
-`ntnt jobs list server.tnt --queue=emails --status=failed` — list jobs with filters.
-
-- Load .tnt file to get KV config
-- Query KV for jobs matching filters
-- Display as table or JSON
-
-**File:** `src/main.rs`
-**Priority:** Low — `ntnt jobs status` (Phase 2c) covers the basic observability need
-
-### `on_job_event(handler)` — User Event Hook
+### `on_job_event(handler)` — User Event Hook — 📋 Open
 
 `on_job_event(fn(e) { ... })` for custom job event handling. Deferred from Phase 2c because `Value::Function` (user closures) contains `Rc<RefCell<Environment>>` which is not `Send` — cannot be stored in the global `JOB_RUNTIME` for worker threads to call.
 
@@ -129,7 +83,8 @@ Configurable drain timeout (default 30s) for `work_jobs()`. After timeout, in-fl
 
 ## Implementation Notes
 
-- Each item is independently implementable as a single PR
-- Priority ordering: Redis Lua claim > Scheduled claim optimization > Dedup > everything else
-- No items here block Phase 2 from being shippable
+- All core Phase 3 items are shipped (PRs #36, #38, #39)
+- Priority queues and atomic dedup shipped in Phase 3b (PR #41)
+- `ntnt jobs list` shipped in Phase 6 (PR #35)
+- Remaining open items (heartbeat refresh, drain timeout, on_job_event) are on-demand — not blocking any phase
 - These can be addressed based on user demand / production usage patterns

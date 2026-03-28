@@ -3,7 +3,7 @@
 **Status:** Phases 0-3, 6 Complete. Priority Queues, Control Socket, Worker Environment, DX Fixes all shipped. Phases 4-5, 7-8 Planned.
 **Author:** Larri
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-23
+**Last Updated:** 2026-03-27
 **Supersedes:** `background_jobs.md`, `dd-037-structured-tasks.md`
 
 ---
