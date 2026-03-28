@@ -3609,6 +3609,9 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("await_task", ["task" => Type::Named("Task".to_string())], Type::Generic { name: "Result".to_string(), args: vec![Type::Any, Type::String] });
             sig!("try_await", ["task" => Type::Named("Task".to_string())], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) });
             sig!("cancel_task", ["task" => Type::Named("Task".to_string())], Type::Bool);
+            // parallel/race accept Array<Function> but typed as Array<Any> — runtime validates via spawn()
+            sig!("parallel", ["fns" => Type::Array(Box::new(Type::Any))], Type::Any);
+            sig!("race", ["fns" => Type::Array(Box::new(Type::Any))], Type::Any);
             sig!("after", ["delay" => Type::Union(vec![Type::Int, Type::String]), "handler" => Type::Any], Type::Named("Task".to_string()));
             // Schedule operations
             sig!("schedule", ["interval" => Type::Union(vec![Type::String, Type::Int]), "handler" => Type::Any], Type::Named("Schedule".to_string()));

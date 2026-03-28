@@ -1930,6 +1930,221 @@ fn concurrent_cancel_task(handle: &Value) -> Result<Value> {
     RUNTIME.cancel_task(id)
 }
 
+/// Extract the inner Err from Ok(Err(msg)) → Some(Err(msg)), else None
+fn extract_inner_err(val: &Value) -> Option<Value> {
+    if let Value::EnumValue {
+        enum_name,
+        variant,
+        values,
+    } = val
+    {
+        if enum_name == "Result" && variant == "Ok" {
+            if let Some(inner) = values.first() {
+                if matches!(inner, Value::EnumValue { enum_name, variant, .. }
+                    if enum_name == "Result" && variant == "Err")
+                {
+                    return Some(inner.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check if a task result represents a failure — either a crash (outer Err from await_task)
+/// or a returned error (Ok(Err(...)) from a task that completed but returned an Err value).
+/// This matches user expectations: parallel cancels if fetch() fails, not just if the task panics.
+fn is_task_failure(val: &Value) -> bool {
+    match val {
+        // Outer Err: task crashed/panicked
+        Value::EnumValue {
+            enum_name, variant, ..
+        } if enum_name == "Result" && variant == "Err" => true,
+        // Ok(Err(...)): task completed but returned an error
+        Value::EnumValue {
+            enum_name,
+            variant,
+            values,
+        } if enum_name == "Result" && variant == "Ok" => values.first().map_or(false, |inner| {
+            matches!(inner, Value::EnumValue { enum_name, variant, .. }
+                if enum_name == "Result" && variant == "Err")
+        }),
+        _ => false,
+    }
+}
+
+// --- parallel/race ---
+
+fn concurrent_parallel(fns_val: &Value) -> Result<Value> {
+    let fns = match fns_val {
+        Value::Array(arr) => arr,
+        _ => {
+            return Err(IntentError::type_error(
+                "parallel() requires an array of functions".to_string(),
+            ))
+        }
+    };
+
+    if fns.is_empty() {
+        return Ok(Value::Array(vec![]));
+    }
+
+    // Spawn all — cancel already-spawned if a later spawn fails
+    let mut handles = Vec::with_capacity(fns.len());
+    for f in fns {
+        match concurrent_spawn(f) {
+            Ok(handle) => handles.push(handle),
+            Err(e) => {
+                for h in &handles {
+                    let _ = concurrent_cancel_task(h);
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    // Await all in order — cancel siblings on any error (Rust-level or ntnt-level)
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in &handles {
+        match concurrent_await_task(handle) {
+            Ok(result) => {
+                if is_task_failure(&result) {
+                    for h in &handles {
+                        let _ = concurrent_cancel_task(h);
+                    }
+                    // Extract the inner error for a clean return
+                    // Ok(Err(msg)) → return Err(msg), outer Err → return as-is
+                    let err_val = extract_inner_err(&result).unwrap_or(result);
+                    return Ok(err_val);
+                }
+                results.push(result);
+            }
+            Err(e) => {
+                // Rust-level error (e.g. parent cancellation) — cancel all children
+                for h in &handles {
+                    let _ = concurrent_cancel_task(h);
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    Ok(Value::Array(results))
+}
+
+fn concurrent_race(fns_val: &Value) -> Result<Value> {
+    let fns = match fns_val {
+        Value::Array(arr) => arr,
+        _ => {
+            return Err(IntentError::type_error(
+                "race() requires an array of functions".to_string(),
+            ))
+        }
+    };
+
+    if fns.is_empty() {
+        return Err(IntentError::runtime_error(
+            "race() requires at least one function".to_string(),
+        ));
+    }
+
+    // Spawn all — cancel already-spawned if a later spawn fails
+    let mut handles = Vec::with_capacity(fns.len());
+    for f in fns {
+        match concurrent_spawn(f) {
+            Ok(handle) => handles.push(handle),
+            Err(e) => {
+                for h in &handles {
+                    let _ = concurrent_cancel_task(h);
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    let cancel_all = |handles: &[Value]| {
+        for h in handles {
+            let _ = concurrent_cancel_task(h);
+        }
+    };
+
+    let mut done = vec![false; handles.len()];
+    let mut last_error: Option<Value> = None;
+
+    loop {
+        if let Err(e) = check_cancellation() {
+            cancel_all(&handles);
+            return Err(e);
+        }
+
+        for (i, handle) in handles.iter().enumerate() {
+            if done[i] {
+                continue;
+            }
+
+            let status_map = match concurrent_try_await(handle) {
+                Ok(m) => m,
+                Err(e) => {
+                    cancel_all(&handles);
+                    return Err(e);
+                }
+            };
+            let (status, result) = match &status_map {
+                Value::Map(m) => {
+                    let status = match m.get("status") {
+                        Some(Value::String(s)) => s.as_str(),
+                        _ => "",
+                    };
+                    let result = m.get("result");
+                    (status, result)
+                }
+                _ => ("", None),
+            };
+
+            match status {
+                "completed" => {
+                    // Get the actual result
+                    let await_result = concurrent_await_task(handle);
+                    match &await_result {
+                        Ok(val) if is_task_failure(val) => {
+                            // Task completed but returned Err — not a winner, treat as failure
+                            done[i] = true;
+                            last_error =
+                                Some(extract_inner_err(val).unwrap_or_else(|| val.clone()));
+                        }
+                        _ => {
+                            // Real success (or Rust-level error) — cancel all and return
+                            cancel_all(&handles);
+                            return await_result;
+                        }
+                    }
+                }
+                "failed" | "panicked" => {
+                    done[i] = true;
+                    if let Some(val) = result {
+                        last_error = Some(val.clone());
+                    }
+                }
+                "consumed" | "expired" => {
+                    done[i] = true;
+                }
+                _ => {} // running
+            }
+        }
+
+        if done.iter().all(|d| *d) {
+            return Ok(last_error.unwrap_or_else(|| {
+                Value::err(Value::String("All race participants failed".to_string()))
+            }));
+        }
+
+        if let Err(e) = concurrent_sleep_ms(5) {
+            cancel_all(&handles);
+            return Err(e);
+        }
+    }
+}
+
 // --- sleep_ms (cancellation-aware) ---
 
 /// sleep_ms(ms) — cancellation-aware sleep. Loops in 50ms slices checking cancellation.
@@ -2565,6 +2780,49 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 1,
             requires: None,
             func: |args| concurrent_cancel_task(&args[0]),
+        },
+    );
+
+    // @ntnt parallel
+    // @module std/concurrent
+    // @signature parallel(fns: Array<Function>) -> Array | Err
+    // Runs all functions concurrently and returns results in input order.
+    // If any task fails (crash or returned Err), cancels all remaining tasks and returns that Err.
+    // @param fns Array of zero-parameter functions to run
+    // @returns Array of Ok values on success, or a single Err value on first failure
+    // @see_also race, spawn, await_task
+    // @since v0.4.6
+    // @example let [a, b] = parallel([fn() { 1 }, fn() { 2 }])
+    module.insert(
+        "parallel".to_string(),
+        Value::NativeFunction {
+            name: "parallel".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: Some(RuntimeCapability::TaskSpawning),
+            func: |args| concurrent_parallel(&args[0]),
+        },
+    );
+
+    // @ntnt race
+    // @module std/concurrent
+    // @signature race(fns: Array<Function>) -> Result<Any, String>
+    // Runs all functions concurrently and returns the first successful result.
+    // Failed or panicked tasks are skipped; all remaining tasks are cancelled on success.
+    // If all tasks fail, returns the last Err result.
+    // @param fns Array of zero-parameter functions to race
+    // @returns Result value from the first successful task
+    // @see_also parallel, spawn, await_task, try_await
+    // @since v0.4.6
+    // @example race([fn() { primary() }, fn() { fallback() }])
+    module.insert(
+        "race".to_string(),
+        Value::NativeFunction {
+            name: "race".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: Some(RuntimeCapability::TaskSpawning),
+            func: |args| concurrent_race(&args[0]),
         },
     );
 

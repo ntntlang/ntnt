@@ -3237,6 +3237,8 @@ import { channel, send, recv } from "std/concurrent"
 | [`cancel_task`](#canceltask) | Requests cooperative cancellation of a task. Sets the cancellation flag; the task thread will exit at the next yield point (recv, recv_timeout, sleep_ms, or fetch). Does NOT force immediate termination. Returns true if the task existed, false otherwise. |
 | [`channel`](#channel) | Creates a new unbounded channel and returns a [sender, receiver] pair. |
 | [`close`](#close) | Closes a channel receiver by removing it from the registry. Once removed, future send(tx, ...) returns false (crossbeam Disconnected). recv(rx) immediately returns Unit since the id is no longer found. Returns true if existed, false otherwise. |
+| [`parallel`](#parallel) | Runs all functions concurrently and returns results in input order. If any task fails (crash or returned Err), cancels all remaining tasks and returns that Err. |
+| [`race`](#race) | Runs all functions concurrently and returns the first successful result. Failed or panicked tasks are skipped; all remaining tasks are cancelled on success. If all tasks fail, returns the last Err result. |
 | [`recv`](#recv) | Receives a value from a channel. Blocks until a value is available. Returns Unit if all senders have been dropped (Disconnected) or the receiver was closed. This is a cancellation yield point: a cancelled task will exit here. Single-consumer: the receiver lock is held for the blocking duration. |
 | [`recv_timeout`](#recvtimeout) | Receives with timeout. Returns None if timeout expires or all senders disconnected. Loops in ≤100ms slices checking cancellation between iterations. This is a cancellation yield point. |
 | [`schedule`](#schedule) | Runs a zero-parameter handler repeatedly at the given interval. Returns a Schedule handle. Interval can be milliseconds (Int) or a string ("5s", "1m"). Zero intervals are rejected. Each tick spawns a thread with catch_unwind; overlap prevention ensures a new tick won't start until the previous one finishes. Panics in tick execution are caught and logged — they don't kill the schedule. |
@@ -3406,6 +3408,58 @@ close(rx)  // => true
 ```
 
 **See also:** `channel`
+
+*Since v0.4.6*
+
+---
+
+#### `parallel`
+
+```ntnt
+parallel(fns: Array<Function>) -> Array | Err
+```
+
+Runs all functions concurrently and returns results in input order. If any task fails (crash or returned Err), cancels all remaining tasks and returns that Err.
+
+**Parameters:**
+
+- `fns` — Array of zero-parameter functions to run
+
+**Returns:** Array of Ok values on success, or a single Err value on first failure
+
+**Examples:**
+
+```ntnt
+let [a, b] = parallel([fn() { 1 }, fn() { 2 }])
+```
+
+**See also:** `race`, `spawn`, `await_task`
+
+*Since v0.4.6*
+
+---
+
+#### `race`
+
+```ntnt
+race(fns: Array<Function>) -> Result<Any, String>
+```
+
+Runs all functions concurrently and returns the first successful result. Failed or panicked tasks are skipped; all remaining tasks are cancelled on success. If all tasks fail, returns the last Err result.
+
+**Parameters:**
+
+- `fns` — Array of zero-parameter functions to race
+
+**Returns:** Result value from the first successful task
+
+**Examples:**
+
+```ntnt
+race([fn() { primary() }, fn() { fallback() }])
+```
+
+**See also:** `parallel`, `spawn`, `await_task`, `try_await`
 
 *Since v0.4.6*
 
