@@ -1,8 +1,9 @@
 # DD-048: DX Simplification — Reduce Boilerplate in ntnt Apps
 
-**Status:** draft  
+**Status:** ✅ Complete — shipped in PR #59 (merged 2026-03-27)  
 **Author:** larri  
 **Created:** 2026-03-25  
+**Completed:** 2026-03-27  
 
 ## Problem
 
@@ -115,24 +116,24 @@ let sorted = sort_by(entries, fn(a, b) { a["date"] > b["date"] })  // custom com
 
 ## Implementation Plan
 
-### Phase 1: KV Type Helpers
-- [ ] Add `get_int`, `get_float`, `get_json`, `get_str` to `src/stdlib/kv.rs`
-- [ ] Each handles: Result unwrap → str conversion → "none"/empty check → type parse → default
-- [ ] `// @ntnt` doc blocks, typechecker `sig!` entries, tests
-- [ ] Refactor snowgauge to use them (validation)
+### Phase 1: KV Type Helpers ✅
+- [x] Add `get_int`, `get_float`, `get_json`, `get_str` to `src/stdlib/kv.rs`
+- [x] Each handles: Result unwrap → str conversion → "none"/empty check → type parse → default
+- [x] `// @ntnt` doc blocks, typechecker `sig!` entries, tests
+- [x] Refactor snowgauge to use them (validation)
 
-### Phase 2: Stdlib Prelude
-- [ ] Define prelude function list
-- [ ] Add `define_prelude()` to interpreter, called after `define_stdlib()`
-- [ ] Inject prelude functions into environment (same as builtins)
-- [ ] Update `builtin_bindings` snapshot to include prelude
-- [ ] Explicit imports still work (no breaking change)
-- [ ] Refactor snowgauge: remove import lines covered by prelude
+### Phase 2: Stdlib Prelude ✅
+- [x] Define prelude function list
+- [x] Add `define_prelude()` to interpreter, called after `define_stdlib()`
+- [x] Inject prelude functions into environment (same as builtins)
+- [x] Update `builtin_bindings` snapshot to include prelude
+- [x] Explicit imports still work (no breaking change)
+- [x] Refactor snowgauge: remove import lines covered by prelude
 
-### Phase 3: sort / sort_by
-- [ ] Add `sort(array)` to `std/collections` — natural ordering for Int/Float/String
-- [ ] Add `sort_by(array, comparator)` — comparator returns Bool or Int
-- [ ] Doc blocks, typechecker sigs, tests
+### Phase 3: sort / sort_by ✅
+- [x] Add `sort(array)` to `std/collections` — natural ordering for Int/Float/String
+- [x] Add `sort_by(array, comparator)` — comparator returns Bool or Int
+- [x] Doc blocks, typechecker sigs, tests
 
 ## Success Criteria
 
