@@ -1,6 +1,6 @@
 # DD-040: fetch() & SQL Stdlib Friction Points
 
-**Status:** 5/6 Resolved (v0.4.4–v0.4.5)  
+**Status:** ✅ Complete — All actionable issues resolved (v0.4.4–v0.4.5)  
 **Author:** Larri  
 **Date:** 2026-03-12  
 **Context:** Building Larri Design domain management feature (DD-010)  
@@ -157,7 +157,7 @@ execute(db, r#"UPDATE t SET data = jsonb_set(data, '{my_key}', 'true')"#, [])
 | 2. fetch() arg count | 🟡 Medium | ✅ **Done** (v0.4.4, PR #27) |
 | 3. JSONB bind params | 🔴 High | ✅ **Done** (v0.4.4, PR #27) |
 | 4. UUID double cast | 🟡 Medium | ✅ **Done** (v0.4.4, PR #27) |
-| 5. SQL string interpolation | 🟡 Medium | **Open** — Lint warning is the right approach |
+| 5. SQL string interpolation | 🟡 Medium | ✅ **Resolved** (v0.4.5) — `#{expr}` sigil change; bare `{` is literal |
 | 6. IPv6 in Docker | 🟢 Low | **Deferred** — Deployment note, not a language fix |
 
-Remaining: Issue 5 (SQL interpolation gotcha — lint warning approach recommended).
+All actionable issues resolved. Issue 5 was fixed by the `#{expr}` interpolation sigil change in v0.4.5 — bare `{` is now always literal, so SQL strings with `{key}` just work. Issue 6 (IPv6 in Docker) is a deployment note, not a language fix.

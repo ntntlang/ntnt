@@ -1,6 +1,6 @@
 # DD-048: Block Expressions — `let` Inside If/Match Expression Branches
 
-**Status:** draft  
+**Status:** ✅ Complete — Merged in PR #60  
 **Author:** larri  
 **Created:** 2026-03-27  
 
@@ -156,16 +156,16 @@ The fix is entirely in the parser. Currently if-expression branches call `expres
 
 ## Implementation Checklist
 
-- [ ] Update if-expression parser to call `block()` for branches (`src/parser.rs`)
-- [ ] Add helper function for parsing if-expression branches (handles `else if` chains)
-- [ ] Update `ntnt docs --generate` for AI agent guide
-- [ ] Tests: if-expression with `let` in branches — `let x = if true { let a = 1; a + 2 } else { 0 }`
-- [ ] Tests: if-expression branch ending in statement — value is `Unit`
-- [ ] Tests: nested if-expression with block branches
-- [ ] Tests: scope isolation — `let` in if-expression branch doesn't leak
-- [ ] Tests: map literal containing block expression value — `map { "k": { let x = 1; x } }`
-- [ ] Tests: block in binary expression `{ 1 + 1 } * 2` (already works, verify)
-- [ ] Tests: `spawn()` / `schedule()` with if-expression block branches (verify existing coverage)
+- [x] Update if-expression parser to call `block()` for branches (`src/parser.rs`)
+- [x] Add helper function for parsing if-expression branches (handles `else if` chains)
+- [x] Update `ntnt docs --generate` for AI agent guide
+- [x] Tests: if-expression with `let` in branches — `let x = if true { let a = 1; a + 2 } else { 0 }`
+- [x] Tests: if-expression branch ending in statement — value is `Unit`
+- [x] Tests: nested if-expression with block branches
+- [x] Tests: scope isolation — `let` in if-expression branch doesn't leak
+- [x] Tests: map literal containing block expression value — `map { "k": { let x = 1; x } }`
+- [x] Tests: block in binary expression `{ 1 + 1 } * 2` (already works, verify)
+- [x] Tests: `spawn()` / `schedule()` with if-expression block branches (verify existing coverage)
 
 ## Risks
 

@@ -433,6 +433,190 @@ match result {
 }
 
 // =============================================================================
+// Parallel/Race tests
+// =============================================================================
+
+#[test]
+fn test_parallel_results_in_order() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { parallel, sleep_ms } from "std/concurrent"
+
+let results = parallel([
+    fn() { sleep_ms(50); "a" },
+    fn() { sleep_ms(10); "b" },
+    fn() { sleep_ms(20); "c" }
+])
+
+match results[0] { Ok(v) => print("r1: " + str(v)), Err(e) => print("err1") }
+match results[1] { Ok(v) => print("r2: " + str(v)), Err(e) => print("err2") }
+match results[2] { Ok(v) => print("r3: " + str(v)), Err(e) => print("err3") }
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("r1: a"), "stdout: {}", stdout);
+    assert!(stdout.contains("r2: b"), "stdout: {}", stdout);
+    assert!(stdout.contains("r3: c"), "stdout: {}", stdout);
+}
+
+#[test]
+fn test_parallel_empty_array() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { parallel } from "std/concurrent"
+
+let results = parallel([])
+print("len: " + str(len(results)))
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.trim().contains("len: 0"), "stdout: {}", stdout);
+}
+
+#[test]
+fn test_parallel_failure_cancels_others() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { parallel, sleep_ms, channel, send, recv_timeout } from "std/concurrent"
+
+let [tx, rx] = channel()
+let result = parallel([
+    fn() { sleep_ms(50); 1 / 0 },
+    fn() { sleep_ms(200); send(tx, "late1"); "ok1" },
+    fn() { sleep_ms(200); send(tx, "late2"); "ok2" }
+])
+
+match result {
+    Ok(v) => print("ok: " + str(v)),
+    Err(e) => print("err: " + str(e))
+}
+
+let msg = recv_timeout(rx, 400)
+match msg {
+    None => print("no_send"),
+    Some(v) => print("sent: " + str(v))
+}
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("err:"), "stdout: {}", stdout);
+    assert!(stdout.contains("no_send"), "stdout: {}", stdout);
+}
+
+#[test]
+fn test_race_fastest_wins() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { race, sleep_ms } from "std/concurrent"
+
+let result = race([
+    fn() { sleep_ms(500); "slow" },
+    fn() { sleep_ms(50); "fast" },
+    fn() { sleep_ms(300); "mid" }
+])
+
+match result {
+    Ok(v) => print("ok: " + str(v)),
+    Err(e) => print("err: " + str(e))
+}
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("ok: fast"), "stdout: {}", stdout);
+}
+
+#[test]
+fn test_race_error_then_success() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { race, sleep_ms } from "std/concurrent"
+
+let result = race([
+    fn() { sleep_ms(10); 1 / 0 },
+    fn() { sleep_ms(50); "ok" }
+])
+
+match result {
+    Ok(v) => print("ok: " + str(v)),
+    Err(e) => print("err: " + str(e))
+}
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("ok: ok"), "stdout: {}", stdout);
+}
+
+#[test]
+fn test_race_all_fail() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { race, sleep_ms } from "std/concurrent"
+
+let result = race([
+    fn() { 1 / 0 },
+    fn() { sleep_ms(10); 1 / 0 }
+])
+
+match result {
+    Ok(v) => print("ok: " + str(v)),
+    Err(e) => print("err: " + str(e))
+}
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("err:"), "stdout: {}", stdout);
+}
+
+#[test]
+fn test_race_empty_array_errors() {
+    let (_stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { race } from "std/concurrent"
+
+let result = race([])
+print(result)
+"#,
+    );
+    assert_ne!(code, 0, "race([]) should be a runtime error");
+}
+
+#[test]
+fn test_race_parent_cancellation_cancels_children() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, cancel_task, await_task, race, sleep_ms, channel, send, recv_timeout } from "std/concurrent"
+
+let [tx, rx] = channel()
+
+let task = spawn(fn() {
+    race([
+        fn() { sleep_ms(1000); send(tx, "a"); "a" },
+        fn() { sleep_ms(1000); send(tx, "b"); "b" }
+    ])
+})
+
+sleep_ms(100)
+cancel_task(task)
+
+let result = await_task(task)
+match result {
+    Ok(v) => print("ok: " + str(v)),
+    Err(e) => print("cancelled: " + str(e))
+}
+
+let msg = recv_timeout(rx, 1500)
+match msg {
+    None => print("children_cancelled"),
+    Some(v) => print("sent: " + str(v))
+}
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("cancelled:"), "stdout: {}", stdout);
+    assert!(stdout.contains("children_cancelled"), "stdout: {}", stdout);
+}
+
+// =============================================================================
 // After tests
 // =============================================================================
 
@@ -1366,6 +1550,104 @@ print("no_limit")
     assert!(
         stdout.contains("Maximum concurrent task limit"),
         "Error message should mention the limit, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_parallel_parent_cancellation_cancels_children() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, cancel_task, await_task, parallel, sleep_ms, channel, send, recv_timeout } from "std/concurrent"
+
+let [tx, rx] = channel()
+
+let task = spawn(fn() {
+    parallel([
+        fn() { sleep_ms(1000); send(tx, "a"); "a" },
+        fn() { sleep_ms(1000); send(tx, "b"); "b" }
+    ])
+})
+
+sleep_ms(100)
+cancel_task(task)
+
+let result = await_task(task)
+match result {
+    Ok(v) => print("ok: " + str(v)),
+    Err(e) => print("cancelled: " + str(e))
+}
+
+let msg = recv_timeout(rx, 1500)
+match msg {
+    None => print("children_cancelled"),
+    Some(v) => print("sent: " + str(v))
+}
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("cancelled:"), "stdout: {}", stdout);
+    assert!(stdout.contains("children_cancelled"), "stdout: {}", stdout);
+}
+
+#[test]
+fn test_parallel_cancels_on_returned_err() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { parallel, sleep_ms, channel, send, recv_timeout } from "std/concurrent"
+
+let [tx, rx] = channel()
+let result = parallel([
+    fn() { sleep_ms(50); Err("api down") },
+    fn() { sleep_ms(300); send(tx, "late"); "ok" }
+])
+
+match result {
+    Ok(v) => print("ok: " + str(v)),
+    Err(e) => print("err: " + str(e))
+}
+
+let msg = recv_timeout(rx, 500)
+match msg {
+    None => print("cancelled"),
+    Some(v) => print("sent: " + str(v))
+}
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("err:"),
+        "should detect returned Err: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("cancelled"),
+        "should cancel remaining: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_race_skips_returned_err() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { race, sleep_ms } from "std/concurrent"
+
+let result = race([
+    fn() { Err("fast but failed") },
+    fn() { sleep_ms(50); "slow but ok" }
+])
+
+match result {
+    Ok(v) => print("ok: " + str(v)),
+    Err(e) => print("err: " + str(e))
+}
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("ok: slow but ok"),
+        "should skip Err and pick Ok winner: {}",
         stdout
     );
 }
