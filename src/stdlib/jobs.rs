@@ -28,11 +28,12 @@ use crate::ast::{Block, Parameter};
 use crate::error::{IntentError, Result};
 use crate::interpreter::{RuntimeCapability, Value};
 use crate::stdlib::concurrent::{
-    check_task_limit, finalize_task, is_current_task_cancelled, CURRENT_TASK_CANCELLED, RUNTIME,
+    check_task_limit, finalize_task, is_current_task_cancelled, sleep_cancellable, CancelToken,
+    CURRENT_CANCEL_TOKEN, RUNTIME,
 };
 use crate::stdlib::kv;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -75,6 +76,34 @@ impl BandConfig {
     pub fn ceiling_key(&self) -> String {
         format!("jobs:pending:{:02}:~", self.max_priority)
     }
+}
+
+/// Rate limit parsed from a `rate: "N/interval"` job option.
+#[derive(Debug, Clone)]
+pub struct RateLimit {
+    /// Maximum number of executions per window.
+    pub count: u64,
+    /// Window duration in seconds (1 for /second, 60 for /minute, 3600 for /hour).
+    pub window_secs: u64,
+}
+
+/// Parse `"N/interval"` rate limit strings.
+///
+/// Supported intervals: `second`, `minute`, `hour`.
+/// Returns `None` for invalid format (caller should error at registration time).
+pub(crate) fn parse_rate_limit(s: &str) -> Option<RateLimit> {
+    let (count_str, interval) = s.trim().split_once('/')?;
+    let count: u64 = count_str.trim().parse().ok()?;
+    if count == 0 {
+        return None;
+    }
+    let window_secs = match interval.trim() {
+        "second" => 1,
+        "minute" => 60,
+        "hour" => 3600,
+        _ => return None,
+    };
+    Some(RateLimit { count, window_secs })
 }
 
 /// Default worker band configuration (used when work_jobs/work_async gets no "bands" option).
@@ -240,12 +269,17 @@ pub struct JobRuntime {
     /// Active band configurations (set at work_jobs/work_async startup).
     pub active_bands: Mutex<Vec<BandConfig>>,
     /// Cancel Arcs for active band workers — used by scale_workers to cancel excess threads.
-    pub band_cancel_arcs: Mutex<HashMap<String, Vec<Arc<AtomicBool>>>>,
+    pub band_cancel_arcs: Mutex<HashMap<String, Vec<Arc<CancelToken>>>>,
     /// Queue filter active at worker startup — so scale_workers uses the same queue filter.
     pub active_queues: Mutex<Option<Vec<String>>>,
     /// Main source file path — set when a job is registered so workers can recreate a
     /// full interpreter (with imports and user functions) for each job execution.
     source_file: Mutex<Option<String>>,
+    /// In-memory cache of paused queue names (fast read path — no KV round-trip per poll).
+    pub paused_queues: RwLock<HashSet<String>>,
+    /// Timestamp of last pause cache refresh from KV. Refreshed lazily every 5 seconds
+    /// to pick up pauses from other processes in multi-process deployments.
+    paused_cache_updated_at: Mutex<std::time::Instant>,
 }
 
 impl JobRuntime {
@@ -261,6 +295,12 @@ impl JobRuntime {
             band_cancel_arcs: Mutex::new(HashMap::new()),
             active_queues: Mutex::new(None),
             source_file: Mutex::new(None),
+            paused_queues: RwLock::new(HashSet::new()),
+            // Initialize as stale (10s in the past) so first is_queue_paused() call
+            // forces a KV refresh — ensures pauses persisted before restart are respected.
+            paused_cache_updated_at: Mutex::new(
+                std::time::Instant::now() - std::time::Duration::from_secs(10),
+            ),
         }
     }
 
@@ -421,6 +461,13 @@ impl JobRuntime {
         }
         if let Ok(mut sf) = self.source_file.lock() {
             *sf = None;
+        }
+        if let Ok(mut pq) = self.paused_queues.write() {
+            pq.clear();
+        }
+        if let Ok(mut ts) = self.paused_cache_updated_at.lock() {
+            // Reset as stale so next is_queue_paused() refreshes from KV
+            *ts = std::time::Instant::now() - std::time::Duration::from_secs(10);
         }
     }
 }
@@ -917,12 +964,58 @@ fn enqueue_internal(
     Ok(Value::ok(Value::String(job_id)))
 }
 
+fn reenqueue_job(kv_handle: &Value, job_data: &HashMap<String, Value>, job_id: &str) {
+    if let Some(Value::String(pk)) = job_data.get("pending_key") {
+        let _ = kv::kv_set(kv_handle, pk, &Value::String(job_id.to_string()), None);
+    }
+}
+
+/// RAII guard that decrements the concurrency counter on drop.
+struct ConcurrencyGuard {
+    kv_handle: Value,
+    counter_key: Option<String>,
+}
+
+impl ConcurrencyGuard {
+    /// Manually release the concurrency slot (e.g., before a long sleep).
+    /// After calling this, drop() becomes a no-op.
+    fn release(&mut self) {
+        if let Some(ref ck) = self.counter_key.take() {
+            let _ = kv::kv_incr(&self.kv_handle, ck, -1);
+        }
+    }
+}
+
+impl Drop for ConcurrencyGuard {
+    fn drop(&mut self) {
+        if let Some(ref ck) = self.counter_key {
+            let _ = kv::kv_incr(&self.kv_handle, ck, -1);
+        }
+    }
+}
+
 /// Worker loop — runs until cooperative cancellation is signalled.
 ///
 /// `kv_info`: serializable KV handle info (reconstructed into a `Value` on entry).
 /// `band`: the band configuration (determines floor, ceiling, and poll interval).
 /// `queues`: if Some, only process jobs whose queue field matches one of
 ///           these names; if None, process all queues.
+/// Sleep for `dur`; returns `true` if the task was cancelled (caller should `break`).
+fn sleep_or_break(dur: std::time::Duration) -> bool {
+    sleep_cancellable(dur)
+}
+
+/// Re-enqueue a job then sleep for `dur`; returns `true` if cancelled (caller should `break`).
+fn reenqueue_and_backoff(
+    kv_handle: &Value,
+    job_data: &HashMap<String, Value>,
+    job_id: &str,
+    dur: std::time::Duration,
+) -> bool {
+    reenqueue_job(kv_handle, job_data, job_id);
+    sleep_cancellable(dur)
+}
+
 fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<String>>) {
     let kv_handle = kv_info.to_value();
     let poll_duration = std::time::Duration::from_millis(band.poll_interval_ms);
@@ -947,11 +1040,15 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             Ok(Some((_pending_key, value))) => value,
             Ok(None) => {
                 // Queue empty — sleep and try again
-                std::thread::sleep(poll_duration);
+                if sleep_or_break(poll_duration) {
+                    break;
+                }
                 continue;
             }
             Err(_) => {
-                std::thread::sleep(poll_duration);
+                if sleep_or_break(poll_duration) {
+                    break;
+                }
                 continue;
             }
         };
@@ -960,7 +1057,9 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         let job_id = match &claimed {
             Value::String(s) => s.clone(),
             _ => {
-                std::thread::sleep(poll_duration);
+                if sleep_or_break(poll_duration) {
+                    break;
+                }
                 continue;
             }
         };
@@ -1000,7 +1099,9 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     let pk = pk.clone();
                     let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
                 }
-                std::thread::sleep(poll_duration);
+                if sleep_or_break(poll_duration) {
+                    break;
+                }
                 continue;
             }
         }
@@ -1030,7 +1131,9 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                     _ => format!("jobs:pending:{}:{}", scheduled_at, job_id),
                 };
                 let _ = kv::kv_set(&kv_handle, &pk, &Value::String(job_id.clone()), None);
-                std::thread::sleep(poll_duration);
+                if sleep_or_break(poll_duration) {
+                    break;
+                }
                 continue;
             }
         }
@@ -1121,22 +1224,26 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
             }
         }
 
-        // Write visibility timeout key: jobs:active:<id> with TTL 300s
-        let active_key = format!("jobs:active:{}", job_id);
-        let _ = kv::kv_set(
-            &kv_handle,
-            &active_key,
-            &Value::String(job_id.clone()),
-            Some(300),
-        );
-
-        // Mark status as "active"
-        job_data.insert("status".to_string(), Value::String("active".to_string()));
-        if kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data.clone()), None).is_err() {
+        // Check if queue is paused before executing.
+        let job_queue_for_pause = match job_data.get("queue") {
+            Some(Value::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        if is_queue_paused(&job_queue_for_pause, &kv_handle) {
+            reenqueue_job(&kv_handle, &job_data, &job_id);
+            emit_job_event(
+                "job.queue_paused",
+                &[
+                    ("job_id", Value::String(job_id.clone())),
+                    ("queue", Value::String(job_queue_for_pause)),
+                ],
+            );
+            if sleep_or_break(poll_duration) {
+                break;
+            }
             continue;
         }
 
-        // Look up the job definition
         let job_type = match job_data.get("type") {
             Some(Value::String(s)) => s.clone(),
             _ => continue,
@@ -1153,10 +1260,149 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 );
                 job_data.insert("dead_at".to_string(), Value::String(timestamp_key()));
                 let _ = kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data), None);
-                let _ = kv::kv_del(&kv_handle, &active_key);
                 continue;
             }
         };
+
+        // Concurrency limit: atomic counter semaphore via kv_incr.
+        let has_concurrency_limit =
+            if let Some(JobOptionValue::Int(max_slots)) = def.options.get("concurrency") {
+                let max = (*max_slots).max(1) as i64;
+                let counter_key = format!("jobs:concurrency:{}", job_type);
+                match kv::kv_incr(&kv_handle, &counter_key, 1) {
+                    Ok(new_count) => {
+                        // Refresh TTL on every acquire so counter self-heals after SIGKILL/OOM.
+                        let _ = kv::kv_expire(&kv_handle, &counter_key, 310);
+                        if new_count > max {
+                            let _ = kv::kv_incr(&kv_handle, &counter_key, -1);
+                            reenqueue_job(&kv_handle, &job_data, &job_id);
+                            emit_job_event(
+                                "job.concurrency_limited",
+                                &[
+                                    ("job_id", Value::String(job_id.clone())),
+                                    ("type", Value::String(job_type.clone())),
+                                    ("max", Value::Int(max)),
+                                    ("current", Value::Int(new_count)),
+                                ],
+                            );
+                            if sleep_or_break(std::time::Duration::from_millis(500)) {
+                                break;
+                            }
+                            continue;
+                        }
+                        true
+                    }
+                    Err(_) => {
+                        if reenqueue_and_backoff(
+                            &kv_handle,
+                            &job_data,
+                            &job_id,
+                            std::time::Duration::from_millis(500),
+                        ) {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                false
+            };
+        let mut concurrency_guard = ConcurrencyGuard {
+            kv_handle: kv_handle.clone(),
+            counter_key: if has_concurrency_limit {
+                Some(format!("jobs:concurrency:{}", job_type))
+            } else {
+                None
+            },
+        };
+
+        // Rate limit: sliding window counter via kv_incr.
+        // Uses weighted average of current + previous window to smooth boundary bursts.
+        if let Some(JobOptionValue::String(rate_str)) = def.options.get("rate") {
+            if let Some(rl) = parse_rate_limit(rate_str) {
+                let now_secs = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let ws = rl.window_secs as i64;
+                let window_start = now_secs - (now_secs % ws);
+                let prev_window_start = window_start - ws;
+                let rl_key = format!("jobs:ratelimit:{}:{}", job_type, window_start);
+                let prev_key = format!("jobs:ratelimit:{}:{}", job_type, prev_window_start);
+                match kv::kv_incr(&kv_handle, &rl_key, 1) {
+                    Ok(current_count) => {
+                        if current_count == 1 {
+                            if kv::kv_expire(&kv_handle, &rl_key, ws * 2).is_err() {
+                                let _ = kv::kv_del(&kv_handle, &rl_key);
+                            }
+                        }
+                        // Sliding window: weight previous window by how much of it is still relevant
+                        let prev_count = match kv::kv_get(&kv_handle, &prev_key) {
+                            Ok(Value::Int(n)) => n,
+                            Ok(Value::String(s)) => s.parse::<i64>().unwrap_or(0),
+                            _ => 0,
+                        };
+                        let elapsed_pct = (now_secs % ws) as f64 / ws as f64;
+                        let weighted =
+                            current_count as f64 + prev_count as f64 * (1.0 - elapsed_pct);
+                        if weighted > rl.count as f64 {
+                            let _ = kv::kv_incr(&kv_handle, &rl_key, -1);
+                            concurrency_guard.release();
+                            reenqueue_job(&kv_handle, &job_data, &job_id);
+                            let remaining = ws - (now_secs % ws);
+                            emit_job_event(
+                                "job.rate_limited",
+                                &[
+                                    ("job_id", Value::String(job_id.clone())),
+                                    ("type", Value::String(job_type.clone())),
+                                    ("window", Value::String(rate_str.clone())),
+                                    ("current", Value::Int(current_count)),
+                                    ("weighted", Value::Int(weighted as i64)),
+                                    ("retry_after_secs", Value::Int(remaining)),
+                                ],
+                            );
+                            if sleep_or_break(std::time::Duration::from_secs(
+                                remaining.max(1) as u64
+                            )) {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        concurrency_guard.release();
+                        emit_job_event(
+                            "job.rate_limit_error",
+                            &[
+                                ("job_id", Value::String(job_id.clone())),
+                                ("type", Value::String(job_type.clone())),
+                                ("error", Value::String(e.to_string())),
+                            ],
+                        );
+                        if reenqueue_and_backoff(&kv_handle, &job_data, &job_id, poll_duration) {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Write visibility timeout key: jobs:active:<id> with TTL 300s
+        let active_key = format!("jobs:active:{}", job_id);
+        let _ = kv::kv_set(
+            &kv_handle,
+            &active_key,
+            &Value::String(job_id.clone()),
+            Some(300),
+        );
+
+        // Mark status as "active"
+        job_data.insert("status".to_string(), Value::String("active".to_string()));
+        if kv::kv_set(&kv_handle, &data_key, &Value::Map(job_data.clone()), None).is_err() {
+            let _ = kv::kv_del(&kv_handle, &active_key);
+            continue;
+        }
 
         // Extract payload map
         let payload = match job_data.get("payload") {
@@ -1766,14 +2012,14 @@ fn spawn_worker_task(
     kv_handle: Value,
     band: BandConfig,
     queues: Option<Vec<String>>,
-) -> Result<(Value, Arc<AtomicBool>)> {
+) -> Result<(Value, Arc<CancelToken>)> {
     // Extract serializable KvHandleInfo — Value is not Send due to Rc internals.
     let kv_info = extract_kv_handle_info(&kv_handle)?;
 
     RUNTIME.try_reap_expired_tasks();
     check_task_limit()?;
 
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(CancelToken::new());
     let cancel_clone = Arc::clone(&cancelled);
     let task_id = RUNTIME.register_task(Arc::clone(&cancelled))?;
     RUNTIME.active_tasks.fetch_add(1, AtomicOrdering::Release);
@@ -1783,7 +2029,7 @@ fn spawn_worker_task(
         .expect("task just registered must exist");
 
     std::thread::spawn(move || {
-        CURRENT_TASK_CANCELLED.with(|cell| {
+        CURRENT_CANCEL_TOKEN.with(|cell| {
             *cell.borrow_mut() = Some(cancelled);
         });
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2235,9 +2481,19 @@ pub(crate) fn worker_status_impl() -> crate::error::Result<Value> {
         band_entries.push(Value::Map(entry));
     }
 
+    if let Ok(kv) = JOB_RUNTIME.get_or_init_kv() {
+        refresh_paused_cache(&kv, true);
+    }
+    let paused_queue_names: Vec<Value> =
+        read_paused_cache().into_iter().map(Value::String).collect();
+
     let mut result = HashMap::new();
     result.insert("bands".to_string(), Value::Array(band_entries));
     result.insert("pending".to_string(), Value::Int(pending_count));
+    result.insert(
+        "paused_queues".to_string(),
+        Value::Array(paused_queue_names),
+    );
     Ok(Value::Map(result))
 }
 
@@ -2304,7 +2560,7 @@ pub(crate) fn scale_workers_impl(
         }
     } else if target_count < current_count {
         for arc in arcs.drain(target_count..) {
-            arc.store(true, std::sync::atomic::Ordering::Release);
+            arc.cancel();
         }
         if ids.len() > target_count {
             ids.drain(target_count..ids.len());
@@ -2323,6 +2579,134 @@ pub(crate) fn scale_workers_impl(
     }
 
     Ok(Value::ok(Value::Unit))
+}
+
+fn set_queue_paused(queue_name: &str, paused: bool) -> crate::error::Result<Value> {
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+    if paused {
+        let now_ts = now_nanos_str();
+        kv::kv_set(
+            &kv_handle,
+            &format!("jobs:paused:{}", queue_name),
+            &Value::String(now_ts.clone()),
+            None,
+        )?;
+        JOB_RUNTIME
+            .paused_queues
+            .write()
+            .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?
+            .insert(queue_name.to_string());
+        if let Ok(mut ts) = JOB_RUNTIME.paused_cache_updated_at.lock() {
+            *ts = std::time::Instant::now();
+        }
+        emit_job_event(
+            "queue.paused",
+            &[
+                ("queue", Value::String(queue_name.to_string())),
+                ("paused_at", Value::String(now_ts)),
+            ],
+        );
+    } else {
+        kv::kv_del(&kv_handle, &format!("jobs:paused:{}", queue_name))?;
+        JOB_RUNTIME
+            .paused_queues
+            .write()
+            .map_err(|e| IntentError::runtime_error(format!("Lock error: {}", e)))?
+            .remove(queue_name);
+        if let Ok(mut ts) = JOB_RUNTIME.paused_cache_updated_at.lock() {
+            *ts = std::time::Instant::now();
+        }
+        emit_job_event(
+            "queue.resumed",
+            &[("queue", Value::String(queue_name.to_string()))],
+        );
+    }
+    Ok(Value::ok(Value::Unit))
+}
+
+pub(crate) fn pause_queue_impl(queue_name: &str) -> crate::error::Result<Value> {
+    set_queue_paused(queue_name, true)
+}
+
+pub(crate) fn resume_queue_impl(queue_name: &str) -> crate::error::Result<Value> {
+    set_queue_paused(queue_name, false)
+}
+
+const PAUSE_CACHE_STALE_SECS: u64 = 5;
+
+fn mark_pause_cache_stale() {
+    if let Ok(mut ts) = JOB_RUNTIME.paused_cache_updated_at.lock() {
+        *ts =
+            std::time::Instant::now() - std::time::Duration::from_secs(PAUSE_CACHE_STALE_SECS + 1);
+    }
+}
+
+fn refresh_paused_cache(kv_handle: &Value, force: bool) {
+    // Single critical section: check staleness + claim refresh atomically.
+    let should_refresh = match JOB_RUNTIME.paused_cache_updated_at.lock() {
+        Ok(mut ts) => {
+            if !force && ts.elapsed().as_secs() <= PAUSE_CACHE_STALE_SECS {
+                false
+            } else {
+                *ts = std::time::Instant::now(); // claim refresh
+                true
+            }
+        }
+        Err(_) => true, // poisoned → refresh
+    };
+    if !should_refresh {
+        return;
+    }
+    match kv::kv_list(kv_handle, Some("jobs:paused:")) {
+        Ok(keys) => {
+            let refreshed = keys
+                .iter()
+                .filter_map(|k| k.strip_prefix("jobs:paused:"))
+                .map(str::to_string)
+                .collect();
+            if let Ok(mut paused) = JOB_RUNTIME.paused_queues.write() {
+                *paused = refreshed;
+            }
+        }
+        Err(_) => {
+            // Roll back timestamp so next caller retries
+            if let Ok(mut ts) = JOB_RUNTIME.paused_cache_updated_at.lock() {
+                *ts = std::time::Instant::now()
+                    - std::time::Duration::from_secs(PAUSE_CACHE_STALE_SECS + 1);
+            }
+        }
+    }
+}
+
+/// Read the cached paused queue names (sorted).
+fn read_paused_cache() -> Vec<String> {
+    JOB_RUNTIME
+        .paused_queues
+        .read()
+        .map(|p| {
+            let mut names: Vec<String> = p.iter().cloned().collect();
+            names.sort();
+            names
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn is_queue_paused(queue_name: &str, kv_handle: &Value) -> bool {
+    refresh_paused_cache(kv_handle, false);
+    JOB_RUNTIME
+        .paused_queues
+        .read()
+        .map(|p| p.contains(queue_name))
+        .unwrap_or(false)
+}
+
+/// Return nanosecond epoch as a string (used for paused_at timestamp).
+fn now_nanos_str() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_string()
 }
 
 // ============================================================================
@@ -2745,7 +3129,7 @@ pub fn init() -> HashMap<String, Value> {
                 }
                 let mut handles = Vec::new();
                 let mut band_task_ids: HashMap<String, Vec<u64>> = HashMap::new();
-                let mut band_cancel_arcs: HashMap<String, Vec<Arc<AtomicBool>>> = HashMap::new();
+                let mut band_cancel_arcs: HashMap<String, Vec<Arc<CancelToken>>> = HashMap::new();
                 // Store active queues so scale_workers can reuse the same filter
                 if let Ok(mut aq) = JOB_RUNTIME.active_queues.lock() {
                     *aq = queues.clone();
@@ -2822,9 +3206,9 @@ pub fn init() -> HashMap<String, Value> {
 
                 // Spawn all band workers (background threads), collect cancel arcs
                 let mut band_task_ids: HashMap<String, Vec<u64>> = HashMap::new();
-                let mut band_cancel_arcs_map: HashMap<String, Vec<Arc<AtomicBool>>> =
+                let mut band_cancel_arcs_map: HashMap<String, Vec<Arc<CancelToken>>> =
                     HashMap::new();
-                let mut all_cancel_arcs: Vec<Arc<AtomicBool>> = Vec::new();
+                let mut all_cancel_arcs: Vec<Arc<CancelToken>> = Vec::new();
 
                 for band in &bands {
                     let mut ids = Vec::new();
@@ -2874,13 +3258,13 @@ pub fn init() -> HashMap<String, Value> {
                         if let Ok(ca) = JOB_RUNTIME.band_cancel_arcs.lock() {
                             for arcs in ca.values() {
                                 for arc in arcs {
-                                    arc.store(true, AtomicOrdering::Release);
+                                    arc.cancel();
                                 }
                             }
                         }
                         // Also signal the initial arcs (belt and suspenders)
                         for arc in &all_cancel_arcs {
-                            arc.store(true, AtomicOrdering::Release);
+                            arc.cancel();
                         }
                         break;
                     }
@@ -2973,6 +3357,117 @@ pub fn init() -> HashMap<String, Value> {
             max_arity: 0,
             requires: None,
             func: |_args| worker_status_impl(),
+        },
+    );
+
+    // @ntnt pause_queue
+    // @module std/jobs
+    // @signature pause_queue(queue: String) -> Result<Unit, String>
+    // Pause a queue — workers stop executing jobs from it.
+    // @example pause_queue("emails") ~ "Stop processing the emails queue"
+    module.insert(
+        "pause_queue".to_string(),
+        Value::NativeFunction {
+            name: "pause_queue".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(IntentError::type_error(
+                        "pause_queue() requires 1 argument (queue)".to_string(),
+                    ));
+                }
+                let queue = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "pause_queue() requires a string queue name".to_string(),
+                        ))
+                    }
+                };
+                pause_queue_impl(&queue)
+            },
+        },
+    );
+
+    // @ntnt resume_queue
+    // @module std/jobs
+    // @signature resume_queue(queue: String) -> Result<Unit, String>
+    // Resume a paused queue — workers resume claiming and executing jobs from it.
+    // @example resume_queue("emails") ~ "Resume processing the emails queue"
+    module.insert(
+        "resume_queue".to_string(),
+        Value::NativeFunction {
+            name: "resume_queue".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(IntentError::type_error(
+                        "resume_queue() requires 1 argument (queue)".to_string(),
+                    ));
+                }
+                let queue = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "resume_queue() requires a string queue name".to_string(),
+                        ))
+                    }
+                };
+                resume_queue_impl(&queue)
+            },
+        },
+    );
+
+    // @ntnt queue_status
+    // @module std/jobs
+    // @signature queue_status(queue: String) -> Map
+    // Get the current status of a queue, including whether it is paused.
+    // @example queue_status("emails") ~ "Check if emails queue is paused"
+    module.insert(
+        "queue_status".to_string(),
+        Value::NativeFunction {
+            name: "queue_status".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(IntentError::type_error(
+                        "queue_status() requires 1 argument (queue)".to_string(),
+                    ));
+                }
+                let queue = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "queue_status() requires a string queue name".to_string(),
+                        ))
+                    }
+                };
+
+                let mut result = HashMap::new();
+                result.insert("name".to_string(), Value::String(queue.clone()));
+
+                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                let kv_key = format!("jobs:paused:{}", queue);
+                let paused_val = kv::kv_get(&kv_handle, &kv_key)?;
+
+                match paused_val {
+                    Value::String(ts) if !ts.is_empty() => {
+                        result.insert("paused".to_string(), Value::Bool(true));
+                        result.insert("paused_at".to_string(), Value::String(ts));
+                    }
+                    _ => {
+                        result.insert("paused".to_string(), Value::Bool(false));
+                    }
+                }
+
+                Ok(Value::Map(result))
+            },
         },
     );
 
@@ -3582,6 +4077,20 @@ pub(crate) mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         JOB_RUNTIME.reset();
         f();
+    }
+
+    /// Set up a temp SQLite KV store for the duration of a test, then clean up.
+    fn with_temp_kv<F: FnOnce(&Value)>(db_name: &str, f: F) {
+        with_clean_runtime(|| {
+            let tmp = std::env::temp_dir().join(db_name);
+            let url = format!("sqlite:{}", tmp.display());
+            if let Ok(mut u) = JOB_RUNTIME.kv_url.lock() {
+                *u = url.clone();
+            }
+            let kv = JOB_RUNTIME.get_or_init_kv().unwrap();
+            f(&kv);
+            let _ = std::fs::remove_file(&tmp);
+        });
     }
 
     /// Create a minimal JobDefinition for tests (no perform body needed for registry tests).
@@ -4418,11 +4927,11 @@ pub(crate) mod tests {
             // Run worker_loop in a thread for one iteration, then cancel
             let kv_handle = JOB_RUNTIME.get_or_init_kv().unwrap();
             let kv_info = extract_kv_handle_info(&kv_handle).unwrap();
-            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel = std::sync::Arc::new(crate::stdlib::concurrent::CancelToken::new());
             let cancel_clone = cancel.clone();
             let handle = std::thread::spawn(move || {
-                // Set cancellation flag so the loop can be stopped
-                crate::stdlib::concurrent::CURRENT_TASK_CANCELLED.with(|cell| {
+                // Set cancel token so the loop can be stopped
+                crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|cell| {
                     *cell.borrow_mut() = Some(cancel_clone);
                 });
                 let band = BandConfig {
@@ -4439,7 +4948,7 @@ pub(crate) mod tests {
             std::thread::sleep(std::time::Duration::from_millis(300));
 
             // Cancel the worker
-            cancel.store(true, std::sync::atomic::Ordering::Release);
+            cancel.cancel();
             handle.join().unwrap();
 
             // Check job status — should be "completed"
@@ -4976,10 +5485,10 @@ pub(crate) mod tests {
             // Run worker for a short time — it should NOT claim the future job
             let kv_handle = JOB_RUNTIME.get_or_init_kv().unwrap();
             let kv_info = extract_kv_handle_info(&kv_handle).unwrap();
-            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel = std::sync::Arc::new(crate::stdlib::concurrent::CancelToken::new());
             let cancel_clone = cancel.clone();
             let handle = std::thread::spawn(move || {
-                crate::stdlib::concurrent::CURRENT_TASK_CANCELLED.with(|cell| {
+                crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|cell| {
                     *cell.borrow_mut() = Some(cancel_clone);
                 });
                 let band = BandConfig {
@@ -4994,7 +5503,7 @@ pub(crate) mod tests {
 
             // Let worker poll a few times
             std::thread::sleep(std::time::Duration::from_millis(200));
-            cancel.store(true, std::sync::atomic::Ordering::Release);
+            cancel.cancel();
             handle.join().unwrap();
 
             // Job should still be pending (not claimed, not completed)
@@ -6012,10 +6521,10 @@ pub(crate) mod tests {
             // Run a critical-band worker (range 0-9) for a short time
             let kv_handle = JOB_RUNTIME.get_or_init_kv().unwrap();
             let kv_info = extract_kv_handle_info(&kv_handle).unwrap();
-            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel = std::sync::Arc::new(crate::stdlib::concurrent::CancelToken::new());
             let cancel_clone = cancel.clone();
             let handle = std::thread::spawn(move || {
-                crate::stdlib::concurrent::CURRENT_TASK_CANCELLED.with(|cell| {
+                crate::stdlib::concurrent::CURRENT_CANCEL_TOKEN.with(|cell| {
                     *cell.borrow_mut() = Some(cancel_clone);
                 });
                 let band = BandConfig {
@@ -6029,7 +6538,7 @@ pub(crate) mod tests {
             });
 
             std::thread::sleep(std::time::Duration::from_millis(250));
-            cancel.store(true, std::sync::atomic::Ordering::Release);
+            cancel.cancel();
             handle.join().unwrap();
 
             // Job at priority 50 should still be pending — critical worker should not have claimed it
@@ -6099,5 +6608,170 @@ pub(crate) mod tests {
             "Error should mention 100ms minimum, got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_pause_resume_queue_basic() {
+        with_temp_kv("ntnt_pause_test.db", |kv| {
+            assert!(
+                !is_queue_paused("emails", kv),
+                "Queue should not be paused initially"
+            );
+
+            pause_queue_impl("emails").unwrap();
+            assert!(
+                is_queue_paused("emails", kv),
+                "Queue should be paused after pause_queue_impl"
+            );
+
+            resume_queue_impl("emails").unwrap();
+            mark_pause_cache_stale();
+            assert!(
+                !is_queue_paused("emails", kv),
+                "Queue should not be paused after resume_queue_impl"
+            );
+        });
+    }
+
+    #[test]
+    fn test_pause_queue_persisted_in_kv() {
+        with_temp_kv("ntnt_pause_kv_test.db", |kv| {
+            pause_queue_impl("webhooks").unwrap();
+
+            let val = kv::kv_get(kv, "jobs:paused:webhooks").unwrap();
+            assert!(
+                matches!(val, Value::String(ref s) if !s.is_empty()),
+                "jobs:paused:webhooks should be set in KV, got {:?}",
+                val
+            );
+
+            resume_queue_impl("webhooks").unwrap();
+
+            let val = kv::kv_get(kv, "jobs:paused:webhooks").unwrap();
+            assert!(
+                matches!(val, Value::Unit),
+                "jobs:paused:webhooks should be deleted after resume, got {:?}",
+                val
+            );
+        });
+    }
+
+    #[test]
+    fn test_is_queue_paused_cache_refresh() {
+        with_temp_kv("ntnt_pause_refresh_test.db", |kv| {
+            kv::kv_set(
+                kv,
+                "jobs:paused:billing",
+                &Value::String("123456789".to_string()),
+                None,
+            )
+            .unwrap();
+
+            mark_pause_cache_stale();
+
+            assert!(
+                is_queue_paused("billing", kv),
+                "Cache refresh should detect externally-set pause"
+            );
+        });
+    }
+
+    // ── Rate Limit Tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_rate_limit_valid() {
+        for (input, count, window) in [
+            ("10/second", 10u64, 1u64),
+            ("100/minute", 100, 60),
+            ("1000/hour", 1000, 3600),
+        ] {
+            let rl =
+                parse_rate_limit(input).unwrap_or_else(|| panic!("expected Some for '{}'", input));
+            assert_eq!(rl.count, count, "count for '{}'", input);
+            assert_eq!(rl.window_secs, window, "window_secs for '{}'", input);
+        }
+    }
+
+    #[test]
+    fn test_parse_rate_limit_invalid() {
+        for (input, reason) in [
+            ("0/second", "zero count is invalid"),
+            ("10/day", "day not supported"),
+            ("abc/second", "non-numeric count"),
+            ("10", "missing interval"),
+            ("", "empty string"),
+        ] {
+            assert!(parse_rate_limit(input).is_none(), "{}", reason);
+        }
+    }
+
+    #[test]
+    fn test_rate_limit_kv_counter_increments() {
+        with_temp_kv("ntnt_rate_limit_counter_test.db", |kv| {
+            let rl_key = "jobs:ratelimit:SendEmail:1000000";
+            let c1 = kv::kv_incr(kv, rl_key, 1).unwrap();
+            let c2 = kv::kv_incr(kv, rl_key, 1).unwrap();
+            let c3 = kv::kv_incr(kv, rl_key, 1).unwrap();
+            assert_eq!(c1, 1);
+            assert_eq!(c2, 2);
+            assert_eq!(c3, 3);
+        });
+    }
+
+    #[test]
+    fn test_rate_limit_window_key_format() {
+        // Verify window_start calculation is stable within a window.
+        let window_secs = 60u64;
+        let now_secs = 1_700_000_100i64; // arbitrary timestamp
+        let window_start = now_secs - (now_secs % window_secs as i64);
+        let key = format!("jobs:ratelimit:SendEmail:{}", window_start);
+        assert!(key.starts_with("jobs:ratelimit:SendEmail:"));
+        // window_start should be a multiple of 60
+        assert_eq!(window_start % 60, 0);
+    }
+
+    // ── Concurrency Limit Tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_concurrency_counter_acquire() {
+        with_temp_kv("ntnt_concurrency_counter_test.db", |kv| {
+            let counter_key = "jobs:concurrency:SendEmail";
+            let c1 = kv::kv_incr(kv, counter_key, 1).unwrap();
+            let c2 = kv::kv_incr(kv, counter_key, 1).unwrap();
+            let c3 = kv::kv_incr(kv, counter_key, 1).unwrap();
+            assert_eq!(c1, 1);
+            assert_eq!(c2, 2);
+            assert_eq!(c3, 3);
+
+            let c4 = kv::kv_incr(kv, counter_key, 1).unwrap();
+            assert_eq!(c4, 4, "Counter increments atomically");
+            let c4_rollback = kv::kv_incr(kv, counter_key, -1).unwrap();
+            assert_eq!(c4_rollback, 3, "Rollback restores count");
+        });
+    }
+
+    #[test]
+    fn test_concurrency_counter_release() {
+        with_temp_kv("ntnt_concurrency_release_test.db", |kv| {
+            let counter_key = "jobs:concurrency:ProcessVideo";
+            kv::kv_incr(kv, counter_key, 1).unwrap();
+            kv::kv_incr(kv, counter_key, 1).unwrap();
+
+            let after = kv::kv_incr(kv, counter_key, -1).unwrap();
+            assert_eq!(after, 1, "Release should decrement counter");
+
+            let after2 = kv::kv_incr(kv, counter_key, -1).unwrap();
+            assert_eq!(after2, 0, "All slots released");
+        });
+    }
+
+    #[test]
+    fn test_concurrency_counter_per_job_type() {
+        with_temp_kv("ntnt_concurrency_pertype_test.db", |kv| {
+            let c1 = kv::kv_incr(kv, "jobs:concurrency:SendEmail", 1).unwrap();
+            let c2 = kv::kv_incr(kv, "jobs:concurrency:ProcessVideo", 1).unwrap();
+            assert_eq!(c1, 1);
+            assert_eq!(c2, 1, "Different job type starts at 1, independent");
+        });
     }
 }

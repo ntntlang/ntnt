@@ -6160,6 +6160,9 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`enqueue_in`](#enqueuein) | Enqueue a job to run after a delay in seconds. |
 | [`job_status`](#jobstatus) | Get the current status and data for a job by its ID. |
 | [`list_jobs`](#listjobs) | List jobs with optional status and queue filters. |
+| [`pause_queue`](#pausequeue) | Pause a queue — workers stop executing jobs from it. |
+| [`queue_status`](#queuestatus) | Get the current status of a queue, including whether it is paused. |
+| [`resume_queue`](#resumequeue) | Resume a paused queue — workers resume claiming and executing jobs from it. |
 | [`retry_job`](#retryjob) | Re-queue a failed or dead job for another attempt. |
 | [`scale_workers`](#scaleworkers) | Scale the number of worker threads for a named band up or down. |
 | [`work_async`](#workasync) | Start one or more background worker threads that process jobs from the queue. |
@@ -6509,6 +6512,54 @@ list_jobs(map { "status": "dead", "limit": 10 })  // List up to 10 dead jobs
 ```
 
 **See also:** `job_status`, `retry_job`
+
+---
+
+#### `pause_queue`
+
+```ntnt
+pause_queue(queue: String) -> Result<Unit, String>
+```
+
+Pause a queue — workers stop executing jobs from it.
+
+**Examples:**
+
+```ntnt
+pause_queue("emails")  // Stop processing the emails queue
+```
+
+---
+
+#### `queue_status`
+
+```ntnt
+queue_status(queue: String) -> Map
+```
+
+Get the current status of a queue, including whether it is paused.
+
+**Examples:**
+
+```ntnt
+queue_status("emails")  // Check if emails queue is paused
+```
+
+---
+
+#### `resume_queue`
+
+```ntnt
+resume_queue(queue: String) -> Result<Unit, String>
+```
+
+Resume a paused queue — workers resume claiming and executing jobs from it.
+
+**Examples:**
+
+```ntnt
+resume_queue("emails")  // Resume processing the emails queue
+```
 
 ---
 

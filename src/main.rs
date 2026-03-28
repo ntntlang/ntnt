@@ -633,6 +633,30 @@ enum WorkersCommands {
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
     },
+
+    /// Pause a queue — workers stop executing jobs from it.
+    /// The pause state is persisted in KV and survives process restart.
+    Pause {
+        /// Queue name to pause
+        #[arg(value_name = "QUEUE")]
+        queue: String,
+
+        /// Directory that contains .ntnt.sock (default: current directory)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
+
+    /// Resume a paused queue — workers resume claiming jobs from it.
+    /// Workers begin processing the queue on their next poll cycle.
+    Resume {
+        /// Queue name to resume
+        #[arg(value_name = "QUEUE")]
+        queue: String,
+
+        /// Directory that contains .ntnt.sock (default: current directory)
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
 }
 
 /// Format and display an error with rich context (error codes, source snippets, suggestions).
@@ -1276,6 +1300,8 @@ fn run_workers_command(cmd: WorkersCommands) -> anyhow::Result<()> {
     match cmd {
         WorkersCommands::Status { dir } => run_workers_status(dir),
         WorkersCommands::Scale { band, count, dir } => run_workers_scale(band, count, dir),
+        WorkersCommands::Pause { queue, dir } => run_workers_set_paused(queue, dir, true),
+        WorkersCommands::Resume { queue, dir } => run_workers_set_paused(queue, dir, false),
     }
 }
 
@@ -1397,6 +1423,16 @@ fn run_workers_status(dir: Option<PathBuf>) -> anyhow::Result<()> {
     println!();
     println!("Total pending: {}", format_count(pending));
 
+    // Show paused queues if any
+    if let Some(paused) = resp
+        .get("paused_queues")
+        .and_then(|v| v.as_array())
+        .filter(|a| !a.is_empty())
+    {
+        let names: Vec<&str> = paused.iter().filter_map(|v| v.as_str()).collect();
+        println!("Paused queues: {}", names.join(", "));
+    }
+
     Ok(())
 }
 
@@ -1415,6 +1451,21 @@ fn run_workers_scale(band: String, count: u32, dir: Option<PathBuf>) -> anyhow::
     }
 
     println!("✓ {}: scaled to {} workers", band, count);
+    Ok(())
+}
+
+fn run_workers_set_paused(queue: String, dir: Option<PathBuf>, paused: bool) -> anyhow::Result<()> {
+    let cmd = if paused { "pause" } else { "resume" };
+    let payload = serde_json::json!({ "cmd": cmd, "queue": &queue }).to_string();
+
+    let resp = workers_socket_call(dir, &payload)?;
+
+    if let Some(err) = resp.get("error").and_then(|v| v.as_str()) {
+        anyhow::bail!("{}", err);
+    }
+
+    let state = if paused { "paused" } else { "resumed" };
+    println!("✓ queue '{}': {}", queue, state);
     Ok(())
 }
 

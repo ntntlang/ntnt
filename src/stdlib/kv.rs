@@ -411,12 +411,7 @@ impl SQLiteKV {
         Ok(())
     }
 
-    /// Atomically increment an integer value by `amount`.
-    ///
-    /// - If the key doesn't exist, it is created with value = `amount` (i.e., starts from 0).
-    /// - If the key exists with type "int", the value is incremented atomically.
-    /// - If the key exists with a non-integer type, returns `Err`.
-    /// - Existing TTL is preserved (the `expires_at` column is not updated).
+    /// Atomically increment an integer value. Creates key if missing; preserves existing TTL.
     pub fn incr(&self, key: &str, amount: i64) -> Result<i64> {
         let now = now_unix();
 
@@ -430,32 +425,25 @@ impl SQLiteKV {
             |row| Ok((row.get(0)?, row.get(1)?)),
         );
 
-        match row {
+        let new_val: i64 = match row {
             Err(rusqlite::Error::QueryReturnedNoRows) => {
                 // Key doesn't exist or is expired — delete any expired row first to avoid
                 // unique constraint violation, then insert fresh.
                 let _ = self
                     .conn
                     .execute("DELETE FROM _kv WHERE key = ?", params![key]);
-                match self.conn.execute(
+                let ins = self.conn.execute(
                     "INSERT INTO _kv (key, value, type, expires_at) VALUES (?, ?, 'int', NULL)",
                     params![key, amount.to_string()],
-                ) {
-                    Ok(_) => {
-                        self.conn.execute_batch("COMMIT").map_err(|e| {
-                            let _ = self.conn.execute_batch("ROLLBACK");
-                            IntentError::runtime_error(format!("KV incr commit error: {}", e))
-                        })?;
-                        Ok(amount)
-                    }
-                    Err(e) => {
-                        let _ = self.conn.execute_batch("ROLLBACK");
-                        Err(IntentError::runtime_error(format!(
-                            "KV incr insert error: {}",
-                            e
-                        )))
-                    }
+                );
+                if let Err(e) = ins {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(IntentError::runtime_error(format!(
+                        "KV incr insert error: {}",
+                        e
+                    )));
                 }
+                amount
             }
             Ok((value_str, type_hint)) => {
                 if type_hint != "int" {
@@ -476,31 +464,30 @@ impl SQLiteKV {
                     }
                 };
                 let new_val = current + amount;
-                match self.conn.execute(
+                let upd = self.conn.execute(
                     "UPDATE _kv SET value = ? WHERE key = ?",
                     params![new_val.to_string(), key],
-                ) {
-                    Ok(_) => {
-                        self.conn.execute_batch("COMMIT").map_err(|e| {
-                            let _ = self.conn.execute_batch("ROLLBACK");
-                            IntentError::runtime_error(format!("KV incr commit error: {}", e))
-                        })?;
-                        Ok(new_val)
-                    }
-                    Err(e) => {
-                        let _ = self.conn.execute_batch("ROLLBACK");
-                        Err(IntentError::runtime_error(format!(
-                            "KV incr update error: {}",
-                            e
-                        )))
-                    }
+                );
+                if let Err(e) = upd {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(IntentError::runtime_error(format!(
+                        "KV incr update error: {}",
+                        e
+                    )));
                 }
+                new_val
             }
             Err(e) => {
                 let _ = self.conn.execute_batch("ROLLBACK");
-                Err(IntentError::runtime_error(format!("KV incr error: {}", e)))
+                return Err(IntentError::runtime_error(format!("KV incr error: {}", e)));
             }
-        }
+        };
+
+        self.conn.execute_batch("COMMIT").map_err(|e| {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            IntentError::runtime_error(format!("KV incr commit error: {}", e))
+        })?;
+        Ok(new_val)
     }
 
     /// Atomically claim the first key matching a prefix: SELECT + DELETE in one transaction.
@@ -902,17 +889,10 @@ impl RedisKV {
         }
     }
 
-    /// Atomically increment an integer value by `amount`.
-    ///
-    /// Uses a Lua script for atomicity — GET + parse + SET in one Redis round-trip.
-    /// Handles both envelope format (`{"__ntnt_t":"int","v":N}`) and plain integer strings.
-    /// If the key doesn't exist, it is created with value = `amount`.
-    /// Preserves existing TTL via TTL + EXPIRE.
-    /// Returns Err if the existing value is not an integer.
+    /// Atomically increment an integer value. Creates key if missing; preserves existing TTL.
     pub fn incr(&mut self, key: &str, amount: i64) -> Result<i64> {
-        // Lua script: atomic GET + parse + SET, preserving TTL.
+        // Atomic GET + parse + SET in one round-trip via Lua.
         // Handles both envelope format {"__ntnt_t":"int","v":N} and plain integer strings.
-        // cjson is available in Redis 2.6+ and Valkey.
         let lua_script = r#"
             local key = KEYS[1]
             local amount = tonumber(ARGV[1])
@@ -924,24 +904,24 @@ impl RedisKV {
                 local ok, parsed = pcall(cjson.decode, current)
                 if ok and type(parsed) == 'table' and parsed['__ntnt_t'] == 'int' then
                     local v = parsed['v']
-                    if type(v) ~= 'number' then
+                    if type(v) ~= 'number' or v % 1 ~= 0 then
                         return redis.error_reply('ERR value is not an integer or out of range')
                     end
-                    n = math.floor(v) + amount
+                    n = v + amount
                 else
                     local plain = tonumber(current)
-                    if plain == nil then
+                    if plain == nil or plain % 1 ~= 0 then
                         return redis.error_reply('ERR value is not an integer or out of range')
                     end
-                    n = math.floor(plain) + amount
+                    n = plain + amount
                 end
             end
             local ttl = redis.call('TTL', key)
             -- Store as envelope JSON for type round-trip with get()
             local envelope = cjson.encode({__ntnt_t = 'int', v = n})
             redis.call('SET', key, envelope)
-            if ttl > 0 then
-                redis.call('EXPIRE', key, ttl)
+            if ttl >= 0 then
+                redis.call('EXPIRE', key, math.max(ttl, 1))
             end
             return n
         "#;
@@ -2299,11 +2279,7 @@ pub fn kv_set_nx(handle: &Value, key: &str, value: &Value, ttl: Option<i64>) -> 
     }
 }
 
-/// Atomically increment an integer value by `amount`.
-///
-/// If the key doesn't exist, it is created with value = `amount`.
-/// Returns the new value. Preserves existing TTL (does not reset it).
-/// Returns `Err` if the existing value is not an integer.
+/// Atomically increment an integer value. Creates key if missing; preserves existing TTL.
 pub fn kv_incr(handle: &Value, key: &str, amount: i64) -> Result<i64> {
     let backend = get_backend_type(handle)?;
     match backend {
