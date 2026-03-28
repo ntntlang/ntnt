@@ -3541,6 +3541,98 @@ print(s)
     );
 }
 
+#[test]
+fn test_if_expr_block_with_let_in_branches() {
+    let code = r#"
+let x = if true {
+    let a = 1
+    a + 2
+} else {
+    let b = 10
+    b - 5
+}
+print(x)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("3"),
+        "Block branches should allow let bindings: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_if_expr_block_ending_in_statement_returns_unit() {
+    let code = r#"
+let x = if true {
+    let a = 1
+    let b = a + 1
+} else {
+    let c = 2
+}
+print(x)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("()"),
+        "Block ending in statement should return Unit: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_if_expr_nested_blocks() {
+    let code = r#"
+let x = if true {
+    let inner = if false {
+        let a = 1
+        a
+    } else {
+        let b = 2
+        b
+    }
+    inner + 3
+} else {
+    0
+}
+print(x)
+"#;
+    let (stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0, "Should succeed: stderr={}", stderr);
+    assert!(
+        stdout.contains("5"),
+        "Nested block branches should evaluate correctly: stdout={}",
+        stdout
+    );
+}
+
+#[test]
+fn test_if_expr_branch_scope_isolated() {
+    let code = r#"
+let x = if true {
+    let a = 1
+    a
+} else {
+    0
+}
+print(a)
+"#;
+    let (_stdout, stderr, exit_code) = run_ntnt_code(code);
+    assert_ne!(exit_code, 0, "Should fail with undefined variable");
+    assert!(
+        stderr.contains("E006"),
+        "Should contain error code E006: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("a"),
+        "Should mention undefined variable: {}",
+        stderr
+    );
+}
+
 // ============================================================================
 // None/Option Comparison Safety
 // ============================================================================
@@ -5629,4 +5721,63 @@ print(double(5))
     assert!(stdout.contains("10"), "expected 10, got: {}", stdout);
 
     fs::remove_dir_all(&temp_dir).ok();
+}
+
+// DD-048 edge case tests (from Codex review)
+
+#[test]
+fn test_if_expr_nested_if_as_branch_value() {
+    let code = r#"
+let x = if true { if false { 1 } else { 2 } } else { 0 }
+print(x)
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(
+        stdout.trim(),
+        "2",
+        "Nested if-expression should return inner result"
+    );
+}
+
+#[test]
+fn test_if_expr_else_if_chain_with_blocks() {
+    let code = r#"
+let x = if false {
+    let a = 1
+    a
+} else if false {
+    let b = 2
+    b
+} else {
+    let c = 3
+    c
+}
+print(x)
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "3", "Else-if chain with block branches");
+}
+
+#[test]
+fn test_if_expr_map_literal_in_branch() {
+    let code = r#"
+let x = if true { map { "k": 1 } } else { map { "k": 2 } }
+print(x["k"])
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "1", "Map literal in if-expression branch");
+}
+
+#[test]
+fn test_if_expr_empty_branch_returns_unit() {
+    let code = r#"
+let x = if false { 42 } else { }
+print(x)
+"#;
+    let (stdout, _stderr, exit_code) = run_ntnt_code(code);
+    assert_eq!(exit_code, 0);
+    assert_eq!(stdout.trim(), "()", "Empty branch should return Unit");
 }

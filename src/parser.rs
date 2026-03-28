@@ -1424,6 +1424,11 @@ impl Parser {
         Ok(Block { statements })
     }
 
+    fn parse_if_expr_block_branch(&mut self) -> Result<Expression> {
+        let block = self.block()?;
+        Ok(Expression::Block(block))
+    }
+
     // Expression parsing with precedence climbing
 
     /// Parse a single expression - made public for template rendering
@@ -2058,17 +2063,14 @@ impl Parser {
         if self.match_token(&[TokenKind::If]) {
             let condition = self.expression()?;
             self.consume(&TokenKind::LeftBrace, "Expected '{' after if condition")?;
-            let then_branch = self.expression()?;
-            self.consume(&TokenKind::RightBrace, "Expected '}' after then branch")?;
+            let then_branch = self.parse_if_expr_block_branch()?;
             self.consume(&TokenKind::Else, "If-expressions require an else branch")?;
             let else_branch = if self.check(&TokenKind::If) {
                 // else if — primary() will match If and recurse
                 self.primary()?
             } else {
                 self.consume(&TokenKind::LeftBrace, "Expected '{' after else")?;
-                let expr = self.expression()?;
-                self.consume(&TokenKind::RightBrace, "Expected '}' after else branch")?;
-                expr
+                self.parse_if_expr_block_branch()?
             };
             return Ok(Expression::IfExpr {
                 condition: Box::new(condition),
