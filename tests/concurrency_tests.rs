@@ -303,6 +303,34 @@ await_task(task)
 }
 
 #[test]
+fn test_spawn_with_if_expr_block_branches() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { spawn, await_task } from "std/concurrent"
+
+let task = spawn(fn() {
+    let value = if true {
+        let a = 10
+        a + 1
+    } else {
+        let b = 0
+        b
+    }
+    value
+})
+let result = await_task(task)
+print(result)
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.trim().contains("11"),
+        "Spawn should handle if-expression block branches, got: {}",
+        stdout
+    );
+}
+
+#[test]
 fn test_spawn_rejects_parameterized_handler() {
     let (_stdout, _stderr, code) = run_ntnt_code(
         r#"
@@ -538,6 +566,39 @@ print("cancelled: " + str(result))
     assert!(
         stdout.contains("cancelled: true"),
         "Should cancel successfully, got: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_schedule_with_if_expr_block_branches() {
+    let (stdout, _stderr, code) = run_ntnt_code(
+        r#"
+import { schedule, cancel_schedule, channel, send, recv_timeout } from "std/concurrent"
+
+let [tx, rx] = channel()
+let sched = schedule(50, fn() {
+    let v = if true {
+        let a = 5
+        a + 1
+    } else {
+        0
+    }
+    send(tx, v)
+})
+
+let result = recv_timeout(rx, 500)
+cancel_schedule(sched)
+match result {
+    Some(v) => print("got: " + str(v)),
+    None => print("missing")
+}
+"#,
+    );
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("got: 6"),
+        "Schedule should handle if-expression block branches, got: {}",
         stdout
     );
 }

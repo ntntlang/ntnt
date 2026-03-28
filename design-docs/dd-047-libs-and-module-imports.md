@@ -1,6 +1,6 @@
 # DD-047: `libs()` Builtin + Module-as-Namespace Imports
 
-**Status:** draft  
+**Status:** ✅ Complete  
 **Author:** larri  
 **Created:** 2026-03-25  
 **Reviewed by:** Claude Code — 2026-03-25, Codex — 2026-03-25  
@@ -123,49 +123,49 @@ To make route files also benefit from `libs()` recursive discovery (loading `lib
 
 ### Phase 1: `libs()` Builtin
 
-- [ ] Add `libs` to `define_server_actions()` in `interpreter.rs` (same pattern as `routes`, `jobs`)
-- [ ] **Explicit directory existence check** before scanning (runtime error with clear message if missing)
-- [ ] Implementation: call `collect_tnt_files()` on the directory (recursive), then `load_module_exports()` for each file
-- [ ] Inject exports flat into the current environment (iterate each module's exports, `env.define(name, value)`)
-- [ ] **Build collision warning from scratch:** Track `seen_exports: HashMap<String, String>` during injection, `eprintln!("[warn] {new_file} overwrites '{name}' from {old_file}")` in dev mode
-- [ ] **Normalize module cache keys:** Add a helper that resolves import paths to canonical absolute paths. Use in both `handle_import()` cache lookup and `import_file_module()` cache storage. This prevents double evaluation when `libs()` and explicit `import` target the same file with different path strings.
-- [ ] **Fix environment restore on error:** Both `load_module_exports()` and `import_file_module()` use `?` after `self.eval(&ast)`, which skips environment restore if evaluation fails. Change to `match` + restore pattern (same as the file context save/restore rule in the ntnt skill). Prevents environment leaks when `libs()` loads many files and one has a parse error.
-- [ ] **Hot-reload with directory rescan:** Don't just check tracked file mtimes — rescan the directory on each cycle to detect new/deleted files. Compare against tracked set, add new files, remove deleted files, re-evaluate changed files. Track the `libs()` directory path separately from ad-hoc `lib_module_files`.
-- [ ] **Update `load_file_based_routes()` lib discovery** to use `collect_tnt_files()` (recursive) instead of flat `read_dir`. This ensures route files see modules from `lib/utils/` subdirectories via namespaced access.
-- [ ] `// @ntnt` doc block (NO `@module` — this is a server action builtin)
-- [ ] Add typechecker signature via `sig!` macro
-- [ ] Tests:
-  - [ ] Basic: `libs("lib/")` makes functions callable
-  - [ ] Recursive: `libs("lib/")` discovers files in `lib/utils/subfolder.tnt`
-  - [ ] Collision warning: two files exporting same name → dev mode warning
-  - [ ] Hot reload: modify file, verify new export available (file-routing path)
-  - [ ] Hot reload: add new file to lib dir, verify discovered on next cycle
-  - [ ] Hot reload: delete file from lib dir, verify stale module removed
-  - [ ] Empty directory: no error, no exports
-  - [ ] Missing directory: runtime error with clear message
-  - [ ] Interaction with explicit `import { X } from "./lib/file.tnt"` (no conflict, both work)
-  - [ ] No double evaluation when `libs()` and explicit `import` target the same file (cache key normalization)
-  - [ ] Environment restored correctly when a lib file has a parse/eval error (other libs still work)
-  - [ ] Route files see recursive lib modules via namespaced access after `load_file_based_routes` update
+- [x] Add `libs` to `define_server_actions()` in `interpreter.rs` (same pattern as `routes`, `jobs`)
+- [x] **Explicit directory existence check** before scanning (runtime error with clear message if missing)
+- [x] Implementation: call `collect_tnt_files()` on the directory (recursive), then `load_module_exports()` for each file
+- [x] Inject exports flat into the current environment (iterate each module's exports, `env.define(name, value)`)
+- [x] **Build collision warning from scratch:** Track `seen_exports: HashMap<String, String>` during injection, `eprintln!("[warn] {new_file} overwrites '{name}' from {old_file}")` in dev mode
+- [x] **Normalize module cache keys:** Add a helper that resolves import paths to canonical absolute paths. Use in both `handle_import()` cache lookup and `import_file_module()` cache storage. This prevents double evaluation when `libs()` and explicit `import` target the same file with different path strings.
+- [x] **Fix environment restore on error:** Both `load_module_exports()` and `import_file_module()` use `?` after `self.eval(&ast)`, which skips environment restore if evaluation fails. Change to `match` + restore pattern (same as the file context save/restore rule in the ntnt skill). Prevents environment leaks when `libs()` loads many files and one has a parse error.
+- [x] **Hot-reload with directory rescan:** Don't just check tracked file mtimes — rescan the directory on each cycle to detect new/deleted files. Compare against tracked set, add new files, remove deleted files, re-evaluate changed files. Track the `libs()` directory path separately from ad-hoc `lib_module_files`.
+- [x] **Update `load_file_based_routes()` lib discovery** to use `collect_tnt_files()` (recursive) instead of flat `read_dir`. This ensures route files see modules from `lib/utils/` subdirectories via namespaced access.
+- [x] `// @ntnt` doc block (NO `@module` — this is a server action builtin)
+- [x] Add typechecker signature via `sig!` macro
+- [x] Tests:
+  - [x] Basic: `libs("lib/")` makes functions callable
+  - [x] Recursive: `libs("lib/")` discovers files in `lib/utils/subfolder.tnt`
+  - [x] Collision warning: two files exporting same name → dev mode warning
+  - [x] Hot reload: modify file, verify new export available (file-routing path)
+  - [x] Hot reload: add new file to lib dir, verify discovered on next cycle
+  - [x] Hot reload: delete file from lib dir, verify stale module removed
+  - [x] Empty directory: no error, no exports
+  - [x] Missing directory: runtime error with clear message
+  - [x] Interaction with explicit `import { X } from "./lib/file.tnt"` (no conflict, both work)
+  - [x] No double evaluation when `libs()` and explicit `import` target the same file (cache key normalization)
+  - [x] Environment restored correctly when a lib file has a parse/eval error (other libs still work)
+  - [x] Route files see recursive lib modules via namespaced access after `load_file_based_routes` update
 
 ### Phase 2: Module-as-Namespace Import Syntax
 
-- [ ] **Fix parser misparse:** `import config from "./lib/config.tnt"` currently parses as selective import `import { config } from "..."`. Add lookahead: bare identifier + `from` keyword → namespace import (`Import { items: [], alias: Some(ident), source }`)
-- [ ] Verify `bind_imports` handles `items: []` + `alias: Some(name)` correctly (code path exists and works)
-- [ ] Works for both stdlib and file modules: `import http from "std/http"`, `import config from "./lib/config.tnt"`
-- [ ] Tests:
-  - [ ] `import config from "./lib/config.tnt"` → `config.FIELD` access works
-  - [ ] `import http from "std/http"` → `http.fetch(url)` works
-  - [ ] Module cached after first import (no double evaluation)
-  - [ ] Hot reload tracks the imported file
-  - [ ] Verify `import "path" as alias` still works (existing syntax, must not regress)
+- [x] **Fix parser misparse:** `import config from "./lib/config.tnt"` currently parses as selective import `import { config } from "..."`. Add lookahead: bare identifier + `from` keyword → namespace import (`Import { items: [], alias: Some(ident), source }`)
+- [x] Verify `bind_imports` handles `items: []` + `alias: Some(name)` correctly (code path exists and works)
+- [x] Works for both stdlib and file modules: `import http from "std/http"`, `import config from "./lib/config.tnt"`
+- [x] Tests:
+  - [x] `import config from "./lib/config.tnt"` → `config.FIELD` access works
+  - [x] `import http from "std/http"` → `http.fetch(url)` works
+  - [x] Module cached after first import (no double evaluation)
+  - [x] Hot reload tracks the imported file
+  - [x] Verify `import "path" as alias` still works (existing syntax, must not regress)
 
 ### Phase 3: Wildcard Import (Optional — Low Priority)
 
-- [ ] Parser: `import * from "./lib/config.tnt"` → new AST representation (distinguish from namespace import)
-- [ ] **New `bind_imports` code path:** Current empty-items path always creates a Struct namespace. Wildcard needs flat injection — iterate all exports and `env.define()` each one. Distinguish via a `wildcard: bool` flag on the Import AST node, or a sentinel alias value.
-- [ ] Collision warning if overwriting existing bindings
-- [ ] Tests
+- [x] Parser: `import * from "./lib/config.tnt"` → new AST representation (distinguish from namespace import)
+- [x] **New `bind_imports` code path:** Current empty-items path always creates a Struct namespace. Wildcard needs flat injection — iterate all exports and `env.define()` each one. Distinguish via a `wildcard: bool` flag on the Import AST node, or a sentinel alias value.
+- [x] Collision warning if overwriting existing bindings
+- [x] Tests
 
 ## Interaction Between Features
 
