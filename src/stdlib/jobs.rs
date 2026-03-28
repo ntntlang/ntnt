@@ -1332,9 +1332,9 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                 match kv::kv_incr(&kv_handle, &rl_key, 1) {
                     Ok(current_count) => {
                         if current_count == 1 {
-                            if kv::kv_expire(&kv_handle, &rl_key, ws * 2).is_err() {
-                                let _ = kv::kv_del(&kv_handle, &rl_key);
-                            }
+                            // Best-effort TTL — if it fails, key may leak but counter stays
+                            // correct. Deleting would reset the window and allow overage.
+                            let _ = kv::kv_expire(&kv_handle, &rl_key, ws * 2);
                         }
                         // Sliding window: weight previous window by how much of it is still relevant
                         let prev_count = match kv::kv_get(&kv_handle, &prev_key) {
@@ -1357,7 +1357,7 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
                                     ("type", Value::String(job_type.clone())),
                                     ("window", Value::String(rate_str.clone())),
                                     ("current", Value::Int(current_count)),
-                                    ("weighted", Value::Int(weighted as i64)),
+                                    ("weighted", Value::Float(weighted)),
                                     ("retry_after_secs", Value::Int(remaining)),
                                 ],
                             );
