@@ -4681,6 +4681,28 @@ impl Interpreter {
                     }
                 }
 
+                // Validate rate option format at registration time (helpful error for bad formats)
+                if let Some(crate::stdlib::jobs::JobOptionValue::String(rate_str)) =
+                    opts.get("rate")
+                {
+                    if crate::stdlib::jobs::parse_rate_limit(rate_str).is_none() {
+                        return Err(IntentError::runtime_error(format!(
+                            "Job '{}': invalid rate '{}' (use N/second, N/minute, or N/hour)",
+                            name, rate_str
+                        )));
+                    }
+                }
+
+                // Validate concurrency option at registration time
+                if let Some(crate::stdlib::jobs::JobOptionValue::Int(n)) = opts.get("concurrency") {
+                    if *n < 1 {
+                        return Err(IntentError::runtime_error(format!(
+                            "Job '{}': concurrency must be >= 1, got {}",
+                            name, n
+                        )));
+                    }
+                }
+
                 // Register in global JOB_RUNTIME — store full definition including
                 // perform body so workers can re-evaluate the source file and execute
                 // perform blocks with full access to imports and user-defined functions.

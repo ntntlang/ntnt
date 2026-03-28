@@ -233,7 +233,15 @@ fn dispatch_command(line: &str) -> String {
             };
             cmd_scale(&band, count)
         }
-        _ => serde_json::json!({ "error": "unknown command; expected 'status' or 'scale'" })
+        Some("pause") => match get_queue(&cmd) {
+            Ok(q) => cmd_queue_paused(&q, true),
+            Err(e) => e,
+        },
+        Some("resume") => match get_queue(&cmd) {
+            Ok(q) => cmd_queue_paused(&q, false),
+            Err(e) => e,
+        },
+        _ => serde_json::json!({ "error": "unknown command; expected 'status', 'scale', 'pause', or 'resume'" })
             .to_string(),
     }
 }
@@ -256,6 +264,25 @@ fn cmd_scale(band: &str, count: usize) -> String {
     }
 }
 
+fn get_queue(cmd: &serde_json::Value) -> Result<String, String> {
+    cmd.get("queue")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| serde_json::json!({ "error": "missing 'queue' field" }).to_string())
+}
+
+fn cmd_queue_paused(queue: &str, paused: bool) -> String {
+    let result = if paused {
+        crate::stdlib::jobs::pause_queue_impl(queue)
+    } else {
+        crate::stdlib::jobs::resume_queue_impl(queue)
+    };
+    match result {
+        Ok(_) => serde_json::json!({ "ok": true, "queue": queue, "paused": paused }).to_string(),
+        Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +297,18 @@ mod tests {
     fn test_dispatch_unknown_command() {
         let resp = dispatch_command(r#"{"cmd":"reboot"}"#);
         assert!(resp.contains("unknown command"));
+    }
+
+    #[test]
+    fn test_dispatch_pause_missing_queue() {
+        let resp = dispatch_command(r#"{"cmd":"pause"}"#);
+        assert!(resp.contains("missing 'queue'"));
+    }
+
+    #[test]
+    fn test_dispatch_resume_missing_queue() {
+        let resp = dispatch_command(r#"{"cmd":"resume"}"#);
+        assert!(resp.contains("missing 'queue'"));
     }
 
     #[test]

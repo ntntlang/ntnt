@@ -22,7 +22,7 @@
 //! - `await_task()` marks state as `Consumed` (the "I'm done with this handle" call).
 //! - `try_await()` peeks without consuming — updates `last_checked_at`. Never errors for
 //!   handles that existed; returns `{status: "consumed"}` or `{status: "expired"}` instead.
-//! - `cancel_task()` only sets the `AtomicBool` flag (cooperative cancellation via yield points).
+//! - `cancel_task()` calls `.cancel()` on the task's `CancelToken` (cooperative cancellation via yield points).
 //! - All `eval_block` calls are wrapped in `catch_unwind(AssertUnwindSafe(...))`.
 //! - Tasks auto-expire (marked `Expired`) after 5 minutes in terminal state (the reaper runs on
 //!   `spawn()` and `after()` entry), but only if not recently `try_await()`'d.
@@ -32,13 +32,13 @@
 //! ## Schedules
 //!
 //! - `cancel_schedule()` sets flag AND removes from registry.
-//! - Schedule sleep uses 50ms cancellation-aware slices.
+//! - Schedule sleep uses `CancelToken::wait_timeout()` for instant wakeup on cancellation.
 //! - Zero-duration intervals are rejected.
 //! - Tick execution spawns a thread with `catch_unwind` and overlap prevention via `AtomicBool`.
 //!
 //! ## Cancellation
 //!
-//! Thread-local `CURRENT_TASK_CANCELLED` for cooperative cancellation.
+//! Thread-local `CURRENT_CANCEL_TOKEN` for cooperative cancellation.
 //! Yield points: `recv()`, `recv_timeout()`, `sleep_ms()`, `fetch()`.
 //! Note: `sleep()` from std/time is NOT cancellation-aware.
 
@@ -55,24 +55,83 @@ use std::time::{Duration, Instant};
 type Result<T> = std::result::Result<T, IntentError>;
 
 // =============================================================================
-// Thread-local cancellation flag (cooperative cancellation)
+// CancelToken — cooperative cancellation with instant Condvar wakeup
+// =============================================================================
+
+/// Cooperative cancellation token. `cancel()` sets the flag and wakes all
+/// threads blocked in `wait_timeout()` instantly.
+pub struct CancelToken {
+    inner: Mutex<bool>,
+    condvar: Condvar,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        CancelToken {
+            inner: Mutex::new(false),
+            condvar: Condvar::new(),
+        }
+    }
+
+    /// Signal cancellation. Sets flag and wakes all waiting threads instantly.
+    pub fn cancel(&self) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = true;
+        self.condvar.notify_all();
+    }
+
+    /// Returns true if cancelled (or if mutex is poisoned).
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.lock().map_or(true, |g| *g)
+    }
+
+    /// Sleep for up to `duration`, waking instantly if cancelled.
+    /// Returns true if cancelled, false if timeout elapsed.
+    pub fn wait_timeout(&self, duration: Duration) -> bool {
+        let guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return true,
+        };
+        if *guard {
+            return true;
+        }
+        self.condvar
+            .wait_timeout_while(guard, duration, |cancelled| !*cancelled)
+            .map_or(true, |(g, _)| *g)
+    }
+}
+
+// =============================================================================
+// Thread-local cancellation token (cooperative cancellation)
 // =============================================================================
 
 thread_local! {
-    /// Set by the task's thread to point at the task's cancellation flag.
+    /// Set by the task's thread to point at the task's cancellation token.
     /// Yield-point functions check this to honour cooperative cancellation.
-    pub static CURRENT_TASK_CANCELLED: std::cell::RefCell<Option<Arc<AtomicBool>>> =
+    pub static CURRENT_CANCEL_TOKEN: std::cell::RefCell<Option<Arc<CancelToken>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Check if the current thread's task has been cancelled.
 /// Called at yield points: recv, recv_timeout, sleep_ms, http_fetch, http_get.
 pub fn is_current_task_cancelled() -> bool {
-    CURRENT_TASK_CANCELLED.with(|cell| {
+    CURRENT_CANCEL_TOKEN.with(|cell| {
         cell.borrow()
             .as_ref()
-            .map(|flag| flag.load(AtomicOrdering::Acquire))
+            .map(|t| t.is_cancelled())
             .unwrap_or(false)
+    })
+}
+
+/// Sleep for up to `duration`, waking instantly on cancellation.
+/// Returns true if cancelled, false if duration elapsed.
+pub fn sleep_cancellable(duration: Duration) -> bool {
+    CURRENT_CANCEL_TOKEN.with(|cell| match cell.borrow().as_ref() {
+        Some(token) => token.wait_timeout(duration),
+        None => {
+            thread::sleep(duration);
+            false
+        }
     })
 }
 
@@ -279,8 +338,8 @@ pub(crate) struct TaskInner {
 struct TaskEntry {
     /// Core mutable state — one lock instead of four.
     inner: Arc<Mutex<TaskInner>>,
-    /// Cooperative cancellation flag. Set by `cancel_task()` with Release ordering.
-    cancelled: Arc<AtomicBool>,
+    /// Cooperative cancellation token. `cancel_task()` calls `.cancel()` for instant wakeup.
+    cancelled: Arc<CancelToken>,
     /// Last time `try_await()` checked this task (prevents reaping active handles).
     last_checked_at: Arc<Mutex<Option<Instant>>>,
     /// Condvar notified by `finalize_task()` when the task reaches a terminal state.
@@ -316,7 +375,7 @@ struct ChannelEntry {
 // =============================================================================
 
 struct ScheduleEntry {
-    cancelled: Arc<AtomicBool>,
+    cancelled: Arc<CancelToken>,
 }
 
 // =============================================================================
@@ -686,7 +745,7 @@ impl ConcurrencyRuntime {
     // -------------------------------------------------------------------------
 
     /// Register a new task and return its ID. The caller must spawn the thread.
-    pub(crate) fn register_task(&self, cancelled: Arc<AtomicBool>) -> Result<u64> {
+    pub(crate) fn register_task(&self, cancelled: Arc<CancelToken>) -> Result<u64> {
         let id = self.next_id();
         let entry = TaskEntry {
             inner: Arc::new(Mutex::new(TaskInner {
@@ -912,7 +971,7 @@ impl ConcurrencyRuntime {
                 None => return Ok(Value::Bool(false)),
             }
         };
-        cancelled_arc.store(true, AtomicOrdering::Release);
+        cancelled_arc.cancel();
         Ok(Value::Bool(true))
     }
 
@@ -920,9 +979,9 @@ impl ConcurrencyRuntime {
     // Schedules
     // -------------------------------------------------------------------------
 
-    fn register_schedule(&self) -> Result<(u64, Arc<AtomicBool>, Arc<AtomicBool>)> {
+    fn register_schedule(&self) -> Result<(u64, Arc<CancelToken>, Arc<AtomicBool>)> {
         let id = self.next_id();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(CancelToken::new());
         let tick_running = Arc::new(AtomicBool::new(false));
         let entry = ScheduleEntry {
             cancelled: Arc::clone(&cancelled),
@@ -942,7 +1001,7 @@ impl ConcurrencyRuntime {
             Err(_) => return false,
         };
         if let Some(entry) = schedules.remove(&schedule_id) {
-            entry.cancelled.store(true, AtomicOrdering::Release);
+            entry.cancelled.cancel();
             true
         } else {
             false
@@ -957,13 +1016,13 @@ impl ConcurrencyRuntime {
         // Cancel all tasks
         if let Ok(tasks) = self.tasks.lock() {
             for (_id, entry) in tasks.iter() {
-                entry.cancelled.store(true, AtomicOrdering::Release);
+                entry.cancelled.cancel();
             }
         }
         // Cancel all schedules and remove them
         if let Ok(mut schedules) = self.schedules.lock() {
             for (_id, entry) in schedules.iter() {
-                entry.cancelled.store(true, AtomicOrdering::Release);
+                entry.cancelled.cancel();
             }
             schedules.clear();
         }
@@ -1788,7 +1847,7 @@ pub(crate) fn finalize_task(
     }
     // Always decrement active task counter
     RUNTIME.active_tasks.fetch_sub(1, AtomicOrdering::Release);
-    CURRENT_TASK_CANCELLED.with(|cell| {
+    CURRENT_CANCEL_TOKEN.with(|cell| {
         *cell.borrow_mut() = None;
     });
 }
@@ -1894,7 +1953,7 @@ fn concurrent_spawn(handler: &Value) -> Result<Value> {
     check_task_limit()?;
     let (captured, body) = validate_and_capture("spawn", handler)?;
 
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(CancelToken::new());
     let task_id = RUNTIME.register_task(Arc::clone(&cancelled))?;
     RUNTIME.active_tasks.fetch_add(1, AtomicOrdering::Release);
     // Safe: task_id was just returned by register_task(), so it must exist in the registry
@@ -1903,7 +1962,7 @@ fn concurrent_spawn(handler: &Value) -> Result<Value> {
         .expect("task just registered must exist");
 
     thread::spawn(move || {
-        CURRENT_TASK_CANCELLED.with(|cell| {
+        CURRENT_CANCEL_TOKEN.with(|cell| {
             *cell.borrow_mut() = Some(cancelled);
         });
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -2147,22 +2206,16 @@ fn concurrent_race(fns_val: &Value) -> Result<Value> {
 
 // --- sleep_ms (cancellation-aware) ---
 
-/// sleep_ms(ms) — cancellation-aware sleep. Loops in 50ms slices checking cancellation.
+/// sleep_ms(ms) — cancellation-aware sleep. Uses CancelToken::wait_timeout for instant wakeup.
 fn concurrent_sleep_ms(ms: i64) -> Result<Value> {
     if ms <= 0 {
         return Ok(Value::Unit);
     }
-
-    let deadline = Instant::now() + Duration::from_millis(ms as u64);
-    loop {
-        check_cancellation()?;
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Ok(Value::Unit);
-        }
-        let slice = remaining.min(Duration::from_millis(50));
-        thread::sleep(slice);
+    check_cancellation()?;
+    if sleep_cancellable(Duration::from_millis(ms as u64)) {
+        return Err(IntentError::runtime_error("Task cancelled".to_string()));
     }
+    Ok(Value::Unit)
 }
 
 // --- after(delay, handler) ---
@@ -2191,7 +2244,7 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
 
     let (captured, body) = validate_and_capture("after", handler)?;
 
-    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(CancelToken::new());
     let task_id = RUNTIME.register_task(Arc::clone(&cancelled))?;
     RUNTIME.active_tasks.fetch_add(1, AtomicOrdering::Release);
     // Safe: task_id was just returned by register_task(), so it must exist in the registry
@@ -2200,24 +2253,12 @@ fn concurrent_after(delay: &Value, handler: &Value) -> Result<Value> {
         .expect("task just registered must exist");
 
     thread::spawn(move || {
-        CURRENT_TASK_CANCELLED.with(|cell| {
+        CURRENT_CANCEL_TOKEN.with(|cell| {
             *cell.borrow_mut() = Some(Arc::clone(&cancelled));
         });
 
-        // Cancellation-aware delay (50ms slices)
-        let deadline = Instant::now() + delay_duration;
-        let mut cancelled_during_delay = false;
-        loop {
-            if cancelled.load(AtomicOrdering::Acquire) {
-                cancelled_during_delay = true;
-                break;
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            thread::sleep(remaining.min(Duration::from_millis(50)));
-        }
+        // Cancellation-aware delay — instant wakeup via CancelToken::wait_timeout
+        let cancelled_during_delay = sleep_cancellable(delay_duration);
 
         let result = if cancelled_during_delay {
             Ok(Err(IntentError::runtime_error(
@@ -2267,21 +2308,14 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
     let (schedule_id, cancelled, tick_running) = RUNTIME.register_schedule()?;
 
     thread::spawn(move || {
-        loop {
-            // Cancellation-aware sleep (50ms slices)
-            let deadline = Instant::now() + interval_duration;
-            loop {
-                if cancelled.load(AtomicOrdering::Acquire) {
-                    return;
-                }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                thread::sleep(remaining.min(Duration::from_millis(50)));
-            }
+        // Set cancel token so sleep_cancellable() works in this thread.
+        CURRENT_CANCEL_TOKEN.with(|cell| {
+            *cell.borrow_mut() = Some(Arc::clone(&cancelled));
+        });
 
-            if cancelled.load(AtomicOrdering::Acquire) {
+        loop {
+            // Cancellation-aware interval sleep — instant wakeup via CancelToken::wait_timeout
+            if sleep_cancellable(interval_duration) {
                 return;
             }
 
@@ -2299,15 +2333,15 @@ fn concurrent_schedule(interval: &Value, handler: &Value) -> Result<Value> {
             let tick_cancelled = Arc::clone(&cancelled);
 
             thread::spawn(move || {
-                // Install cancellation flag so yield points (fetch, sleep_ms, recv)
+                // Install cancel token so yield points (fetch, sleep_ms, recv)
                 // in tick bodies respect schedule cancellation.
-                CURRENT_TASK_CANCELLED.with(|cell| {
+                CURRENT_CANCEL_TOKEN.with(|cell| {
                     *cell.borrow_mut() = Some(tick_cancelled);
                 });
                 let _result = catch_unwind(AssertUnwindSafe(|| {
                     let _ = run_in_fresh_interpreter(&tick_captured, &tick_body);
                 }));
-                CURRENT_TASK_CANCELLED.with(|cell| {
+                CURRENT_CANCEL_TOKEN.with(|cell| {
                     *cell.borrow_mut() = None;
                 });
                 tick_running_clone.store(false, AtomicOrdering::Release);
@@ -3221,15 +3255,15 @@ mod tests {
 
     #[test]
     fn test_cancel_task_sets_flag_only() {
-        // Create a task handle with a known cancelled flag
-        let cancelled = Arc::new(AtomicBool::new(false));
+        // Create a task handle with a known cancel token
+        let cancelled = Arc::new(CancelToken::new());
         let task_id = RUNTIME.register_task(Arc::clone(&cancelled)).unwrap();
         let handle = create_handle_value("Task", task_id);
 
         // Cancel should set the flag
         let result = concurrent_cancel_task(&handle).unwrap();
         assert!(matches!(result, Value::Bool(true)));
-        assert!(cancelled.load(AtomicOrdering::Acquire));
+        assert!(cancelled.is_cancelled());
 
         // Task state should still be Running (cooperative — not forced)
         let arcs = RUNTIME.get_task_arcs(task_id).unwrap().unwrap();
@@ -3249,7 +3283,7 @@ mod tests {
         assert!(matches!(result, Value::Bool(true)));
 
         // Flag set
-        assert!(cancelled.load(AtomicOrdering::Acquire));
+        assert!(cancelled.is_cancelled());
 
         // Removed from registry
         assert!(!RUNTIME.schedules.lock().unwrap().contains_key(&schedule_id));

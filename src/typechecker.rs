@@ -3497,6 +3497,10 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("get_float", ["kv" => Type::Any, "key" => Type::String, "default" => Type::Float], Type::Float, required(2));
             sig!("get_json", ["kv" => Type::Any, "key" => Type::String, "default" => Type::Any], Type::Any, required(2));
             sig!("get_str", ["kv" => Type::Any, "key" => Type::String, "default" => Type::String], Type::String, required(2));
+            sig!("incr", ["kv" => Type::Any, "key" => Type::String, "amount" => Type::Int], Type::Generic {
+                name: "Result".to_string(),
+                args: vec![Type::Int, Type::String],
+            });
         }
         "std/fs" => {
             sig!("read_file", ["path" => Type::String], Type::String);
@@ -3641,6 +3645,9 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                     value_type: Box::new(Type::Any)
                 }
             );
+            sig!("pause_queue", ["queue" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Unit, Type::String] });
+            sig!("resume_queue", ["queue" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Unit, Type::String] });
+            sig!("queue_status", ["queue" => Type::String], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) });
             sig!("assert_enqueued", ["job_name" => Type::String, "args" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Bool, Type::String] }, required(1));
             sig!("assert_not_enqueued", ["job_name" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Bool, Type::String] });
             sig!(

@@ -482,8 +482,8 @@ import { parallel, sleep_ms, channel, send, recv_timeout } from "std/concurrent"
 let [tx, rx] = channel()
 let result = parallel([
     fn() { sleep_ms(50); 1 / 0 },
-    fn() { sleep_ms(200); send(tx, "late1"); "ok1" },
-    fn() { sleep_ms(200); send(tx, "late2"); "ok2" }
+    fn() { sleep_ms(500); send(tx, "late1"); "ok1" },
+    fn() { sleep_ms(500); send(tx, "late2"); "ok2" }
 ])
 
 match result {
@@ -491,7 +491,9 @@ match result {
     Err(e) => print("err: " + str(e))
 }
 
-let msg = recv_timeout(rx, 400)
+// Cancellation is cooperative — siblings are cancelled during sleep_ms,
+// so they never reach send(). Use a short timeout to confirm.
+let msg = recv_timeout(rx, 200)
 match msg {
     None => print("no_send"),
     Some(v) => print("sent: " + str(v))

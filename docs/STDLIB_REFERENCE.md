@@ -6160,6 +6160,9 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`enqueue_in`](#enqueuein) | Enqueue a job to run after a delay in seconds. |
 | [`job_status`](#jobstatus) | Get the current status and data for a job by its ID. |
 | [`list_jobs`](#listjobs) | List jobs with optional status and queue filters. |
+| [`pause_queue`](#pausequeue) | Pause a queue — workers stop executing jobs from it. |
+| [`queue_status`](#queuestatus) | Get the current status of a queue, including whether it is paused. |
+| [`resume_queue`](#resumequeue) | Resume a paused queue — workers resume claiming and executing jobs from it. |
 | [`retry_job`](#retryjob) | Re-queue a failed or dead job for another attempt. |
 | [`scale_workers`](#scaleworkers) | Scale the number of worker threads for a named band up or down. |
 | [`work_async`](#workasync) | Start one or more background worker threads that process jobs from the queue. |
@@ -6512,6 +6515,54 @@ list_jobs(map { "status": "dead", "limit": 10 })  // List up to 10 dead jobs
 
 ---
 
+#### `pause_queue`
+
+```ntnt
+pause_queue(queue: String) -> Result<Unit, String>
+```
+
+Pause a queue — workers stop executing jobs from it.
+
+**Examples:**
+
+```ntnt
+pause_queue("emails")  // Stop processing the emails queue
+```
+
+---
+
+#### `queue_status`
+
+```ntnt
+queue_status(queue: String) -> Map
+```
+
+Get the current status of a queue, including whether it is paused.
+
+**Examples:**
+
+```ntnt
+queue_status("emails")  // Check if emails queue is paused
+```
+
+---
+
+#### `resume_queue`
+
+```ntnt
+resume_queue(queue: String) -> Result<Unit, String>
+```
+
+Resume a paused queue — workers resume claiming and executing jobs from it.
+
+**Examples:**
+
+```ntnt
+resume_queue("emails")  // Resume processing the emails queue
+```
+
+---
+
 #### `retry_job`
 
 ```ntnt
@@ -6780,6 +6831,7 @@ import { open, get, get_int } from "std/kv"
 | [`get_json`](#getjson) | Get a value by key and parse it as JSON. |
 | [`get_str`](#getstr) | Get a value by key and convert it to a string. |
 | [`has`](#has) | Check if a key exists in the KV store. |
+| [`incr`](#incr) | Atomically increment an integer value by amount. |
 | [`list`](#list) | List keys in the KV store, optionally filtered by prefix. |
 | [`open`](#open) | Open a KV store connection. |
 | [`set`](#set) | Set a key-value pair in the KV store. |
@@ -7022,6 +7074,40 @@ Returns false for expired keys.
 ```ntnt
 has(cache, "user:123")  // Check if key exists
 ```
+
+---
+
+#### `incr`
+
+```ntnt
+incr(kv: KVStore, key: String, amount: Int) -> Result<Int, String>
+```
+
+Atomically increment an integer value by amount.
+
+If the key doesn't exist, it is created with value = amount (effectively starting from 0). Preserves any existing TTL on the key — does not reset it. Returns the new value after incrementing.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to increment
+- `amount` — Integer to add (use negative values to decrement)
+
+**Returns:** Result containing the new integer value, or Err if the key holds a non-integer
+
+**Examples:**
+
+```ntnt
+incr(kv, "page_views", 1)  // => Ok(1)  // Increment a counter from zero
+incr(kv, "score", 10)  // Add 10 to a score counter
+incr(kv, "countdown", -1)  // Decrement a counter
+```
+
+**Errors:**
+
+- **TypeError**: kv_incr() requires an integer value — *Fix: Ensure the key was set with an integer value or hasn't been written yet*
+
+**See also:** `expire`, `set`
 
 ---
 
