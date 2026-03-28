@@ -411,6 +411,98 @@ impl SQLiteKV {
         Ok(())
     }
 
+    /// Atomically increment an integer value by `amount`.
+    ///
+    /// - If the key doesn't exist, it is created with value = `amount` (i.e., starts from 0).
+    /// - If the key exists with type "int", the value is incremented atomically.
+    /// - If the key exists with a non-integer type, returns `Err`.
+    /// - Existing TTL is preserved (the `expires_at` column is not updated).
+    pub fn incr(&self, key: &str, amount: i64) -> Result<i64> {
+        let now = now_unix();
+
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| IntentError::runtime_error(format!("KV incr begin error: {}", e)))?;
+
+        let row: std::result::Result<(String, String), rusqlite::Error> = self.conn.query_row(
+            "SELECT value, type FROM _kv WHERE key = ? AND (expires_at IS NULL OR expires_at > ?)",
+            params![key, now],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        );
+
+        match row {
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // Key doesn't exist or is expired — delete any expired row first to avoid
+                // unique constraint violation, then insert fresh.
+                let _ = self
+                    .conn
+                    .execute("DELETE FROM _kv WHERE key = ?", params![key]);
+                match self.conn.execute(
+                    "INSERT INTO _kv (key, value, type, expires_at) VALUES (?, ?, 'int', NULL)",
+                    params![key, amount.to_string()],
+                ) {
+                    Ok(_) => {
+                        self.conn.execute_batch("COMMIT").map_err(|e| {
+                            let _ = self.conn.execute_batch("ROLLBACK");
+                            IntentError::runtime_error(format!("KV incr commit error: {}", e))
+                        })?;
+                        Ok(amount)
+                    }
+                    Err(e) => {
+                        let _ = self.conn.execute_batch("ROLLBACK");
+                        Err(IntentError::runtime_error(format!(
+                            "KV incr insert error: {}",
+                            e
+                        )))
+                    }
+                }
+            }
+            Ok((value_str, type_hint)) => {
+                if type_hint != "int" {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(IntentError::runtime_error(format!(
+                        "kv_incr() requires an integer value, but key '{}' has type '{}'",
+                        key, type_hint
+                    )));
+                }
+                let current = match value_str.parse::<i64>() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        let _ = self.conn.execute_batch("ROLLBACK");
+                        return Err(IntentError::runtime_error(format!(
+                            "kv_incr() requires an integer value, but key '{}' has unparseable value '{}'",
+                            key, value_str
+                        )));
+                    }
+                };
+                let new_val = current + amount;
+                match self.conn.execute(
+                    "UPDATE _kv SET value = ? WHERE key = ?",
+                    params![new_val.to_string(), key],
+                ) {
+                    Ok(_) => {
+                        self.conn.execute_batch("COMMIT").map_err(|e| {
+                            let _ = self.conn.execute_batch("ROLLBACK");
+                            IntentError::runtime_error(format!("KV incr commit error: {}", e))
+                        })?;
+                        Ok(new_val)
+                    }
+                    Err(e) => {
+                        let _ = self.conn.execute_batch("ROLLBACK");
+                        Err(IntentError::runtime_error(format!(
+                            "KV incr update error: {}",
+                            e
+                        )))
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(IntentError::runtime_error(format!("KV incr error: {}", e)))
+            }
+        }
+    }
+
     /// Atomically claim the first key matching a prefix: SELECT + DELETE in one transaction.
     /// Returns the key and its raw (value, type) pair, or None if no matching key exists.
     ///
@@ -808,6 +900,58 @@ impl RedisKV {
                 other
             ))),
         }
+    }
+
+    /// Atomically increment an integer value by `amount`.
+    ///
+    /// Uses a Lua script for atomicity — GET + parse + SET in one Redis round-trip.
+    /// Handles both envelope format (`{"__ntnt_t":"int","v":N}`) and plain integer strings.
+    /// If the key doesn't exist, it is created with value = `amount`.
+    /// Preserves existing TTL via TTL + EXPIRE.
+    /// Returns Err if the existing value is not an integer.
+    pub fn incr(&mut self, key: &str, amount: i64) -> Result<i64> {
+        // Lua script: atomic GET + parse + SET, preserving TTL.
+        // Handles both envelope format {"__ntnt_t":"int","v":N} and plain integer strings.
+        // cjson is available in Redis 2.6+ and Valkey.
+        let lua_script = r#"
+            local key = KEYS[1]
+            local amount = tonumber(ARGV[1])
+            local current = redis.call('GET', key)
+            local n
+            if current == false then
+                n = amount
+            else
+                local ok, parsed = pcall(cjson.decode, current)
+                if ok and type(parsed) == 'table' and parsed['__ntnt_t'] == 'int' then
+                    local v = parsed['v']
+                    if type(v) ~= 'number' then
+                        return redis.error_reply('ERR value is not an integer or out of range')
+                    end
+                    n = math.floor(v) + amount
+                else
+                    local plain = tonumber(current)
+                    if plain == nil then
+                        return redis.error_reply('ERR value is not an integer or out of range')
+                    end
+                    n = math.floor(plain) + amount
+                end
+            end
+            local ttl = redis.call('TTL', key)
+            -- Store as envelope JSON for type round-trip with get()
+            local envelope = cjson.encode({__ntnt_t = 'int', v = n})
+            redis.call('SET', key, envelope)
+            if ttl > 0 then
+                redis.call('EXPIRE', key, ttl)
+            end
+            return n
+        "#;
+
+        let new_val: i64 = redis::Script::new(lua_script)
+            .key(key)
+            .arg(amount)
+            .invoke(&mut self.conn)
+            .map_err(|e| IntentError::runtime_error(format!("Redis incr error: {}", e)))?;
+        Ok(new_val)
     }
 }
 
@@ -1885,6 +2029,78 @@ pub fn create_kv_module() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt incr
+    // @module std/kv
+    // @signature incr(kv: KVStore, key: String, amount: Int) -> Result<Int, String>
+    // Atomically increment an integer value by amount.
+    //
+    // If the key doesn't exist, it is created with value = amount (effectively starting from 0).
+    // Preserves any existing TTL on the key — does not reset it.
+    // Returns the new value after incrementing.
+    // @param kv The KV store handle from open()
+    // @param key The key to increment
+    // @param amount Integer to add (use negative values to decrement)
+    // @returns Result containing the new integer value, or Err if the key holds a non-integer
+    // @error TypeError ~ "kv_incr() requires an integer value" fix: "Ensure the key was set with an integer value or hasn't been written yet"
+    // @see_also expire, set
+    // @example incr(kv, "page_views", 1) => Ok(1) ~ "Increment a counter from zero"
+    // @example incr(kv, "score", 10) ~ "Add 10 to a score counter"
+    // @example incr(kv, "countdown", -1) ~ "Decrement a counter"
+    module.insert(
+        "incr".to_string(),
+        Value::NativeFunction {
+            name: "incr".to_string(),
+            arity: 3,
+            max_arity: 3,
+            requires: None,
+            func: |args| {
+                if args.len() != 3 {
+                    return Err(IntentError::type_error(
+                        "incr() requires 3 arguments (kv, key, amount)".to_string(),
+                    ));
+                }
+
+                let key = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "incr() requires a string key".to_string(),
+                        ))
+                    }
+                };
+
+                let amount = match &args[2] {
+                    Value::Int(i) => *i,
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "incr() requires an integer amount".to_string(),
+                        ))
+                    }
+                };
+
+                let backend = get_backend_type(&args[0])?;
+                let new_val = match backend {
+                    KVBackend::SQLite => {
+                        let kv_arc = get_sqlite_kv(&args[0])?;
+                        let kv = kv_arc.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
+                        })?;
+                        kv.incr(&key, amount)?
+                    }
+                    KVBackend::Redis => {
+                        let kv_arc = get_redis_kv(&args[0])?;
+                        let mut kv = kv_arc.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("KV lock error: {}", e))
+                        })?;
+                        kv.incr(&key, amount)?
+                    }
+                };
+
+                Ok(Value::ok(Value::Int(new_val)))
+            },
+        },
+    );
+
     module
 }
 
@@ -2079,6 +2295,52 @@ pub fn kv_set_nx(handle: &Value, key: &str, value: &Value, ttl: Option<i64>) -> 
                 .lock()
                 .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
             kv.set_nx(key, value, ttl)
+        }
+    }
+}
+
+/// Atomically increment an integer value by `amount`.
+///
+/// If the key doesn't exist, it is created with value = `amount`.
+/// Returns the new value. Preserves existing TTL (does not reset it).
+/// Returns `Err` if the existing value is not an integer.
+pub fn kv_incr(handle: &Value, key: &str, amount: i64) -> Result<i64> {
+    let backend = get_backend_type(handle)?;
+    match backend {
+        KVBackend::SQLite => {
+            let kv_arc = get_sqlite_kv(handle)?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.incr(key, amount)
+        }
+        KVBackend::Redis => {
+            let kv_arc = get_redis_kv(handle)?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.incr(key, amount)
+        }
+    }
+}
+
+/// Set a TTL on an existing key. Returns true if the key exists and TTL was set.
+pub fn kv_expire(handle: &Value, key: &str, seconds: i64) -> Result<bool> {
+    let backend = get_backend_type(handle)?;
+    match backend {
+        KVBackend::SQLite => {
+            let kv_arc = get_sqlite_kv(handle)?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.expire(key, seconds)
+        }
+        KVBackend::Redis => {
+            let kv_arc = get_redis_kv(handle)?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.expire(key, seconds)
         }
     }
 }
@@ -2447,5 +2709,131 @@ mod tests {
             .claim("jobs:pending:", None, Some("jobs:pending:99999:~"))
             .unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_sqlite_kv_incr_basic() {
+        let kv = SQLiteKV::new(":memory:").unwrap();
+
+        // Increment non-existent key (starts from 0)
+        let result = kv.incr("counter", 1).unwrap();
+        assert_eq!(result, 1);
+
+        // Increment existing key
+        let result = kv.incr("counter", 1).unwrap();
+        assert_eq!(result, 2);
+
+        // Increment by larger amount
+        let result = kv.incr("counter", 10).unwrap();
+        assert_eq!(result, 12);
+
+        // Negative amount (decrement)
+        let result = kv.incr("counter", -5).unwrap();
+        assert_eq!(result, 7);
+    }
+
+    #[test]
+    fn test_sqlite_kv_incr_from_set() {
+        let kv = SQLiteKV::new(":memory:").unwrap();
+
+        // Int stored via set() should be incrementable
+        kv.set("int_key", &Value::Int(10), None).unwrap();
+        let result = kv.incr("int_key", 5).unwrap();
+        assert_eq!(result, 15);
+    }
+
+    #[test]
+    fn test_sqlite_kv_incr_non_integer_error() {
+        let kv = SQLiteKV::new(":memory:").unwrap();
+
+        // Non-integer value must return Err
+        kv.set("string_key", &Value::String("hello".to_string()), None)
+            .unwrap();
+        let result = kv.incr("string_key", 1);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("integer"));
+    }
+
+    #[test]
+    fn test_sqlite_kv_incr_preserves_ttl() {
+        let kv = SQLiteKV::new(":memory:").unwrap();
+
+        // Store an int with TTL
+        kv.set("ttl_counter", &Value::Int(0), Some(3600)).unwrap();
+        let before_ttl = kv.ttl("ttl_counter").unwrap();
+        assert!(matches!(before_ttl, Some(t) if t > 3500 && t <= 3600));
+
+        // Increment — TTL should be preserved
+        kv.incr("ttl_counter", 1).unwrap();
+        let after_ttl = kv.ttl("ttl_counter").unwrap();
+        assert!(matches!(after_ttl, Some(t) if t > 3500 && t <= 3600));
+    }
+
+    #[test]
+    fn test_sqlite_kv_incr_non_existent_no_ttl() {
+        let kv = SQLiteKV::new(":memory:").unwrap();
+
+        // Increment from scratch — no TTL set
+        kv.incr("fresh", 5).unwrap();
+        let ttl = kv.ttl("fresh").unwrap();
+        assert!(ttl.is_none(), "newly created key should have no TTL");
+    }
+
+    #[test]
+    fn test_sqlite_kv_incr_expired_key() {
+        let kv = SQLiteKV::new(":memory:").unwrap();
+
+        // Set a key with a very short TTL, then manually expire it
+        kv.set("expiring", &Value::Int(100), Some(1)).unwrap();
+
+        // Manually set expires_at to the past to simulate expiry
+        kv.conn
+            .execute("UPDATE _kv SET expires_at = 1 WHERE key = 'expiring'", [])
+            .unwrap();
+
+        // incr should treat the expired key as non-existent and start from amount
+        let result = kv.incr("expiring", 5).unwrap();
+        assert_eq!(result, 5, "expired key should be treated as missing");
+
+        // Subsequent incr should work normally
+        let result2 = kv.incr("expiring", 3).unwrap();
+        assert_eq!(result2, 8);
+    }
+
+    #[test]
+    fn test_kv_module_incr() {
+        let module = create_kv_module();
+        let open = get_fn(&module, "open");
+        let incr = get_fn(&module, "incr");
+        let expire = get_fn(&module, "expire");
+
+        let kv = unwrap_ok(open(&[Value::String(":memory:".to_string())]).unwrap());
+
+        // First incr on missing key returns 1
+        let r = incr(&[kv.clone(), Value::String("c".to_string()), Value::Int(1)]).unwrap();
+        assert!(matches!(unwrap_ok(r), Value::Int(1)));
+
+        // Second incr returns 2
+        let r = incr(&[kv.clone(), Value::String("c".to_string()), Value::Int(1)]).unwrap();
+        assert!(matches!(unwrap_ok(r), Value::Int(2)));
+
+        // incr by 5
+        let r = incr(&[kv.clone(), Value::String("c".to_string()), Value::Int(5)]).unwrap();
+        assert!(matches!(unwrap_ok(r), Value::Int(7)));
+
+        // expire on the key, then incr again should preserve TTL
+        expire(&[kv.clone(), Value::String("c".to_string()), Value::Int(3600)]).unwrap();
+        incr(&[kv.clone(), Value::String("c".to_string()), Value::Int(1)]).unwrap();
+        // TTL is still set (not None)
+        let ttl_fn = get_fn(&module, "ttl");
+        let ttl_result = ttl_fn(&[kv.clone(), Value::String("c".to_string())]).unwrap();
+        let ttl_inner = unwrap_ok(ttl_result);
+        // Should be Some(t) — not None
+        assert!(
+            matches!(&ttl_inner, Value::EnumValue { variant, .. } if variant == "Some"),
+            "TTL should be preserved after incr: {:?}",
+            ttl_inner
+        );
     }
 }

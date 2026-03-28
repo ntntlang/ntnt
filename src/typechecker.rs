@@ -3497,6 +3497,10 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("get_float", ["kv" => Type::Any, "key" => Type::String, "default" => Type::Float], Type::Float, required(2));
             sig!("get_json", ["kv" => Type::Any, "key" => Type::String, "default" => Type::Any], Type::Any, required(2));
             sig!("get_str", ["kv" => Type::Any, "key" => Type::String, "default" => Type::String], Type::String, required(2));
+            sig!("incr", ["kv" => Type::Any, "key" => Type::String, "amount" => Type::Int], Type::Generic {
+                name: "Result".to_string(),
+                args: vec![Type::Int, Type::String],
+            });
         }
         "std/fs" => {
             sig!("read_file", ["path" => Type::String], Type::String);

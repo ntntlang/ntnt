@@ -6780,6 +6780,7 @@ import { open, get, get_int } from "std/kv"
 | [`get_json`](#getjson) | Get a value by key and parse it as JSON. |
 | [`get_str`](#getstr) | Get a value by key and convert it to a string. |
 | [`has`](#has) | Check if a key exists in the KV store. |
+| [`incr`](#incr) | Atomically increment an integer value by amount. |
 | [`list`](#list) | List keys in the KV store, optionally filtered by prefix. |
 | [`open`](#open) | Open a KV store connection. |
 | [`set`](#set) | Set a key-value pair in the KV store. |
@@ -7022,6 +7023,40 @@ Returns false for expired keys.
 ```ntnt
 has(cache, "user:123")  // Check if key exists
 ```
+
+---
+
+#### `incr`
+
+```ntnt
+incr(kv: KVStore, key: String, amount: Int) -> Result<Int, String>
+```
+
+Atomically increment an integer value by amount.
+
+If the key doesn't exist, it is created with value = amount (effectively starting from 0). Preserves any existing TTL on the key — does not reset it. Returns the new value after incrementing.
+
+**Parameters:**
+
+- `kv` — The KV store handle from open()
+- `key` — The key to increment
+- `amount` — Integer to add (use negative values to decrement)
+
+**Returns:** Result containing the new integer value, or Err if the key holds a non-integer
+
+**Examples:**
+
+```ntnt
+incr(kv, "page_views", 1)  // => Ok(1)  // Increment a counter from zero
+incr(kv, "score", 10)  // Add 10 to a score counter
+incr(kv, "countdown", -1)  // Decrement a counter
+```
+
+**Errors:**
+
+- **TypeError**: kv_incr() requires an integer value — *Fix: Ensure the key was set with an integer value or hasn't been written yet*
+
+**See also:** `expire`, `set`
 
 ---
 
