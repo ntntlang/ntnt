@@ -1,6 +1,6 @@
 # DD-051: Rate Limiting, Concurrency Limits & Queue Pause/Resume
 
-**Status:** Draft
+**Status:** Complete — Merged PR #62 (2026-03-28)
 **Author:** Larri
 **Created:** 2026-03-28
 **Parent:** [DD-037](dd-037-concurrency-and-jobs.md) (Phase 5 - Production Hardening)
@@ -802,6 +802,8 @@ ntnt ships rate limiting + concurrency limits for free. Sidekiq charges $250/mon
 | 2026-03-28 | Review Cycle 2 — Codex found 3 hardening issues (pause cache init, check order swap, Redis incr envelope). Fixed. Check order updated: concurrency before rate limit. |
 | 2026-03-28 | Greptile review — Updated design doc check order to match implementation (concurrency → rate limit). |
 | 2026-03-28 | Phase 5 added — CancelToken design for instant cooperative cancellation (replaces AtomicBool polling). |
+| 2026-03-28 | Implemented all 5 phases. Multiple review cycles (Codex, Greptile, Copilot). Sliding window counter, atomic concurrency semaphore with TTL self-healing, CancelToken with Condvar. |
+| 2026-03-28 | Merged PR #62 to main. 1,317 tests passing. Enterprise features roadmap split to DD-052. |
 
 ---
 

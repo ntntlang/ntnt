@@ -404,9 +404,10 @@ Feature: Welcome Email Job
 ```
 
 #### Additional Hardening
-- [ ] Rate limiting — `rate: 100/minute` per job type
-- [ ] Concurrency limits — `concurrency: 5` per job type
-- [ ] Queue pause/resume — `Queue.pause("emails")` / `Queue.resume("emails")`
+- [x] ~~Rate limiting~~ — shipped as `rate: "N/interval"` sliding window counter in DD-051 (PR #62)
+- [x] ~~Concurrency limits~~ — shipped as `concurrency: N` atomic counter semaphore in DD-051 (PR #62)
+- [x] ~~Queue pause/resume~~ — shipped as `pause_queue()`/`resume_queue()` + CLI + control socket in DD-051 (PR #62)
+- [x] ~~CancelToken~~ — instant cooperative cancellation replacing AtomicBool polling, DD-051 (PR #62)
 - [ ] Cron expressions — `schedule("0 9 * * MON-FRI", fn)` with distributed lock
 - [ ] Dead job caps — 10K max, auto-prune oldest
 - [x] ~~Idempotency~~ — shipped as `unique: N` in Phase 3 (PR #38)
@@ -820,3 +821,4 @@ For production apps with existing user auth. The dashboard becomes another admin
 | 2026-03-22 | DD-044 Fix F: PR #54 merged — `ntnt jobs` CLI evaluates in Worker mode (no side effects). |
 | 2026-03-23 | DD-044 Fix B: PR #55 merged — free-variable analysis for `schedule()`/`spawn()`/`after()` closures. Scope-aware AST walker captures only referenced bindings. All DD-044 fixes now complete. |
 | 2026-03-23 | DD-037 v8: Updated roadmap, phase status table, resolved questions, architecture decisions, competitive analysis. All shipped work accurately reflected. 1,241 tests on main. |
+| 2026-03-28 | DD-051 merged (PR #62): Rate limiting, concurrency limits, queue pause/resume, CancelToken. Phase 5 hardening items checked off. 1,317 tests on main. Remaining enterprise features tracked in DD-052. |

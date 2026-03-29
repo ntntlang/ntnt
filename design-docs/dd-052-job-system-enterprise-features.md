@@ -17,12 +17,12 @@ ntnt's job system already ships 5 of Sidekiq Enterprise's 7 core features for fr
 
 | Feature | Sidekiq Tier | ntnt Implementation | DD/PR |
 |---------|-------------|---------------------|-------|
-| Rate Limiting | Enterprise ($250/mo) | Sliding window counter, `rate: "N/interval"` | DD-051/PR#62 |
-| Concurrency Limits | Enterprise ($250/mo) | Atomic counter semaphore, `concurrency: N` | DD-051/PR#62 |
+| Rate Limiting | Enterprise ($250/mo) | Sliding window counter, `rate: "N/interval"` | DD-051/PR#62 ✅ Merged |
+| Concurrency Limits | Enterprise ($250/mo) | Atomic counter semaphore, `concurrency: N` | DD-051/PR#62 ✅ Merged |
 | Unique Jobs | Enterprise ($250/mo) | SHA256 dedup via `kv_set_nx` | DD-037/PR#41 |
 | Periodic Jobs | Enterprise ($250/mo) | Cron expressions in job DSL | DD-037 |
-| Queue Pause/Resume | Enterprise ($250/mo) | KV-persisted + CLI + control socket | DD-051/PR#62 |
-| CancelToken | N/A (Sidekiq uses signals) | Condvar-based instant cooperative cancellation | DD-051/PR#62 |
+| Queue Pause/Resume | Enterprise ($250/mo) | KV-persisted + CLI + control socket | DD-051/PR#62 ✅ Merged |
+| CancelToken | N/A (Sidekiq uses signals) | Condvar-based instant cooperative cancellation | DD-051/PR#62 ✅ Merged |
 | Priority Queues | Pro ($99/mo) | Band-based priority with configurable ranges | DD-037/PR#41 |
 | Dead Letter Queue | Pro ($99/mo) | Auto-dead after max retries, `retry_job()` | DD-037 |
 
@@ -336,3 +336,4 @@ ntnt ships features that Sidekiq doesn't have at any tier: CancelToken instant c
 | Date | Change |
 |------|--------|
 | 2026-03-28 | Initial draft — gap analysis and feature designs |
+| 2026-03-28 | DD-051 merged (PR #62) — rate limiting, concurrency, pause/resume, CancelToken all shipped. 5 of 7 Sidekiq Enterprise features now free in ntnt. |
