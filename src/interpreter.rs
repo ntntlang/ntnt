@@ -5157,14 +5157,42 @@ impl Interpreter {
             self.current_old_values = Some(self.capture_old_values(&c.ensures)?);
         }
 
-        // Execute body statements
+        // Snapshot deferred count so we drain only what this block added
+        let deferred_count_before = self.deferred_statements.len();
+
+        // Execute body statements — capture error for cleanup
         let mut result = Value::Unit;
+        let mut body_error: Option<IntentError> = None;
         for stmt in &block.statements {
-            result = self.eval_statement(stmt)?;
-            if let Value::Return(v) = result {
-                result = *v;
-                break;
+            match self.eval_statement(stmt) {
+                Ok(val) => {
+                    if let Value::Return(v) = val {
+                        result = *v;
+                        break;
+                    }
+                    result = val;
+                }
+                Err(e) => {
+                    body_error = Some(e);
+                    break;
+                }
             }
+        }
+
+        // Execute deferred statements in LIFO order (always, even on error)
+        let deferred_to_run: Vec<Expression> = self
+            .deferred_statements
+            .drain(deferred_count_before..)
+            .collect();
+        for deferred_expr in deferred_to_run.into_iter().rev() {
+            let _ = self.eval_expression(&deferred_expr);
+        }
+
+        // Propagate body error after deferred cleanup
+        if let Some(e) = body_error {
+            self.current_old_values = None;
+            self.current_result = None;
+            return Err(e);
         }
 
         // Bind result in environment for postcondition evaluation
