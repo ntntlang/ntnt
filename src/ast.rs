@@ -224,8 +224,6 @@ pub enum Statement {
         options: Vec<(String, Expression)>,
         /// Parameters for the perform block
         perform_params: Vec<Parameter>,
-        /// Optional contract (requires/ensures) for the perform block
-        perform_contract: Option<Contract>,
         /// Body of the perform block
         perform_body: Block,
         /// Optional on_failure handler: (params, body)

@@ -933,7 +933,6 @@ impl Parser {
             &TokenKind::RightParen,
             "Expected ')' after perform parameters",
         )?;
-        let perform_contract = self.parse_contract()?;
         self.consume(&TokenKind::LeftBrace, "Expected '{' before perform body")?;
         let perform_body = self.block()?;
 
@@ -965,7 +964,6 @@ impl Parser {
             queue,
             options,
             perform_params,
-            perform_contract,
             perform_body,
             on_failure,
         })
