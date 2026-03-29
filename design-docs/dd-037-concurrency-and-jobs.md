@@ -195,8 +195,8 @@ Phase 2   ✅  Job DSL + KV Backend                       PR 2a/2b/2c — declar
 Phase 3   ✅  Job System Advanced Features               Lua claim, scheduled optimization, dedup, expiration, batch enqueue
 Phase 3b  ✅  Priority Queues + Atomic Dedup             PR #41 — named priorities, worker bands, kv_set_nx
 Phase 3c  ✅  Control Socket + CLI                       PR #42 — .ntnt.sock, ntnt workers status/scale
-Phase 4   📋  Composition Layer                          parallel, race, task groups
-Phase 5   📋  Dashboard + Production Hardening            real-time UI, simulation, contracts
+Phase 4   ✅  Composition Layer (2/3)                     parallel ✅, race ✅, task groups 📋
+Phase 5   ✅  Production Hardening (partial)              rate limit ✅, concurrency ✅, pause ✅, CancelToken ✅, dashboard 📋
 Phase 6   ✅  Observability CLI                          PR #35 — list/inspect/retry/cancel/clear + dedup refactor
 Phase 7   📋  Event Dispatch (std/events)                pub/sub fan-out over the job system
 Phase 8   📋  Job Audit Log & Observability Pipeline    structured logs, sinks, webhooks, web viewer
@@ -294,13 +294,13 @@ DD-045  ✅  Job Worker Environment                       PRs #44, #45, #46, #49
 
 ---
 
-### Phase 4: Composition Layer 📋
+### Phase 4: Composition Layer (2/3 ✅)
 
 **Depends on:** Phase 1 ✅
 **Estimated effort:** 2-3 days
 
-- [ ] `parallel(fns) -> Array` — run N functions, collect all results, cancel on first error
-- [ ] `race(fns) -> Value` — run N functions, return first result, cancel others
+- [x] ~~`parallel(fns) -> Array`~~ — shipped in DD-049 (PR #61)
+- [x] ~~`race(fns) -> Value`~~ — shipped in DD-049 (PR #61)
 - [ ] `task_group(fn(group))` — structured scope, all tasks cancelled when scope exits
 
 ---
