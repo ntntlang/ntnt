@@ -629,6 +629,7 @@ fn execute_in_worker(
     if result.is_err() {
         interp.clear_deferred();
         interp.reset_call_depth();
+        interp.clear_contract_state();
     }
 
     match result {
@@ -690,6 +691,7 @@ fn execute_on_failure_in_worker(
     if panic_result.is_err() {
         interp.clear_deferred();
         interp.reset_call_depth();
+        interp.clear_contract_state();
     }
 }
 

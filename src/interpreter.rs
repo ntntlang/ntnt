@@ -1510,6 +1510,14 @@ impl Interpreter {
         self.call_depth = 0;
     }
 
+    /// Reset contract evaluation state (old() snapshots and result binding).
+    /// Must be called after panic/error cleanup on reused interpreters to prevent
+    /// stale contract state from leaking into subsequent job executions.
+    pub(crate) fn clear_contract_state(&mut self) {
+        self.current_old_values = None;
+        self.current_result = None;
+    }
+
     /// Define a variable in the current scope.
     pub(crate) fn define_in_scope(&mut self, name: String, value: Value) {
         self.environment.borrow_mut().define(name, value);
