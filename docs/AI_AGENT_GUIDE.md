@@ -16,7 +16,7 @@ Critical syntax rules and patterns for AI agents generating NTNT code. For compl
 # One-line install (installs Rust if needed, clones repo, builds)
 curl -sSf https://raw.githubusercontent.com/ntntlang/ntnt/main/install.sh | bash
 source "$HOME/.cargo/env"
-ntnt --version  # Verify: should print ntnt 0.4.2 or later
+ntnt --version  # Verify: should print ntnt 0.4.6 or later
 ```
 
 ### Your First App (60 seconds)
@@ -533,6 +533,15 @@ let result = if outer { if inner { 1 } else { 2 } } else { 3 }
 
 // WRONG - else is required for if-expressions
 let x = if true { 1 }  // ERROR: If-expressions require an else branch
+
+// Block expressions in branches (v0.4.6+) — multi-statement, last expression is the value
+let result = if condition {
+    let temp = compute()
+    let adjusted = temp * 2
+    adjusted + 1
+} else {
+    default_value()
+}
 ```
 
 ### 15. Destructuring Assignment
@@ -1369,6 +1378,26 @@ Route files export `get`, `post`, etc. functions.
 
 ---
 
+## libs() — Auto-Import Directory
+
+```ntnt
+libs("lib/")   // All exports from lib/*.tnt injected flat into current scope
+```
+
+Replaces verbose per-file imports:
+```ntnt
+// Instead of:
+import { SITES, TZ_OFFSET } from "./lib/config.tnt"
+import { parse_data } from "./lib/parser.tnt"
+import { round_1dp } from "./lib/helpers.tnt"
+
+// Just use:
+libs("lib/")
+// All exported names from all .tnt files in lib/ are now available
+```
+
+---
+
 ## Middleware
 
 ```ntnt
@@ -1660,17 +1689,37 @@ sleep_ms(1000)         // Cancellation-aware sleep (50ms slices)
 let cpus = thread_count()  // Available CPU threads
 ```
 
+### Composition: parallel and race
+
+```ntnt
+import { parallel, race } from "std/concurrent"
+
+// Run N functions concurrently, wait for all, return results in input order
+// If any task fails (crash or returned Err), cancels all and returns that Err
+let [a, b, c] = parallel([fn() { fetch(url1) }, fn() { fetch(url2) }, fn() { fetch(url3) }])
+let results = parallel([]) // Empty array → []
+
+// Race N functions — first Ok wins, cancel the rest
+// Tasks that fail or return Err are skipped; all fail → returns last Err
+let winner = race([fn() { fetch(primary) }, fn() { fetch(fallback) }])
+```
+
+Use `otherwise` with parallel for error handling:
+```ntnt
+let results = parallel([fn() { fetch(url) }]) otherwise { return [] }
+```
+
 ---
 
 ## Background Jobs (`std/jobs`)
 
-Persistent background job processing with retry, backoff, and scheduled execution.
+Persistent background job processing with retry, backoff, priority queues, rate limiting, concurrency limits, deduplication, and scheduled execution.
 
 ### Defining Jobs
 
 ```ntnt
 job SendEmail on emails (retry: 5, backoff: "exponential") {
-    perform(to, subject) {
+    perform(to: String, subject: String) {
         print("Sending to #{to}: #{subject}")
     }
     on_failure(error, attempt) {
@@ -1681,9 +1730,58 @@ job SendEmail on emails (retry: 5, backoff: "exponential") {
 
 **Syntax:** `job Name on queue_name (options) { perform(params) { body } on_failure(params) { body } }`
 
-- `on queue_name` — assigns the job to a named queue
-- Options: `retry: N` (default 3), `backoff: "exponential"|"linear"|"constant"`, `timeout: N` (seconds, post-execution check — does not preemptively interrupt)
+- `on queue_name` — assigns the job to a named queue (optional, defaults to `"default"`)
 - `on_failure` block is optional — called on each failure with error message and attempt count
+
+### Job Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `retry` | Int | 3 | Max retry attempts before marking dead |
+| `backoff` | String | `"exponential"` | `"exponential"`, `"linear"`, or `"constant"` |
+| `timeout` | Int | none | Seconds — post-execution elapsed check |
+| `priority` | String or Int | `"normal"` (50) | `"critical"` (5), `"high"` (25), `"normal"` (50), `"low"` (85), or raw 0-99 |
+| `rate` | String | none | Rate limit: `"100/minute"`, `"5/second"`, `"1000/hour"` |
+| `concurrency` | Int | none | Max simultaneous instances of this job type |
+| `unique` | Int | none | Dedup window in seconds (SHA-256 hash of type + args) |
+| `expires` | Int | none | Seconds — job skipped if older than this when claimed |
+
+```ntnt
+// Full example with all options
+job ProcessPayment on payments (
+    retry: 3,
+    backoff: "exponential",
+    timeout: 120,
+    priority: "critical",
+    rate: "100/minute",
+    concurrency: 5,
+    unique: 3600,
+    expires: 7200
+) {
+    perform(payment_id: String) {
+        charge(payment_id)
+    }
+}
+```
+
+### Job Contracts (requires/ensures)
+
+Jobs support ntnt's contract system for argument validation:
+
+```ntnt
+job ProcessPayment on payments (retry: 3)
+    requires payment_id != ""
+    ensures result != None
+{
+    perform(payment_id: String) {
+        let charge = process_charge(payment_id)
+        return charge
+    }
+}
+```
+
+- `requires` — checked before perform runs; violation fails the job immediately
+- `ensures` — checked after perform completes; violation fails the job
 
 ### Multi-File Job Organization
 
@@ -1838,6 +1936,68 @@ let count = unwrap(drain_jobs())
 
 // Reset between tests
 clear_jobs()
+```
+
+### Priority Queues and Worker Bands
+
+Each priority band gets its own independent thread pool. Critical jobs don't compete with low-priority jobs for workers.
+
+```ntnt
+job ResetPassword on auth (priority: "critical") {
+    perform(user_id: String) { ... }
+}
+
+job WeeklyDigest on notifications (priority: "low") {
+    perform(user_id: String) { ... }
+}
+```
+
+Scale workers per band at runtime (no restart needed):
+```ntnt
+import { scale_workers, worker_status } from "std/jobs"
+
+scale_workers("critical", 4)
+scale_workers("low", 1)
+
+let status = worker_status()
+// { "bands": [...], "pending": 42 }
+```
+
+**CLI (via control socket):**
+```bash
+ntnt workers status server.tnt
+ntnt workers scale critical 4
+ntnt workers scale low 1
+```
+
+### Batch Enqueue
+
+```ntnt
+import { enqueue_batch } from "std/jobs"
+
+// Enqueue multiple jobs atomically (up to 10,000)
+let ids = unwrap(enqueue_batch("SendEmail", [
+    map { "to": "alice@example.com" },
+    map { "to": "bob@example.com" },
+    map { "to": "charlie@example.com" }
+]))
+```
+
+All-or-nothing validation: if any argument map is invalid, none are enqueued.
+
+### Queue Pause and Resume
+
+```ntnt
+import { pause_queue, resume_queue } from "std/jobs"
+
+pause_queue("webhooks")   // Workers stop claiming jobs from this queue
+resume_queue("webhooks")  // Workers resume
+```
+
+Pause state is durable (persisted to KV, survives restarts). Also available via CLI:
+```bash
+ntnt workers pause webhooks
+ntnt workers resume webhooks
 ```
 
 ### Scaling: Separate Web and Worker Processes
@@ -2025,6 +2185,7 @@ ntnt test server.tnt --port 9090 --get /
 | `transform(arr, fn)` | Transform (map) array elements |
 | `find(arr, fn)` | First element matching predicate → `Option` |
 | `sort(arr)`, `sort(arr, key)` | Sort array (key: string field name or function) |
+| `sort_by(arr, fn)` | Sort with custom comparator: `sort_by(arr, fn(a, b) { a - b })` |
 | `sort_desc(arr)`, `sort_desc(arr, key)` | Sort descending |
 | `any(arr, fn)` | True if any element matches |
 | `all(arr, fn)` | True if all elements match |
@@ -2068,6 +2229,8 @@ ntnt test server.tnt --port 9090 --get /
 | `listen(port)` | Start server |
 | `serve_static(prefix, dir)` | Static files |
 | `routes(dir)` | File-based routing |
+| `libs(dir)` | Auto-import all exports from directory (flat injection into scope) |
+| `jobs(dir)` | Auto-discover and register all jobs from directory |
 | `template(path, vars)` | Load template |
 | `use_middleware(fn)` | Add middleware |
 | `enable_cors(options?)` | Configure CORS |
@@ -2096,7 +2259,11 @@ import { parse_url, encode_component, build_query, parse_query } from "std/url"
 import { parse_csv, parse_with_headers } from "std/csv"
 import { to_html } from "std/markdown"
 import { join_path, dirname, basename, extension } from "std/path"
-import { channel, send, recv, sleep_ms, spawn, await_task, schedule, cancel_schedule } from "std/concurrent"
+import { channel, send, recv, sleep_ms, spawn, await_task, schedule, cancel_schedule, parallel, race } from "std/concurrent"
+import { enqueue, enqueue_in, enqueue_at, enqueue_batch, configure_queue, work_async, work_jobs } from "std/jobs"
+import { job_status, cancel_job, retry_job, list_jobs, delete_jobs } from "std/jobs"
+import { scale_workers, worker_status, pause_queue, resume_queue } from "std/jobs"
+import { assert_enqueued, assert_not_enqueued, drain_jobs, clear_jobs } from "std/jobs"
 ```
 
 ### CLI Commands
