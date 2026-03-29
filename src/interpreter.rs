@@ -5148,7 +5148,27 @@ impl Interpreter {
         job_name: &str,
         contract: Option<&FunctionContract>,
     ) -> Result<Value> {
-        // Check preconditions before executing the body
+        // Defensive reset — ensure no stale contract state from a prior execution
+        self.current_old_values = None;
+        self.current_result = None;
+
+        // Run the inner logic, guaranteeing contract state cleanup on all exits
+        let result = self.eval_block_with_contract_inner(block, job_name, contract);
+
+        // Always clean up — covers ensures eval errors, capture_old_values errors, etc.
+        self.current_old_values = None;
+        self.current_result = None;
+
+        result
+    }
+
+    fn eval_block_with_contract_inner(
+        &mut self,
+        block: &Block,
+        job_name: &str,
+        contract: Option<&FunctionContract>,
+    ) -> Result<Value> {
+        // Check preconditions
         if let Some(c) = contract {
             for req_expr in &c.requires {
                 let condition_str = Self::format_expression(req_expr);
@@ -5168,7 +5188,7 @@ impl Interpreter {
         // Snapshot deferred count so we drain only what this block added
         let deferred_count_before = self.deferred_statements.len();
 
-        // Execute body statements — capture error for cleanup
+        // Execute body — capture error for deferred cleanup
         let mut result = Value::Unit;
         let mut body_error: Option<IntentError> = None;
         for stmt in &block.statements {
@@ -5196,27 +5216,22 @@ impl Interpreter {
             let _ = self.eval_expression(&deferred_expr);
         }
 
-        // Propagate body error after deferred cleanup
         if let Some(e) = body_error {
-            self.current_old_values = None;
-            self.current_result = None;
             return Err(e);
         }
 
-        // Bind result in environment for postcondition evaluation
+        // Bind result for postcondition evaluation
         self.current_result = Some(result.clone());
         self.environment
             .borrow_mut()
             .define("result".to_string(), result.clone());
 
-        // Check postconditions after execution
+        // Check postconditions
         if let Some(c) = contract {
             for ens_expr in &c.ensures {
                 let condition_str = Self::format_expression(ens_expr);
                 let check = self.eval_expression(ens_expr)?;
                 if !check.is_truthy() {
-                    self.current_old_values = None;
-                    self.current_result = None;
                     return Err(IntentError::ContractViolation(format!(
                         "Postcondition failed in '{}': {}",
                         job_name, condition_str
@@ -5226,9 +5241,6 @@ impl Interpreter {
                     .check_postcondition(&condition_str, true, None)?;
             }
         }
-
-        self.current_old_values = None;
-        self.current_result = None;
 
         Ok(result)
     }
