@@ -384,53 +384,53 @@ claim job from KV
 ### PR Plan
 
 **PR 1: `kv_incr` primitive** (~0.5 day)
-- [ ] Add `incr(key, amount) -> Result<i64>` to `SqliteKvStore`
-- [ ] Add `incr(key, amount) -> Result<i64>` to `RedisKvStore`
-- [ ] Add `kv_incr(handle, key, amount) -> Result<Value>` public API
-- [ ] Register `kv_incr` in NativeFunction table
-- [ ] Add `@ntnt` doc block, update STDLIB_REFERENCE.md
-- [ ] Tests for both backends: basic increment, create-on-missing, negative values
-- [ ] `cargo build --release --locked && ./target/release/ntnt docs --generate`
+- [x] Add `incr(key, amount) -> Result<i64>` to `SqliteKvStore`
+- [x] Add `incr(key, amount) -> Result<i64>` to `RedisKvStore`
+- [x] Add `kv_incr(handle, key, amount) -> Result<Value>` public API
+- [x] Register `kv_incr` in NativeFunction table
+- [x] Add `@ntnt` doc block, update STDLIB_REFERENCE.md
+- [x] Tests for both backends: basic increment, create-on-missing, negative values
+- [x] `cargo build --release --locked && ./target/release/ntnt docs --generate`
 
 **PR 2: Queue Pause/Resume** (~1 day)
-- [ ] Add `paused_queues: RwLock<HashSet<String>>` + `paused_cache_updated_at` to `JobRuntime`
-- [ ] Implement `pause_queue_impl(name)`, `resume_queue_impl(name)`, `is_queue_paused(name)`
-- [ ] KV persistence: `jobs:paused:<name>` keys
-- [ ] Lazy cache refresh (5s interval)
-- [ ] Worker loop integration: check after claim, before execution
-- [ ] Stdlib functions: `pause_queue`, `resume_queue`, `queue_status`
-- [ ] Register in NativeFunction table with `@ntnt` doc blocks
-- [ ] Control socket: add `pause` and `resume` commands to `dispatch_command`
-- [ ] CLI: add `Pause` and `Resume` subcommands under `Workers`
-- [ ] Streaming events: `queue.paused`, `queue.resumed`, `job.queue_paused`
-- [ ] Tests: pause prevents execution, resume allows execution, status reflects state, cache refresh
-- [ ] Update `worker_status_impl` to include paused queues in response
-- [ ] `cargo build --release --locked && ./target/release/ntnt docs --generate`
+- [x] Add `paused_queues: RwLock<HashSet<String>>` + `paused_cache_updated_at` to `JobRuntime`
+- [x] Implement `pause_queue_impl(name)`, `resume_queue_impl(name)`, `is_queue_paused(name)`
+- [x] KV persistence: `jobs:paused:<name>` keys
+- [x] Lazy cache refresh (5s interval)
+- [x] Worker loop integration: check after claim, before execution
+- [x] Stdlib functions: `pause_queue`, `resume_queue`, `queue_status`
+- [x] Register in NativeFunction table with `@ntnt` doc blocks
+- [x] Control socket: add `pause` and `resume` commands to `dispatch_command`
+- [x] CLI: add `Pause` and `Resume` subcommands under `Workers`
+- [x] Streaming events: `queue.paused`, `queue.resumed`, `job.queue_paused`
+- [x] Tests: pause prevents execution, resume allows execution, status reflects state, cache refresh
+- [x] Update `worker_status_impl` to include paused queues in response
+- [x] `cargo build --release --locked && ./target/release/ntnt docs --generate`
 
 **PR 3: Rate Limiting** (~1.5 days)
-- [ ] Parse `rate: "N/interval"` in job option parser → `RateLimit { count, window_secs }`
-- [ ] Validate format at registration time (helpful error for bad formats)
-- [ ] `check_rate_limit(kv, job_type, rate_limit) -> bool` using `kv_incr` + `kv_expire`
-- [ ] Worker loop integration: after pause check, before concurrency check
-- [ ] Re-enqueue on limit hit with `remaining_window_secs` sleep
-- [ ] Streaming event: `job.rate_limited`
-- [ ] Tests: rate limit enforcement, window reset, re-enqueue behavior
-- [ ] Update STDLIB_REFERENCE.md with `rate` option documentation
-- [ ] `cargo build --release --locked && ./target/release/ntnt docs --generate`
+- [x] Parse `rate: "N/interval"` in job option parser → `RateLimit { count, window_secs }`
+- [x] Validate format at registration time (helpful error for bad formats)
+- [x] `check_rate_limit(kv, job_type, rate_limit) -> bool` using `kv_incr` + `kv_expire`
+- [x] Worker loop integration: after pause check, before concurrency check
+- [x] Re-enqueue on limit hit with `remaining_window_secs` sleep
+- [x] Streaming event: `job.rate_limited`
+- [x] Tests: rate limit enforcement, window reset, re-enqueue behavior
+- [x] Update STDLIB_REFERENCE.md with `rate` option documentation
+- [x] `cargo build --release --locked && ./target/release/ntnt docs --generate`
 
 **PR 4: Concurrency Limits** (~1 day)
-- [ ] Parse `concurrency: N` in job option parser
-- [ ] Slot acquisition: `kv_set_nx("jobs:concurrency:{type}:{id}", "", ttl: visibility_timeout_secs)`
-- [ ] Slot count check: `kv_list("jobs:concurrency:{type}:")` before acquisition
-- [ ] Worker loop integration: after rate limit check
-- [ ] Slot release: `kv_del` in job completion + failure + cancellation paths
-- [ ] Re-enqueue on limit hit
-- [ ] Streaming event: `job.concurrency_limited`
-- [ ] Tests: concurrency enforcement, slot release on completion, TTL expiry on crash
-- [ ] Refresh concurrency slot TTL alongside `jobs:active:<id>` (if/when heartbeat refresh exists)
-- [ ] Interaction test: concurrency + rate limit together
-- [ ] Update STDLIB_REFERENCE.md with `concurrency` option documentation
-- [ ] `cargo build --release --locked && ./target/release/ntnt docs --generate`
+- [x] Parse `concurrency: N` in job option parser
+- [x] Slot acquisition: `kv_set_nx("jobs:concurrency:{type}:{id}", "", ttl: visibility_timeout_secs)`
+- [x] Slot count check: `kv_list("jobs:concurrency:{type}:")` before acquisition
+- [x] Worker loop integration: after rate limit check
+- [x] Slot release: `kv_del` in job completion + failure + cancellation paths
+- [x] Re-enqueue on limit hit
+- [x] Streaming event: `job.concurrency_limited`
+- [x] Tests: concurrency enforcement, slot release on completion, TTL expiry on crash
+- [x] Refresh concurrency slot TTL alongside `jobs:active:<id>` (if/when heartbeat refresh exists)
+- [x] Interaction test: concurrency + rate limit together
+- [x] Update STDLIB_REFERENCE.md with `concurrency` option documentation
+- [x] `cargo build --release --locked && ./target/release/ntnt docs --generate`
 
 ### Estimated Total: 4-5 days
 
@@ -668,31 +668,31 @@ If a sleep site runs in a thread without a token, `sleep_cancellable()` falls ba
 
 ### Implementation Checklist
 
-- [ ] Add `CancelToken` struct to `concurrent.rs` with `new()`, `cancel()`, `is_cancelled()`, `wait_timeout()`
-- [ ] Add `CURRENT_CANCEL_TOKEN` thread-local (rename from `CURRENT_TASK_CANCELLED`)
-- [ ] Keep `CURRENT_TASK_CANCELLED` as a deprecated alias during transition (or rename all at once)
-- [ ] Update `is_current_task_cancelled()` to use `CancelToken::is_cancelled()`
-- [ ] Add `sleep_cancellable(duration) -> bool` public utility
-- [ ] Update `TaskEntry.cancelled` type to `Arc<CancelToken>`
-- [ ] Update `ScheduleEntry.cancelled` type to `Arc<CancelToken>`
-- [ ] Update `register_task()` signature
-- [ ] Update `cancel_task()` to call `.cancel()` instead of `.store(true)`
-- [ ] Update `register_schedule()` return type
-- [ ] Update `cancel_schedule()` to call `.cancel()`
-- [ ] Update `spawn_worker_task()` return type and creation
-- [ ] Update `band_cancel_arcs` type in `JobRuntime`
-- [ ] Update all 6 cancel sites in `jobs.rs` (`.store(true)` → `.cancel()`)
-- [ ] Replace all 12 worker_loop sleep sites with `sleep_cancellable()`
-- [ ] Replace `sleep_ms()` 50ms polling with single `sleep_cancellable()`
-- [ ] Replace `schedule()` interval sleep with `sleep_cancellable()`
-- [ ] Replace `after()` delay polling with `sleep_cancellable()`
-- [ ] Remove chunked sleep code from rate limit path
-- [ ] Update schedule thread to set `CURRENT_CANCEL_TOKEN`
-- [ ] Tests: cancel during sleep wakes instantly
-- [ ] Tests: cancel token poisoned-mutex fail-safe
-- [ ] Tests: sleep_cancellable returns false on timeout, true on cancel
-- [ ] Tests: worker responds to scale-down during rate limit sleep
-- [ ] `cargo build --release --locked && ./target/release/ntnt docs --generate`
+- [x] Add `CancelToken` struct to `concurrent.rs` with `new()`, `cancel()`, `is_cancelled()`, `wait_timeout()`
+- [x] Add `CURRENT_CANCEL_TOKEN` thread-local (rename from `CURRENT_TASK_CANCELLED`)
+- [x] Keep `CURRENT_TASK_CANCELLED` as a deprecated alias during transition (or rename all at once)
+- [x] Update `is_current_task_cancelled()` to use `CancelToken::is_cancelled()`
+- [x] Add `sleep_cancellable(duration) -> bool` public utility
+- [x] Update `TaskEntry.cancelled` type to `Arc<CancelToken>`
+- [x] Update `ScheduleEntry.cancelled` type to `Arc<CancelToken>`
+- [x] Update `register_task()` signature
+- [x] Update `cancel_task()` to call `.cancel()` instead of `.store(true)`
+- [x] Update `register_schedule()` return type
+- [x] Update `cancel_schedule()` to call `.cancel()`
+- [x] Update `spawn_worker_task()` return type and creation
+- [x] Update `band_cancel_arcs` type in `JobRuntime`
+- [x] Update all 6 cancel sites in `jobs.rs` (`.store(true)` → `.cancel()`)
+- [x] Replace all 12 worker_loop sleep sites with `sleep_cancellable()`
+- [x] Replace `sleep_ms()` 50ms polling with single `sleep_cancellable()`
+- [x] Replace `schedule()` interval sleep with `sleep_cancellable()`
+- [x] Replace `after()` delay polling with `sleep_cancellable()`
+- [x] Remove chunked sleep code from rate limit path
+- [x] Update schedule thread to set `CURRENT_CANCEL_TOKEN`
+- [x] Tests: cancel during sleep wakes instantly
+- [x] Tests: cancel token poisoned-mutex fail-safe
+- [x] Tests: sleep_cancellable returns false on timeout, true on cancel
+- [x] Tests: worker responds to scale-down during rate limit sleep
+- [x] `cargo build --release --locked && ./target/release/ntnt docs --generate`
 
 ### Estimated Effort: 1-1.5 days
 
