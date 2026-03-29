@@ -1510,6 +1510,14 @@ impl Interpreter {
         self.call_depth = 0;
     }
 
+    /// Reset contract evaluation state (old() snapshots and result binding).
+    /// Must be called after panic/error cleanup on reused interpreters to prevent
+    /// stale contract state from leaking into subsequent job executions.
+    pub(crate) fn clear_contract_state(&mut self) {
+        self.current_old_values = None;
+        self.current_result = None;
+    }
+
     /// Define a variable in the current scope.
     pub(crate) fn define_in_scope(&mut self, name: String, value: Value) {
         self.environment.borrow_mut().define(name, value);
@@ -4662,6 +4670,7 @@ impl Interpreter {
                 queue,
                 options,
                 perform_params,
+                perform_contract,
                 perform_body,
                 on_failure,
             } => {
@@ -4707,11 +4716,16 @@ impl Interpreter {
                 // perform body so workers can re-evaluate the source file and execute
                 // perform blocks with full access to imports and user-defined functions.
                 use crate::stdlib::jobs::{JobDefinition, JOB_RUNTIME};
+                let job_contract = perform_contract.as_ref().map(|c| FunctionContract {
+                    requires: c.requires.clone(),
+                    ensures: c.ensures.clone(),
+                });
                 let job_def = JobDefinition {
                     name: name.clone(),
                     queue: queue.clone(),
                     options: opts,
                     perform_params: perform_params.clone(),
+                    perform_contract: job_contract,
                     perform_body: perform_body.clone(),
                     on_failure: on_failure.clone(),
                 };
@@ -5119,6 +5133,115 @@ impl Interpreter {
         }
 
         self.environment = previous;
+        Ok(result)
+    }
+
+    /// Evaluate a block with optional contract checking (requires/ensures).
+    ///
+    /// Used by the job worker path to execute perform blocks that carry contracts.
+    /// Unlike `call_user_function`, this does **not** push a new scope — the caller
+    /// (i.e. `execute_in_worker`) is responsible for setting up and tearing down the
+    /// execution scope.
+    pub fn eval_block_with_contract(
+        &mut self,
+        block: &Block,
+        job_name: &str,
+        contract: Option<&FunctionContract>,
+    ) -> Result<Value> {
+        // Defensive reset — ensure no stale contract state from a prior execution
+        self.current_old_values = None;
+        self.current_result = None;
+
+        // Run the inner logic, guaranteeing contract state cleanup on all exits
+        let result = self.eval_block_with_contract_inner(block, job_name, contract);
+
+        // Always clean up — covers ensures eval errors, capture_old_values errors, etc.
+        self.current_old_values = None;
+        self.current_result = None;
+
+        result
+    }
+
+    fn eval_block_with_contract_inner(
+        &mut self,
+        block: &Block,
+        job_name: &str,
+        contract: Option<&FunctionContract>,
+    ) -> Result<Value> {
+        // Check preconditions
+        if let Some(c) = contract {
+            for req_expr in &c.requires {
+                let condition_str = Self::format_expression(req_expr);
+                let check = self.eval_expression(req_expr)?;
+                if !check.is_truthy() {
+                    return Err(IntentError::ContractViolation(format!(
+                        "Precondition failed in '{}': {}",
+                        job_name, condition_str
+                    )));
+                }
+                self.contracts
+                    .check_precondition(&condition_str, true, None)?;
+            }
+            self.current_old_values = Some(self.capture_old_values(&c.ensures)?);
+        }
+
+        // Snapshot deferred count so we drain only what this block added
+        let deferred_count_before = self.deferred_statements.len();
+
+        // Execute body — capture error for deferred cleanup
+        let mut result = Value::Unit;
+        let mut body_error: Option<IntentError> = None;
+        for stmt in &block.statements {
+            match self.eval_statement(stmt) {
+                Ok(val) => {
+                    if let Value::Return(v) = val {
+                        result = *v;
+                        break;
+                    }
+                    result = val;
+                }
+                Err(e) => {
+                    body_error = Some(e);
+                    break;
+                }
+            }
+        }
+
+        // Execute deferred statements in LIFO order (always, even on error)
+        let deferred_to_run: Vec<Expression> = self
+            .deferred_statements
+            .drain(deferred_count_before..)
+            .collect();
+        for deferred_expr in deferred_to_run.into_iter().rev() {
+            let _ = self.eval_expression(&deferred_expr);
+        }
+
+        if let Some(e) = body_error {
+            return Err(e);
+        }
+
+        // Bind result for postcondition evaluation
+        self.current_result = Some(result.clone());
+        self.environment
+            .borrow_mut()
+            .define("result".to_string(), result.clone());
+
+        // Check postconditions
+        if let Some(c) = contract {
+            for ens_expr in &c.ensures {
+                let condition_str = Self::format_expression(ens_expr);
+                let check = self.eval_expression(ens_expr)?;
+                if !check.is_truthy() {
+                    return Err(IntentError::ContractViolation(format!(
+                        "Postcondition failed in '{}': {}",
+                        job_name, condition_str
+                    )));
+                }
+                self.contracts
+                    .check_postcondition(&condition_str, true, None)?;
+            }
+        }
+
         Ok(result)
     }
 
@@ -9866,6 +9989,123 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(result, Value::Int(10)));
+    }
+
+    // --- Job contract tests ---
+
+    /// Helper: run NTNT source in a clean JOB_RUNTIME context.
+    fn eval_with_clean_jobs(source: &str) -> Result<Value> {
+        let _guard = crate::stdlib::jobs::tests::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::stdlib::jobs::JOB_RUNTIME.reset();
+        eval(source)
+    }
+
+    #[test]
+    fn test_job_contract_requires_passes() {
+        let result = eval_with_clean_jobs(
+            r#"
+            import { configure_queue, enqueue, drain_jobs } from "std/jobs"
+            configure_queue(map { "mode": "testing" })
+            job ProcessOrder on orders {
+                perform(amount: Int) requires amount > 0 {
+                    print("processing")
+                }
+            }
+            enqueue("ProcessOrder", map { "amount": 10 })
+            drain_jobs()
+        "#,
+        );
+        assert!(result.is_ok(), "Job with passing requires should succeed");
+    }
+
+    #[test]
+    fn test_job_contract_requires_fails() {
+        let result = eval_with_clean_jobs(
+            r#"
+            import { configure_queue, enqueue, drain_jobs } from "std/jobs"
+            configure_queue(map { "mode": "testing" })
+            job ProcessOrder on orders {
+                perform(amount: Int) requires amount > 0 {
+                    print("processing")
+                }
+            }
+            enqueue("ProcessOrder", map { "amount": 0 })
+            drain_jobs()
+        "#,
+        );
+        // drain_jobs() surfaces job failures as a runtime error
+        assert!(result.is_err(), "Job with failing requires should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Precondition failed"),
+            "Error should mention Precondition failed, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_job_contract_ensures_passes() {
+        let result = eval_with_clean_jobs(
+            r#"
+            import { configure_queue, enqueue, drain_jobs } from "std/jobs"
+            configure_queue(map { "mode": "testing" })
+            job ComputeJob on compute {
+                perform(x: Int) ensures result >= 0 {
+                    return x * x
+                }
+            }
+            enqueue("ComputeJob", map { "x": 5 })
+            drain_jobs()
+        "#,
+        );
+        assert!(result.is_ok(), "Job with passing ensures should succeed");
+    }
+
+    #[test]
+    fn test_job_contract_ensures_fails() {
+        let result = eval_with_clean_jobs(
+            r#"
+            import { configure_queue, enqueue, drain_jobs } from "std/jobs"
+            configure_queue(map { "mode": "testing" })
+            job BadJob on default {
+                perform(x: Int) ensures result > 1000 {
+                    return x
+                }
+            }
+            enqueue("BadJob", map { "x": 5 })
+            drain_jobs()
+        "#,
+        );
+        assert!(result.is_err(), "Job with failing ensures should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Postcondition failed"),
+            "Error should mention Postcondition failed, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_job_no_contract_unchanged() {
+        let result = eval_with_clean_jobs(
+            r#"
+            import { configure_queue, enqueue, drain_jobs } from "std/jobs"
+            configure_queue(map { "mode": "testing" })
+            job SimpleJob on default {
+                perform(msg) {
+                    print(msg)
+                }
+            }
+            enqueue("SimpleJob", map { "msg": "hello" })
+            drain_jobs()
+        "#,
+        );
+        assert!(
+            result.is_ok(),
+            "Job without contract should behave as before"
+        );
     }
 
     #[test]

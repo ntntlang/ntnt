@@ -26,7 +26,7 @@
 
 use crate::ast::{Block, Parameter};
 use crate::error::{IntentError, Result};
-use crate::interpreter::{RuntimeCapability, Value};
+use crate::interpreter::{FunctionContract, RuntimeCapability, Value};
 use crate::stdlib::concurrent::{
     check_task_limit, finalize_task, is_current_task_cancelled, sleep_cancellable, CancelToken,
     CURRENT_CANCEL_TOKEN, RUNTIME,
@@ -190,6 +190,8 @@ pub struct JobDefinition {
     pub options: HashMap<String, JobOptionValue>,
     /// Parameters for the perform block (e.g., [to, body])
     pub perform_params: Vec<Parameter>,
+    /// Optional contract (requires/ensures) for the perform block
+    pub perform_contract: Option<FunctionContract>,
     /// Body of the perform block — executed by workers in a child scope of the worker interpreter
     pub perform_body: Block,
     /// Optional on_failure handler: (params, body)
@@ -607,10 +609,13 @@ fn execute_in_worker(
         interp.define_in_scope(param.name.clone(), val);
     }
 
-    // Evaluate the perform body
+    // Evaluate the perform body (with contract checking if present)
     let body = def.perform_body.clone();
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| interp.eval_block(&body)));
+    let name = def.name.clone();
+    let contract = def.perform_contract.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        interp.eval_block_with_contract(&body, &name, contract.as_ref())
+    }));
 
     // Unconditionally restore to the snapshot — works regardless of how many
     // nested scopes eval_block leaked on panic.
@@ -624,6 +629,7 @@ fn execute_in_worker(
     if result.is_err() {
         interp.clear_deferred();
         interp.reset_call_depth();
+        interp.clear_contract_state();
     }
 
     match result {
@@ -685,6 +691,7 @@ fn execute_on_failure_in_worker(
     if panic_result.is_err() {
         interp.clear_deferred();
         interp.reset_call_depth();
+        interp.clear_contract_state();
     }
 }
 
@@ -4100,6 +4107,7 @@ pub(crate) mod tests {
             queue: queue.to_string(),
             options: HashMap::new(),
             perform_params: vec![],
+            perform_contract: None,
             perform_body: crate::ast::Block { statements: vec![] },
             on_failure: None,
         }
@@ -4115,6 +4123,7 @@ pub(crate) mod tests {
             queue: queue.to_string(),
             options,
             perform_params: vec![],
+            perform_contract: None,
             perform_body: crate::ast::Block { statements: vec![] },
             on_failure: None,
         }
@@ -5819,6 +5828,7 @@ pub(crate) mod tests {
                     name: name.to_string(),
                     queue: "default".to_string(),
                     perform_params: vec![],
+                    perform_contract: None,
                     perform_body: Block { statements: vec![] },
                     on_failure: None,
                     options: opts,
@@ -5866,6 +5876,7 @@ pub(crate) mod tests {
                 name: "NumPrioJob".to_string(),
                 queue: "default".to_string(),
                 perform_params: vec![],
+                perform_contract: None,
                 perform_body: Block { statements: vec![] },
                 on_failure: None,
                 options: opts,
@@ -5904,6 +5915,7 @@ pub(crate) mod tests {
                 name: "BadPrioJob".to_string(),
                 queue: "default".to_string(),
                 perform_params: vec![],
+                perform_contract: None,
                 perform_body: Block { statements: vec![] },
                 on_failure: None,
                 options: opts,
@@ -5934,6 +5946,7 @@ pub(crate) mod tests {
                 name: "UnknownPrioJob".to_string(),
                 queue: "default".to_string(),
                 perform_params: vec![],
+                perform_contract: None,
                 perform_body: Block { statements: vec![] },
                 on_failure: None,
                 options: opts,
@@ -6266,6 +6279,7 @@ pub(crate) mod tests {
                 name: "RetryPrioJob".to_string(),
                 queue: "default".to_string(),
                 perform_params: vec![],
+                perform_contract: None,
                 perform_body: Block { statements: vec![] },
                 on_failure: None,
                 options: opts,
@@ -6492,6 +6506,7 @@ pub(crate) mod tests {
                 name: "TaggedJob".to_string(),
                 queue: "default".to_string(),
                 perform_params: vec![],
+                perform_contract: None,
                 perform_body: crate::ast::Block { statements: vec![] },
                 on_failure: None,
                 options: opts,
