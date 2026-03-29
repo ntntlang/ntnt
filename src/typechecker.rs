@@ -3626,7 +3626,9 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
         }
         "std/jobs" => {
             sig!("configure_queue", ["opts" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Unit, Type::String] });
-            sig!("enqueue", ["job_name" => Type::String, "args" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::String, Type::String] });
+            // enqueue supports 2 forms: (job_name, args) -> Result<String, String>
+            // and (batch_handle, job_name, args) -> Result<Unit, String>
+            sig!("enqueue", ["batch_or_job" => Type::Union(vec![Type::String, Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }]), "job_name_or_args" => Type::Any, "args" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Any, Type::String] }, required(2));
             sig!("job_status", ["job_id" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
             sig!("cancel_job", ["job_id" => Type::String, "opts" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Bool, Type::String] }, required(1));
             sig!("retry_job", ["job_id" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Bool, Type::String] });
@@ -3667,6 +3669,10 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
                 }
             );
             sig!("enqueue_batch", ["job_name" => Type::String, "args" => Type::Array(Box::new(Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }))], Type::Generic { name: "Result".to_string(), args: vec![Type::Array(Box::new(Type::String)), Type::String] });
+            sig!("batch", ["name" => Type::String, "opts" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, required(1));
+            sig!("seal", ["batch_handle" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Unit, Type::String] });
+            sig!("batch_status", ["batch_id_or_handle" => Type::Any], Type::Generic { name: "Result".to_string(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
+            sig!("batch_id", [], Type::Optional(Box::new(Type::String)));
         }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));
