@@ -3628,8 +3628,10 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("configure_queue", ["opts" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Unit, Type::String] });
             // enqueue supports 2 forms: (job_name, args) -> Result<String, String>
             // and (batch_handle, job_name, args) -> Result<Unit, String>
-            // Return type: Result<Union(String, Unit), String> — preserves type safety for both forms
-            sig!("enqueue", ["batch_or_job" => Type::Union(vec![Type::String, Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }]), "job_name_or_args" => Type::Any, "args" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Union(vec![Type::String, Type::Unit]), Type::String] }, required(2));
+            // Return type uses Any because the typechecker can't do overload resolution —
+            // Union(String, Unit) would make unwrap() produce String|() which breaks
+            // downstream code expecting String (e.g. job_status(unwrap(enqueue(...)))).
+            sig!("enqueue", ["batch_or_job" => Type::Union(vec![Type::String, Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }]), "job_name_or_args" => Type::Any, "args" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Any, Type::String] }, required(2));
             sig!("job_status", ["job_id" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
             sig!("cancel_job", ["job_id" => Type::String, "opts" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Bool, Type::String] }, required(1));
             sig!("retry_job", ["job_id" => Type::String], Type::Generic { name: "Result".to_string(), args: vec![Type::Bool, Type::String] });
