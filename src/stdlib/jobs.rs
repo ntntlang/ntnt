@@ -571,9 +571,8 @@ fn extract_kv_handle_info(handle: &Value) -> Result<KvHandleInfo> {
 // Helper: zero-padded timestamp for lexicographic ordering
 // ============================================================================
 
-/// Returns a zero-padded nanosecond timestamp string for KV key ordering.
-/// Format: 20-digit zero-padded Unix timestamp in nanoseconds.
-/// Build batch metadata map with common fields. Caller sets status-specific fields after.
+/// Build batch metadata map with common fields used for tracking job batches.
+/// Caller is responsible for updating status-specific fields (e.g. fired flags, timestamps).
 fn build_batch_meta(
     batch_id: &str,
     name: &str,
@@ -603,6 +602,8 @@ fn build_batch_meta(
     meta
 }
 
+/// Returns a zero-padded nanosecond timestamp string for KV key ordering.
+/// Format: 20-digit zero-padded Unix timestamp in nanoseconds.
 pub fn timestamp_key() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4529,19 +4530,40 @@ pub fn init() -> HashMap<String, Value> {
                     }
                     Err(e) => {
                         // KV writes failed — clean up both KV and in-memory state for retry.
+                        // Use the same kv_handle from the closure scope to avoid re-init failures.
+                        let meta_key = format!("jobs:batch:{}", batch_id);
 
                         // 1. Revert KV metadata: delete the "sealing" record so
                         //    batch_status() doesn't report a phantom seal, and
                         //    a process restart doesn't leave an unrecoverable state.
-                        if let Ok(kv) = JOB_RUNTIME.get_or_init_kv() {
-                            let meta_key = format!("jobs:batch:{}", batch_id);
-                            let _ = kv::kv_del(&kv, &meta_key);
+                        //    If cleanup fails, return that error — don't leave KV and
+                        //    memory in divergent states.
+                        match JOB_RUNTIME.get_or_init_kv() {
+                            Ok(kv) => {
+                                if let Err(cleanup_err) = kv::kv_del(&kv, &meta_key) {
+                                    // KV cleanup failed — don't reset in-memory state either,
+                                    // so KV ("sealing") and memory (Sealing) stay consistent.
+                                    return Err(IntentError::runtime_error(format!(
+                                        "Seal failed ({}), and KV cleanup also failed ({}). \
+                                         Batch '{}' is stuck in 'sealing' state.",
+                                        e, cleanup_err, batch_id
+                                    )));
+                                }
+                            }
+                            Err(kv_err) => {
+                                // Can't acquire KV handle — don't reset in-memory state,
+                                // keep both sides in Sealing to avoid divergence.
+                                return Err(IntentError::runtime_error(format!(
+                                    "Seal failed ({}), and KV handle unavailable for cleanup ({}). \
+                                     Batch '{}' is stuck in 'sealing' state.",
+                                    e, kv_err, batch_id
+                                )));
+                            }
                         }
 
-                        // 2. Reset in-memory batch to Open for retry.
-                        //    Copy flushed flags from local state so retries skip
-                        //    already-written jobs. Use poison recovery to ensure
-                        //    the batch is always reset, even if a panic poisoned the mutex.
+                        // 2. KV metadata cleaned up successfully — now safe to reset
+                        //    in-memory batch to Open for retry. Copy flushed flags from
+                        //    local state so retries skip already-written jobs.
                         let mut batches = BATCH_RUNTIME
                             .batches
                             .lock()
