@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.4.6
+> Last updated: v0.4.7
 
 ## Table of Contents
 
@@ -6733,6 +6733,7 @@ seal(b)  // Seal a batch after buffering all jobs
 **Gotchas:**
 
 - Callbacks (on_success, on_complete, on_death) registered via batch() are accepted for API forward-compatibility but are not executed until Phase 2.
+- Idempotency is sequential only. Calling seal() after a batch is already sealed returns Ok (no-op). However, concurrent seal() calls while the first seal is still in progress return an error. Do not call seal() from multiple threads simultaneously.
 - If enqueue_internal fails mid-write for a single job (e.g., data key written but pending key not), that job's flushed flag stays false and retry will re-enqueue with a new ID, potentially creating a duplicate. This is a known limitation of the non-transactional KV backend.
 
 **See also:** `batch`, `batch_status`

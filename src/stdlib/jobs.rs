@@ -3030,7 +3030,7 @@ pub fn init() -> HashMap<String, Value> {
                                 Ok(Value::ok(Value::Unit))
                             }
                             None => Err(IntentError::runtime_error(format!(
-                                "Batch '{}' not found or already sealed",
+                                "Batch '{}' not found (may have been sealed or pruned after 1h of inactivity)",
                                 batch_id
                             ))),
                         }
@@ -4344,6 +4344,7 @@ pub fn init() -> HashMap<String, Value> {
     // @param batch_handle The batch handle returned by batch()
     // @returns Result<Unit, String>
     // @gotcha Callbacks (on_success, on_complete, on_death) registered via batch() are accepted for API forward-compatibility but are not executed until Phase 2.
+    // @gotcha Idempotency is sequential only. Calling seal() after a batch is already sealed returns Ok (no-op). However, concurrent seal() calls while the first seal is still in progress return an error. Do not call seal() from multiple threads simultaneously.
     // @gotcha If enqueue_internal fails mid-write for a single job (e.g., data key written but pending key not), that job's flushed flag stays false and retry will re-enqueue with a new ID, potentially creating a duplicate. This is a known limitation of the non-transactional KV backend.
     // @example seal(b) ~ "Seal a batch after buffering all jobs"
     // @see_also batch, batch_status
@@ -4423,9 +4424,9 @@ pub fn init() -> HashMap<String, Value> {
                                             "Batch '{}' has incomplete seal (status='sealing'). Previous seal may have crashed mid-flush.",
                                             batch_id
                                         ))),
-                                        _ => Err(IntentError::runtime_error(format!(
-                                            "Batch '{}' has unexpected status in KV",
-                                            batch_id
+                                        other => Err(IntentError::runtime_error(format!(
+                                            "Batch '{}' has unexpected status '{}' in KV metadata (key: jobs:batch:{})",
+                                            batch_id, other.unwrap_or("missing"), batch_id
                                         ))),
                                     }
                                 }
