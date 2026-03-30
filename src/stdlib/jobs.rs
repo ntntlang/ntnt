@@ -497,13 +497,13 @@ enum BatchStatus {
     Sealing,
 }
 
-#[allow(dead_code)]
 #[derive(Clone)]
 struct BatchState {
     id: String,
     name: String,
     /// Names of callbacks that were provided ("on_success", "on_complete", "on_death").
-    /// Actual closures not stored — Phase 2 handles serialization.
+    /// Actual closures not stored — Phase 2 wires execution via serialized references.
+    #[allow(dead_code)]
     callback_names: Vec<String>,
     buffered: Vec<BufferedJob>,
     created_at: String,
@@ -3003,7 +3003,7 @@ pub fn init() -> HashMap<String, Value> {
                                 e
                             ))
                         })?;
-                        // Validate job type is registered before buffering (#5)
+                        // Validate job type is registered before buffering
                         if JOB_RUNTIME.get_job(&job_name)?.is_none() {
                             return Err(IntentError::runtime_error(format!(
                                 "Unknown job type '{}' — make sure it is defined with a job block before enqueueing",
@@ -3026,7 +3026,7 @@ pub fn init() -> HashMap<String, Value> {
                                     payload_json,
                                     flushed: false,
                                 });
-                                // Return Unit — the job has no KV identity until seal() (#4)
+                                // Return Unit — the job has no KV identity until seal()
                                 Ok(Value::ok(Value::Unit))
                             }
                             None => Err(IntentError::runtime_error(format!(
@@ -4308,7 +4308,7 @@ pub fn init() -> HashMap<String, Value> {
                     .batches
                     .lock()
                     .map_err(|e| IntentError::runtime_error(format!("Batch lock error: {}", e)))?;
-                // Lazily prune abandoned Open batches older than 1 hour (#6).
+                // Lazily prune abandoned Open batches older than 1 hour.
                 // Never prune Sealing batches — they're actively being flushed.
                 let one_hour_nanos: u128 = 3_600_000_000_000;
                 let now_nanos = SystemTime::now()
@@ -4396,7 +4396,9 @@ pub fn init() -> HashMap<String, Value> {
                         Some(batch) => {
                             // Mark as sealing (stays in map so concurrent enqueues see it)
                             batch.status = BatchStatus::Sealing;
-                            // Clone out the data we need for KV work
+                            // Clone (not take/remove) so the Sealing entry stays in the map.
+                            // This lets concurrent enqueue() calls see the Sealing status
+                            // and get a clear error, rather than "batch not found".
                             BatchState {
                                 id: batch.id.clone(),
                                 name: batch.name.clone(),
@@ -4442,7 +4444,7 @@ pub fn init() -> HashMap<String, Value> {
                 // Batch remains in map with Sealing status, blocking concurrent enqueues.
 
                 // Step 2: All KV work outside the lock.
-                // On failure, re-lock and reinsert the batch for retry (#2).
+                // On failure, clean up KV and reset batch to Open for retry.
                 let kv_result: Result<()> = (|| {
                     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
                     let meta_key = format!("jobs:batch:{}", batch_id);
@@ -4463,7 +4465,7 @@ pub fn init() -> HashMap<String, Value> {
                         return Ok(());
                     }
 
-                    // Pre-parse ALL payloads before any KV writes (#7).
+                    // Pre-parse ALL payloads before any KV writes.
                     // Fail immediately on parse error rather than substituting empty maps.
                     let base_nanos = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
