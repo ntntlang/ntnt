@@ -4981,6 +4981,9 @@ pub(crate) mod tests {
     fn with_temp_kv<F: FnOnce(&Value)>(db_name: &str, f: F) {
         with_clean_runtime(|| {
             let tmp = std::env::temp_dir().join(db_name);
+            // Delete before opening so stale data from a previous failed run
+            // can't interfere (e.g. done-set entries causing early returns).
+            let _ = std::fs::remove_file(&tmp);
             let url = format!("sqlite:{}", tmp.display());
             if let Ok(mut u) = JOB_RUNTIME.kv_url.lock() {
                 *u = url.clone();
