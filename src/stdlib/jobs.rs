@@ -573,6 +573,36 @@ fn extract_kv_handle_info(handle: &Value) -> Result<KvHandleInfo> {
 
 /// Returns a zero-padded nanosecond timestamp string for KV key ordering.
 /// Format: 20-digit zero-padded Unix timestamp in nanoseconds.
+/// Build batch metadata map with common fields. Caller sets status-specific fields after.
+fn build_batch_meta(
+    batch_id: &str,
+    name: &str,
+    created_at: &str,
+    status: &str,
+    total: i64,
+    pending: i64,
+) -> HashMap<String, Value> {
+    let mut meta = HashMap::new();
+    meta.insert("id".to_string(), Value::String(batch_id.to_string()));
+    meta.insert("name".to_string(), Value::String(name.to_string()));
+    meta.insert("status".to_string(), Value::String(status.to_string()));
+    meta.insert("total".to_string(), Value::Int(total));
+    meta.insert("pending".to_string(), Value::Int(pending));
+    meta.insert("succeeded".to_string(), Value::Int(0));
+    meta.insert("dead".to_string(), Value::Int(0));
+    meta.insert("cancelled".to_string(), Value::Int(0));
+    meta.insert("fired_success".to_string(), Value::Bool(false));
+    meta.insert("fired_complete".to_string(), Value::Bool(false));
+    meta.insert("fired_death".to_string(), Value::Bool(false));
+    meta.insert(
+        "created_at".to_string(),
+        Value::String(created_at.to_string()),
+    );
+    meta.insert("sealed_at".to_string(), Value::none());
+    meta.insert("completed_at".to_string(), Value::none());
+    meta
+}
+
 pub fn timestamp_key() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4277,13 +4307,17 @@ pub fn init() -> HashMap<String, Value> {
                     .batches
                     .lock()
                     .map_err(|e| IntentError::runtime_error(format!("Batch lock error: {}", e)))?;
-                // Lazily prune unsealed batches older than 1 hour (#6)
-                let one_hour_nanos: u128 = 3_600_000_000_000; // 1h in nanoseconds
+                // Lazily prune abandoned Open batches older than 1 hour (#6).
+                // Never prune Sealing batches — they're actively being flushed.
+                let one_hour_nanos: u128 = 3_600_000_000_000;
                 let now_nanos = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_nanos();
                 batches.retain(|_, s| {
+                    if s.status == BatchStatus::Sealing {
+                        return true; // never prune active seals
+                    }
                     s.created_at.parse::<u128>().map_or(true, |created| {
                         now_nanos.saturating_sub(created) < one_hour_nanos
                     })
@@ -4411,22 +4445,12 @@ pub fn init() -> HashMap<String, Value> {
 
                     if total == 0 {
                         // Empty batch → immediately complete
-                        let mut meta = HashMap::new();
-                        meta.insert("id".to_string(), Value::String(batch_id.clone()));
-                        meta.insert("name".to_string(), Value::String(batch_state.name.clone()));
-                        meta.insert("status".to_string(), Value::String("complete".to_string()));
-                        meta.insert("total".to_string(), Value::Int(0));
-                        meta.insert("pending".to_string(), Value::Int(0));
-                        meta.insert("succeeded".to_string(), Value::Int(0));
-                        meta.insert("dead".to_string(), Value::Int(0));
-                        meta.insert("cancelled".to_string(), Value::Int(0));
+                        let mut meta = build_batch_meta(
+                            &batch_id, &batch_state.name, &batch_state.created_at,
+                            "complete", 0, 0,
+                        );
                         meta.insert("fired_success".to_string(), Value::Bool(true));
                         meta.insert("fired_complete".to_string(), Value::Bool(true));
-                        meta.insert("fired_death".to_string(), Value::Bool(false));
-                        meta.insert(
-                            "created_at".to_string(),
-                            Value::String(batch_state.created_at.clone()),
-                        );
                         let now = timestamp_key();
                         meta.insert("sealed_at".to_string(), Value::String(now.clone()));
                         meta.insert("completed_at".to_string(), Value::String(now));
@@ -4463,24 +4487,10 @@ pub fn init() -> HashMap<String, Value> {
                     // This ensures batch_status() can always find the batch even if
                     // a crash occurs mid-flush (prevents orphaned jobs with batch_id
                     // but no batch metadata).
-                    let mut meta = HashMap::new();
-                    meta.insert("id".to_string(), Value::String(batch_id.clone()));
-                    meta.insert("name".to_string(), Value::String(batch_state.name.clone()));
-                    meta.insert("status".to_string(), Value::String("sealing".to_string()));
-                    meta.insert("total".to_string(), Value::Int(total));
-                    meta.insert("pending".to_string(), Value::Int(total));
-                    meta.insert("succeeded".to_string(), Value::Int(0));
-                    meta.insert("dead".to_string(), Value::Int(0));
-                    meta.insert("cancelled".to_string(), Value::Int(0));
-                    meta.insert("fired_success".to_string(), Value::Bool(false));
-                    meta.insert("fired_complete".to_string(), Value::Bool(false));
-                    meta.insert("fired_death".to_string(), Value::Bool(false));
-                    meta.insert(
-                        "created_at".to_string(),
-                        Value::String(batch_state.created_at.clone()),
+                    let meta = build_batch_meta(
+                        &batch_id, &batch_state.name, &batch_state.created_at,
+                        "sealing", total, total,
                     );
-                    meta.insert("sealed_at".to_string(), Value::none());
-                    meta.insert("completed_at".to_string(), Value::none());
                     kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
 
                     // Flush jobs to KV.
@@ -4492,24 +4502,11 @@ pub fn init() -> HashMap<String, Value> {
 
                     // Update metadata to "sealed" after all jobs are durable.
                     let sealed_at = timestamp_key();
-                    let mut meta = HashMap::new();
-                    meta.insert("id".to_string(), Value::String(batch_id.clone()));
-                    meta.insert("name".to_string(), Value::String(batch_state.name.clone()));
-                    meta.insert("status".to_string(), Value::String("sealed".to_string()));
-                    meta.insert("total".to_string(), Value::Int(total));
-                    meta.insert("pending".to_string(), Value::Int(total));
-                    meta.insert("succeeded".to_string(), Value::Int(0));
-                    meta.insert("dead".to_string(), Value::Int(0));
-                    meta.insert("cancelled".to_string(), Value::Int(0));
-                    meta.insert("fired_success".to_string(), Value::Bool(false));
-                    meta.insert("fired_complete".to_string(), Value::Bool(false));
-                    meta.insert("fired_death".to_string(), Value::Bool(false));
-                    meta.insert(
-                        "created_at".to_string(),
-                        Value::String(batch_state.created_at.clone()),
+                    let mut meta = build_batch_meta(
+                        &batch_id, &batch_state.name, &batch_state.created_at,
+                        "sealed", total, total,
                     );
                     meta.insert("sealed_at".to_string(), Value::String(sealed_at));
-                    meta.insert("completed_at".to_string(), Value::none());
                     kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
 
                     Ok(())
@@ -4524,9 +4521,19 @@ pub fn init() -> HashMap<String, Value> {
                         Ok(Value::ok(Value::Unit))
                     }
                     Err(e) => {
-                        // KV writes failed — reset batch to Open for retry (#2).
-                        // Copy flushed flags from our local state back into the map entry
-                        // so retries skip already-written jobs.
+                        // KV writes failed — clean up both KV and in-memory state for retry.
+
+                        // 1. Revert KV metadata: delete the "sealing" record so
+                        //    batch_status() doesn't report a phantom seal, and
+                        //    a process restart doesn't leave an unrecoverable state.
+                        if let Ok(kv) = JOB_RUNTIME.get_or_init_kv() {
+                            let meta_key = format!("jobs:batch:{}", batch_id);
+                            let _ = kv::kv_del(&kv, &meta_key);
+                        }
+
+                        // 2. Reset in-memory batch to Open for retry.
+                        //    Copy flushed flags from local state so retries skip
+                        //    already-written jobs.
                         if let Ok(mut batches) = BATCH_RUNTIME.batches.lock() {
                             if let Some(batch) = batches.get_mut(&batch_id) {
                                 batch.status = BatchStatus::Open;
