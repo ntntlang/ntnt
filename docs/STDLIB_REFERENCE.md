@@ -6168,7 +6168,7 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`resume_queue`](#resumequeue) | Resume a paused queue — workers resume claiming and executing jobs from it. |
 | [`retry_job`](#retryjob) | Re-queue a failed or dead job for another attempt. |
 | [`scale_workers`](#scaleworkers) | Scale the number of worker threads for a named band up or down. |
-| [`seal`](#seal) | Seal a batch, flushing all buffered jobs to KV atomically. |
+| [`seal`](#seal) | Seal a batch, flushing all buffered jobs to KV in order. |
 | [`work_async`](#workasync) | Start one or more background worker threads that process jobs from the queue. |
 | [`work_jobs`](#workjobs) | Run a blocking worker loop that processes jobs from the queue. |
 | [`worker_status`](#workerstatus) | Return a status snapshot of the job worker system. |
@@ -6714,9 +6714,9 @@ scale_workers("normal", 1)  // Scale normal band down to 1 worker
 seal(batch_handle: Map) -> Result<Unit, String>
 ```
 
-Seal a batch, flushing all buffered jobs to KV atomically.
+Seal a batch, flushing all buffered jobs to KV in order.
 
-After seal(), no more jobs can be buffered. Workers can immediately begin claiming the flushed jobs. Idempotent — sealing an already-sealed batch is a no-op. Empty batches (0 jobs) are immediately marked complete.
+After seal(), no more jobs can be buffered. Workers can immediately begin claiming the flushed jobs. Idempotent — sealing an already-sealed batch is a no-op. Empty batches (0 jobs) are immediately marked complete. Note: seal writes metadata then individual jobs sequentially (not transactionally). On failure, already-flushed jobs are tracked and skipped on retry.
 
 **Parameters:**
 
@@ -6733,6 +6733,7 @@ seal(b)  // Seal a batch after buffering all jobs
 **Gotchas:**
 
 - Callbacks (on_success, on_complete, on_death) registered via batch() are accepted for API forward-compatibility but are not executed until Phase 2.
+- If enqueue_internal fails mid-write for a single job (e.g., data key written but pending key not), that job's flushed flag stays false and retry will re-enqueue with a new ID, potentially creating a duplicate. This is a known limitation of the non-transactional KV backend.
 
 **See also:** `batch`, `batch_status`
 

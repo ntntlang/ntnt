@@ -4333,14 +4333,17 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt seal
     // @module std/jobs
     // @signature seal(batch_handle: Map) -> Result<Unit, String>
-    // Seal a batch, flushing all buffered jobs to KV atomically.
+    // Seal a batch, flushing all buffered jobs to KV in order.
     //
     // After seal(), no more jobs can be buffered. Workers can immediately begin
     // claiming the flushed jobs. Idempotent — sealing an already-sealed batch
     // is a no-op. Empty batches (0 jobs) are immediately marked complete.
+    // Note: seal writes metadata then individual jobs sequentially (not transactionally).
+    // On failure, already-flushed jobs are tracked and skipped on retry.
     // @param batch_handle The batch handle returned by batch()
     // @returns Result<Unit, String>
     // @gotcha Callbacks (on_success, on_complete, on_death) registered via batch() are accepted for API forward-compatibility but are not executed until Phase 2.
+    // @gotcha If enqueue_internal fails mid-write for a single job (e.g., data key written but pending key not), that job's flushed flag stays false and retry will re-enqueue with a new ID, potentially creating a duplicate. This is a known limitation of the non-transactional KV backend.
     // @example seal(b) ~ "Seal a batch after buffering all jobs"
     // @see_also batch, batch_status
     module.insert(
@@ -4514,10 +4517,14 @@ pub fn init() -> HashMap<String, Value> {
 
                 match kv_result {
                     Ok(_) => {
-                        // Success — remove the batch from the map (no longer needed in memory)
-                        if let Ok(mut batches) = BATCH_RUNTIME.batches.lock() {
-                            batches.remove(&batch_id);
-                        }
+                        // Success — remove the batch from the map (no longer needed in memory).
+                        // Use poison recovery so a poisoned mutex doesn't leave the batch
+                        // permanently stuck in Sealing state after a successful seal.
+                        let mut batches = BATCH_RUNTIME
+                            .batches
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        batches.remove(&batch_id);
                         Ok(Value::ok(Value::Unit))
                     }
                     Err(e) => {
@@ -4533,18 +4540,19 @@ pub fn init() -> HashMap<String, Value> {
 
                         // 2. Reset in-memory batch to Open for retry.
                         //    Copy flushed flags from local state so retries skip
-                        //    already-written jobs.
-                        if let Ok(mut batches) = BATCH_RUNTIME.batches.lock() {
-                            if let Some(batch) = batches.get_mut(&batch_id) {
-                                batch.status = BatchStatus::Open;
-                                for (i, local_job) in batch_state.buffered.iter().enumerate() {
-                                    if i < batch.buffered.len() && local_job.flushed {
-                                        batch.buffered[i].flushed = true;
-                                    }
+                        //    already-written jobs. Use poison recovery to ensure
+                        //    the batch is always reset, even if a panic poisoned the mutex.
+                        let mut batches = BATCH_RUNTIME
+                            .batches
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if let Some(batch) = batches.get_mut(&batch_id) {
+                            batch.status = BatchStatus::Open;
+                            for (i, local_job) in batch_state.buffered.iter().enumerate() {
+                                if i < batch.buffered.len() && local_job.flushed {
+                                    batch.buffered[i].flushed = true;
                                 }
                             }
-                        } else {
-                            eprintln!("[WARN] seal(): could not re-lock batch map to reset failed batch '{}'", batch_id);
                         }
                         Err(e)
                     }
