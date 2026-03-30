@@ -639,8 +639,17 @@ fn fire_batch_callback(
 
     let cb_job_id = format!("cb-{}-{}", batch_id, callback_type);
 
-    // Announce before enqueue so the event is emitted even if the enqueue fails
-    // (the caller will log the error; the fired_* flag is already set in KV).
+    enqueue_internal(
+        "_BatchCallback",
+        Value::Map(payload),
+        &timestamp_key(),
+        None,
+        None,
+        Some(&cb_job_id),
+    )?;
+
+    // Emit only after enqueue succeeds — avoids false-positive events when
+    // the callback job fails to enqueue but fired_* is already set in metadata.
     eprintln!(
         "[ntnt] batch '{}': firing callback '{}'",
         batch_id, callback_type
@@ -653,15 +662,6 @@ fn fire_batch_callback(
             ("job_id", Value::String(cb_job_id.clone())),
         ],
     );
-
-    enqueue_internal(
-        "_BatchCallback",
-        Value::Map(payload),
-        &timestamp_key(),
-        None,
-        None,
-        Some(&cb_job_id),
-    )?;
 
     Ok(())
 }
@@ -706,126 +706,150 @@ fn update_batch_on_terminal(
         return Ok(());
     }
 
-    // Read current batch metadata.
-    let meta_key = format!("jobs:batch:{}", batch_id);
-    let mut meta = match kv::kv_get(kv_handle, &meta_key).map_err(|e| {
-        IntentError::runtime_error(format!(
-            "batch metadata read failed for batch '{}': {}",
-            batch_id, e
-        ))
-    })? {
-        Value::Map(m) => m,
-        Value::Unit => {
-            // Metadata missing — batch may have been deleted externally.
-            // Don't fail the job; just skip batch accounting.
-            eprintln!(
-                "[ntnt] warning: batch metadata not found for batch '{}' (job '{}')",
-                batch_id, job_id
-            );
-            return Ok(());
-        }
-        _ => {
-            return Err(IntentError::runtime_error(format!(
-                "corrupt batch metadata for batch '{}'",
-                batch_id
-            )));
-        }
-    };
+    // --- Atomic counter updates via kv_incr ---
+    // Each counter lives in its own KV key so concurrent workers updating
+    // different jobs in the same batch don't race on a shared metadata map.
+    // kv_incr is atomic per-key (SQLite: single transaction, Redis: Lua script).
+    let counter_prefix = format!("jobs:batch:{}:counter", batch_id);
 
-    // Decrement pending (floor at 0 to guard against metadata drift).
-    let pending = match meta.get("pending") {
-        Some(Value::Int(n)) => (*n - 1).max(0),
-        _ => 0,
-    };
-    meta.insert("pending".to_string(), Value::Int(pending));
+    let new_pending = kv::kv_incr(kv_handle, &format!("{}:pending", counter_prefix), -1)
+        .unwrap_or(0)
+        .max(0);
 
-    // Snapshot counters before increment (needed for first-death detection).
-    let dead_before = match meta.get("dead") {
-        Some(Value::Int(n)) => *n,
-        _ => 0,
-    };
-    let succeeded_before = match meta.get("succeeded") {
-        Some(Value::Int(n)) => *n,
-        _ => 0,
-    };
-    let cancelled_before = match meta.get("cancelled") {
-        Some(Value::Int(n)) => *n,
-        _ => 0,
-    };
-
+    // Increment the terminal counter. kv_incr returns the value AFTER increment,
+    // so new_dead==1 means this worker caused the 0→1 transition.
     let (new_dead, new_succeeded, new_cancelled) = match terminal_type {
-        "dead" => (dead_before + 1, succeeded_before, cancelled_before),
-        "succeeded" => (dead_before, succeeded_before + 1, cancelled_before),
-        "cancelled" => (dead_before, succeeded_before, cancelled_before + 1),
-        _ => (dead_before, succeeded_before, cancelled_before),
+        "dead" => {
+            let d = kv::kv_incr(kv_handle, &format!("{}:dead", counter_prefix), 1).unwrap_or(0);
+            (d, 0, 0) // Other counters read below if needed for callback checks
+        }
+        "succeeded" => {
+            let s =
+                kv::kv_incr(kv_handle, &format!("{}:succeeded", counter_prefix), 1).unwrap_or(0);
+            (0, s, 0)
+        }
+        "cancelled" => {
+            let c =
+                kv::kv_incr(kv_handle, &format!("{}:cancelled", counter_prefix), 1).unwrap_or(0);
+            (0, 0, c)
+        }
+        _ => (0, 0, 0),
     };
 
-    meta.insert("dead".to_string(), Value::Int(new_dead));
-    meta.insert("succeeded".to_string(), Value::Int(new_succeeded));
-    meta.insert("cancelled".to_string(), Value::Int(new_cancelled));
-
-    // Determine which callbacks need firing.
-    let fired_death = matches!(meta.get("fired_death"), Some(Value::Bool(true)));
-    let fired_complete = matches!(meta.get("fired_complete"), Some(Value::Bool(true)));
-    let fired_success = matches!(meta.get("fired_success"), Some(Value::Bool(true)));
-
-    // on_death: first job death (dead_before == 0 means the count just crossed 0 → 1).
-    let fire_death = terminal_type == "dead" && dead_before == 0 && !fired_death;
-
-    // on_complete: pending reached 0 for the first time.
-    let fire_complete = pending == 0 && !fired_complete;
-
-    // on_success: complete AND no deaths AND no cancellations.
-    let fire_success = fire_complete && new_dead == 0 && new_cancelled == 0 && !fired_success;
-
-    if fire_death {
-        meta.insert("fired_death".to_string(), Value::Bool(true));
-    }
-    if fire_complete {
-        meta.insert("fired_complete".to_string(), Value::Bool(true));
-        meta.insert("status".to_string(), Value::String("complete".to_string()));
-        meta.insert("completed_at".to_string(), Value::String(timestamp_key()));
-    }
-    if fire_success {
-        meta.insert("fired_success".to_string(), Value::Bool(true));
-    }
-
-    // Persist updated metadata before firing callbacks.  If the write fails, the
-    // done-set slot was already claimed so we won't double-count on retry — but
-    // the counters will be one behind.  Accept this trade-off: the alternative
-    // (releasing the done-set on write failure) opens a double-count window.
-    kv::kv_set(kv_handle, &meta_key, &Value::Map(meta.clone()), None).map_err(|e| {
-        IntentError::runtime_error(format!(
-            "batch metadata write failed for batch '{}': {}",
-            batch_id, e
-        ))
-    })?;
-
-    // Fire callbacks after the metadata write is durable.  Log errors but don't
-    // fail the terminal path — the job itself succeeded/died; callback enqueue
-    // failure is a secondary concern and will be visible in job event logs.
-    if fire_death {
-        if let Err(e) = fire_batch_callback(&batch_id, "on_death", &meta) {
-            eprintln!(
-                "[ntnt] warning: failed to enqueue on_death callback for batch '{}': {}",
-                batch_id, e
-            );
+    // Read the counters we didn't just increment (needed for callback conditions).
+    let all_dead = if terminal_type == "dead" {
+        new_dead
+    } else {
+        match kv::kv_get(kv_handle, &format!("{}:dead", counter_prefix)) {
+            Ok(Value::Int(n)) => n,
+            _ => 0,
         }
-    }
-    if fire_complete {
-        if let Err(e) = fire_batch_callback(&batch_id, "on_complete", &meta) {
-            eprintln!(
-                "[ntnt] warning: failed to enqueue on_complete callback for batch '{}': {}",
-                batch_id, e
-            );
+    };
+    let all_cancelled = if terminal_type == "cancelled" {
+        new_cancelled
+    } else {
+        match kv::kv_get(kv_handle, &format!("{}:cancelled", counter_prefix)) {
+            Ok(Value::Int(n)) => n,
+            _ => 0,
         }
-    }
-    if fire_success {
-        if let Err(e) = fire_batch_callback(&batch_id, "on_success", &meta) {
-            eprintln!(
-                "[ntnt] warning: failed to enqueue on_success callback for batch '{}': {}",
-                batch_id, e
-            );
+    };
+
+    // --- Callback conditions ---
+    // on_death:    new_dead==1 means kv_incr caused the 0→1 transition (exactly one worker sees this).
+    // on_complete: new_pending==0 means this worker brought pending to zero.
+    // on_success:  complete AND no deaths AND no cancellations.
+    let fire_death = terminal_type == "dead" && new_dead == 1;
+    let fire_complete = new_pending == 0;
+    let fire_success = fire_complete && all_dead == 0 && all_cancelled == 0;
+
+    // --- Exactly-once callback firing via kv_set_nx on fired flag keys ---
+    // Even if two workers concurrently see the same trigger condition (e.g. both
+    // see new_pending==0 due to read timing), only the kv_set_nx winner fires.
+    let fired_prefix = format!("jobs:batch:{}:fired", batch_id);
+    let do_fire_death = fire_death
+        && kv::kv_set_nx(
+            kv_handle,
+            &format!("{}:on_death", fired_prefix),
+            &Value::Bool(true),
+            None,
+        )
+        .unwrap_or(false);
+    let do_fire_complete = fire_complete
+        && kv::kv_set_nx(
+            kv_handle,
+            &format!("{}:on_complete", fired_prefix),
+            &Value::Bool(true),
+            None,
+        )
+        .unwrap_or(false);
+    let do_fire_success = fire_success
+        && kv::kv_set_nx(
+            kv_handle,
+            &format!("{}:on_success", fired_prefix),
+            &Value::Bool(true),
+            None,
+        )
+        .unwrap_or(false);
+
+    // --- Update metadata map with authoritative counter values ---
+    // Two workers racing here both write FROM the atomic counter values,
+    // so the last writer is always correct — no lost update.
+    let meta_key = format!("jobs:batch:{}", batch_id);
+    if let Ok(Value::Map(mut meta)) = kv::kv_get(kv_handle, &meta_key) {
+        meta.insert("pending".to_string(), Value::Int(new_pending));
+        // Read all counters for the metadata snapshot.
+        let all_succeeded = if terminal_type == "succeeded" {
+            new_succeeded
+        } else {
+            match kv::kv_get(kv_handle, &format!("{}:succeeded", counter_prefix)) {
+                Ok(Value::Int(n)) => n,
+                _ => 0,
+            }
+        };
+        meta.insert("dead".to_string(), Value::Int(all_dead));
+        meta.insert("succeeded".to_string(), Value::Int(all_succeeded));
+        meta.insert("cancelled".to_string(), Value::Int(all_cancelled));
+
+        if do_fire_death {
+            meta.insert("fired_death".to_string(), Value::Bool(true));
+        }
+        if do_fire_complete {
+            meta.insert("fired_complete".to_string(), Value::Bool(true));
+            meta.insert("status".to_string(), Value::String("complete".to_string()));
+            meta.insert("completed_at".to_string(), Value::String(timestamp_key()));
+        }
+        if do_fire_success {
+            meta.insert("fired_success".to_string(), Value::Bool(true));
+        }
+
+        let _ = kv::kv_set(kv_handle, &meta_key, &Value::Map(meta.clone()), None);
+
+        // Fire callbacks after metadata is durable. Log errors but don't fail
+        // the terminal path — the job itself succeeded/died; callback enqueue
+        // failure is secondary and visible in event logs.
+        if do_fire_death {
+            if let Err(e) = fire_batch_callback(&batch_id, "on_death", &meta) {
+                eprintln!(
+                    "[ntnt] warning: failed to enqueue on_death callback for batch '{}': {}",
+                    batch_id, e
+                );
+            }
+        }
+        if do_fire_complete {
+            if let Err(e) = fire_batch_callback(&batch_id, "on_complete", &meta) {
+                eprintln!(
+                    "[ntnt] warning: failed to enqueue on_complete callback for batch '{}': {}",
+                    batch_id, e
+                );
+            }
+        }
+        if do_fire_success {
+            if let Err(e) = fire_batch_callback(&batch_id, "on_success", &meta) {
+                eprintln!(
+                    "[ntnt] warning: failed to enqueue on_success callback for batch '{}': {}",
+                    batch_id, e
+                );
+            }
         }
     }
 
@@ -4739,6 +4763,12 @@ pub fn init() -> HashMap<String, Value> {
                         meta.insert("sealed_at".to_string(), Value::String(now.clone()));
                         meta.insert("completed_at".to_string(), Value::String(now));
                         kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
+                        // Initialize atomic counter keys at 0 for consistency.
+                        let cp = format!("jobs:batch:{}:counter", batch_id);
+                        kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(0), None)?;
+                        kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), None)?;
+                        kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), None)?;
+                        kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), None)?;
                         return Ok(());
                     }
 
@@ -4792,6 +4822,13 @@ pub fn init() -> HashMap<String, Value> {
                     );
                     meta.insert("sealed_at".to_string(), Value::String(sealed_at));
                     kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
+
+                    // Initialize atomic counter keys for concurrent worker updates.
+                    let cp = format!("jobs:batch:{}:counter", batch_id);
+                    kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(total), None)?;
+                    kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), None)?;
+                    kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), None)?;
+                    kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), None)?;
 
                     Ok(())
                 })();
@@ -4912,6 +4949,18 @@ pub fn init() -> HashMap<String, Value> {
                         "Batch '{}' not found",
                         batch_id
                     ))),
+                    Value::Map(mut m) => {
+                        // Merge authoritative counter values from atomic keys.
+                        let cp = format!("jobs:batch:{}:counter", batch_id);
+                        for counter in &["pending", "succeeded", "dead", "cancelled"] {
+                            if let Ok(Value::Int(n)) =
+                                kv::kv_get(&kv_handle, &format!("{}:{}", cp, counter))
+                            {
+                                m.insert(counter.to_string(), Value::Int(n));
+                            }
+                        }
+                        Ok(Value::ok(Value::Map(m)))
+                    }
                     other => Ok(Value::ok(other)),
                 }
             },
@@ -8043,10 +8092,28 @@ pub(crate) mod tests {
     /// Helper: read batch metadata from KV, panicking if absent or non-map.
     fn read_batch_meta(kv: &Value, batch_id: &str) -> HashMap<String, Value> {
         let key = format!("jobs:batch:{}", batch_id);
-        match kv::kv_get(kv, &key).unwrap() {
+        let mut m = match kv::kv_get(kv, &key).unwrap() {
             Value::Map(m) => m,
             other => panic!("expected batch metadata map, got {:?}", other),
+        };
+        // Merge authoritative atomic counter values (mirrors batch_status()).
+        let cp = format!("jobs:batch:{}:counter", batch_id);
+        for counter in &["pending", "succeeded", "dead", "cancelled"] {
+            if let Ok(Value::Int(n)) = kv::kv_get(kv, &format!("{}:{}", cp, counter)) {
+                m.insert(counter.to_string(), Value::Int(n));
+            }
         }
+        m
+    }
+
+    /// Initialize the atomic counter keys that seal() normally creates.
+    /// Tests that bypass seal() must call this.
+    fn init_batch_counters(kv: &Value, batch_id: &str, pending: i64) {
+        let cp = format!("jobs:batch:{}:counter", batch_id);
+        kv::kv_set(kv, &format!("{}:pending", cp), &Value::Int(pending), None).unwrap();
+        kv::kv_set(kv, &format!("{}:succeeded", cp), &Value::Int(0), None).unwrap();
+        kv::kv_set(kv, &format!("{}:dead", cp), &Value::Int(0), None).unwrap();
+        kv::kv_set(kv, &format!("{}:cancelled", cp), &Value::Int(0), None).unwrap();
     }
 
     #[test]
@@ -8065,6 +8132,7 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
+            init_batch_counters(kv, batch_id, 1);
 
             let job_data = batch_job_data(job_id, batch_id);
             update_batch_on_terminal(kv, &job_data, job_id, "succeeded").unwrap();
@@ -8100,6 +8168,7 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
+            init_batch_counters(kv, batch_id, 2);
 
             // First job completes — pending should go to 1, not yet complete.
             update_batch_on_terminal(kv, &batch_job_data("job-a", batch_id), "job-a", "succeeded")
@@ -8154,6 +8223,7 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
+            init_batch_counters(kv, batch_id, 1);
 
             update_batch_on_terminal(
                 kv,
@@ -8186,6 +8256,7 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
+            init_batch_counters(kv, batch_id, 3);
 
             // First death — should set fired_death.
             update_batch_on_terminal(kv, &batch_job_data("job-die", batch_id), "job-die", "dead")
@@ -8236,6 +8307,7 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
+            init_batch_counters(kv, batch_id, 2);
 
             let job_data = batch_job_data(job_id, batch_id);
 
@@ -8272,6 +8344,7 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
+            init_batch_counters(kv, batch_id, 2);
 
             // One succeeds, one dies.
             update_batch_on_terminal(
