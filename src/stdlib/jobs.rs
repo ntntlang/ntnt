@@ -476,6 +476,69 @@ impl JobRuntime {
 
 pub static JOB_RUNTIME: LazyLock<JobRuntime> = LazyLock::new(JobRuntime::new);
 
+// ============================================================================
+// Batch Runtime — in-memory state for open (unsealed) batches
+// ============================================================================
+
+#[derive(Clone)]
+struct BufferedJob {
+    job_type: String,
+    /// Payload serialized as JSON — avoids Value's Rc/Send issues (mirrors EnqueuedJob).
+    payload_json: String,
+    /// Set to true once written to KV during seal. Prevents duplicates on retry.
+    flushed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchStatus {
+    /// Batch is open — enqueues are accepted.
+    Open,
+    /// Batch is being sealed — no more enqueues, KV flush in progress.
+    Sealing,
+}
+
+#[derive(Clone)]
+struct BatchState {
+    id: String,
+    name: String,
+    /// Names of callbacks that were provided ("on_success", "on_complete", "on_death").
+    /// Actual closures not stored — Phase 2 wires execution via serialized references.
+    #[allow(dead_code)]
+    callback_names: Vec<String>,
+    buffered: Vec<BufferedJob>,
+    created_at: String,
+    status: BatchStatus,
+}
+
+pub(crate) struct BatchRuntime {
+    batches: Mutex<HashMap<String, BatchState>>,
+}
+
+impl BatchRuntime {
+    fn new() -> Self {
+        BatchRuntime {
+            batches: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset(&self) {
+        match self.batches.lock() {
+            Ok(mut b) => b.clear(),
+            Err(e) => {
+                eprintln!(
+                    "[WARN] BatchRuntime::reset(): mutex poisoned, clearing anyway: {}",
+                    e
+                );
+                let mut b = e.into_inner();
+                b.clear();
+            }
+        }
+    }
+}
+
+pub(crate) static BATCH_RUNTIME: LazyLock<BatchRuntime> = LazyLock::new(BatchRuntime::new);
+
 /// Extract KvHandleInfo from a Value::Map returned by kv::open_kv.
 fn extract_kv_handle_info(handle: &Value) -> Result<KvHandleInfo> {
     match handle {
@@ -507,6 +570,37 @@ fn extract_kv_handle_info(handle: &Value) -> Result<KvHandleInfo> {
 // ============================================================================
 // Helper: zero-padded timestamp for lexicographic ordering
 // ============================================================================
+
+/// Build batch metadata map with common fields used for tracking job batches.
+/// Caller is responsible for updating status-specific fields (e.g. fired flags, timestamps).
+fn build_batch_meta(
+    batch_id: &str,
+    name: &str,
+    created_at: &str,
+    status: &str,
+    total: i64,
+    pending: i64,
+) -> HashMap<String, Value> {
+    let mut meta = HashMap::new();
+    meta.insert("id".to_string(), Value::String(batch_id.to_string()));
+    meta.insert("name".to_string(), Value::String(name.to_string()));
+    meta.insert("status".to_string(), Value::String(status.to_string()));
+    meta.insert("total".to_string(), Value::Int(total));
+    meta.insert("pending".to_string(), Value::Int(pending));
+    meta.insert("succeeded".to_string(), Value::Int(0));
+    meta.insert("dead".to_string(), Value::Int(0));
+    meta.insert("cancelled".to_string(), Value::Int(0));
+    meta.insert("fired_success".to_string(), Value::Bool(false));
+    meta.insert("fired_complete".to_string(), Value::Bool(false));
+    meta.insert("fired_death".to_string(), Value::Bool(false));
+    meta.insert(
+        "created_at".to_string(),
+        Value::String(created_at.to_string()),
+    );
+    meta.insert("sealed_at".to_string(), Value::none());
+    meta.insert("completed_at".to_string(), Value::none());
+    meta
+}
 
 /// Returns a zero-padded nanosecond timestamp string for KV key ordering.
 /// Format: 20-digit zero-padded Unix timestamp in nanoseconds.
@@ -705,6 +799,7 @@ fn enqueue_internal(
     payload: Value,
     pending_ts: &str,
     scheduled_at: Option<&str>,
+    batch_id: Option<&str>,
 ) -> Result<Value> {
     // Look up job in registry
     let job_def = JOB_RUNTIME.get_job(job_name)?;
@@ -891,6 +986,9 @@ fn enqueue_internal(
     job_data.insert("status".to_string(), Value::String("pending".to_string()));
     job_data.insert("attempts".to_string(), Value::Int(0));
     job_data.insert("created_at".to_string(), Value::String(timestamp_key()));
+    if let Some(bid) = batch_id {
+        job_data.insert("batch_id".to_string(), Value::String(bid.to_string()));
+    }
 
     // Copy job options (retry, timeout, etc.)
     for (k, v) in &job_def.options {
@@ -2820,49 +2918,127 @@ pub fn init() -> HashMap<String, Value> {
     // @ntnt enqueue
     // @module std/jobs
     // @signature enqueue(job_name: String, args: Map) -> Result<String, String>
-    // Enqueue a background job for processing.
+    // @signature enqueue(batch_handle: Map, job_name: String, args: Map) -> Result<Unit, String>
+    // Enqueue a background job for processing, or buffer a job into an open batch.
     //
-    // Looks up the job name in the registry, generates a unique ID, serializes
-    // the job data, and writes it to the configured KV store. Returns the job ID.
-    // If configure_queue() hasn't been called, auto-initializes with SQLite.
-    // @param job_name The registered job name (e.g., "SendEmail")
+    // Two-arg form: enqueue(job_name, args) — writes job to KV immediately and returns
+    // the job ID string. Three-arg form: enqueue(batch_handle, job_name, args) — buffers
+    // the job in memory until seal() is called. Does not write to KV; returns Ok(Unit)
+    // instead of a job ID (the job has no KV identity until sealed).
+    // @param job_name The registered job name (e.g., "SendEmail") — 2-arg form
     // @param args A map of arguments to pass to the job's perform block
-    // @returns Result containing the job ID string or an error
+    // @param batch_handle The batch handle returned by batch() — 3-arg form (first positional)
+    // @returns 2-arg: Result<String, String> containing the job ID; 3-arg: Result<Unit, String>
+    // @gotcha The typechecker cannot distinguish the 2-arg and 3-arg overloads at compile time. Passing enqueue("name", string, map) will typecheck but fail at runtime. This is a known gap — the runtime validates argument types strictly.
     // @example enqueue("SendEmail", map { "to": "alice@example.com" }) ~ "Enqueue an email job"
-    // @example enqueue("ProcessPayment", map { "amount": 100 }) ~ "Enqueue a payment job"
+    // @example enqueue(b, "ProcessRow", map { "row_id": row_id }) ~ "Buffer job into a batch"
     module.insert(
         "enqueue".to_string(),
         Value::NativeFunction {
             name: "enqueue".to_string(),
             arity: 2,
-            max_arity: 2,
+            max_arity: 3,
             requires: Some(crate::interpreter::RuntimeCapability::JobEnqueue),
             func: |args| {
-                if args.len() != 2 {
-                    return Err(IntentError::type_error(
-                        "enqueue() requires 2 arguments (job_name, args)".to_string(),
-                    ));
+                match args.len() {
+                    2 => {
+                        // Normal enqueue: (job_name, args)
+                        let job_name = match &args[0] {
+                            Value::String(s) => s.clone(),
+                            _ => {
+                                return Err(IntentError::type_error(
+                                    "enqueue() first argument must be a string job name".to_string(),
+                                ))
+                            }
+                        };
+                        let payload = match &args[1] {
+                            Value::Map(_) => args[1].clone(),
+                            _ => {
+                                return Err(IntentError::type_error(
+                                    "enqueue() second argument must be a map".to_string(),
+                                ))
+                            }
+                        };
+                        enqueue_internal(&job_name, payload, &timestamp_key(), None, None)
+                    }
+                    3 => {
+                        // Batch enqueue: (batch_handle, job_name, args)
+                        let batch_id = match &args[0] {
+                            Value::Map(m) => match m.get("_batch_id") {
+                                Some(Value::String(bid)) => bid.clone(),
+                                _ => {
+                                    return Err(IntentError::type_error(
+                                        "enqueue() first argument must be a batch handle (map with _batch_id)".to_string(),
+                                    ))
+                                }
+                            },
+                            _ => {
+                                return Err(IntentError::type_error(
+                                    "enqueue() with 3 arguments requires a batch handle as first argument".to_string(),
+                                ))
+                            }
+                        };
+                        let job_name = match &args[1] {
+                            Value::String(s) => s.clone(),
+                            _ => {
+                                return Err(IntentError::type_error(
+                                    "enqueue() second argument must be a string job name".to_string(),
+                                ))
+                            }
+                        };
+                        let payload = match &args[2] {
+                            Value::Map(_) => args[2].clone(),
+                            _ => {
+                                return Err(IntentError::type_error(
+                                    "enqueue() third argument must be a map".to_string(),
+                                ))
+                            }
+                        };
+                        let payload_json = serde_json::to_string(
+                            &kv::value_to_json_public(&payload),
+                        )
+                        .map_err(|e| {
+                            IntentError::runtime_error(format!(
+                                "Failed to serialize batch payload: {}",
+                                e
+                            ))
+                        })?;
+                        // Validate job type is registered before buffering
+                        if JOB_RUNTIME.get_job(&job_name)?.is_none() {
+                            return Err(IntentError::runtime_error(format!(
+                                "Unknown job type '{}' — make sure it is defined with a job block before enqueueing",
+                                job_name
+                            )));
+                        }
+                        let mut batches = BATCH_RUNTIME.batches.lock().map_err(|e| {
+                            IntentError::runtime_error(format!("Batch lock error: {}", e))
+                        })?;
+                        match batches.get_mut(&batch_id) {
+                            Some(batch) if batch.status == BatchStatus::Sealing => {
+                                Err(IntentError::runtime_error(format!(
+                                    "Batch '{}' is being sealed — no more enqueues accepted",
+                                    batch_id
+                                )))
+                            }
+                            Some(batch) => {
+                                batch.buffered.push(BufferedJob {
+                                    job_type: job_name,
+                                    payload_json,
+                                    flushed: false,
+                                });
+                                // Return Unit — the job has no KV identity until seal()
+                                Ok(Value::ok(Value::Unit))
+                            }
+                            None => Err(IntentError::runtime_error(format!(
+                                "Batch '{}' not found (may have been sealed or pruned after 1h of inactivity)",
+                                batch_id
+                            ))),
+                        }
+                    }
+                    _ => Err(IntentError::type_error(
+                        "enqueue() requires 2-3 arguments: (job_name, args) or (batch, job_name, args)".to_string(),
+                    )),
                 }
-
-                let job_name = match &args[0] {
-                    Value::String(s) => s.clone(),
-                    _ => {
-                        return Err(IntentError::type_error(
-                            "enqueue() first argument must be a string job name".to_string(),
-                        ))
-                    }
-                };
-
-                let payload = match &args[1] {
-                    Value::Map(_) => args[1].clone(),
-                    _ => {
-                        return Err(IntentError::type_error(
-                            "enqueue() second argument must be a map".to_string(),
-                        ))
-                    }
-                };
-
-                enqueue_internal(&job_name, payload, &timestamp_key(), None)
             },
         },
     );
@@ -3030,7 +3206,7 @@ pub fn init() -> HashMap<String, Value> {
                 };
 
                 let pending_ts = format!("{:020}", ts_nanos);
-                enqueue_internal(&job_name, payload, &pending_ts, Some(&pending_ts))
+                enqueue_internal(&job_name, payload, &pending_ts, Some(&pending_ts), None)
             },
         },
     );
@@ -3097,7 +3273,7 @@ pub fn init() -> HashMap<String, Value> {
                     .as_nanos()
                     + (delay_secs.max(0) as u128) * 1_000_000_000;
                 let pending_ts = format!("{:020}", future_nanos);
-                enqueue_internal(&job_name, payload, &pending_ts, Some(&pending_ts))
+                enqueue_internal(&job_name, payload, &pending_ts, Some(&pending_ts), None)
             },
         },
     );
@@ -4037,7 +4213,7 @@ pub fn init() -> HashMap<String, Value> {
                 for (i, item) in items.into_iter().enumerate() {
                     let ts = format!("{:020}", base_nanos + i as u128);
                     // Wrap errors with item index so callers know which item failed
-                    let result = enqueue_internal(&job_name, item, &ts, None).map_err(|e| {
+                    let result = enqueue_internal(&job_name, item, &ts, None, None).map_err(|e| {
                         IntentError::runtime_error(format!(
                             "enqueue_batch: item {} failed: {}",
                             i, e
@@ -4066,6 +4242,428 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt batch
+    // @module std/jobs
+    // @signature batch(name: String, opts?: Map) -> Map
+    // Create a new job batch that buffers enqueues until sealed.
+    //
+    // Returns a batch handle (Map with _batch_id field). Jobs enqueued via
+    // enqueue(handle, job_name, args) are buffered in memory until seal() is called.
+    // Batches are not durable until sealed — a process crash loses buffered jobs.
+    // @param name Human-readable name for the batch (for observability)
+    // @param opts Optional map with "on_success", "on_complete", "on_death" callback functions
+    // @returns Batch handle map with _batch_id field
+    // @gotcha Callbacks (on_success, on_complete, on_death) are accepted for API forward-compatibility but are not executed until Phase 2. Providing them now is safe and encouraged for future-proofing.
+    // @example batch("csv-import", map { "on_success": fn(s) { print("done") } }) ~ "Create batch with callback"
+    // @example batch("daily-report") ~ "Create batch without callbacks"
+    // @see_also seal, batch_status, enqueue
+    module.insert(
+        "batch".to_string(),
+        Value::NativeFunction {
+            name: "batch".to_string(),
+            arity: 1,
+            max_arity: 2,
+            requires: Some(crate::interpreter::RuntimeCapability::JobEnqueue),
+            func: |args| {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(IntentError::type_error(
+                        "batch() requires 1-2 arguments (name, opts?)".to_string(),
+                    ));
+                }
+                let name = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "batch() first argument must be a string name".to_string(),
+                        ))
+                    }
+                };
+                let mut callback_names = Vec::new();
+                if args.len() == 2 {
+                    match &args[1] {
+                        Value::Map(opts) => {
+                            for key in ["on_success", "on_complete", "on_death"] {
+                                if opts.contains_key(key) {
+                                    callback_names.push(key.to_string());
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(IntentError::type_error(
+                                "batch() second argument must be a map".to_string(),
+                            ))
+                        }
+                    }
+                }
+                let batch_id = Uuid::new_v4().to_string();
+                let state = BatchState {
+                    id: batch_id.clone(),
+                    name,
+                    callback_names,
+                    buffered: Vec::new(),
+                    created_at: timestamp_key(),
+                    status: BatchStatus::Open,
+                };
+                let mut batches = BATCH_RUNTIME
+                    .batches
+                    .lock()
+                    .map_err(|e| IntentError::runtime_error(format!("Batch lock error: {}", e)))?;
+                // Lazily prune abandoned Open batches older than 1 hour.
+                // Never prune Sealing batches — they're actively being flushed.
+                let one_hour_nanos: u128 = 3_600_000_000_000;
+                let now_nanos = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                batches.retain(|_, s| {
+                    if s.status == BatchStatus::Sealing {
+                        return true; // never prune active seals
+                    }
+                    s.created_at.parse::<u128>().map_or(true, |created| {
+                        now_nanos.saturating_sub(created) < one_hour_nanos
+                    })
+                });
+                batches.insert(batch_id.clone(), state);
+                let mut handle = HashMap::new();
+                handle.insert("_batch_id".to_string(), Value::String(batch_id));
+                Ok(Value::Map(handle))
+            },
+        },
+    );
+
+    // @ntnt seal
+    // @module std/jobs
+    // @signature seal(batch_handle: Map) -> Result<Unit, String>
+    // Seal a batch, flushing all buffered jobs to KV in order.
+    //
+    // After seal(), no more jobs can be buffered. Workers can immediately begin
+    // claiming the flushed jobs. Idempotent — sealing an already-sealed batch
+    // is a no-op. Empty batches (0 jobs) are immediately marked complete.
+    // Note: seal writes metadata then individual jobs sequentially (not transactionally).
+    // On failure, already-flushed jobs are tracked and skipped on retry.
+    // @param batch_handle The batch handle returned by batch()
+    // @returns Result<Unit, String>
+    // @gotcha Callbacks (on_success, on_complete, on_death) registered via batch() are accepted for API forward-compatibility but are not executed until Phase 2.
+    // @gotcha Idempotency is sequential only. Calling seal() after a batch is already sealed returns Ok (no-op). However, concurrent seal() calls while the first seal is still in progress return an error. Do not call seal() from multiple threads simultaneously.
+    // @gotcha If enqueue_internal fails mid-write for a single job (e.g., data key written but pending key not), that job's flushed flag stays false and retry will re-enqueue with a new ID, potentially creating a duplicate. This is a known limitation of the non-transactional KV backend.
+    // @example seal(b) ~ "Seal a batch after buffering all jobs"
+    // @see_also batch, batch_status
+    module.insert(
+        "seal".to_string(),
+        Value::NativeFunction {
+            name: "seal".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: Some(crate::interpreter::RuntimeCapability::JobEnqueue),
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(IntentError::type_error(
+                        "seal() requires 1 argument (batch_handle)".to_string(),
+                    ));
+                }
+                let batch_id = match &args[0] {
+                    Value::Map(m) => match m.get("_batch_id") {
+                        Some(Value::String(bid)) => bid.clone(),
+                        _ => {
+                            return Err(IntentError::type_error(
+                                "seal() requires a batch handle (map with _batch_id)".to_string(),
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "seal() requires a batch handle".to_string(),
+                        ))
+                    }
+                };
+
+                // Step 1: Under lock — mark batch as "sealing" to block concurrent enqueues.
+                // The batch stays in the map with Sealing status so other threads see it.
+                let mut batch_state = {
+                    let mut batches = BATCH_RUNTIME
+                        .batches
+                        .lock()
+                        .map_err(|e| IntentError::runtime_error(format!("Batch lock error: {}", e)))?;
+
+                    match batches.get_mut(&batch_id) {
+                        Some(batch) if batch.status == BatchStatus::Sealing => {
+                            // Another thread is already sealing this batch
+                            return Err(IntentError::runtime_error(format!(
+                                "Batch '{}' is being sealed by another thread",
+                                batch_id
+                            )));
+                        }
+                        Some(batch) => {
+                            // Mark as sealing (stays in map so concurrent enqueues see it)
+                            batch.status = BatchStatus::Sealing;
+                            // Clone (not take/remove) so the Sealing entry stays in the map.
+                            // This lets concurrent enqueue() calls see the Sealing status
+                            // and get a clear error, rather than "batch not found".
+                            BatchState {
+                                id: batch.id.clone(),
+                                name: batch.name.clone(),
+                                callback_names: batch.callback_names.clone(),
+                                buffered: batch.buffered.clone(),
+                                created_at: batch.created_at.clone(),
+                                status: BatchStatus::Sealing,
+                            }
+                        }
+                        None => {
+                            // Not in memory — check if already sealed in KV (idempotent)
+                            drop(batches);
+                            let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                            let meta_key = format!("jobs:batch:{}", batch_id);
+                            return match kv::kv_get(&kv_handle, &meta_key)? {
+                                Value::Map(m) => {
+                                    // Only treat as idempotent if status is terminal
+                                    let status = m.get("status").and_then(|v| match v {
+                                        Value::String(s) => Some(s.as_str()),
+                                        _ => None,
+                                    });
+                                    match status {
+                                        Some("sealed") | Some("complete") => Ok(Value::ok(Value::Unit)),
+                                        Some("sealing") => Err(IntentError::runtime_error(format!(
+                                            "Batch '{}' has incomplete seal (status='sealing'). Previous seal may have crashed mid-flush.",
+                                            batch_id
+                                        ))),
+                                        other => Err(IntentError::runtime_error(format!(
+                                            "Batch '{}' has unexpected status '{}' in KV metadata (key: jobs:batch:{})",
+                                            batch_id, other.unwrap_or("missing"), batch_id
+                                        ))),
+                                    }
+                                }
+                                _ => Err(IntentError::runtime_error(format!(
+                                    "Batch '{}' not found",
+                                    batch_id
+                                ))),
+                            };
+                        }
+                    }
+                };
+                // Lock is dropped here — KV work proceeds without holding global lock.
+                // Batch remains in map with Sealing status, blocking concurrent enqueues.
+
+                // Step 2: All KV work outside the lock.
+                // On failure, clean up KV and reset batch to Open for retry.
+                let kv_result: Result<()> = (|| {
+                    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                    let meta_key = format!("jobs:batch:{}", batch_id);
+                    let total = batch_state.buffered.len() as i64;
+
+                    if total == 0 {
+                        // Empty batch → immediately complete
+                        let mut meta = build_batch_meta(
+                            &batch_id, &batch_state.name, &batch_state.created_at,
+                            "complete", 0, 0,
+                        );
+                        meta.insert("fired_success".to_string(), Value::Bool(true));
+                        meta.insert("fired_complete".to_string(), Value::Bool(true));
+                        let now = timestamp_key();
+                        meta.insert("sealed_at".to_string(), Value::String(now.clone()));
+                        meta.insert("completed_at".to_string(), Value::String(now));
+                        kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
+                        return Ok(());
+                    }
+
+                    // Pre-parse ALL payloads before any KV writes.
+                    // Fail immediately on parse error rather than substituting empty maps.
+                    let base_nanos = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos();
+                    let mut prepared: Vec<(usize, String, Value, String)> =
+                        Vec::with_capacity(batch_state.buffered.len());
+                    for i in 0..batch_state.buffered.len() {
+                        if batch_state.buffered[i].flushed {
+                            continue;
+                        }
+                        let job = &batch_state.buffered[i];
+                        let ts = format!("{:020}", base_nanos + i as u128);
+                        let payload = serde_json::from_str::<serde_json::Value>(&job.payload_json)
+                            .map(|j| kv::json_to_value_public(&j))
+                            .map_err(|e| {
+                                IntentError::runtime_error(format!(
+                                    "Failed to parse buffered payload for job '{}': {}",
+                                    job.job_type, e
+                                ))
+                            })?;
+                        prepared.push((i, job.job_type.clone(), payload, ts));
+                    }
+
+                    // Write "sealing" metadata BEFORE flushing jobs.
+                    // This ensures batch_status() can always find the batch even if
+                    // a crash occurs mid-flush (prevents orphaned jobs with batch_id
+                    // but no batch metadata).
+                    let meta = build_batch_meta(
+                        &batch_id, &batch_state.name, &batch_state.created_at,
+                        "sealing", total, total,
+                    );
+                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
+
+                    // Flush jobs to KV.
+                    // Mark each flushed so retries skip already-written jobs.
+                    for (idx, job_type, payload, ts) in &prepared {
+                        enqueue_internal(job_type, payload.clone(), ts, None, Some(&batch_id))?;
+                        batch_state.buffered[*idx].flushed = true;
+                    }
+
+                    // Update metadata to "sealed" after all jobs are durable.
+                    let sealed_at = timestamp_key();
+                    let mut meta = build_batch_meta(
+                        &batch_id, &batch_state.name, &batch_state.created_at,
+                        "sealed", total, total,
+                    );
+                    meta.insert("sealed_at".to_string(), Value::String(sealed_at));
+                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
+
+                    Ok(())
+                })();
+
+                match kv_result {
+                    Ok(_) => {
+                        // Success — remove the batch from the map (no longer needed in memory).
+                        // Use poison recovery so a poisoned mutex doesn't leave the batch
+                        // permanently stuck in Sealing state after a successful seal.
+                        let mut batches = BATCH_RUNTIME
+                            .batches
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        batches.remove(&batch_id);
+                        Ok(Value::ok(Value::Unit))
+                    }
+                    Err(e) => {
+                        // KV writes failed — clean up both KV and in-memory state for retry.
+                        // Use the same kv_handle from the closure scope to avoid re-init failures.
+                        let meta_key = format!("jobs:batch:{}", batch_id);
+
+                        // 1. Revert KV metadata: delete the "sealing" record so
+                        //    batch_status() doesn't report a phantom seal, and
+                        //    a process restart doesn't leave an unrecoverable state.
+                        //    If cleanup fails, return that error — don't leave KV and
+                        //    memory in divergent states.
+                        match JOB_RUNTIME.get_or_init_kv() {
+                            Ok(kv) => {
+                                if let Err(cleanup_err) = kv::kv_del(&kv, &meta_key) {
+                                    // KV cleanup failed — don't reset in-memory state either,
+                                    // so KV ("sealing") and memory (Sealing) stay consistent.
+                                    return Err(IntentError::runtime_error(format!(
+                                        "Seal failed ({}), and KV cleanup also failed ({}). \
+                                         Batch '{}' is stuck in 'sealing' state.",
+                                        e, cleanup_err, batch_id
+                                    )));
+                                }
+                            }
+                            Err(kv_err) => {
+                                // Can't acquire KV handle — don't reset in-memory state,
+                                // keep both sides in Sealing to avoid divergence.
+                                return Err(IntentError::runtime_error(format!(
+                                    "Seal failed ({}), and KV handle unavailable for cleanup ({}). \
+                                     Batch '{}' is stuck in 'sealing' state.",
+                                    e, kv_err, batch_id
+                                )));
+                            }
+                        }
+
+                        // 2. KV metadata cleaned up successfully — now safe to reset
+                        //    in-memory batch to Open for retry. Copy flushed flags from
+                        //    local state so retries skip already-written jobs.
+                        let mut batches = BATCH_RUNTIME
+                            .batches
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if let Some(batch) = batches.get_mut(&batch_id) {
+                            batch.status = BatchStatus::Open;
+                            for (i, local_job) in batch_state.buffered.iter().enumerate() {
+                                if i < batch.buffered.len() && local_job.flushed {
+                                    batch.buffered[i].flushed = true;
+                                }
+                            }
+                        }
+                        Err(e)
+                    }
+                }
+            },
+        },
+    );
+
+    // @ntnt batch_status
+    // @module std/jobs
+    // @signature batch_status(batch_id_or_handle: Any) -> Result<Map, String>
+    // Get the current status and counters for a batch.
+    //
+    // Accepts either a batch ID string or a batch handle map (with _batch_id field).
+    // Returns the full batch metadata map from KV. Only available after seal().
+    // @param batch_id_or_handle Batch ID string or batch handle map
+    // @returns Result containing the batch metadata map or an error
+    // @example batch_status(b) ~ "Get status of a sealed batch via handle"
+    // @example batch_status("batch-abc-123") ~ "Get status by batch ID string"
+    // @see_also batch, seal
+    module.insert(
+        "batch_status".to_string(),
+        Value::NativeFunction {
+            name: "batch_status".to_string(),
+            arity: 1,
+            max_arity: 1,
+            requires: None,
+            func: |args| {
+                if args.len() != 1 {
+                    return Err(IntentError::type_error(
+                        "batch_status() requires 1 argument".to_string(),
+                    ));
+                }
+                let batch_id = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    Value::Map(m) => match m.get("_batch_id") {
+                        Some(Value::String(bid)) => bid.clone(),
+                        _ => {
+                            return Err(IntentError::type_error(
+                                "batch_status() argument must be a batch ID or handle".to_string(),
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "batch_status() argument must be a batch ID string or handle"
+                                .to_string(),
+                        ))
+                    }
+                };
+                let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                let meta_key = format!("jobs:batch:{}", batch_id);
+                match kv::kv_get(&kv_handle, &meta_key)? {
+                    Value::Unit => Err(IntentError::runtime_error(format!(
+                        "Batch '{}' not found",
+                        batch_id
+                    ))),
+                    other => Ok(Value::ok(other)),
+                }
+            },
+        },
+    );
+
+    // @ntnt batch_id
+    // @module std/jobs
+    // @signature batch_id() -> Option<String>
+    // Returns the batch ID of the currently-executing job, or None.
+    //
+    // Available inside a job's perform block when the job belongs to a batch.
+    // Use this to dynamically add more jobs to the same batch from within a job.
+    // Returns None for jobs not associated with a batch.
+    // Phase 1: always returns None. Phase 2 wires up thread-local job context.
+    // @returns Option<String> — Some(batch_id) or None
+    // @example let bid = batch_id() ~ "Get current job's batch ID"
+    // @see_also batch, enqueue
+    module.insert(
+        "batch_id".to_string(),
+        Value::NativeFunction {
+            name: "batch_id".to_string(),
+            arity: 0,
+            max_arity: 0,
+            requires: None,
+            func: |_args| Ok(Value::none()),
+        },
+    );
+
     module
 }
 
@@ -4083,6 +4681,7 @@ pub(crate) mod tests {
         // while holding the lock — we still need to run subsequent tests)
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         JOB_RUNTIME.reset();
+        BATCH_RUNTIME.reset();
         f();
     }
 
@@ -6787,6 +7386,439 @@ pub(crate) mod tests {
             let c2 = kv::kv_incr(kv, "jobs:concurrency:ProcessVideo", 1).unwrap();
             assert_eq!(c1, 1);
             assert_eq!(c2, 1, "Different job type starts at 1, independent");
+        });
+    }
+
+    // ── Batch Tests ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_batch_create() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let result = batch_fn(&[Value::String("csv-import".to_string())]).unwrap();
+            match result {
+                Value::Map(ref m) => {
+                    assert!(
+                        matches!(m.get("_batch_id"), Some(Value::String(_))),
+                        "batch handle must have _batch_id string field"
+                    );
+                }
+                _ => panic!("batch() must return a Map"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_batch_enqueue_buffers() {
+        with_temp_kv("ntnt_batch_buffer_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+
+            let handle = batch_fn(&[Value::String("test-batch".to_string())]).unwrap();
+
+            // Enqueue into batch — should NOT write to KV
+            let mut payload = HashMap::new();
+            payload.insert("row_id".to_string(), Value::String("r1".to_string()));
+            let result = enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "enqueue to batch must return Ok"
+            );
+
+            // No pending keys in KV
+            let pending_keys = kv::kv_list(kv, Some("jobs:pending:")).unwrap_or_default();
+            assert!(
+                pending_keys.is_empty(),
+                "No jobs:pending: keys should exist before seal"
+            );
+            // No job data in KV
+            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+            assert!(
+                data_keys.is_empty(),
+                "No jobs:data: keys should exist before seal"
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_seal_writes_jobs() {
+        with_temp_kv("ntnt_batch_seal_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("seal-test".to_string())]).unwrap();
+
+            for i in 0..3 {
+                let mut payload = HashMap::new();
+                payload.insert("row_id".to_string(), Value::String(format!("r{}", i)));
+                enqueue_fn(&[
+                    handle.clone(),
+                    Value::String("ProcessRow".to_string()),
+                    Value::Map(payload),
+                ])
+                .unwrap();
+            }
+
+            let seal_result = seal_fn(&[handle.clone()]).unwrap();
+            assert!(
+                matches!(seal_result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "seal() must return Ok"
+            );
+
+            // Batch metadata written to KV
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+            let meta = kv::kv_get(kv, &format!("jobs:batch:{}", bid)).unwrap();
+            assert!(
+                matches!(meta, Value::Map(_)),
+                "batch metadata must be in KV"
+            );
+            match meta {
+                Value::Map(ref m) => {
+                    assert!(
+                        matches!(m.get("status"), Some(Value::String(s)) if s == "sealed"),
+                        "status must be sealed"
+                    );
+                    assert!(
+                        matches!(m.get("total"), Some(Value::Int(3))),
+                        "total must be 3"
+                    );
+                    assert!(
+                        matches!(m.get("pending"), Some(Value::Int(3))),
+                        "pending must be 3"
+                    );
+                }
+                _ => unreachable!(),
+            }
+
+            // 3 jobs written to KV
+            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+            assert_eq!(
+                data_keys.len(),
+                3,
+                "3 jobs:data: entries expected after seal"
+            );
+            let pending_keys = kv::kv_list(kv, Some("jobs:pending:")).unwrap_or_default();
+            assert_eq!(
+                pending_keys.len(),
+                3,
+                "3 jobs:pending: entries expected after seal"
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_seal_empty() {
+        with_temp_kv("ntnt_batch_empty_test.db", |kv| {
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("empty-batch".to_string())]).unwrap();
+            let seal_result = seal_fn(&[handle.clone()]).unwrap();
+            assert!(
+                matches!(seal_result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "seal() on empty batch must return Ok"
+            );
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+            let meta = kv::kv_get(kv, &format!("jobs:batch:{}", bid)).unwrap();
+            match meta {
+                Value::Map(ref m) => {
+                    assert!(
+                        matches!(m.get("status"), Some(Value::String(s)) if s == "complete"),
+                        "status must be complete"
+                    );
+                    assert!(
+                        matches!(m.get("total"), Some(Value::Int(0))),
+                        "total must be 0"
+                    );
+                    assert!(
+                        matches!(m.get("fired_success"), Some(Value::Bool(true))),
+                        "fired_success must be true"
+                    );
+                    assert!(
+                        matches!(m.get("fired_complete"), Some(Value::Bool(true))),
+                        "fired_complete must be true"
+                    );
+                }
+                _ => panic!("expected batch metadata map"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_batch_status() {
+        with_temp_kv("ntnt_batch_status_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let status_fn = get_fn(&module, "batch_status");
+
+            let handle = batch_fn(&[Value::String("status-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            // Query via handle
+            let result = status_fn(&[handle.clone()]).unwrap();
+            let meta = match result {
+                Value::EnumValue {
+                    ref variant,
+                    ref values,
+                    ..
+                } if variant == "Ok" => &values[0],
+                _ => panic!("batch_status must return Ok"),
+            };
+            match meta {
+                Value::Map(m) => {
+                    assert!(
+                        matches!(m.get("total"), Some(Value::Int(1))),
+                        "total must be 1"
+                    );
+                    assert!(
+                        matches!(m.get("pending"), Some(Value::Int(1))),
+                        "pending must be 1"
+                    );
+                    assert!(
+                        matches!(m.get("status"), Some(Value::String(s)) if s == "sealed"),
+                        "status must be sealed"
+                    );
+                }
+                _ => panic!("expected map in Ok"),
+            }
+
+            // Also query by string ID
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+            let result2 = status_fn(&[Value::String(bid)]).unwrap();
+            assert!(
+                matches!(result2, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "batch_status by string ID must return Ok"
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_seal_idempotent() {
+        with_temp_kv("ntnt_batch_idempotent_test.db", |_kv| {
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("idempotent-batch".to_string())]).unwrap();
+            // First seal
+            seal_fn(&[handle.clone()]).unwrap();
+            // Second seal — must be no-op (Ok, not an error)
+            let result = seal_fn(&[handle.clone()]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "second seal must return Ok (no-op)"
+            );
+        });
+    }
+
+    #[test]
+    fn test_enqueue_after_seal_rejected() {
+        with_temp_kv("ntnt_batch_enqueue_after_seal_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("sealed-batch".to_string())]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            // Try to enqueue after seal — must return an error
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            let result = enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ]);
+            assert!(result.is_err(), "enqueue after seal must return an error");
+        });
+    }
+
+    #[test]
+    fn test_batch_id_propagation_into_job_kv_data() {
+        with_temp_kv("ntnt_batch_id_prop_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("id-prop-test".to_string())]).unwrap();
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let mut payload = HashMap::new();
+            payload.insert("row_id".to_string(), Value::String("r1".to_string()));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            // Verify each job's data map contains batch_id
+            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+            assert_eq!(data_keys.len(), 1, "expected 1 job data entry");
+            for key in &data_keys {
+                let job_data = kv::kv_get(kv, key).unwrap();
+                match job_data {
+                    Value::Map(ref m) => {
+                        assert!(
+                            matches!(m.get("batch_id"), Some(Value::String(ref s)) if s == &bid),
+                            "job data must contain batch_id matching the batch: got {:?}",
+                            m.get("batch_id")
+                        );
+                    }
+                    _ => panic!("job data must be a Map"),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_batch_seal_flushed_flag_retry_path() {
+        // Tests the partial seal retry scenario: if some jobs were flushed
+        // before a failure, re-sealing skips already-flushed jobs.
+        with_temp_kv("ntnt_batch_flushed_retry_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("flushed-retry".to_string())]).unwrap();
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            // Enqueue 3 jobs
+            for i in 0..3 {
+                let mut payload = HashMap::new();
+                payload.insert("row_id".to_string(), Value::String(format!("r{}", i)));
+                enqueue_fn(&[
+                    handle.clone(),
+                    Value::String("ProcessRow".to_string()),
+                    Value::Map(payload),
+                ])
+                .unwrap();
+            }
+
+            // Simulate partial flush: manually mark the first job as flushed
+            // then seal. The seal should only flush the remaining 2 jobs.
+            {
+                let mut batches = BATCH_RUNTIME.batches.lock().unwrap();
+                if let Some(batch) = batches.get_mut(&bid) {
+                    // Simulate: first job was already flushed in a prior attempt
+                    batch.buffered[0].flushed = true;
+                }
+            }
+
+            // Manually write the "first" job to KV to simulate partial flush
+            let first_job_payload = HashMap::new();
+            enqueue_internal(
+                "ProcessRow",
+                Value::Map(first_job_payload),
+                "00000000000000000000",
+                None,
+                Some(&bid),
+            )
+            .unwrap();
+
+            // Now seal — should skip the already-flushed first job
+            let seal_result = seal_fn(&[handle.clone()]).unwrap();
+            assert!(
+                matches!(seal_result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "seal() must return Ok even with pre-flushed jobs"
+            );
+
+            // Total jobs in KV should be 3 (1 pre-flushed + 2 flushed during seal)
+            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+            assert_eq!(
+                data_keys.len(),
+                3,
+                "3 jobs:data: entries expected (1 pre-flushed + 2 from seal)"
+            );
+
+            // Batch metadata should show total=3, status=sealed
+            let meta = kv::kv_get(kv, &format!("jobs:batch:{}", bid)).unwrap();
+            match meta {
+                Value::Map(ref m) => {
+                    assert!(
+                        matches!(m.get("status"), Some(Value::String(s)) if s == "sealed"),
+                        "status must be sealed"
+                    );
+                    assert!(
+                        matches!(m.get("total"), Some(Value::Int(3))),
+                        "total must be 3"
+                    );
+                }
+                _ => panic!("expected batch metadata map"),
+            }
         });
     }
 }

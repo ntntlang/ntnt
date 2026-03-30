@@ -2,7 +2,7 @@
 
 > **Auto-generated from source code doc comments** - Do not edit directly.
 >
-> Last updated: v0.4.6
+> Last updated: v0.4.7
 
 ## Table of Contents
 
@@ -6149,12 +6149,15 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 |----------|-------------|
 | [`assert_enqueued`](#assertenqueued) | Assert that a job was enqueued in testing mode. |
 | [`assert_not_enqueued`](#assertnotenqueued) | Assert that a job was NOT enqueued in testing mode. |
+| [`batch`](#batch) | Create a new job batch that buffers enqueues until sealed. |
+| [`batch_id`](#batchid) | Returns the batch ID of the currently-executing job, or None. |
+| [`batch_status`](#batchstatus) | Get the current status and counters for a batch. |
 | [`cancel_job`](#canceljob) | Cancel a job by its ID. |
 | [`clear_jobs`](#clearjobs) | Clear all jobs from the test queue without executing them. |
 | [`configure_queue`](#configurequeue) | Configure the job queue storage backend. |
 | [`delete_jobs`](#deletejobs) | Bulk delete jobs by status. |
 | [`drain_jobs`](#drainjobs) | Execute all enqueued test jobs synchronously and return the count. |
-| [`enqueue`](#enqueue) | Enqueue a background job for processing. |
+| [`enqueue`](#enqueue) | Enqueue a background job for processing, or buffer a job into an open batch. |
 | [`enqueue_at`](#enqueueat) | Enqueue a job to run at a specific future time. |
 | [`enqueue_batch`](#enqueuebatch) | Enqueue multiple jobs of the same type in one call. |
 | [`enqueue_in`](#enqueuein) | Enqueue a job to run after a delay in seconds. |
@@ -6165,6 +6168,7 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`resume_queue`](#resumequeue) | Resume a paused queue — workers resume claiming and executing jobs from it. |
 | [`retry_job`](#retryjob) | Re-queue a failed or dead job for another attempt. |
 | [`scale_workers`](#scaleworkers) | Scale the number of worker threads for a named band up or down. |
+| [`seal`](#seal) | Seal a batch, flushing all buffered jobs to KV in order. |
 | [`work_async`](#workasync) | Start one or more background worker threads that process jobs from the queue. |
 | [`work_jobs`](#workjobs) | Run a blocking worker loop that processes jobs from the queue. |
 | [`worker_status`](#workerstatus) | Return a status snapshot of the job worker system. |
@@ -6220,6 +6224,87 @@ assert_not_enqueued("SendEmail")  // Assert no SendEmail was enqueued
 ```
 
 **See also:** `assert_enqueued`, `drain_jobs`, `clear_jobs`
+
+---
+
+#### `batch`
+
+```ntnt
+batch(name: String, opts?: Map) -> Map
+```
+
+Create a new job batch that buffers enqueues until sealed.
+
+Returns a batch handle (Map with _batch_id field). Jobs enqueued via enqueue(handle, job_name, args) are buffered in memory until seal() is called. Batches are not durable until sealed — a process crash loses buffered jobs.
+
+**Parameters:**
+
+- `name` — Human-readable name for the batch (for observability)
+- `opts` — Optional map with "on_success", "on_complete", "on_death" callback functions
+
+**Returns:** Batch handle map with _batch_id field
+
+**Examples:**
+
+```ntnt
+batch("csv-import", map { "on_success": fn(s) { print("done") } })  // Create batch with callback
+batch("daily-report")  // Create batch without callbacks
+```
+
+**Gotchas:**
+
+- Callbacks (on_success, on_complete, on_death) are accepted for API forward-compatibility but are not executed until Phase 2. Providing them now is safe and encouraged for future-proofing.
+
+**See also:** `seal`, `batch_status`, `enqueue`
+
+---
+
+#### `batch_id`
+
+```ntnt
+batch_id() -> Option<String>
+```
+
+Returns the batch ID of the currently-executing job, or None.
+
+Available inside a job's perform block when the job belongs to a batch. Use this to dynamically add more jobs to the same batch from within a job. Returns None for jobs not associated with a batch. Phase 1: always returns None. Phase 2 wires up thread-local job context.
+
+**Returns:** Option<String> — Some(batch_id) or None
+
+**Examples:**
+
+```ntnt
+let bid = batch_id()  // Get current job's batch ID
+```
+
+**See also:** `batch`, `enqueue`
+
+---
+
+#### `batch_status`
+
+```ntnt
+batch_status(batch_id_or_handle: Any) -> Result<Map, String>
+```
+
+Get the current status and counters for a batch.
+
+Accepts either a batch ID string or a batch handle map (with _batch_id field). Returns the full batch metadata map from KV. Only available after seal().
+
+**Parameters:**
+
+- `batch_id_or_handle` — Batch ID string or batch handle map
+
+**Returns:** Result containing the batch metadata map or an error
+
+**Examples:**
+
+```ntnt
+batch_status(b)  // Get status of a sealed batch via handle
+batch_status("batch-abc-123")  // Get status by batch ID string
+```
+
+**See also:** `batch`, `seal`
 
 ---
 
@@ -6351,25 +6436,31 @@ drain_jobs()  // Execute all pending test jobs
 
 ```ntnt
 enqueue(job_name: String, args: Map) -> Result<String, String>
+enqueue(batch_handle: Map, job_name: String, args: Map) -> Result<Unit, String>
 ```
 
-Enqueue a background job for processing.
+Enqueue a background job for processing, or buffer a job into an open batch.
 
-Looks up the job name in the registry, generates a unique ID, serializes the job data, and writes it to the configured KV store. Returns the job ID. If configure_queue() hasn't been called, auto-initializes with SQLite.
+Two-arg form: enqueue(job_name, args) — writes job to KV immediately and returns the job ID string. Three-arg form: enqueue(batch_handle, job_name, args) — buffers the job in memory until seal() is called. Does not write to KV; returns Ok(Unit) instead of a job ID (the job has no KV identity until sealed).
 
 **Parameters:**
 
-- `job_name` — The registered job name (e.g., "SendEmail")
+- `job_name` — The registered job name (e.g., "SendEmail") — 2-arg form
 - `args` — A map of arguments to pass to the job's perform block
+- `batch_handle` — The batch handle returned by batch() — 3-arg form (first positional)
 
-**Returns:** Result containing the job ID string or an error
+**Returns:** 2-arg: Result<String, String> containing the job ID; 3-arg: Result<Unit, String>
 
 **Examples:**
 
 ```ntnt
 enqueue("SendEmail", map { "to": "alice@example.com" })  // Enqueue an email job
-enqueue("ProcessPayment", map { "amount": 100 })  // Enqueue a payment job
+enqueue(b, "ProcessRow", map { "row_id": row_id })  // Buffer job into a batch
 ```
+
+**Gotchas:**
+
+- The typechecker cannot distinguish the 2-arg and 3-arg overloads at compile time. Passing enqueue("name", string, map) will typecheck but fail at runtime. This is a known gap — the runtime validates argument types strictly.
 
 ---
 
@@ -6614,6 +6705,38 @@ scale_workers("normal", 1)  // Scale normal band down to 1 worker
 ```
 
 **See also:** `work_async`, `worker_status`
+
+---
+
+#### `seal`
+
+```ntnt
+seal(batch_handle: Map) -> Result<Unit, String>
+```
+
+Seal a batch, flushing all buffered jobs to KV in order.
+
+After seal(), no more jobs can be buffered. Workers can immediately begin claiming the flushed jobs. Idempotent — sealing an already-sealed batch is a no-op. Empty batches (0 jobs) are immediately marked complete. Note: seal writes metadata then individual jobs sequentially (not transactionally). On failure, already-flushed jobs are tracked and skipped on retry.
+
+**Parameters:**
+
+- `batch_handle` — The batch handle returned by batch()
+
+**Returns:** Result<Unit, String>
+
+**Examples:**
+
+```ntnt
+seal(b)  // Seal a batch after buffering all jobs
+```
+
+**Gotchas:**
+
+- Callbacks (on_success, on_complete, on_death) registered via batch() are accepted for API forward-compatibility but are not executed until Phase 2.
+- Idempotency is sequential only. Calling seal() after a batch is already sealed returns Ok (no-op). However, concurrent seal() calls while the first seal is still in progress return an error. Do not call seal() from multiple threads simultaneously.
+- If enqueue_internal fails mid-write for a single job (e.g., data key written but pending key not), that job's flushed flag stays false and retry will re-enqueue with a new ID, potentially creating a duplicate. This is a known limitation of the non-transactional KV backend.
+
+**See also:** `batch`, `batch_status`
 
 ---
 

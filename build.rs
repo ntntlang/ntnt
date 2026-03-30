@@ -269,7 +269,11 @@ fn parse_doc_block(
         } else if let Some(val) = line.strip_prefix("@module_description ") {
             module_description = Some(val.trim().to_string());
         } else if let Some(val) = line.strip_prefix("@signature ") {
-            signature = Some(val.trim().to_string());
+            let sig_line = val.trim().to_string();
+            signature = Some(match signature {
+                Some(existing) => format!("{}\n{}", existing, sig_line),
+                None => sig_line,
+            });
         } else if let Some(val) = line.strip_prefix("@param ") {
             // @param name description
             let val = val.trim();
