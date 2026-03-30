@@ -480,6 +480,7 @@ pub static JOB_RUNTIME: LazyLock<JobRuntime> = LazyLock::new(JobRuntime::new);
 // Batch Runtime — in-memory state for open (unsealed) batches
 // ============================================================================
 
+#[derive(Clone)]
 struct BufferedJob {
     job_type: String,
     /// Payload serialized as JSON — avoids Value's Rc/Send issues (mirrors EnqueuedJob).
@@ -497,6 +498,7 @@ enum BatchStatus {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 struct BatchState {
     id: String,
     name: String,
@@ -4336,8 +4338,8 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
 
-                // Step 1: Under lock — mark batch as "sealing" and remove from map.
-                // This blocks concurrent enqueues without holding the lock during KV I/O.
+                // Step 1: Under lock — mark batch as "sealing" to block concurrent enqueues.
+                // The batch stays in the map with Sealing status so other threads see it.
                 let mut batch_state = {
                     let mut batches = BATCH_RUNTIME
                         .batches
@@ -4346,23 +4348,24 @@ pub fn init() -> HashMap<String, Value> {
 
                     match batches.get_mut(&batch_id) {
                         Some(batch) if batch.status == BatchStatus::Sealing => {
-                            // Another thread is already sealing — drop lock and check KV
-                            drop(batches);
-                            let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
-                            let meta_key = format!("jobs:batch:{}", batch_id);
-                            return match kv::kv_get(&kv_handle, &meta_key)? {
-                                Value::Map(_) => Ok(Value::ok(Value::Unit)),
-                                _ => Err(IntentError::runtime_error(format!(
-                                    "Batch '{}' is being sealed by another thread",
-                                    batch_id
-                                ))),
-                            };
+                            // Another thread is already sealing this batch
+                            return Err(IntentError::runtime_error(format!(
+                                "Batch '{}' is being sealed by another thread",
+                                batch_id
+                            )));
                         }
-                        Some(_) => {
-                            // Mark as sealing, then remove from map
-                            let batch = batches.get_mut(&batch_id).unwrap();
+                        Some(batch) => {
+                            // Mark as sealing (stays in map so concurrent enqueues see it)
                             batch.status = BatchStatus::Sealing;
-                            batches.remove(&batch_id).unwrap()
+                            // Clone out the data we need for KV work
+                            BatchState {
+                                id: batch.id.clone(),
+                                name: batch.name.clone(),
+                                callback_names: batch.callback_names.clone(),
+                                buffered: batch.buffered.clone(),
+                                created_at: batch.created_at.clone(),
+                                status: BatchStatus::Sealing,
+                            }
                         }
                         None => {
                             // Not in memory — check if already sealed in KV (idempotent)
@@ -4370,7 +4373,24 @@ pub fn init() -> HashMap<String, Value> {
                             let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
                             let meta_key = format!("jobs:batch:{}", batch_id);
                             return match kv::kv_get(&kv_handle, &meta_key)? {
-                                Value::Map(_) => Ok(Value::ok(Value::Unit)), // already sealed
+                                Value::Map(m) => {
+                                    // Only treat as idempotent if status is terminal
+                                    let status = m.get("status").and_then(|v| match v {
+                                        Value::String(s) => Some(s.as_str()),
+                                        _ => None,
+                                    });
+                                    match status {
+                                        Some("sealed") | Some("complete") => Ok(Value::ok(Value::Unit)),
+                                        Some("sealing") => Err(IntentError::runtime_error(format!(
+                                            "Batch '{}' has incomplete seal (status='sealing'). Previous seal may have crashed mid-flush.",
+                                            batch_id
+                                        ))),
+                                        _ => Err(IntentError::runtime_error(format!(
+                                            "Batch '{}' has unexpected status in KV",
+                                            batch_id
+                                        ))),
+                                    }
+                                }
                                 _ => Err(IntentError::runtime_error(format!(
                                     "Batch '{}' not found",
                                     batch_id
@@ -4380,6 +4400,7 @@ pub fn init() -> HashMap<String, Value> {
                     }
                 };
                 // Lock is dropped here — KV work proceeds without holding global lock.
+                // Batch remains in map with Sealing status, blocking concurrent enqueues.
 
                 // Step 2: All KV work outside the lock.
                 // On failure, re-lock and reinsert the batch for retry (#2).
@@ -4495,15 +4516,28 @@ pub fn init() -> HashMap<String, Value> {
                 })();
 
                 match kv_result {
-                    Ok(_) => Ok(Value::ok(Value::Unit)),
-                    Err(e) => {
-                        // KV writes failed — re-lock and put batch back for retry (#2).
-                        // Reset status to Open so enqueues work again after retry.
-                        batch_state.status = BatchStatus::Open;
+                    Ok(_) => {
+                        // Success — remove the batch from the map (no longer needed in memory)
                         if let Ok(mut batches) = BATCH_RUNTIME.batches.lock() {
-                            batches.insert(batch_id.clone(), batch_state);
+                            batches.remove(&batch_id);
+                        }
+                        Ok(Value::ok(Value::Unit))
+                    }
+                    Err(e) => {
+                        // KV writes failed — reset batch to Open for retry (#2).
+                        // Copy flushed flags from our local state back into the map entry
+                        // so retries skip already-written jobs.
+                        if let Ok(mut batches) = BATCH_RUNTIME.batches.lock() {
+                            if let Some(batch) = batches.get_mut(&batch_id) {
+                                batch.status = BatchStatus::Open;
+                                for (i, local_job) in batch_state.buffered.iter().enumerate() {
+                                    if i < batch.buffered.len() && local_job.flushed {
+                                        batch.buffered[i].flushed = true;
+                                    }
+                                }
+                            }
                         } else {
-                            eprintln!("[WARN] seal(): could not re-lock batch map to reinsert failed batch '{}'", batch_id);
+                            eprintln!("[WARN] seal(): could not re-lock batch map to reset failed batch '{}'", batch_id);
                         }
                         Err(e)
                     }
