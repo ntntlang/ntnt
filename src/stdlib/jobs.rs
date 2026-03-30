@@ -4418,7 +4418,7 @@ pub fn init() -> HashMap<String, Value> {
                         Value::String(batch_state.created_at.clone()),
                     );
                     meta.insert("sealed_at".to_string(), Value::String(sealed_at));
-                    meta.insert("completed_at".to_string(), Value::Unit);
+                    meta.insert("completed_at".to_string(), Value::none());
                     kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
 
                     Ok(())
