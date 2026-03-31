@@ -7971,10 +7971,9 @@ const AGENT_END_MARKER: &str = "<!-- END NTNT CODING GUIDE -->";
 const AGENT_SYNC_PREFIX: &str = "<!-- Last synced: ";
 
 /// Agent files to sync: (relative path from project root, link prefix for doc references)
-const AGENT_FILES: &[(&str, &str)] = &[
-    ("CLAUDE.md", "docs/"),
-    (".github/copilot-instructions.md", "../docs/"),
-];
+/// Note: CLAUDE.md and copilot-instructions.md are no longer auto-synced — they contain
+/// condensed versions with references to docs/AI_AGENT_GUIDE.md instead of embedding the full guide.
+const AGENT_FILES: &[(&str, &str)] = &[];
 
 /// Doc filenames that need link rewriting per agent file location
 const DOC_LINK_FILES: &[&str] = &[
