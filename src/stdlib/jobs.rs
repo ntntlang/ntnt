@@ -737,8 +737,11 @@ fn update_batch_on_terminal(
             _ => 0,
         },
         _ => {
+            // Metadata missing — release the done-set claim so a future retry
+            // can attempt this update once the metadata reappears.
+            let _ = kv::kv_del(kv_handle, &done_key);
             eprintln!(
-                "[ntnt] warning: batch metadata not found for batch '{}' (job '{}')",
+                "[ntnt] warning: batch metadata not found for batch '{}' (job '{}'), released done-set",
                 batch_id, job_id
             );
             return Ok(());
@@ -762,14 +765,29 @@ fn update_batch_on_terminal(
         );
     }
 
-    let new_pending = kv::kv_incr(kv_handle, &format!("{}:pending", counter_prefix), -1)
-        .map_err(|e| {
+    let pending_raw =
+        kv::kv_incr(kv_handle, &format!("{}:pending", counter_prefix), -1).map_err(|e| {
             IntentError::runtime_error(format!(
                 "batch pending counter failed for batch '{}': {}",
                 batch_id, e
             ))
-        })?
-        .max(0);
+        })?;
+    // Correct KV on underflow so the authoritative counter stays non-negative.
+    // Underflow indicates metadata drift (e.g., counter initialized at 0 before
+    // seal set the real value) — don't trigger callbacks in this case.
+    let new_pending = if pending_raw < 0 {
+        let _ = kv::kv_set(
+            kv_handle,
+            &format!("{}:pending", counter_prefix),
+            &Value::Int(0),
+            None,
+        );
+        0
+    } else {
+        pending_raw
+    };
+    // If pending went negative, something is wrong — skip callback firing.
+    let pending_underflow = pending_raw < 0;
 
     // Increment the terminal counter. kv_incr returns the value AFTER increment,
     // so new_dead==1 means this worker caused the 0→1 transition.
@@ -816,40 +834,100 @@ fn update_batch_on_terminal(
     //              there's no room for dead/cancelled. Avoids the TOCTOU race
     //              of reading dead/cancelled as separate non-atomic KV gets.
     let fire_death = terminal_type == "dead" && new_dead == 1;
-    let fire_complete = new_pending == 0;
+    let fire_complete = new_pending == 0 && !pending_underflow;
     let fire_success = fire_complete && terminal_type == "succeeded" && new_succeeded == total_jobs;
 
-    // --- Exactly-once callback firing via kv_set_nx on fired flag keys ---
-    // Only the kv_set_nx winner fires. TTL matches batch retention.
+    // --- Callback firing: enqueue FIRST, then set fired flags ---
+    // This ordering is safe because:
+    //   - fire_batch_callback checks if jobs:data:<cb_id> exists → skip if present (idempotent enqueue)
+    //   - kv_set_nx on fired flags → only first writer wins (idempotent flag)
+    // If we crash after enqueue but before flag-set, the next worker retries:
+    //   - enqueue sees existing job data → skip (no duplicate)
+    //   - kv_set_nx wins → flag set, self-healed
+    // If enqueue fails, fired flag is never set → next worker retries the whole thing.
+    // Result: reliable exactly-once delivery with automatic retry.
+
+    // Build a metadata snapshot for callback payloads.
+    let meta_snapshot = if fire_death || fire_complete || fire_success {
+        match kv::kv_get(kv_handle, &meta_key) {
+            Ok(Value::Map(m)) => Some(m),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     let fired_prefix = format!("jobs:batch:{}:fired", batch_id);
-    let do_fire_death = fire_death
-        && kv::kv_set_nx(
+
+    // Step 1: Enqueue callback jobs (idempotent via jobs:data existence check).
+    let mut did_fire_death = false;
+    let mut did_fire_complete = false;
+    let mut did_fire_success = false;
+
+    if fire_death {
+        if let Some(ref snap) = meta_snapshot {
+            if let Ok(()) = fire_batch_callback(&batch_id, "on_death", snap) {
+                did_fire_death = true;
+            } else {
+                eprintln!(
+                    "[ntnt] warning: failed to enqueue on_death callback for batch '{}'",
+                    batch_id
+                );
+            }
+        }
+    }
+    if fire_complete {
+        if let Some(ref snap) = meta_snapshot {
+            if let Ok(()) = fire_batch_callback(&batch_id, "on_complete", snap) {
+                did_fire_complete = true;
+            } else {
+                eprintln!(
+                    "[ntnt] warning: failed to enqueue on_complete callback for batch '{}'",
+                    batch_id
+                );
+            }
+        }
+    }
+    if fire_success {
+        if let Some(ref snap) = meta_snapshot {
+            if let Ok(()) = fire_batch_callback(&batch_id, "on_success", snap) {
+                did_fire_success = true;
+            } else {
+                eprintln!(
+                    "[ntnt] warning: failed to enqueue on_success callback for batch '{}'",
+                    batch_id
+                );
+            }
+        }
+    }
+
+    // Step 2: Set fired flags AFTER successful enqueue (or skip if enqueue failed).
+    if did_fire_death {
+        let _ = kv::kv_set_nx(
             kv_handle,
             &format!("{}:on_death", fired_prefix),
             &Value::Bool(true),
             batch_ttl,
-        )
-        .unwrap_or(false);
-    let do_fire_complete = fire_complete
-        && kv::kv_set_nx(
+        );
+    }
+    if did_fire_complete {
+        let _ = kv::kv_set_nx(
             kv_handle,
             &format!("{}:on_complete", fired_prefix),
             &Value::Bool(true),
             batch_ttl,
-        )
-        .unwrap_or(false);
-    let do_fire_success = fire_success
-        && kv::kv_set_nx(
+        );
+    }
+    if did_fire_success {
+        let _ = kv::kv_set_nx(
             kv_handle,
             &format!("{}:on_success", fired_prefix),
             &Value::Bool(true),
             batch_ttl,
-        )
-        .unwrap_or(false);
+        );
+    }
 
     // --- Update metadata map with authoritative counter values ---
-    // Read all counters fresh for the snapshot. Two workers racing here both
-    // write FROM the atomic counter keys, so last-writer-wins is always correct.
     if let Ok(Value::Map(mut meta)) = kv::kv_get(kv_handle, &meta_key) {
         meta.insert("pending".to_string(), Value::Int(new_pending));
         let all_dead = match kv::kv_get(kv_handle, &format!("{}:dead", counter_prefix)) {
@@ -868,47 +946,19 @@ fn update_batch_on_terminal(
         meta.insert("succeeded".to_string(), Value::Int(all_succeeded));
         meta.insert("cancelled".to_string(), Value::Int(all_cancelled));
 
-        if do_fire_death {
+        if did_fire_death {
             meta.insert("fired_death".to_string(), Value::Bool(true));
         }
-        if do_fire_complete {
+        if did_fire_complete {
             meta.insert("fired_complete".to_string(), Value::Bool(true));
             meta.insert("status".to_string(), Value::String("complete".to_string()));
             meta.insert("completed_at".to_string(), Value::String(timestamp_key()));
         }
-        if do_fire_success {
+        if did_fire_success {
             meta.insert("fired_success".to_string(), Value::Bool(true));
         }
 
-        let _ = kv::kv_set(kv_handle, &meta_key, &Value::Map(meta.clone()), None);
-
-        // Fire callbacks after metadata is durable. Log errors but don't fail
-        // the terminal path — the job itself succeeded/died; callback enqueue
-        // failure is secondary and visible in event logs.
-        if do_fire_death {
-            if let Err(e) = fire_batch_callback(&batch_id, "on_death", &meta) {
-                eprintln!(
-                    "[ntnt] warning: failed to enqueue on_death callback for batch '{}': {}",
-                    batch_id, e
-                );
-            }
-        }
-        if do_fire_complete {
-            if let Err(e) = fire_batch_callback(&batch_id, "on_complete", &meta) {
-                eprintln!(
-                    "[ntnt] warning: failed to enqueue on_complete callback for batch '{}': {}",
-                    batch_id, e
-                );
-            }
-        }
-        if do_fire_success {
-            if let Err(e) = fire_batch_callback(&batch_id, "on_success", &meta) {
-                eprintln!(
-                    "[ntnt] warning: failed to enqueue on_success callback for batch '{}': {}",
-                    batch_id, e
-                );
-            }
-        }
+        let _ = kv::kv_set(kv_handle, &meta_key, &Value::Map(meta), None);
     }
 
     Ok(())
