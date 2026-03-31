@@ -321,6 +321,132 @@ let clean = sanitize_html(user_input, map {
 
 ---
 
+### Priority 2.5: ORM / Query Builder (`std/db/model`)
+
+**The gap:** 80% of web app database interactions are CRUD — find, create, update, delete, where, order, limit. Writing raw SQL for every one is repetitive boilerplate. Every major web framework has an ORM (Django ORM, ActiveRecord, Eloquent, Prisma, SQLAlchemy) because developer productivity on common queries matters more than SQL purity.
+
+**What developers install instead:** prisma, sequelize, typeorm, knex (npm); SQLAlchemy, Django ORM, tortoise-orm (PyPI)
+
+**Why it belongs in ntnt:** ntnt already has type annotations + contracts + gradual typing. An ORM can leverage all of that for type-safe models with built-in validation — a genuine differentiator over Prisma or ActiveRecord, where the model layer and validation layer are typically separate packages.
+
+**Proposed API:**
+```ntnt
+// Define a model — types + contracts + defaults in one place
+model User {
+    id: Int (primary, auto)
+    email: String (unique, required)
+    name: String (required, max_length(100))
+    role: String (default: "user", one_of(["admin", "user", "editor"]))
+    age: Int? (min(13))
+    created_at: Int (default: now())
+}
+
+// CRUD
+let user = User.create(map { "email": "alice@example.com", "name": "Alice" })
+let user = User.find(1)                                    // by primary key
+let user = User.find_by(map { "email": "alice@example.com" })  // first match
+let users = User.where(map { "role": "admin" })
+                .order("created_at", "desc")
+                .limit(10)
+let count = User.count(map { "role": "user" })
+
+// Update
+User.update(1, map { "name": "Alice Smith" })
+user.save()  // if modified in place
+
+// Delete
+User.delete(1)
+User.delete_where(map { "role": "inactive" })
+
+// Relations (stretch)
+model Post {
+    id: Int (primary, auto)
+    title: String (required)
+    author_id: Int (references: User)
+    body: String
+}
+
+let posts = user.posts()  // auto-generated from foreign key
+let author = post.author()
+```
+
+**Key design decisions:**
+- Models ARE the schema — `ntnt migrate` generates SQL migrations from model definitions (like Prisma Migrate or Django makemigrations)
+- Validation is built into the model definition via constraints (ties into `std/validate`)
+- Query builder returns ntnt maps, not opaque objects — stays consistent with the rest of the language
+- Raw SQL is always available as an escape hatch (`pg_query` still works)
+- Supports both PostgreSQL and SQLite backends
+
+**What the model syntax compiles to:**
+```ntnt
+// User.where(map { "role": "admin" }).order("created_at", "desc").limit(10)
+// becomes:
+pg_query(db, "SELECT * FROM users WHERE role = $1 ORDER BY created_at DESC LIMIT $2", ["admin", 10])
+```
+
+The ORM doesn't replace raw SQL — it makes the common case fast and keeps the power for complex queries.
+
+**Scope:** Large (~2000-3000 LOC). This is the biggest addition. Includes: model definition syntax (parser/AST), query builder, migration generator, relation resolution. Needs its own DD.
+
+#### Priority 2.6: GraphQL (`std/graphql`)
+
+**The gap:** API-first apps, mobile backends, and any system with complex data relationships benefit from GraphQL — clients fetch exactly what they need in a single request. Without GraphQL support, ntnt is limited to REST-only, which cuts off a significant chunk of modern app architectures.
+
+**What developers install instead:** apollo-server, graphql-yoga, mercurius (npm); strawberry, graphene, ariadne (PyPI)
+
+**Proposed API:**
+```ntnt
+import { graphql, schema, query, mutation, field } from "std/graphql"
+
+// Schema definition — ntnt-native, not SDL strings
+let user_type = type("User", map {
+    "id": field(Int, required),
+    "name": field(String, required),
+    "email": field(String, required),
+    "posts": field([Post], resolve: fn(user) {
+        Post.where(map { "author_id": user.id })
+    })
+})
+
+let schema = schema(map {
+    "query": map {
+        "user": query(User, args: map { "id": Int }, resolve: fn(args) {
+            User.find(args.id)
+        }),
+        "users": query([User], args: map { "role": String? }, resolve: fn(args) {
+            if args.role { User.where(map { "role": args.role }) }
+            else { User.all() }
+        })
+    },
+    "mutation": map {
+        "createUser": mutation(User, args: map { "name": String, "email": String }, resolve: fn(args) {
+            User.create(args)
+        })
+    }
+})
+
+// Mount as endpoint
+post("/graphql", graphql(schema))
+
+// Optional: GraphiQL playground in dev
+if get_env("NTNT_ENV") == "development" {
+    get("/graphql", graphql_playground())
+}
+```
+
+**ORM integration:** If `std/db/model` exists, GraphQL resolvers become trivial — models provide the data layer, GraphQL provides the API shape. This is the same pattern Prisma + Apollo popularized, but integrated into the language.
+
+**Key features:**
+- Schema defined in ntnt (not SDL strings) — type-checked, autocomplete-friendly
+- Automatic resolver generation from models (stretch goal)
+- Batching / DataLoader pattern for N+1 query prevention
+- Subscriptions via WebSocket (ties into `std/ws`)
+- Introspection + GraphiQL playground in dev mode
+
+**Scope:** Large (~2000-3000 LOC). Needs `async-graphql` crate (mature, Axum integration exists). Could start with query/mutation only, add subscriptions later.
+
+---
+
 ## What We're NOT Adding (and Why)
 
 | Category | Examples | Why skip |
@@ -329,12 +455,10 @@ let clean = sanitize_html(user_input, map {
 | Build tools / bundling | webpack, rollup, esbuild, vite | ntnt doesn't need a build step |
 | Linting / formatting | eslint, prettier, black | ntnt has `ntnt lint` and `ntnt fmt` built in |
 | Test frameworks | jest, mocha, chai, pytest | ntnt has intent-driven testing (IDD) |
-| ORM / query builders | prisma, sequelize, SQLAlchemy | ntnt's raw SQL + `pg_query` is idiomatic. ORMs add abstraction that fights the simplicity goal. |
 | React/Vue/frontend | react, vue, svelte | ntnt is server-rendered. Frontend framework integration is out of scope for stdlib. |
 | TypeScript tooling | ts-node, tsx | ntnt has its own type system |
 | Process managers | pm2, forever | ntnt runs in Docker with health checks |
 | Logging transports | winston-transport, pino-pretty | `std/log` covers it; transport to external services via `fetch()` |
-| GraphQL | apollo-server, graphql-yoga | REST/JSON is ntnt's paradigm. GraphQL could be a future package, not stdlib. |
 
 ---
 
@@ -353,9 +477,16 @@ Based on impact, effort, and dependencies:
 | 7 | Cron expressions | Small (200-300 LOC) | Medium | `cron` crate. Extend `std/time`. |
 | 8 | `std/xml` | Medium (400-600 LOC) | Medium | `quick-xml` crate. Integrations. |
 | 9 | `std/ws` (WebSocket) | Large (1000+ LOC) | Medium | Axum has WS support. Real-time apps. |
-| 10 | QR codes | Small (200 LOC) | Low | `qrcode` crate. 2FA UX. |
+| 10 | `std/db/model` (ORM) | Large (2000-3000 LOC) | Very High | Model syntax, query builder, migrations. Needs own DD. |
+| 11 | `std/graphql` | Large (2000-3000 LOC) | High | `async-graphql` crate. API-first apps. Needs own DD. |
+| 12 | QR codes | Small (200 LOC) | Low | `qrcode` crate. 2FA UX. |
 
-**Total:** ~3,500-5,500 lines of Rust across all additions. Items 1-4 cover the critical gaps. Items 5-7 are quick wins. Items 8-10 are nice-to-haves.
+**Total:** ~8,000-11,000 lines of Rust across all additions. Items 1-4 cover the critical gaps. Items 5-7 are quick wins. Items 8-9 are medium effort. Items 10-11 are major features that each deserve their own design doc. Item 12 is a nice-to-have.
+
+**Suggested phasing:**
+- **v0.5.0:** Items 1-5 (validation, email, rate limiting, uploads, quick wins) — closes the most common gaps
+- **v0.6.0:** Items 6-9 (sanitization, cron, XML, WebSocket) — fills remaining holes
+- **v0.7.0:** Items 10-11 (ORM + GraphQL) — the headline features that make ntnt a complete application framework, not just a web server language
 
 ---
 
