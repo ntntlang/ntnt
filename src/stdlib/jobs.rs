@@ -5099,6 +5099,16 @@ pub(crate) mod tests {
             }
             let kv = JOB_RUNTIME.get_or_init_kv().unwrap();
             f(&kv);
+            // Clear the cached KV handle on exit so that concurrent tests (running
+            // outside TEST_LOCK) cannot inherit a stale handle pointing to this
+            // temp DB — which would cause spurious `jobs:data:` key counts in
+            // parallel test runs (e.g. test_batch_seal_through_terminal_integration).
+            if let Ok(mut h) = JOB_RUNTIME.kv_handle_info.lock() {
+                *h = None;
+            }
+            if let Ok(mut u) = JOB_RUNTIME.kv_url.lock() {
+                *u = "sqlite:./jobs.db".to_string();
+            }
             let _ = std::fs::remove_file(&tmp);
         });
     }
