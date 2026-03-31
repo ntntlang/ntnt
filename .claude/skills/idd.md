@@ -132,9 +132,11 @@ let data = map { "key": "value" }  // CORRECT
 let data = { "key": "value" }      // WRONG
 ```
 
-### String Interpolation Uses `{expr}` NOT `${expr}`
+### String Interpolation Uses `#{expr}` NOT `${expr}` or `{expr}`
 ```ntnt
-let msg = "Hello, {name}!"  // CORRECT
+let msg = "Hello, #{name}!"  // CORRECT — hash-brace syntax
+let msg = "Hello, ${name}!"  // WRONG
+let msg = "Hello, {name}!"   // WRONG — bare braces are literal text
 ```
 
 ### Route Patterns Auto-Detect Parameters
@@ -161,6 +163,34 @@ get("/path", handler)  // PREFERRED — readable, reusable
 
 get("/health", fn(req) { json(map { "ok": true }) })  // OK for simple routes
 ```
+
+### Error Handling: `?`, `??`, `otherwise`
+```ntnt
+// ? — propagate errors (unwrap Ok/Some, early-return Err/None)
+let data = parse_json(req)?
+
+// ?? — null coalescing (default for None)
+let name = user["name"] ?? "Anonymous"
+
+// otherwise — handle at call site (block MUST diverge with return/break/continue)
+let data = parse_json(req) otherwise {
+    return status(400, "Bad JSON: #{err}")
+}
+```
+
+### No Semicolons — Use Newlines
+`;` silently corrupts parser state. Never use semicolons.
+
+### `otherwise` Blocks MUST Diverge
+```ntnt
+let data = parse_json(req) otherwise { return status(400, "err") }  // CORRECT
+let data = parse_json(req) otherwise { status(400, "err") }         // WRONG — missing return
+```
+
+### Stdlib Prelude (v0.4.6+) — Common Functions Auto-Available
+Many stdlib functions are auto-injected without imports: `split`, `trim`, `contains`, `replace`, `join`, `starts_with`, `ends_with`, `to_lower`, `to_upper`, `parse_json`, `stringify`, `keys`, `values`, `entries`, `has_key`, `get_key`, `reverse`, `sort`, `json`, `html`, `text`, `redirect`, `status`, `not_found`, `error`, `parse_form`, `get_env`, `load_env`, `now`, `format`, `uuid`, `sha256`.
+
+Still need explicit imports: `fetch` (std/http), DB modules, KV, jobs, fs, csv, `sort_by`, `first`/`last`/`push`/`pop`.
 
 ## Standard Assertions (IAL)
 
