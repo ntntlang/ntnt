@@ -865,9 +865,34 @@ fn update_batch_on_terminal(
     // on_success:  succeeded==total is race-free — if every job succeeded,
     //              there's no room for dead/cancelled. Avoids the TOCTOU race
     //              of reading dead/cancelled as separate non-atomic KV gets.
-    let fire_death = terminal_type == "dead" && new_dead == 1;
-    let fire_complete = new_pending == 0 && !pending_underflow;
-    let fire_success = fire_complete && terminal_type == "succeeded" && new_succeeded == total_jobs;
+    let mut fire_death = terminal_type == "dead" && new_dead == 1;
+    let mut fire_complete = new_pending == 0 && !pending_underflow;
+    let mut fire_success = fire_complete && terminal_type == "succeeded" && new_succeeded == total_jobs;
+
+    // Set closed flag atomically BEFORE firing callbacks.
+    // Only the worker that sets this flag proceeds with callbacks.
+    // enqueue_into() checks this flag to reject dynamic adds after completion.
+    let did_close = if fire_complete {
+        let closed_key = format!("jobs:batch:{}:closed", batch_id);
+        let we_closed = kv::kv_set_nx(
+            kv_handle,
+            &closed_key,
+            &Value::Bool(true),
+            batch_ttl,
+        )
+        .unwrap_or(false);
+        if !we_closed {
+            // Another worker already closed — skip callbacks but still
+            // update metadata so batch_status() shows correct state.
+            fire_complete = false;
+            fire_death = false;
+            fire_success = false;
+        }
+        we_closed
+    } else {
+        false
+    };
+    let _ = did_close; // used by Task 7 (TTLs)
 
     // --- Callback firing: enqueue FIRST, then set fired flags ---
     // This ordering is safe because:
@@ -8986,6 +9011,125 @@ pub(crate) mod tests {
                 matches!(status_map.get("total"), Some(Value::Int(3))),
                 "batch_status total must be 3 (from counter), got {:?}",
                 status_map.get("total")
+            );
+        });
+    }
+
+    #[test]
+    fn test_closed_flag_set_on_completion() {
+        with_temp_kv("ntnt_closed_flag_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("closed-flag-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+            let job_id = data_keys
+                .iter()
+                .find(|k| !k.contains("cb-"))
+                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
+                .expect("should find a non-callback job");
+
+            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
+
+            update_batch_on_terminal(kv, &job_data, &job_id, "succeeded").unwrap();
+
+            let closed_key = format!("jobs:batch:{}:closed", bid);
+            let closed = kv::kv_get(kv, &closed_key).unwrap();
+            assert!(
+                matches!(closed, Value::Bool(true)),
+                "closed flag must be set after batch completion"
+            );
+        });
+    }
+
+    #[test]
+    fn test_only_one_worker_fires_callbacks() {
+        with_temp_kv("ntnt_one_worker_callbacks_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("one-worker-test".to_string())]).unwrap();
+            for i in 0..2 {
+                let mut payload = HashMap::new();
+                payload.insert("x".to_string(), Value::Int(i));
+                enqueue_fn(&[
+                    handle.clone(),
+                    Value::String("ProcessRow".to_string()),
+                    Value::Map(payload),
+                ])
+                .unwrap();
+            }
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+            let job_ids: Vec<String> = data_keys
+                .iter()
+                .filter(|k| !k.contains("cb-"))
+                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
+                .collect();
+            assert_eq!(job_ids.len(), 2);
+
+            let job_data_1 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[0])).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
+            update_batch_on_terminal(kv, &job_data_1, &job_ids[0], "succeeded").unwrap();
+
+            let job_data_2 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[1])).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
+            update_batch_on_terminal(kv, &job_data_2, &job_ids[1], "succeeded").unwrap();
+
+            let cb_keys = kv::kv_list(kv, Some(&format!("jobs:data:cb-{}", bid)))
+                .unwrap_or_default();
+            let complete_cbs: Vec<&String> = cb_keys
+                .iter()
+                .filter(|k| k.contains("on_complete"))
+                .collect();
+            assert!(
+                complete_cbs.len() <= 1,
+                "at most one on_complete callback should be enqueued, got {}",
+                complete_cbs.len()
             );
         });
     }
