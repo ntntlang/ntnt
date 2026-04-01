@@ -2,6 +2,61 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+---
+
+## Review Notes (2026-04-01 — Codex + Larri)
+
+**Status: Approved with corrections.** The plan is well-structured, task ordering is correct, all call sites and test helpers are verified against the codebase. The following items need attention during implementation:
+
+### ⚠️ Bug: Task 6 Early Return Skips Metadata Update
+
+The `return Ok(())` when `kv_set_nx` on the closed flag fails (second worker loses the race) causes that worker to skip the metadata update at the end of `update_batch_on_terminal()`. This means `batch_status()` could show stale metadata — missing `status: "complete"` and `completed_at`.
+
+**Fix:** Don't early-return. Instead, set `fire_complete = false` (and `fire_death`/`fire_success` to false) and let execution continue to the metadata update. The closed flag still prevents duplicate callbacks, but both workers write metadata. The second metadata write is idempotent (same status, slightly different timestamp — harmless).
+
+```rust
+// INSTEAD OF:
+if !we_closed { return Ok(()); }
+
+// DO:
+if !we_closed {
+    // Another worker closed — skip callbacks but still update metadata.
+    fire_complete = false;
+    fire_death = false;
+    fire_success = false;
+}
+```
+
+### Line Reference Offsets (~60 lines)
+
+Plan line numbers are approximate and will shift as earlier tasks insert code. Actual locations verified:
+- Thread-local insertion point: after line ~540 (BATCH_RUNTIME static), not ~480
+- `kv_expire` in kv.rs: line 2304, not 2340 (Task 1 `kv_ttl` should go after 2340, which is after `kv_expire`)
+- `batch_id()` stub: line ~5082, not ~5092
+- Worker loop `execute_in_worker` call: line 1930
+
+These are close enough for sequential implementation — each task's context (function names, surrounding code) is sufficient to locate the right spot.
+
+### Minor: `kv_expire` Failure Logging
+
+Spec §4 says: "If `kv_expire` fails on a counter key, log a warning but don't fail the completion." Task 7 silently ignores with `let _ =`. Consider adding `eprintln!` for debuggability, but this is not blocking.
+
+### Minor: `enqueue_into` Accepts Map Handles
+
+The plan's `enqueue_into` registration accepts both `Value::String` (batch ID) and `Value::Map` (batch handle with `_batch_id`). The spec says String only. The Map acceptance is actually a nice ergonomic addition — keeps `enqueue_into(batch_id(), ...)` and `enqueue_into(handle, ...)` both working. No change needed.
+
+### Verified ✅
+
+- All 7 `enqueue_internal` call sites identified and correctly handled
+- `get_fn` helper defined at line 6077 in the test module
+- `test_job_def_with_opts` exists at line 5179
+- `build_batch_meta` and `update_batch_on_terminal` accessible via `use super::*`
+- Task dependency chain is clean (no cycles)
+- `RefCell` import may be needed — check if already in scope via existing imports
+- `kv_ttl` function doesn't exist yet — Task 1 correctly adds it as prerequisite
+
+---
+
 **Goal:** Wire `batch_id()` context into perform blocks, enable `enqueue_into()` for dynamic batch job addition, add batch expiry TTLs, and achieve full test coverage for all edge cases.
 
 **Architecture:** All changes are in `src/stdlib/jobs.rs` (with one small addition to `src/stdlib/kv.rs` for TTL testing). Thread-local `CURRENT_BATCH_ID` with RAII guard provides batch context. `enqueue_into()` is a new stdlib function that writes directly to KV + atomically increments counters for post-seal dynamic adds. A `closed` flag serializes completion vs dynamic add races. `counter:total` becomes an atomic KV key (replacing metadata-only `total`) for correctness under dynamic adds. Seal and completion paths get proper TTLs.
@@ -849,13 +904,17 @@ Expected: FAIL — closed flag not set.
 
 - [ ] **Step 3: Add closed flag to `update_batch_on_terminal()`**
 
-In the callback conditions section (after line ~837, where `fire_complete` is calculated), add the closed flag logic. Find:
+In the callback conditions section (after line ~837, where `fire_complete` is calculated), add the closed flag logic.
+
+**Important:** The existing `fire_death`, `fire_complete`, and `fire_success` bindings must become `let mut` since the closed flag logic may reassign them when a second worker loses the `kv_set_nx` race (see Review Notes above).
+
+Find:
 
 ```rust
 let fire_complete = new_pending == 0 && !pending_underflow;
 ```
 
-Add after it:
+Change to `let mut` and add after it:
 
 ```rust
 // Set closed flag atomically BEFORE firing callbacks.
@@ -871,11 +930,13 @@ let did_close = if fire_complete {
     )
     .unwrap_or(false);
     if !we_closed {
-        // Another worker already closed — skip callback firing entirely.
-        // Still update metadata below for consistency.
-        return Ok(());
+        // Another worker already closed — skip callbacks but continue
+        // to the metadata update so batch_status() shows correct state.
+        fire_complete = false;
+        fire_death = false;
+        fire_success = false;
     }
-    true
+    we_closed
 } else {
     false
 };
