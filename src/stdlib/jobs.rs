@@ -33,8 +33,8 @@ use crate::stdlib::concurrent::{
 };
 use crate::stdlib::kv;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -707,11 +707,7 @@ fn fire_batch_callback(
 ///
 /// Returns `Ok(job_id)` on success, or an error if the batch doesn't exist,
 /// is complete, or is closed.
-fn enqueue_to_sealed_batch(
-    batch_id: &str,
-    job_name: &str,
-    payload: Value,
-) -> Result<String> {
+fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Result<String> {
     // Step 1: Validate job type is registered (before any counter mutation).
     let _job_def = JOB_RUNTIME.get_job(job_name)?.ok_or_else(|| {
         IntentError::runtime_error(format!(
@@ -985,25 +981,21 @@ fn update_batch_on_terminal(
     //              of reading dead/cancelled as separate non-atomic KV gets.
     let mut fire_death = terminal_type == "dead" && new_dead == 1;
     let mut fire_complete = new_pending == 0 && !pending_underflow;
-    let mut fire_success = fire_complete && terminal_type == "succeeded" && new_succeeded == total_jobs;
+    let mut fire_success =
+        fire_complete && terminal_type == "succeeded" && new_succeeded == total_jobs;
 
     // Set closed flag atomically BEFORE firing callbacks.
     // Only the worker that sets this flag proceeds with callbacks.
     // enqueue_into() checks this flag to reject dynamic adds after completion.
     let did_close = if fire_complete {
         let closed_key = format!("jobs:batch:{}:closed", batch_id);
-        let we_closed = kv::kv_set_nx(
-            kv_handle,
-            &closed_key,
-            &Value::Bool(true),
-            batch_ttl,
-        )
-        .map_err(|e| {
-            IntentError::runtime_error(format!(
-                "batch '{}' closed flag set failed: {}",
-                batch_id, e
-            ))
-        })?;
+        let we_closed = kv::kv_set_nx(kv_handle, &closed_key, &Value::Bool(true), batch_ttl)
+            .map_err(|e| {
+                IntentError::runtime_error(format!(
+                    "batch '{}' closed flag set failed: {}",
+                    batch_id, e
+                ))
+            })?;
         if !we_closed {
             // Another worker already closed — skip callbacks but still
             // update metadata so batch_status() shows correct state.
@@ -1148,7 +1140,11 @@ fn update_batch_on_terminal(
     if did_close {
         let completion_ttl = 24 * 3600i64;
         for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
-            let _ = kv::kv_expire(kv_handle, &format!("{}:{}", counter_prefix, suffix), completion_ttl);
+            let _ = kv::kv_expire(
+                kv_handle,
+                &format!("{}:{}", counter_prefix, suffix),
+                completion_ttl,
+            );
         }
         let closed_key = format!("jobs:batch:{}:closed", batch_id);
         let _ = kv::kv_expire(kv_handle, &closed_key, completion_ttl);
@@ -5351,27 +5347,27 @@ pub fn init() -> HashMap<String, Value> {
             func: |args| {
                 if args.len() != 3 {
                     return Err(IntentError::type_error(
-                        "enqueue_into() requires 3 arguments (batch_id, job_type, args)".to_string(),
+                        "enqueue_into() requires 3 arguments (batch_id, job_type, args)"
+                            .to_string(),
                     ));
                 }
-                let batch_id = match &args[0] {
-                    Value::String(s) => s.clone(),
-                    Value::Map(m) => match m.get("_batch_id") {
-                        Some(Value::String(bid)) => bid.clone(),
+                let batch_id =
+                    match &args[0] {
+                        Value::String(s) => s.clone(),
+                        Value::Map(m) => match m.get("_batch_id") {
+                            Some(Value::String(bid)) => bid.clone(),
+                            _ => return Err(IntentError::type_error(
+                                "enqueue_into() first argument must be a batch ID string or handle"
+                                    .to_string(),
+                            )),
+                        },
                         _ => {
                             return Err(IntentError::type_error(
                                 "enqueue_into() first argument must be a batch ID string or handle"
                                     .to_string(),
                             ))
                         }
-                    },
-                    _ => {
-                        return Err(IntentError::type_error(
-                            "enqueue_into() first argument must be a batch ID string or handle"
-                                .to_string(),
-                        ))
-                    }
-                };
+                    };
                 let job_type = match &args[1] {
                     Value::String(s) => s.clone(),
                     _ => {
@@ -9043,7 +9039,10 @@ pub(crate) mod tests {
             let result = batch_id_fn(&[]).unwrap();
             match result {
                 Value::String(ref s) => assert_eq!(s, "test-batch-123"),
-                _ => panic!("batch_id() must return String inside a batch job, got {:?}", result),
+                _ => panic!(
+                    "batch_id() must return String inside a batch job, got {:?}",
+                    result
+                ),
             }
         });
     }
@@ -9129,7 +9128,10 @@ pub(crate) mod tests {
             let result2 = batch_id_fn(&[]).unwrap();
             match &result2 {
                 Value::String(s) => assert_eq!(s, "failure-batch"),
-                _ => panic!("batch_id() must still return String in on_failure context, got {:?}", result2),
+                _ => panic!(
+                    "batch_id() must still return String in on_failure context, got {:?}",
+                    result2
+                ),
             }
         });
     }
@@ -9283,18 +9285,30 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("ttl-meta-test".to_string())]).unwrap();
             let mut payload = HashMap::new();
             payload.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(payload)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
             let meta_key = format!("jobs:batch:{}", bid);
             let ttl = kv::kv_ttl(kv, &meta_key).unwrap();
             let thirty_days = 30 * 24 * 3600;
             match ttl {
-                Some(t) => assert!(t > thirty_days - 60 && t <= thirty_days, "metadata TTL should be ~30 days, got {} seconds", t),
+                Some(t) => assert!(
+                    t > thirty_days - 60 && t <= thirty_days,
+                    "metadata TTL should be ~30 days, got {} seconds",
+                    t
+                ),
                 None => panic!("metadata key should have a TTL after seal"),
             }
         });
@@ -9303,7 +9317,9 @@ pub(crate) mod tests {
     #[test]
     fn test_seal_sets_30d_ttl_on_counters() {
         with_temp_kv("ntnt_seal_ttl_counters_test.db", |kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9312,11 +9328,19 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("ttl-counters-test".to_string())]).unwrap();
             let mut payload = HashMap::new();
             payload.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(payload)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
             let cp = format!("jobs:batch:{}:counter", bid);
@@ -9324,7 +9348,12 @@ pub(crate) mod tests {
             for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
                 let ttl = kv::kv_ttl(kv, &format!("{}:{}", cp, suffix)).unwrap();
                 match ttl {
-                    Some(t) => assert!(t > thirty_days - 60 && t <= thirty_days, "counter:{} TTL should be ~30 days, got {}s", suffix, t),
+                    Some(t) => assert!(
+                        t > thirty_days - 60 && t <= thirty_days,
+                        "counter:{} TTL should be ~30 days, got {}s",
+                        suffix,
+                        t
+                    ),
                     None => panic!("counter:{} should have TTL after seal", suffix),
                 }
             }
@@ -9334,7 +9363,9 @@ pub(crate) mod tests {
     #[test]
     fn test_completion_shortens_ttl_to_24h() {
         with_temp_kv("ntnt_completion_ttl_test.db", |kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9343,24 +9374,43 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("completion-ttl-test".to_string())]).unwrap();
             let mut payload = HashMap::new();
             payload.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(payload)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
 
             let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_id = data_keys.iter().find(|k| !k.contains("cb-")).map(|k| k.strip_prefix("jobs:data:").unwrap().to_string()).expect("should find a job");
-            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() { Value::Map(m) => m, _ => panic!("expected map") };
+            let job_id = data_keys
+                .iter()
+                .find(|k| !k.contains("cb-"))
+                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
+                .expect("should find a job");
+            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
             update_batch_on_terminal(kv, &job_data, &job_id, "succeeded").unwrap();
 
             let meta_key = format!("jobs:batch:{}", bid);
             let twenty_four_hours = 24 * 3600;
             let meta_ttl = kv::kv_ttl(kv, &meta_key).unwrap();
             match meta_ttl {
-                Some(t) => assert!(t > twenty_four_hours - 60 && t <= twenty_four_hours, "metadata TTL should be ~24h after completion, got {}s", t),
+                Some(t) => assert!(
+                    t > twenty_four_hours - 60 && t <= twenty_four_hours,
+                    "metadata TTL should be ~24h after completion, got {}s",
+                    t
+                ),
                 None => panic!("metadata should have TTL after completion"),
             }
 
@@ -9368,7 +9418,12 @@ pub(crate) mod tests {
             for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
                 let ttl = kv::kv_ttl(kv, &format!("{}:{}", cp, suffix)).unwrap();
                 match ttl {
-                    Some(t) => assert!(t > twenty_four_hours - 60 && t <= twenty_four_hours, "counter:{} TTL should be ~24h after completion, got {}s", suffix, t),
+                    Some(t) => assert!(
+                        t > twenty_four_hours - 60 && t <= twenty_four_hours,
+                        "counter:{} TTL should be ~24h after completion, got {}s",
+                        suffix,
+                        t
+                    ),
                     None => panic!("counter:{} should have TTL after completion", suffix),
                 }
             }
@@ -9378,7 +9433,9 @@ pub(crate) mod tests {
     #[test]
     fn test_closed_flag_has_ttl() {
         with_temp_kv("ntnt_closed_flag_ttl_test.db", |kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9387,24 +9444,43 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("closed-ttl-test".to_string())]).unwrap();
             let mut payload = HashMap::new();
             payload.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(payload)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
 
             let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_id = data_keys.iter().find(|k| !k.contains("cb-")).map(|k| k.strip_prefix("jobs:data:").unwrap().to_string()).expect("should find a job");
-            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() { Value::Map(m) => m, _ => panic!("expected map") };
+            let job_id = data_keys
+                .iter()
+                .find(|k| !k.contains("cb-"))
+                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
+                .expect("should find a job");
+            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
             update_batch_on_terminal(kv, &job_data, &job_id, "succeeded").unwrap();
 
             let closed_key = format!("jobs:batch:{}:closed", bid);
             let twenty_four_hours = 24 * 3600;
             let ttl = kv::kv_ttl(kv, &closed_key).unwrap();
             match ttl {
-                Some(t) => assert!(t > twenty_four_hours - 60 && t <= twenty_four_hours, "closed flag TTL should be ~24h, got {}s", t),
+                Some(t) => assert!(
+                    t > twenty_four_hours - 60 && t <= twenty_four_hours,
+                    "closed flag TTL should be ~24h, got {}s",
+                    t
+                ),
                 None => panic!("closed flag should have TTL"),
             }
         });
@@ -9421,14 +9497,21 @@ pub(crate) mod tests {
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
             let meta_key = format!("jobs:batch:{}", bid);
             let twenty_four_hours = 24 * 3600;
             let ttl = kv::kv_ttl(kv, &meta_key).unwrap();
             match ttl {
-                Some(t) => assert!(t > twenty_four_hours - 60 && t <= twenty_four_hours, "empty batch metadata TTL should be ~24h, got {}s", t),
+                Some(t) => assert!(
+                    t > twenty_four_hours - 60 && t <= twenty_four_hours,
+                    "empty batch metadata TTL should be ~24h, got {}s",
+                    t
+                ),
                 None => panic!("empty batch metadata should have 24h TTL"),
             }
         });
@@ -9486,8 +9569,8 @@ pub(crate) mod tests {
             };
             update_batch_on_terminal(kv, &job_data_2, &job_ids[1], "succeeded").unwrap();
 
-            let cb_keys = kv::kv_list(kv, Some(&format!("jobs:data:cb-{}", bid)))
-                .unwrap_or_default();
+            let cb_keys =
+                kv::kv_list(kv, Some(&format!("jobs:data:cb-{}", bid))).unwrap_or_default();
             let complete_cbs: Vec<&String> = cb_keys
                 .iter()
                 .filter(|k| k.contains("on_complete"))
@@ -9503,7 +9586,9 @@ pub(crate) mod tests {
     #[test]
     fn test_enqueue_into_rejects_invalid_batch_id() {
         with_temp_kv("ntnt_enqueue_into_invalid_test.db", |_kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let enqueue_into_fn = get_fn(&module, "enqueue_into");
 
@@ -9512,16 +9597,25 @@ pub(crate) mod tests {
                 Value::String("ProcessRow".to_string()),
                 Value::Map(HashMap::new()),
             ]);
-            assert!(result.is_err(), "enqueue_into with invalid batch_id must error");
+            assert!(
+                result.is_err(),
+                "enqueue_into with invalid batch_id must error"
+            );
             let err_msg = format!("{}", result.unwrap_err());
-            assert!(err_msg.contains("not found"), "error must mention 'not found', got: {}", err_msg);
+            assert!(
+                err_msg.contains("not found"),
+                "error must mention 'not found', got: {}",
+                err_msg
+            );
         });
     }
 
     #[test]
     fn test_enqueue_into_rejects_unknown_job_type() {
         with_temp_kv("ntnt_enqueue_into_unknown_type_test.db", |_kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9531,11 +9625,19 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("unknown-type-test".to_string())]).unwrap();
             let mut p = HashMap::new();
             p.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
 
@@ -9544,14 +9646,19 @@ pub(crate) mod tests {
                 Value::String("NonExistentJob".to_string()),
                 Value::Map(HashMap::new()),
             ]);
-            assert!(result.is_err(), "enqueue_into with unknown job type must error");
+            assert!(
+                result.is_err(),
+                "enqueue_into with unknown job type must error"
+            );
         });
     }
 
     #[test]
     fn test_enqueue_into_writes_job_and_increments_counters() {
         with_temp_kv("ntnt_enqueue_into_counters_test.db", |kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9561,16 +9668,30 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("dynamic-add-test".to_string())]).unwrap();
             let mut payload = HashMap::new();
             payload.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(payload)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
             let cp = format!("jobs:batch:{}:counter", bid);
-            assert!(matches!(kv::kv_get(kv, &format!("{}:total", cp)).unwrap(), Value::Int(1)));
-            assert!(matches!(kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(), Value::Int(1)));
+            assert!(matches!(
+                kv::kv_get(kv, &format!("{}:total", cp)).unwrap(),
+                Value::Int(1)
+            ));
+            assert!(matches!(
+                kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(),
+                Value::Int(1)
+            ));
 
             let mut payload2 = HashMap::new();
             payload2.insert("x".to_string(), Value::Int(2));
@@ -9578,11 +9699,27 @@ pub(crate) mod tests {
                 Value::String(bid.clone()),
                 Value::String("ProcessRow".to_string()),
                 Value::Map(payload2),
-            ]).unwrap();
-            assert!(matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"), "enqueue_into must return Ok");
+            ])
+            .unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "enqueue_into must return Ok"
+            );
 
-            assert!(matches!(kv::kv_get(kv, &format!("{}:total", cp)).unwrap(), Value::Int(2)), "total should be 2");
-            assert!(matches!(kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(), Value::Int(2)), "pending should be 2");
+            assert!(
+                matches!(
+                    kv::kv_get(kv, &format!("{}:total", cp)).unwrap(),
+                    Value::Int(2)
+                ),
+                "total should be 2"
+            );
+            assert!(
+                matches!(
+                    kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(),
+                    Value::Int(2)
+                ),
+                "pending should be 2"
+            );
 
             let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
             assert_eq!(data_keys.len(), 2, "should have 2 jobs in KV");
@@ -9592,7 +9729,9 @@ pub(crate) mod tests {
     #[test]
     fn test_enqueue_into_returns_job_id() {
         with_temp_kv("ntnt_enqueue_into_returns_id_test.db", |_kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9602,11 +9741,19 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("returns-id-test".to_string())]).unwrap();
             let mut p = HashMap::new();
             p.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
 
@@ -9614,12 +9761,20 @@ pub(crate) mod tests {
                 Value::String(bid),
                 Value::String("ProcessRow".to_string()),
                 Value::Map(HashMap::new()),
-            ]).unwrap();
+            ])
+            .unwrap();
 
             match result {
-                Value::EnumValue { ref variant, ref values, .. } => {
+                Value::EnumValue {
+                    ref variant,
+                    ref values,
+                    ..
+                } => {
                     assert_eq!(variant, "Ok");
-                    assert!(matches!(values.first(), Some(Value::String(_))), "enqueue_into must return Ok(String(job_id))");
+                    assert!(
+                        matches!(values.first(), Some(Value::String(_))),
+                        "enqueue_into must return Ok(String(job_id))"
+                    );
                 }
                 _ => panic!("expected EnumValue Ok"),
             }
@@ -9629,7 +9784,9 @@ pub(crate) mod tests {
     #[test]
     fn test_enqueue_into_rejects_complete_batch() {
         with_temp_kv("ntnt_enqueue_into_complete_test.db", |kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9639,17 +9796,32 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("complete-reject-test".to_string())]).unwrap();
             let mut p = HashMap::new();
             p.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
 
             let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_id = data_keys.iter().find(|k| !k.contains("cb-")).map(|k| k.strip_prefix("jobs:data:").unwrap().to_string()).expect("should find a job");
-            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() { Value::Map(m) => m, _ => panic!("expected map") };
+            let job_id = data_keys
+                .iter()
+                .find(|k| !k.contains("cb-"))
+                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
+                .expect("should find a job");
+            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
             update_batch_on_terminal(kv, &job_data, &job_id, "succeeded").unwrap();
 
             let result = enqueue_into_fn(&[
@@ -9659,14 +9831,20 @@ pub(crate) mod tests {
             ]);
             assert!(result.is_err(), "enqueue_into to complete batch must error");
             let err_msg = format!("{}", result.unwrap_err());
-            assert!(err_msg.contains("complete") || err_msg.contains("closing"), "error should mention complete or closing, got: {}", err_msg);
+            assert!(
+                err_msg.contains("complete") || err_msg.contains("closing"),
+                "error should mention complete or closing, got: {}",
+                err_msg
+            );
         });
     }
 
     #[test]
     fn test_enqueue_into_rejects_closed_batch() {
         with_temp_kv("ntnt_enqueue_into_closed_test.db", |kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9676,11 +9854,19 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("closed-reject-test".to_string())]).unwrap();
             let mut p = HashMap::new();
             p.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
 
@@ -9694,14 +9880,20 @@ pub(crate) mod tests {
             ]);
             assert!(result.is_err(), "enqueue_into to closed batch must error");
             let err_msg = format!("{}", result.unwrap_err());
-            assert!(err_msg.contains("closing"), "error should mention 'closing', got: {}", err_msg);
+            assert!(
+                err_msg.contains("closing"),
+                "error should mention 'closing', got: {}",
+                err_msg
+            );
         });
     }
 
     #[test]
     fn test_enqueue_into_allowed_during_sealing() {
         with_temp_kv("ntnt_enqueue_into_sealing_test.db", |kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let enqueue_into_fn = get_fn(&module, "enqueue_into");
 
@@ -9710,7 +9902,11 @@ pub(crate) mod tests {
             kv::kv_set(kv, &format!("jobs:batch:{}", bid), &Value::Map(meta), None).unwrap();
             let cp = format!("jobs:batch:{}:counter", bid);
             for suffix in &["pending", "total", "succeeded", "dead", "cancelled"] {
-                let val = if *suffix == "pending" || *suffix == "total" { 1 } else { 0 };
+                let val = if *suffix == "pending" || *suffix == "total" {
+                    1
+                } else {
+                    0
+                };
                 kv::kv_set(kv, &format!("{}:{}", cp, suffix), &Value::Int(val), None).unwrap();
             }
 
@@ -9719,14 +9915,20 @@ pub(crate) mod tests {
                 Value::String("ProcessRow".to_string()),
                 Value::Map(HashMap::new()),
             ]);
-            assert!(result.is_ok(), "enqueue_into during sealing should succeed, got: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "enqueue_into during sealing should succeed, got: {:?}",
+                result.err()
+            );
         });
     }
 
     #[test]
     fn test_enqueue_into_allowed_when_sealed() {
         with_temp_kv("ntnt_enqueue_into_sealed_test.db", |_kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9736,11 +9938,19 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("sealed-add-test".to_string())]).unwrap();
             let mut p = HashMap::new();
             p.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
 
@@ -9749,7 +9959,11 @@ pub(crate) mod tests {
                 Value::String("ProcessRow".to_string()),
                 Value::Map(HashMap::new()),
             ]);
-            assert!(result.is_ok(), "enqueue_into on sealed batch should succeed, got: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "enqueue_into on sealed batch should succeed, got: {:?}",
+                result.err()
+            );
         });
     }
 
@@ -9758,8 +9972,12 @@ pub(crate) mod tests {
         with_temp_kv("ntnt_enqueue_into_dedup_test.db", |kv| {
             let mut opts = HashMap::new();
             opts.insert("unique".to_string(), JobOptionValue::Int(3600));
-            JOB_RUNTIME.register_job(test_job_def_with_opts("UniqueJob", "default", opts)).unwrap();
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def_with_opts("UniqueJob", "default", opts))
+                .unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9769,18 +9987,32 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("dedup-rollback-test".to_string())]).unwrap();
             let mut p = HashMap::new();
             p.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
             let cp = format!("jobs:batch:{}:counter", bid);
 
             // Initial: total=1, pending=1
-            assert!(matches!(kv::kv_get(kv, &format!("{}:total", cp)).unwrap(), Value::Int(1)));
-            assert!(matches!(kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(), Value::Int(1)));
+            assert!(matches!(
+                kv::kv_get(kv, &format!("{}:total", cp)).unwrap(),
+                Value::Int(1)
+            ));
+            assert!(matches!(
+                kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(),
+                Value::Int(1)
+            ));
 
             // First unique job add — should succeed, counters go to 2
             let mut unique_payload = HashMap::new();
@@ -9789,27 +10021,45 @@ pub(crate) mod tests {
                 Value::String(bid.clone()),
                 Value::String("UniqueJob".to_string()),
                 Value::Map(unique_payload.clone()),
-            ]).unwrap();
-            assert!(matches!(kv::kv_get(kv, &format!("{}:total", cp)).unwrap(), Value::Int(2)));
-            assert!(matches!(kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(), Value::Int(2)));
+            ])
+            .unwrap();
+            assert!(matches!(
+                kv::kv_get(kv, &format!("{}:total", cp)).unwrap(),
+                Value::Int(2)
+            ));
+            assert!(matches!(
+                kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(),
+                Value::Int(2)
+            ));
 
             // Second identical unique job — should dedup, counters should stay at 2
             enqueue_into_fn(&[
                 Value::String(bid.clone()),
                 Value::String("UniqueJob".to_string()),
                 Value::Map(unique_payload),
-            ]).unwrap();
+            ])
+            .unwrap();
             let total_after = kv::kv_get(kv, &format!("{}:total", cp)).unwrap();
             let pending_after = kv::kv_get(kv, &format!("{}:pending", cp)).unwrap();
-            assert!(matches!(total_after, Value::Int(2)), "total should still be 2 after dedup, got {:?}", total_after);
-            assert!(matches!(pending_after, Value::Int(2)), "pending should still be 2 after dedup, got {:?}", pending_after);
+            assert!(
+                matches!(total_after, Value::Int(2)),
+                "total should still be 2 after dedup, got {:?}",
+                total_after
+            );
+            assert!(
+                matches!(pending_after, Value::Int(2)),
+                "pending should still be 2 after dedup, got {:?}",
+                pending_after
+            );
         });
     }
 
     #[test]
     fn test_dynamic_add_then_complete_fires_callbacks() {
         with_temp_kv("ntnt_dynamic_add_callbacks_test.db", |kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9819,49 +10069,93 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("dynamic-callback-test".to_string())]).unwrap();
             let mut p = HashMap::new();
             p.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
 
             let mut p2 = HashMap::new();
             p2.insert("x".to_string(), Value::Int(2));
-            enqueue_into_fn(&[Value::String(bid.clone()), Value::String("ProcessRow".to_string()), Value::Map(p2)]).unwrap();
+            enqueue_into_fn(&[
+                Value::String(bid.clone()),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p2),
+            ])
+            .unwrap();
 
             // Now total=2, pending=2. Complete both jobs.
             let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_ids: Vec<String> = data_keys.iter()
+            let job_ids: Vec<String> = data_keys
+                .iter()
                 .filter(|k| !k.contains("cb-"))
                 .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
                 .collect();
             assert_eq!(job_ids.len(), 2, "should have 2 jobs");
 
-            let jd1 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[0])).unwrap() { Value::Map(m) => m, _ => panic!("expected map") };
+            let jd1 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[0])).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
             update_batch_on_terminal(kv, &jd1, &job_ids[0], "succeeded").unwrap();
 
             let cp = format!("jobs:batch:{}:counter", bid);
-            assert!(matches!(kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(), Value::Int(1)), "pending should be 1 after first completion");
+            assert!(
+                matches!(
+                    kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(),
+                    Value::Int(1)
+                ),
+                "pending should be 1 after first completion"
+            );
 
-            let jd2 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[1])).unwrap() { Value::Map(m) => m, _ => panic!("expected map") };
+            let jd2 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[1])).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
             update_batch_on_terminal(kv, &jd2, &job_ids[1], "succeeded").unwrap();
 
-            let meta = match kv::kv_get(kv, &format!("jobs:batch:{}", bid)).unwrap() { Value::Map(m) => m, _ => panic!("expected metadata map") };
-            assert!(matches!(meta.get("status"), Some(Value::String(s)) if s == "complete"), "batch status should be complete");
-            assert!(matches!(meta.get("fired_complete"), Some(Value::Bool(true))), "fired_complete should be true");
-            assert!(matches!(meta.get("fired_success"), Some(Value::Bool(true))), "fired_success should be true");
+            let meta = match kv::kv_get(kv, &format!("jobs:batch:{}", bid)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected metadata map"),
+            };
+            assert!(
+                matches!(meta.get("status"), Some(Value::String(s)) if s == "complete"),
+                "batch status should be complete"
+            );
+            assert!(
+                matches!(meta.get("fired_complete"), Some(Value::Bool(true))),
+                "fired_complete should be true"
+            );
+            assert!(
+                matches!(meta.get("fired_success"), Some(Value::Bool(true))),
+                "fired_success should be true"
+            );
 
             let total = kv::kv_get(kv, &format!("{}:total", cp)).unwrap();
-            assert!(matches!(total, Value::Int(2)), "counter:total should be 2, got {:?}", total);
+            assert!(
+                matches!(total, Value::Int(2)),
+                "counter:total should be 2, got {:?}",
+                total
+            );
         });
     }
 
     #[test]
     fn test_on_success_uses_counter_total() {
         with_temp_kv("ntnt_on_success_counter_total_test.db", |kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9871,37 +10165,62 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("success-counter-test".to_string())]).unwrap();
             let mut p = HashMap::new();
             p.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
 
-            enqueue_into_fn(&[Value::String(bid.clone()), Value::String("ProcessRow".to_string()), Value::Map(HashMap::new())]).unwrap();
+            enqueue_into_fn(&[
+                Value::String(bid.clone()),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
 
             // counter:total = 2, metadata total = 1 (stale)
             let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_ids: Vec<String> = data_keys.iter()
+            let job_ids: Vec<String> = data_keys
+                .iter()
                 .filter(|k| !k.contains("cb-"))
                 .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
                 .collect();
 
             for jid in &job_ids {
-                let jd = match kv::kv_get(kv, &format!("jobs:data:{}", jid)).unwrap() { Value::Map(m) => m, _ => panic!("expected map") };
+                let jd = match kv::kv_get(kv, &format!("jobs:data:{}", jid)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
                 update_batch_on_terminal(kv, &jd, jid, "succeeded").unwrap();
             }
 
-            let meta = match kv::kv_get(kv, &format!("jobs:batch:{}", bid)).unwrap() { Value::Map(m) => m, _ => panic!("expected metadata") };
-            assert!(matches!(meta.get("fired_success"), Some(Value::Bool(true))), "on_success should fire — succeeded(2) == counter:total(2), not metadata total(1)");
+            let meta = match kv::kv_get(kv, &format!("jobs:batch:{}", bid)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected metadata"),
+            };
+            assert!(
+                matches!(meta.get("fired_success"), Some(Value::Bool(true))),
+                "on_success should fire — succeeded(2) == counter:total(2), not metadata total(1)"
+            );
         });
     }
 
     #[test]
     fn test_total_counter_incremented_on_dynamic_add() {
         with_temp_kv("ntnt_total_counter_dynamic_test.db", |kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9911,11 +10230,19 @@ pub(crate) mod tests {
             let handle = batch_fn(&[Value::String("total-dynamic-test".to_string())]).unwrap();
             let mut p = HashMap::new();
             p.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
             seal_fn(&[handle.clone()]).unwrap();
 
             let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
             let cp = format!("jobs:batch:{}:counter", bid);
@@ -9923,18 +10250,29 @@ pub(crate) mod tests {
             for i in 0..3 {
                 let mut pp = HashMap::new();
                 pp.insert("y".to_string(), Value::Int(i));
-                enqueue_into_fn(&[Value::String(bid.clone()), Value::String("ProcessRow".to_string()), Value::Map(pp)]).unwrap();
+                enqueue_into_fn(&[
+                    Value::String(bid.clone()),
+                    Value::String("ProcessRow".to_string()),
+                    Value::Map(pp),
+                ])
+                .unwrap();
             }
 
             let total = kv::kv_get(kv, &format!("{}:total", cp)).unwrap();
-            assert!(matches!(total, Value::Int(4)), "counter:total should be 4 (1 sealed + 3 dynamic), got {:?}", total);
+            assert!(
+                matches!(total, Value::Int(4)),
+                "counter:total should be 4 (1 sealed + 3 dynamic), got {:?}",
+                total
+            );
         });
     }
 
     #[test]
     fn test_nested_batch_via_callback() {
         with_temp_kv("ntnt_nested_batch_test.db", |kv| {
-            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
             let module = init();
             let batch_fn = get_fn(&module, "batch");
             let enqueue_fn = get_fn(&module, "enqueue");
@@ -9945,48 +10283,86 @@ pub(crate) mod tests {
             let handle_a = batch_fn(&[Value::String("parent-batch".to_string())]).unwrap();
             let mut p = HashMap::new();
             p.insert("x".to_string(), Value::Int(1));
-            enqueue_fn(&[handle_a.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            enqueue_fn(&[
+                handle_a.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
             seal_fn(&[handle_a.clone()]).unwrap();
 
             let bid_a = match &handle_a {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
 
             // Complete batch A
             let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_id_a = data_keys.iter().find(|k| !k.contains("cb-")).map(|k| k.strip_prefix("jobs:data:").unwrap().to_string()).expect("should find a job");
-            let jd_a = match kv::kv_get(kv, &format!("jobs:data:{}", job_id_a)).unwrap() { Value::Map(m) => m, _ => panic!("expected map") };
+            let job_id_a = data_keys
+                .iter()
+                .find(|k| !k.contains("cb-"))
+                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
+                .expect("should find a job");
+            let jd_a = match kv::kv_get(kv, &format!("jobs:data:{}", job_id_a)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
             update_batch_on_terminal(kv, &jd_a, &job_id_a, "succeeded").unwrap();
 
             // Batch A is now complete. Simulate callback creating batch B.
             let handle_b = batch_fn(&[Value::String("child-batch".to_string())]).unwrap();
             let mut pb = HashMap::new();
             pb.insert("y".to_string(), Value::Int(2));
-            enqueue_fn(&[handle_b.clone(), Value::String("ProcessRow".to_string()), Value::Map(pb)]).unwrap();
+            enqueue_fn(&[
+                handle_b.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(pb),
+            ])
+            .unwrap();
             seal_fn(&[handle_b.clone()]).unwrap();
 
             let bid_b = match &handle_b {
-                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
                 _ => panic!("not a map"),
             };
 
             // Batch B is independent
             let status_b = status_fn(&[Value::String(bid_b.clone())]).unwrap();
             let status_map = match status_b {
-                Value::EnumValue { ref values, .. } => match values.first() { Some(Value::Map(m)) => m.clone(), _ => panic!("expected map") },
+                Value::EnumValue { ref values, .. } => match values.first() {
+                    Some(Value::Map(m)) => m.clone(),
+                    _ => panic!("expected map"),
+                },
                 _ => panic!("expected Ok"),
             };
-            assert!(matches!(status_map.get("status"), Some(Value::String(s)) if s == "sealed"), "child batch should be sealed");
-            assert!(matches!(status_map.get("total"), Some(Value::Int(1))), "child batch total should be 1");
+            assert!(
+                matches!(status_map.get("status"), Some(Value::String(s)) if s == "sealed"),
+                "child batch should be sealed"
+            );
+            assert!(
+                matches!(status_map.get("total"), Some(Value::Int(1))),
+                "child batch total should be 1"
+            );
 
             // Batch A status is still complete
             let status_a = status_fn(&[Value::String(bid_a.clone())]).unwrap();
             let status_map_a = match status_a {
-                Value::EnumValue { ref values, .. } => match values.first() { Some(Value::Map(m)) => m.clone(), _ => panic!("expected map") },
+                Value::EnumValue { ref values, .. } => match values.first() {
+                    Some(Value::Map(m)) => m.clone(),
+                    _ => panic!("expected map"),
+                },
                 _ => panic!("expected Ok"),
             };
-            assert!(matches!(status_map_a.get("status"), Some(Value::String(s)) if s == "complete"), "parent batch should still be complete");
+            assert!(
+                matches!(status_map_a.get("status"), Some(Value::String(s)) if s == "complete"),
+                "parent batch should still be complete"
+            );
         });
     }
 
@@ -10015,9 +10391,7 @@ pub(crate) mod tests {
             kv::kv_set(kv, &format!("{}:cancelled", cp), &Value::Int(0), None).unwrap();
             // Deliberately NOT setting counter:total — this is the legacy case.
 
-            // Write two fake jobs with batch_id
-            let module = init();
-            let enqueue_fn = get_fn(&module, "enqueue");
+            // Write two fake jobs with batch_id directly to KV
             let job1_id = "legacy-job-1";
             let job2_id = "legacy-job-2";
             for (jid, val) in &[(job1_id, 1), (job2_id, 2)] {
@@ -10026,11 +10400,14 @@ pub(crate) mod tests {
                 jdata.insert("status".to_string(), Value::String("pending".to_string()));
                 jdata.insert("batch_id".to_string(), Value::String(bid.to_string()));
                 jdata.insert("queue".to_string(), Value::String("imports".to_string()));
-                jdata.insert("payload".to_string(), Value::Map({
-                    let mut p = HashMap::new();
-                    p.insert("x".to_string(), Value::Int(*val));
-                    p
-                }));
+                jdata.insert(
+                    "payload".to_string(),
+                    Value::Map({
+                        let mut p = HashMap::new();
+                        p.insert("x".to_string(), Value::Int(*val));
+                        p
+                    }),
+                );
                 kv::kv_set(kv, &format!("jobs:data:{}", jid), &Value::Map(jdata), None).unwrap();
             }
 
