@@ -1964,6 +1964,15 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
         // Record start time for timeout detection and duration stats
         let start = std::time::Instant::now();
 
+        // Set batch context for batch_id() — read batch_id from job_data.
+        // Explicitly set None for non-batch jobs to clear any stale value.
+        let batch_id_for_context = match job_data.get("batch_id") {
+            Some(Value::String(bid)) => Some(bid.clone()),
+            _ => None,
+        };
+        CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = batch_id_for_context);
+        let _batch_guard = BatchIdGuard;
+
         let exec_result = execute_in_worker(&mut interp, &def, &payload);
 
         // Check job timeout (non-negative values only; >= for boundary correctness)
