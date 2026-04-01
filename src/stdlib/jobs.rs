@@ -755,35 +755,40 @@ fn update_batch_on_terminal(
         return Ok(());
     }
 
-    // Read total from metadata for the succeeded==total check (avoids TOCTOU
-    // race on fire_success — see Greptile review).
-    let meta_key = format!("jobs:batch:{}", batch_id);
-    let total_jobs = match kv::kv_get(kv_handle, &meta_key) {
-        Ok(Value::Map(ref m)) => match m.get("total") {
-            Some(Value::Int(n)) => *n,
-            _ => 0,
-        },
-        _ => {
-            // Metadata missing — release the done-set claim so a future retry
-            // can attempt this update once the metadata reappears.
-            let _ = kv::kv_del(kv_handle, &done_key);
-            eprintln!(
-                "[ntnt] warning: batch metadata not found for batch '{}' (job '{}'), released done-set",
-                batch_id, job_id
-            );
-            return Ok(());
-        }
-    };
-
     // --- Atomic counter updates via kv_incr ---
     // Each counter lives in its own KV key so concurrent workers can't race
     // on a shared metadata map. kv_incr is atomic per-call. Errors propagate
     // rather than silently becoming 0 (which would falsely trigger on_complete).
     let counter_prefix = format!("jobs:batch:{}:counter", batch_id);
 
+    // Read total from atomic counter key (not metadata) — dynamic adds
+    // increment counter:total, making the metadata total stale.
+    let meta_key = format!("jobs:batch:{}", batch_id);
+    let total_jobs = match kv::kv_get(kv_handle, &format!("{}:total", counter_prefix)) {
+        Ok(Value::Int(n)) => n,
+        _ => {
+            // Counter key missing — fall back to metadata total for
+            // backwards compatibility with batches sealed before Phase 3.
+            match kv::kv_get(kv_handle, &meta_key) {
+                Ok(Value::Map(ref m)) => match m.get("total") {
+                    Some(Value::Int(n)) => *n,
+                    _ => 0,
+                },
+                _ => {
+                    let _ = kv::kv_del(kv_handle, &done_key);
+                    eprintln!(
+                        "[ntnt] warning: batch metadata not found for batch '{}' (job '{}'), released done-set",
+                        batch_id, job_id
+                    );
+                    return Ok(());
+                }
+            }
+        }
+    };
+
     // Ensure counter keys exist (handles race where worker runs before seal()
     // finishes initializing counters). kv_set_nx is a no-op if already set.
-    for suffix in &["pending", "succeeded", "dead", "cancelled"] {
+    for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
         let _ = kv::kv_set_nx(
             kv_handle,
             &format!("{}:{}", counter_prefix, suffix),
@@ -4928,6 +4933,7 @@ pub fn init() -> HashMap<String, Value> {
                         kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), None)?;
                         kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), None)?;
                         kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), None)?;
+                        kv::kv_set(&kv_handle, &format!("{}:total", cp), &Value::Int(0), None)?;
                         return Ok(());
                     }
 
@@ -4974,6 +4980,7 @@ pub fn init() -> HashMap<String, Value> {
                     kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), None)?;
                     kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), None)?;
                     kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), None)?;
+                    kv::kv_set(&kv_handle, &format!("{}:total", cp), &Value::Int(total), None)?;
 
                     // Flush jobs to KV.
                     // Mark each flushed so retries skip already-written jobs.
@@ -5113,7 +5120,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Map(mut m) => {
                         // Merge authoritative counter values from atomic keys.
                         let cp = format!("jobs:batch:{}:counter", batch_id);
-                        for counter in &["pending", "succeeded", "dead", "cancelled"] {
+                        for counter in &["pending", "succeeded", "dead", "cancelled", "total"] {
                             if let Ok(Value::Int(n)) =
                                 kv::kv_get(&kv_handle, &format!("{}:{}", cp, counter))
                             {
@@ -8898,6 +8905,88 @@ pub(crate) mod tests {
                 Value::String(s) => assert_eq!(s, "failure-batch"),
                 _ => panic!("batch_id() must still return String in on_failure context, got {:?}", result2),
             }
+        });
+    }
+
+    #[test]
+    fn test_total_counter_initialized_at_seal() {
+        with_temp_kv("ntnt_total_counter_seal_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("total-ctr-test".to_string())]).unwrap();
+            for i in 0..5 {
+                let mut payload = HashMap::new();
+                payload.insert("x".to_string(), Value::Int(i));
+                enqueue_fn(&[
+                    handle.clone(),
+                    Value::String("ProcessRow".to_string()),
+                    Value::Map(payload),
+                ])
+                .unwrap();
+            }
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+            let cp = format!("jobs:batch:{}:counter", bid);
+            let total = kv::kv_get(kv, &format!("{}:total", cp)).unwrap();
+            assert!(
+                matches!(total, Value::Int(5)),
+                "counter:total must be 5 after sealing 5 jobs, got {:?}",
+                total
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_status_includes_total_counter() {
+        with_temp_kv("ntnt_batch_status_total_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let status_fn = get_fn(&module, "batch_status");
+
+            let handle = batch_fn(&[Value::String("status-total-test".to_string())]).unwrap();
+            for i in 0..3 {
+                let mut payload = HashMap::new();
+                payload.insert("x".to_string(), Value::Int(i));
+                enqueue_fn(&[
+                    handle.clone(),
+                    Value::String("ProcessRow".to_string()),
+                    Value::Map(payload),
+                ])
+                .unwrap();
+            }
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let status = status_fn(&[handle.clone()]).unwrap();
+            let status_map = match status {
+                Value::EnumValue { ref values, .. } => match values.first() {
+                    Some(Value::Map(m)) => m.clone(),
+                    _ => panic!("expected map in Ok, got {:?}", values),
+                },
+                _ => panic!("expected Ok variant"),
+            };
+            assert!(
+                matches!(status_map.get("total"), Some(Value::Int(3))),
+                "batch_status total must be 3 (from counter), got {:?}",
+                status_map.get("total")
+            );
         });
     }
 }
