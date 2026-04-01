@@ -747,11 +747,20 @@ fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Re
 
     // Step 5: Check closed flag.
     let closed_key = format!("jobs:batch:{}:closed", batch_id);
-    if let Ok(Value::Bool(true)) = kv::kv_get(&kv_handle, &closed_key) {
-        return Err(IntentError::runtime_error(format!(
-            "batch '{}' is closing — a completion callback is in flight, cannot add jobs",
-            batch_id
-        )));
+    match kv::kv_get(&kv_handle, &closed_key) {
+        Ok(Value::Bool(true)) => {
+            return Err(IntentError::runtime_error(format!(
+                "batch '{}' is closing — a completion callback is in flight, cannot add jobs",
+                batch_id
+            )));
+        }
+        Ok(_) => {} // Key missing (Unit) or false — batch is open, proceed
+        Err(e) => {
+            return Err(IntentError::runtime_error(format!(
+                "batch '{}' closed flag check failed: {} — refusing to add jobs during KV error",
+                batch_id, e
+            )));
+        }
     }
 
     // Step 6: Only allow dynamic adds for sealing/sealed batches.
@@ -901,14 +910,14 @@ fn update_batch_on_terminal(
             kv_handle,
             &format!("{}:{}", counter_prefix, suffix),
             &Value::Int(0),
-            None,
+            batch_ttl,
         );
     }
     let _ = kv::kv_set_nx(
         kv_handle,
         &format!("{}:total", counter_prefix),
         &Value::Int(total_jobs),
-        None,
+        batch_ttl,
     );
 
     let pending_raw =
@@ -1128,7 +1137,15 @@ fn update_batch_on_terminal(
             meta.insert("fired_success".to_string(), Value::Bool(true));
         }
 
-        let meta_write_ttl = if did_close { Some(24 * 3600i64) } else { None };
+        // Non-closing workers must preserve the existing TTL — writing with None
+        // strips any TTL set by the closing worker (race: Worker A slow to write
+        // metadata after Worker B already set 24h TTL). Use batch_ttl (30d) for
+        // non-closing writes so they never remove a shorter TTL.
+        let meta_write_ttl = if did_close {
+            Some(24 * 3600i64)
+        } else {
+            batch_ttl
+        };
         if let Err(e) = kv::kv_set(kv_handle, &meta_key, &Value::Map(meta), meta_write_ttl) {
             eprintln!(
                 "[ntnt] warning: batch '{}' metadata update failed: {} — batch_status() may show stale data",

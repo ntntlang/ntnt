@@ -3676,6 +3676,7 @@ fn get_module_signatures(module: &str) -> HashMap<String, FunctionSig> {
             sig!("seal", ["batch_handle" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::Unit, Type::String] });
             sig!("batch_status", ["batch_id_or_handle" => Type::Any], Type::Generic { name: "Result".to_string(), args: vec![Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }, Type::String] });
             sig!("batch_id", [], Type::Optional(Box::new(Type::String)));
+            sig!("enqueue_into", ["batch_id" => Type::String, "job_type" => Type::String, "args" => Type::Map { key_type: Box::new(Type::String), value_type: Box::new(Type::Any) }], Type::Generic { name: "Result".to_string(), args: vec![Type::String, Type::String] });
         }
         "std/csv" => {
             sig!("parse", ["s" => Type::String], Type::Array(Box::new(Type::Array(Box::new(Type::String)))));
