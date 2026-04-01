@@ -480,6 +480,16 @@ pub static JOB_RUNTIME: LazyLock<JobRuntime> = LazyLock::new(JobRuntime::new);
 // Batch Runtime — in-memory state for open (unsealed) batches
 // ============================================================================
 
+/// Result of an enqueue operation, distinguishing new jobs from dedup collisions.
+/// Used by `enqueue_into()` to roll back batch counters on dedup.
+#[derive(Debug)]
+enum EnqueueResult {
+    /// A new job was created and written to KV.
+    Created(String),
+    /// A dedup collision occurred — the returned ID is the existing job.
+    Deduplicated(String),
+}
+
 #[derive(Clone)]
 struct BufferedJob {
     job_type: String,
@@ -1151,6 +1161,16 @@ fn execute_on_failure_in_worker(
     }
 }
 
+/// Convert an `EnqueueResult` to the `Value::ok(Value::String(job_id))` format
+/// expected by ntnt stdlib callers.
+fn enqueue_result_to_value(result: EnqueueResult) -> Value {
+    match result {
+        EnqueueResult::Created(id) | EnqueueResult::Deduplicated(id) => {
+            Value::ok(Value::String(id))
+        }
+    }
+}
+
 /// Core implementation shared by `enqueue()`, `enqueue_at()`, and `enqueue_in()`.
 ///
 /// `pending_ts` is the timestamp portion used for the pending key (controls
@@ -1163,7 +1183,7 @@ fn enqueue_internal(
     scheduled_at: Option<&str>,
     batch_id: Option<&str>,
     override_job_id: Option<&str>,
-) -> Result<Value> {
+) -> Result<EnqueueResult> {
     // Look up job in registry
     let job_def = JOB_RUNTIME.get_job(job_name)?;
     let job_def = match job_def {
@@ -1306,7 +1326,7 @@ fn enqueue_internal(
             // Concurrent enqueue already holds the slot — return existing job_id.
             match kv::kv_get(&kv_handle, dk) {
                 Ok(Value::String(existing_id)) => {
-                    return Ok(Value::ok(Value::String(existing_id)));
+                    return Ok(EnqueueResult::Deduplicated(existing_id));
                 }
                 _ => {
                     // Key vanished between set_nx and get (TTL race).
@@ -1337,7 +1357,7 @@ fn enqueue_internal(
                 queue: job_def.queue.clone(),
                 payload_json,
             });
-            return Ok(Value::ok(Value::String(job_id)));
+            return Ok(EnqueueResult::Created(job_id));
         }
     }
 
@@ -1433,7 +1453,7 @@ fn enqueue_internal(
         ],
     );
 
-    Ok(Value::ok(Value::String(job_id)))
+    Ok(EnqueueResult::Created(job_id))
 }
 
 fn reenqueue_job(kv_handle: &Value, job_data: &HashMap<String, Value>, job_id: &str) {
@@ -3355,6 +3375,7 @@ pub fn init() -> HashMap<String, Value> {
                             }
                         };
                         enqueue_internal(&job_name, payload, &timestamp_key(), None, None, None)
+                            .map(enqueue_result_to_value)
                     }
                     3 => {
                         // Batch enqueue: (batch_handle, job_name, args)
@@ -3609,6 +3630,7 @@ pub fn init() -> HashMap<String, Value> {
                     None,
                     None,
                 )
+                .map(enqueue_result_to_value)
             },
         },
     );
@@ -3683,6 +3705,7 @@ pub fn init() -> HashMap<String, Value> {
                     None,
                     None,
                 )
+                .map(enqueue_result_to_value)
             },
         },
     );
@@ -4622,7 +4645,9 @@ pub fn init() -> HashMap<String, Value> {
                 for (i, item) in items.into_iter().enumerate() {
                     let ts = format!("{:020}", base_nanos + i as u128);
                     // Wrap errors with item index so callers know which item failed
-                    let result = enqueue_internal(&job_name, item, &ts, None, None, None).map_err(|e| {
+                    let result = enqueue_internal(&job_name, item, &ts, None, None, None)
+                        .map(enqueue_result_to_value)
+                        .map_err(|e| {
                         IntentError::runtime_error(format!(
                             "enqueue_batch: item {} failed: {}",
                             i, e
