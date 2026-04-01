@@ -8512,6 +8512,25 @@ pub(crate) mod tests {
         m
     }
 
+    /// Find all non-callback job IDs belonging to a specific batch.
+    /// Filters kv_list("jobs:data:") results by reading each job's batch_id field,
+    /// avoiding cross-test pollution from parallel test runs that share the global
+    /// JOB_RUNTIME KV handle.
+    fn batch_job_ids(kv: &Value, batch_id: &str) -> Vec<String> {
+        let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+        data_keys
+            .iter()
+            .filter(|k| !k.contains("cb-"))
+            .filter_map(|k| k.strip_prefix("jobs:data:").map(|s| s.to_string()))
+            .filter(|jid| {
+                matches!(
+                    kv::kv_get(kv, &format!("jobs:data:{}", jid)),
+                    Ok(Value::Map(ref m)) if matches!(m.get("batch_id"), Some(Value::String(ref b)) if b == batch_id)
+                )
+            })
+            .collect()
+    }
+
     /// Initialize the atomic counter keys that seal() normally creates.
     /// Tests that bypass seal() must call this.
     fn init_batch_counters(kv: &Value, batch_id: &str, pending: i64) {
@@ -9262,11 +9281,10 @@ pub(crate) mod tests {
                 _ => panic!("not a map"),
             };
 
-            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_id = data_keys
-                .iter()
-                .find(|k| !k.contains("cb-"))
-                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
+            let job_ids = batch_job_ids(kv, &bid);
+            let job_id = job_ids
+                .into_iter()
+                .next()
                 .expect("should find a non-callback job");
 
             let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
@@ -9404,12 +9422,8 @@ pub(crate) mod tests {
                 _ => panic!("not a map"),
             };
 
-            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_id = data_keys
-                .iter()
-                .find(|k| !k.contains("cb-"))
-                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
-                .expect("should find a job");
+            let job_ids = batch_job_ids(kv, &bid);
+            let job_id = job_ids.into_iter().next().expect("should find a job");
             let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
                 Value::Map(m) => m,
                 _ => panic!("expected map"),
@@ -9474,12 +9488,8 @@ pub(crate) mod tests {
                 _ => panic!("not a map"),
             };
 
-            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_id = data_keys
-                .iter()
-                .find(|k| !k.contains("cb-"))
-                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
-                .expect("should find a job");
+            let job_ids = batch_job_ids(kv, &bid);
+            let job_id = job_ids.into_iter().next().expect("should find a job");
             let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
                 Value::Map(m) => m,
                 _ => panic!("expected map"),
@@ -9563,12 +9573,7 @@ pub(crate) mod tests {
                 _ => panic!("not a map"),
             };
 
-            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_ids: Vec<String> = data_keys
-                .iter()
-                .filter(|k| !k.contains("cb-"))
-                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
-                .collect();
+            let job_ids = batch_job_ids(kv, &bid);
             assert_eq!(job_ids.len(), 2);
 
             let job_data_1 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[0])).unwrap() {
@@ -9735,8 +9740,8 @@ pub(crate) mod tests {
                 "pending should be 2"
             );
 
-            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            assert_eq!(data_keys.len(), 2, "should have 2 jobs in KV");
+            let job_ids = batch_job_ids(kv, &bid);
+            assert_eq!(job_ids.len(), 2, "should have 2 jobs in KV");
         });
     }
 
@@ -9826,12 +9831,8 @@ pub(crate) mod tests {
                 _ => panic!("not a map"),
             };
 
-            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_id = data_keys
-                .iter()
-                .find(|k| !k.contains("cb-"))
-                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
-                .expect("should find a job");
+            let job_ids = batch_job_ids(kv, &bid);
+            let job_id = job_ids.into_iter().next().expect("should find a job");
             let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
                 Value::Map(m) => m,
                 _ => panic!("expected map"),
@@ -10109,12 +10110,7 @@ pub(crate) mod tests {
             .unwrap();
 
             // Now total=2, pending=2. Complete both jobs.
-            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_ids: Vec<String> = data_keys
-                .iter()
-                .filter(|k| !k.contains("cb-"))
-                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
-                .collect();
+            let job_ids = batch_job_ids(kv, &bid);
             assert_eq!(job_ids.len(), 2, "should have 2 jobs");
 
             let jd1 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[0])).unwrap() {
@@ -10203,12 +10199,7 @@ pub(crate) mod tests {
             .unwrap();
 
             // counter:total = 2, metadata total = 1 (stale)
-            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_ids: Vec<String> = data_keys
-                .iter()
-                .filter(|k| !k.contains("cb-"))
-                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
-                .collect();
+            let job_ids = batch_job_ids(kv, &bid);
 
             for jid in &job_ids {
                 let jd = match kv::kv_get(kv, &format!("jobs:data:{}", jid)).unwrap() {
@@ -10314,12 +10305,8 @@ pub(crate) mod tests {
             };
 
             // Complete batch A
-            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_id_a = data_keys
-                .iter()
-                .find(|k| !k.contains("cb-"))
-                .map(|k| k.strip_prefix("jobs:data:").unwrap().to_string())
-                .expect("should find a job");
+            let job_ids_a = batch_job_ids(kv, &bid_a);
+            let job_id_a = job_ids_a.into_iter().next().expect("should find a job");
             let jd_a = match kv::kv_get(kv, &format!("jobs:data:{}", job_id_a)).unwrap() {
                 Value::Map(m) => m,
                 _ => panic!("expected map"),
