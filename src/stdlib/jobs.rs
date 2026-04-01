@@ -34,6 +34,7 @@ use crate::stdlib::concurrent::{
 use crate::stdlib::kv;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -548,6 +549,22 @@ impl BatchRuntime {
 }
 
 pub(crate) static BATCH_RUNTIME: LazyLock<BatchRuntime> = LazyLock::new(BatchRuntime::new);
+
+// Thread-local batch ID context for batch_id() — set by worker loop before
+// execute_in_worker(), read by batch_id() stdlib function.
+thread_local! {
+    static CURRENT_BATCH_ID: RefCell<Option<String>> = RefCell::new(None);
+}
+
+/// RAII guard that unconditionally clears CURRENT_BATCH_ID on drop.
+/// Guarantees cleanup even on panic (panic=unwind) or early return.
+struct BatchIdGuard;
+
+impl Drop for BatchIdGuard {
+    fn drop(&mut self) {
+        CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = None);
+    }
+}
 
 /// Extract KvHandleInfo from a Value::Map returned by kv::open_kv.
 fn extract_kv_handle_info(handle: &Value) -> Result<KvHandleInfo> {
@@ -5110,7 +5127,7 @@ pub fn init() -> HashMap<String, Value> {
     // Available inside a job's perform block when the job belongs to a batch.
     // Use this to dynamically add more jobs to the same batch from within a job.
     // Returns None for jobs not associated with a batch.
-    // Phase 1: always returns None. Phase 2 wires up thread-local job context.
+    // Uses thread-local context set by the worker loop. Returns None when called outside a batch job.
     // @returns Option<String> — Some(batch_id) or None
     // @example let bid = batch_id() ~ "Get current job's batch ID"
     // @see_also batch, enqueue
@@ -5121,7 +5138,13 @@ pub fn init() -> HashMap<String, Value> {
             arity: 0,
             max_arity: 0,
             requires: None,
-            func: |_args| Ok(Value::none()),
+            func: |_args| {
+                let bid = CURRENT_BATCH_ID.with(|c| c.borrow().clone());
+                match bid {
+                    Some(id) => Ok(Value::String(id)),
+                    None => Ok(Value::none()),
+                }
+            },
         },
     );
 
@@ -8748,6 +8771,124 @@ pub(crate) mod tests {
                 matches!(meta.get("fired_success"), Some(Value::Bool(true))),
                 "fired_success must be true"
             );
+        });
+    }
+
+    // ── batch_id() thread-local tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_batch_id_returns_none_outside_job() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+            let result = batch_id_fn(&[]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "None"),
+                "batch_id() must return None outside a job perform block"
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_id_returns_id_inside_batch_job() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+
+            CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = Some("test-batch-123".to_string()));
+            let _guard = BatchIdGuard;
+
+            let result = batch_id_fn(&[]).unwrap();
+            match result {
+                Value::String(ref s) => assert_eq!(s, "test-batch-123"),
+                _ => panic!("batch_id() must return String inside a batch job, got {:?}", result),
+            }
+        });
+    }
+
+    #[test]
+    fn test_batch_id_cleared_after_job_execution() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+
+            {
+                CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = Some("batch-abc".to_string()));
+                let _guard = BatchIdGuard;
+            }
+
+            let result = batch_id_fn(&[]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "None"),
+                "batch_id() must return None after guard drops"
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_id_none_for_non_batch_job() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+
+            {
+                CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = Some("batch-xyz".to_string()));
+                let _guard = BatchIdGuard;
+            }
+            {
+                CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = None);
+                let _guard = BatchIdGuard;
+
+                let result = batch_id_fn(&[]).unwrap();
+                assert!(
+                    matches!(result, Value::EnumValue { ref variant, .. } if variant == "None"),
+                    "batch_id() must return None for non-batch job"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_batch_id_cleared_on_panic() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = Some("panic-batch".to_string()));
+                let _guard = BatchIdGuard;
+                panic!("simulated panic in perform block");
+            }));
+            assert!(result.is_err(), "should have caught panic");
+
+            let result = batch_id_fn(&[]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "None"),
+                "batch_id() must return None after panic (guard cleanup)"
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_id_available_in_on_failure() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+
+            CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = Some("failure-batch".to_string()));
+            let _guard = BatchIdGuard;
+
+            let result1 = batch_id_fn(&[]).unwrap();
+            match &result1 {
+                Value::String(s) => assert_eq!(s, "failure-batch"),
+                _ => panic!("batch_id() must return String, got {:?}", result1),
+            }
+
+            let result2 = batch_id_fn(&[]).unwrap();
+            match &result2 {
+                Value::String(s) => assert_eq!(s, "failure-batch"),
+                _ => panic!("batch_id() must still return String in on_failure context, got {:?}", result2),
+            }
         });
     }
 }
