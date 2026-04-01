@@ -8518,17 +8518,24 @@ pub(crate) mod tests {
     /// JOB_RUNTIME KV handle.
     fn batch_job_ids(kv: &Value, batch_id: &str) -> Vec<String> {
         let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-        data_keys
-            .iter()
-            .filter(|k| !k.contains("cb-"))
-            .filter_map(|k| k.strip_prefix("jobs:data:").map(|s| s.to_string()))
-            .filter(|jid| {
-                matches!(
-                    kv::kv_get(kv, &format!("jobs:data:{}", jid)),
-                    Ok(Value::Map(ref m)) if matches!(m.get("batch_id"), Some(Value::String(ref b)) if b == batch_id)
-                )
-            })
-            .collect()
+        let mut result = Vec::new();
+        for key in &data_keys {
+            if key.contains("cb-") {
+                continue;
+            }
+            let jid = match key.strip_prefix("jobs:data:") {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if let Ok(Value::Map(m)) = kv::kv_get(kv, key) {
+                if let Some(Value::String(bid)) = m.get("batch_id") {
+                    if bid == batch_id {
+                        result.push(jid);
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Initialize the atomic counter keys that seal() normally creates.
@@ -8996,19 +9003,7 @@ pub(crate) mod tests {
             );
 
             // Simulate both jobs completing.
-            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_ids: Vec<String> = data_keys
-                .iter()
-                .filter(|k| !k.contains("cb-"))
-                .filter_map(|k| k.strip_prefix("jobs:data:").map(|s| s.to_string()))
-                .filter(|jid| {
-                    // Only include jobs belonging to THIS batch (avoids cross-test pollution)
-                    matches!(
-                        kv::kv_get(kv, &format!("jobs:data:{}", jid)),
-                        Ok(Value::Map(ref m)) if matches!(m.get("batch_id"), Some(Value::String(ref b)) if b == &bid)
-                    )
-                })
-                .collect();
+            let job_ids = batch_job_ids(kv, &bid);
             assert_eq!(
                 job_ids.len(),
                 2,
