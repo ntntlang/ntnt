@@ -702,6 +702,114 @@ fn fire_batch_callback(
     Ok(())
 }
 
+/// Dynamically add a job to a sealed batch. Writes directly to KV and
+/// atomically increments pending + total counters.
+///
+/// Returns `Ok(job_id)` on success, or an error if the batch doesn't exist,
+/// is complete, or is closed.
+fn enqueue_to_sealed_batch(
+    batch_id: &str,
+    job_name: &str,
+    payload: Value,
+) -> Result<String> {
+    // Step 1: Validate job type is registered (before any counter mutation).
+    let _job_def = JOB_RUNTIME.get_job(job_name)?.ok_or_else(|| {
+        IntentError::runtime_error(format!(
+            "Unknown job type '{}' — define it with a job block before enqueueing",
+            job_name
+        ))
+    })?;
+
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+    let meta_key = format!("jobs:batch:{}", batch_id);
+
+    // Step 2-4: Read metadata and validate status.
+    let status = match kv::kv_get(&kv_handle, &meta_key)? {
+        Value::Map(m) => match m.get("status") {
+            Some(Value::String(s)) => s.clone(),
+            _ => {
+                return Err(IntentError::runtime_error(format!(
+                    "batch '{}' has missing or invalid status",
+                    batch_id
+                )));
+            }
+        },
+        _ => {
+            return Err(IntentError::runtime_error(format!(
+                "batch '{}' not found — it may have expired or the ID is invalid",
+                batch_id
+            )));
+        }
+    };
+
+    if status == "complete" {
+        return Err(IntentError::runtime_error(format!(
+            "batch '{}' is complete — cannot add jobs after all jobs have reached terminal state",
+            batch_id
+        )));
+    }
+
+    // Step 5: Check closed flag.
+    let closed_key = format!("jobs:batch:{}:closed", batch_id);
+    if let Ok(Value::Bool(true)) = kv::kv_get(&kv_handle, &closed_key) {
+        return Err(IntentError::runtime_error(format!(
+            "batch '{}' is closing — a completion callback is in flight, cannot add jobs",
+            batch_id
+        )));
+    }
+
+    // Step 6: Only allow dynamic adds for sealing/sealed batches.
+    if status != "sealing" && status != "sealed" {
+        return Err(IntentError::runtime_error(format!(
+            "batch '{}' has status '{}' — dynamic adds only allowed for sealing/sealed batches",
+            batch_id, status
+        )));
+    }
+
+    // Step 7: Increment counters BEFORE writing the job.
+    let counter_prefix = format!("jobs:batch:{}:counter", batch_id);
+    kv::kv_incr(&kv_handle, &format!("{}:pending", counter_prefix), 1).map_err(|e| {
+        IntentError::runtime_error(format!(
+            "batch '{}' pending counter increment failed: {}",
+            batch_id, e
+        ))
+    })?;
+    kv::kv_incr(&kv_handle, &format!("{}:total", counter_prefix), 1).map_err(|e| {
+        // Roll back pending on total increment failure.
+        let _ = kv::kv_incr(&kv_handle, &format!("{}:pending", counter_prefix), -1);
+        IntentError::runtime_error(format!(
+            "batch '{}' total counter increment failed: {}",
+            batch_id, e
+        ))
+    })?;
+
+    // Step 8: Write job to KV via enqueue_internal.
+    let result = enqueue_internal(
+        job_name,
+        payload,
+        &timestamp_key(),
+        None,
+        Some(batch_id),
+        None,
+    );
+
+    match result {
+        Ok(EnqueueResult::Created(job_id)) => Ok(job_id),
+        Ok(EnqueueResult::Deduplicated(existing_id)) => {
+            // Dedup collision — roll back both counters.
+            let _ = kv::kv_incr(&kv_handle, &format!("{}:pending", counter_prefix), -1);
+            let _ = kv::kv_incr(&kv_handle, &format!("{}:total", counter_prefix), -1);
+            Ok(existing_id)
+        }
+        Err(e) => {
+            // Enqueue failed — roll back both counters.
+            let _ = kv::kv_incr(&kv_handle, &format!("{}:pending", counter_prefix), -1);
+            let _ = kv::kv_incr(&kv_handle, &format!("{}:total", counter_prefix), -1);
+            Err(e)
+        }
+    }
+}
+
 /// Update batch counters when a job reaches a terminal state.
 ///
 /// Called from every terminal path in the worker loop and from `cancel_job_by_id`.
@@ -5199,6 +5307,69 @@ pub fn init() -> HashMap<String, Value> {
         },
     );
 
+    // @ntnt enqueue_into
+    // @module std/jobs
+    // @signature enqueue_into(batch_id: String, job_type: String, args: Map) -> Result<String, String>
+    // Dynamically add a job to a sealed batch.
+    //
+    // Writes the job directly to KV and atomically increments the batch's
+    // pending and total counters. Use this from within a batch job's perform
+    // block to add more work to the same batch.
+    // @param batch_id The batch ID string (from batch_id() or batch handle)
+    // @param job_type The registered job type name
+    // @param args The job payload map
+    // @returns Result<String, String> — Ok(job_id) or Err(message)
+    // @example enqueue_into(batch_id(), "ProcessChild", map { "id": child.id }) ~ "Add a child job to the current batch"
+    // @see_also batch, batch_id, enqueue, seal
+    module.insert(
+        "enqueue_into".to_string(),
+        Value::NativeFunction {
+            name: "enqueue_into".to_string(),
+            arity: 3,
+            max_arity: 3,
+            requires: Some(crate::interpreter::RuntimeCapability::JobEnqueue),
+            func: |args| {
+                if args.len() != 3 {
+                    return Err(IntentError::type_error(
+                        "enqueue_into() requires 3 arguments (batch_id, job_type, args)".to_string(),
+                    ));
+                }
+                let batch_id = match &args[0] {
+                    Value::String(s) => s.clone(),
+                    Value::Map(m) => match m.get("_batch_id") {
+                        Some(Value::String(bid)) => bid.clone(),
+                        _ => {
+                            return Err(IntentError::type_error(
+                                "enqueue_into() first argument must be a batch ID string or handle"
+                                    .to_string(),
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "enqueue_into() first argument must be a batch ID string or handle"
+                                .to_string(),
+                        ))
+                    }
+                };
+                let job_type = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "enqueue_into() second argument must be a job type string".to_string(),
+                        ))
+                    }
+                };
+                let payload = args[2].clone();
+
+                match enqueue_to_sealed_batch(&batch_id, &job_type, payload) {
+                    Ok(job_id) => Ok(Value::ok(Value::String(job_id))),
+                    Err(e) => Err(e),
+                }
+            },
+        },
+    );
+
     // Register the internal _BatchCallback job type so the worker can execute
     // callback jobs enqueued by update_batch_on_terminal.  The perform body is
     // empty for Phase 2 — Phase 3 will replace it with actual closure dispatch.
@@ -9306,6 +9477,259 @@ pub(crate) mod tests {
                 "at most one on_complete callback should be enqueued, got {}",
                 complete_cbs.len()
             );
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_rejects_invalid_batch_id() {
+        with_temp_kv("ntnt_enqueue_into_invalid_test.db", |_kv| {
+            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            let module = init();
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let result = enqueue_into_fn(&[
+                Value::String("nonexistent-batch-id".to_string()),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(result.is_err(), "enqueue_into with invalid batch_id must error");
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(err_msg.contains("not found"), "error must mention 'not found', got: {}", err_msg);
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_rejects_unknown_job_type() {
+        with_temp_kv("ntnt_enqueue_into_unknown_type_test.db", |_kv| {
+            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("unknown-type-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                _ => panic!("not a map"),
+            };
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid),
+                Value::String("NonExistentJob".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(result.is_err(), "enqueue_into with unknown job type must error");
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_writes_job_and_increments_counters() {
+        with_temp_kv("ntnt_enqueue_into_counters_test.db", |kv| {
+            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("dynamic-add-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(payload)]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                _ => panic!("not a map"),
+            };
+            let cp = format!("jobs:batch:{}:counter", bid);
+            assert!(matches!(kv::kv_get(kv, &format!("{}:total", cp)).unwrap(), Value::Int(1)));
+            assert!(matches!(kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(), Value::Int(1)));
+
+            let mut payload2 = HashMap::new();
+            payload2.insert("x".to_string(), Value::Int(2));
+            let result = enqueue_into_fn(&[
+                Value::String(bid.clone()),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload2),
+            ]).unwrap();
+            assert!(matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"), "enqueue_into must return Ok");
+
+            assert!(matches!(kv::kv_get(kv, &format!("{}:total", cp)).unwrap(), Value::Int(2)), "total should be 2");
+            assert!(matches!(kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(), Value::Int(2)), "pending should be 2");
+
+            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+            assert_eq!(data_keys.len(), 2, "should have 2 jobs in KV");
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_returns_job_id() {
+        with_temp_kv("ntnt_enqueue_into_returns_id_test.db", |_kv| {
+            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("returns-id-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                _ => panic!("not a map"),
+            };
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ]).unwrap();
+
+            match result {
+                Value::EnumValue { ref variant, ref values, .. } => {
+                    assert_eq!(variant, "Ok");
+                    assert!(matches!(values.first(), Some(Value::String(_))), "enqueue_into must return Ok(String(job_id))");
+                }
+                _ => panic!("expected EnumValue Ok"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_rejects_complete_batch() {
+        with_temp_kv("ntnt_enqueue_into_complete_test.db", |kv| {
+            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("complete-reject-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                _ => panic!("not a map"),
+            };
+
+            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+            let job_id = data_keys.iter().find(|k| !k.contains("cb-")).map(|k| k.strip_prefix("jobs:data:").unwrap().to_string()).expect("should find a job");
+            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() { Value::Map(m) => m, _ => panic!("expected map") };
+            update_batch_on_terminal(kv, &job_data, &job_id, "succeeded").unwrap();
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(result.is_err(), "enqueue_into to complete batch must error");
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(err_msg.contains("complete") || err_msg.contains("closing"), "error should mention complete or closing, got: {}", err_msg);
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_rejects_closed_batch() {
+        with_temp_kv("ntnt_enqueue_into_closed_test.db", |kv| {
+            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("closed-reject-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                _ => panic!("not a map"),
+            };
+
+            let closed_key = format!("jobs:batch:{}:closed", bid);
+            kv::kv_set(kv, &closed_key, &Value::Bool(true), None).unwrap();
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(result.is_err(), "enqueue_into to closed batch must error");
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(err_msg.contains("closing"), "error should mention 'closing', got: {}", err_msg);
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_allowed_during_sealing() {
+        with_temp_kv("ntnt_enqueue_into_sealing_test.db", |kv| {
+            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            let module = init();
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let bid = "test-sealing-batch";
+            let meta = build_batch_meta(bid, "sealing-test", "0", "sealing", 1, 1);
+            kv::kv_set(kv, &format!("jobs:batch:{}", bid), &Value::Map(meta), None).unwrap();
+            let cp = format!("jobs:batch:{}:counter", bid);
+            for suffix in &["pending", "total", "succeeded", "dead", "cancelled"] {
+                let val = if *suffix == "pending" || *suffix == "total" { 1 } else { 0 };
+                kv::kv_set(kv, &format!("{}:{}", cp, suffix), &Value::Int(val), None).unwrap();
+            }
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid.to_string()),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(result.is_ok(), "enqueue_into during sealing should succeed, got: {:?}", result.err());
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_allowed_when_sealed() {
+        with_temp_kv("ntnt_enqueue_into_sealed_test.db", |_kv| {
+            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("sealed-add-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(p)]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                _ => panic!("not a map"),
+            };
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(result.is_ok(), "enqueue_into on sealed batch should succeed, got: {:?}", result.err());
         });
     }
 }
