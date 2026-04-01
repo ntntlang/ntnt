@@ -892,8 +892,6 @@ fn update_batch_on_terminal(
     } else {
         false
     };
-    let _ = did_close; // used by Task 7 (TTLs)
-
     // --- Callback firing: enqueue FIRST, then set fired flags ---
     // This ordering is safe because:
     //   - fire_batch_callback checks if jobs:data:<cb_id> exists → skip if present (idempotent enqueue)
@@ -1015,7 +1013,17 @@ fn update_batch_on_terminal(
             meta.insert("fired_success".to_string(), Value::Bool(true));
         }
 
-        let _ = kv::kv_set(kv_handle, &meta_key, &Value::Map(meta), None);
+        let meta_write_ttl = if did_close { Some(24 * 3600i64) } else { None };
+        let _ = kv::kv_set(kv_handle, &meta_key, &Value::Map(meta), meta_write_ttl);
+    }
+
+    if did_close {
+        let completion_ttl = 24 * 3600i64;
+        for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
+            let _ = kv::kv_expire(kv_handle, &format!("{}:{}", counter_prefix, suffix), completion_ttl);
+        }
+        let closed_key = format!("jobs:batch:{}:closed", batch_id);
+        let _ = kv::kv_expire(kv_handle, &closed_key, completion_ttl);
     }
 
     Ok(())
@@ -4937,11 +4945,13 @@ pub fn init() -> HashMap<String, Value> {
                 // On failure, clean up KV and reset batch to Open for retry.
                 let kv_result: Result<()> = (|| {
                     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                    let batch_ttl_30d: Option<i64> = Some(30 * 24 * 3600);
                     let meta_key = format!("jobs:batch:{}", batch_id);
                     let total = batch_state.buffered.len() as i64;
 
                     if total == 0 {
-                        // Empty batch → immediately complete
+                        // Empty batch → immediately complete — use 24h TTL (completes at seal time)
+                        let completion_ttl: Option<i64> = Some(24 * 3600);
                         let mut meta = build_batch_meta(
                             &batch_id, &batch_state.name, &batch_state.created_at,
                             "complete", 0, 0,
@@ -4951,14 +4961,14 @@ pub fn init() -> HashMap<String, Value> {
                         let now = timestamp_key();
                         meta.insert("sealed_at".to_string(), Value::String(now.clone()));
                         meta.insert("completed_at".to_string(), Value::String(now));
-                        kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
+                        kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), completion_ttl)?;
                         // Initialize atomic counter keys at 0 for consistency.
                         let cp = format!("jobs:batch:{}:counter", batch_id);
-                        kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(0), None)?;
-                        kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), None)?;
-                        kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), None)?;
-                        kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), None)?;
-                        kv::kv_set(&kv_handle, &format!("{}:total", cp), &Value::Int(0), None)?;
+                        kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(0), completion_ttl)?;
+                        kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), completion_ttl)?;
+                        kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), completion_ttl)?;
+                        kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), completion_ttl)?;
+                        kv::kv_set(&kv_handle, &format!("{}:total", cp), &Value::Int(0), completion_ttl)?;
                         return Ok(());
                     }
 
@@ -4995,17 +5005,17 @@ pub fn init() -> HashMap<String, Value> {
                         &batch_id, &batch_state.name, &batch_state.created_at,
                         "sealing", total, total,
                     );
-                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
+                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), batch_ttl_30d)?;
 
                     // Initialize atomic counter keys BEFORE flushing jobs.
                     // Workers can claim jobs as soon as pending keys exist —
                     // counters must be ready before the first job is written.
                     let cp = format!("jobs:batch:{}:counter", batch_id);
-                    kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(total), None)?;
-                    kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), None)?;
-                    kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), None)?;
-                    kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), None)?;
-                    kv::kv_set(&kv_handle, &format!("{}:total", cp), &Value::Int(total), None)?;
+                    kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(total), batch_ttl_30d)?;
+                    kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), batch_ttl_30d)?;
+                    kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), batch_ttl_30d)?;
+                    kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), batch_ttl_30d)?;
+                    kv::kv_set(&kv_handle, &format!("{}:total", cp), &Value::Int(total), batch_ttl_30d)?;
 
                     // Flush jobs to KV.
                     // Mark each flushed so retries skip already-written jobs.
@@ -5021,7 +5031,7 @@ pub fn init() -> HashMap<String, Value> {
                         "sealed", total, total,
                     );
                     meta.insert("sealed_at".to_string(), Value::String(sealed_at));
-                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
+                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), batch_ttl_30d)?;
 
                     Ok(())
                 })();
@@ -9065,6 +9075,171 @@ pub(crate) mod tests {
                 matches!(closed, Value::Bool(true)),
                 "closed flag must be set after batch completion"
             );
+        });
+    }
+
+    #[test]
+    fn test_seal_sets_30d_ttl_on_metadata() {
+        with_temp_kv("ntnt_seal_ttl_meta_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("ttl-meta-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(payload)]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                _ => panic!("not a map"),
+            };
+            let meta_key = format!("jobs:batch:{}", bid);
+            let ttl = kv::kv_ttl(kv, &meta_key).unwrap();
+            let thirty_days = 30 * 24 * 3600;
+            match ttl {
+                Some(t) => assert!(t > thirty_days - 60 && t <= thirty_days, "metadata TTL should be ~30 days, got {} seconds", t),
+                None => panic!("metadata key should have a TTL after seal"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_seal_sets_30d_ttl_on_counters() {
+        with_temp_kv("ntnt_seal_ttl_counters_test.db", |kv| {
+            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("ttl-counters-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(payload)]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                _ => panic!("not a map"),
+            };
+            let cp = format!("jobs:batch:{}:counter", bid);
+            let thirty_days = 30 * 24 * 3600;
+            for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
+                let ttl = kv::kv_ttl(kv, &format!("{}:{}", cp, suffix)).unwrap();
+                match ttl {
+                    Some(t) => assert!(t > thirty_days - 60 && t <= thirty_days, "counter:{} TTL should be ~30 days, got {}s", suffix, t),
+                    None => panic!("counter:{} should have TTL after seal", suffix),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_completion_shortens_ttl_to_24h() {
+        with_temp_kv("ntnt_completion_ttl_test.db", |kv| {
+            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("completion-ttl-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(payload)]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                _ => panic!("not a map"),
+            };
+
+            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+            let job_id = data_keys.iter().find(|k| !k.contains("cb-")).map(|k| k.strip_prefix("jobs:data:").unwrap().to_string()).expect("should find a job");
+            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() { Value::Map(m) => m, _ => panic!("expected map") };
+            update_batch_on_terminal(kv, &job_data, &job_id, "succeeded").unwrap();
+
+            let meta_key = format!("jobs:batch:{}", bid);
+            let twenty_four_hours = 24 * 3600;
+            let meta_ttl = kv::kv_ttl(kv, &meta_key).unwrap();
+            match meta_ttl {
+                Some(t) => assert!(t > twenty_four_hours - 60 && t <= twenty_four_hours, "metadata TTL should be ~24h after completion, got {}s", t),
+                None => panic!("metadata should have TTL after completion"),
+            }
+
+            let cp = format!("jobs:batch:{}:counter", bid);
+            for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
+                let ttl = kv::kv_ttl(kv, &format!("{}:{}", cp, suffix)).unwrap();
+                match ttl {
+                    Some(t) => assert!(t > twenty_four_hours - 60 && t <= twenty_four_hours, "counter:{} TTL should be ~24h after completion, got {}s", suffix, t),
+                    None => panic!("counter:{} should have TTL after completion", suffix),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_closed_flag_has_ttl() {
+        with_temp_kv("ntnt_closed_flag_ttl_test.db", |kv| {
+            JOB_RUNTIME.register_job(test_job_def("ProcessRow", "imports")).unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("closed-ttl-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[handle.clone(), Value::String("ProcessRow".to_string()), Value::Map(payload)]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                _ => panic!("not a map"),
+            };
+
+            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+            let job_id = data_keys.iter().find(|k| !k.contains("cb-")).map(|k| k.strip_prefix("jobs:data:").unwrap().to_string()).expect("should find a job");
+            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() { Value::Map(m) => m, _ => panic!("expected map") };
+            update_batch_on_terminal(kv, &job_data, &job_id, "succeeded").unwrap();
+
+            let closed_key = format!("jobs:batch:{}:closed", bid);
+            let twenty_four_hours = 24 * 3600;
+            let ttl = kv::kv_ttl(kv, &closed_key).unwrap();
+            match ttl {
+                Some(t) => assert!(t > twenty_four_hours - 60 && t <= twenty_four_hours, "closed flag TTL should be ~24h, got {}s", t),
+                None => panic!("closed flag should have TTL"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_empty_batch_gets_24h_ttl() {
+        with_temp_kv("ntnt_empty_batch_ttl_test.db", |kv| {
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("empty-ttl-test".to_string())]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") { Some(Value::String(s)) => s.clone(), _ => panic!("no _batch_id") },
+                _ => panic!("not a map"),
+            };
+            let meta_key = format!("jobs:batch:{}", bid);
+            let twenty_four_hours = 24 * 3600;
+            let ttl = kv::kv_ttl(kv, &meta_key).unwrap();
+            match ttl {
+                Some(t) => assert!(t > twenty_four_hours - 60 && t <= twenty_four_hours, "empty batch metadata TTL should be ~24h, got {}s", t),
+                None => panic!("empty batch metadata should have 24h TTL"),
+            }
         });
     }
 
