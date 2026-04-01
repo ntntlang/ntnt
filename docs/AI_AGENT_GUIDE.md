@@ -1985,6 +1985,52 @@ let ids = unwrap(enqueue_batch("SendEmail", [
 
 All-or-nothing validation: if any argument map is invalid, none are enqueued.
 
+### Job Batches
+
+Batches group jobs and fire callbacks when all jobs complete:
+
+```ntnt
+import { batch, enqueue, seal, batch_status, batch_id, enqueue_into } from "std/jobs"
+
+// Create a batch with callbacks
+let b = batch("import-users", map {
+    "on_complete": "NotifyAdmin",
+    "on_success": "SendReport",
+    "on_death": "AlertOps"
+})
+
+// Buffer jobs (not written to KV yet)
+enqueue(b, "ImportUser", map { "id": 1 })
+enqueue(b, "ImportUser", map { "id": 2 })
+
+// Seal flushes jobs to KV and starts processing
+seal(b)
+```
+
+**Dynamic additions** — add jobs to a sealed batch from within a running job:
+
+```ntnt
+Job ImportUser on imports {
+    perform(id) {
+        let children = fetch_children(id)
+        let bid = batch_id()  // Get current batch ID (None if not in a batch)
+        for child in children {
+            enqueue_into(bid, "ImportChild", map { "child_id": child })
+        }
+    }
+}
+```
+
+`enqueue_into()` atomically increments the batch's pending and total counters. Callbacks only fire after all jobs (including dynamically added ones) reach terminal state.
+
+**Batch status:**
+
+```ntnt
+let s = batch_status(b)  // Returns map with status, pending, succeeded, dead, cancelled, total
+```
+
+**Batch expiry:** Sealed batches expire after 30 days. Completed batches expire after 24 hours.
+
 ### Queue Pause and Resume
 
 ```ntnt
@@ -2260,7 +2306,7 @@ import { parse_csv, parse_with_headers } from "std/csv"
 import { to_html } from "std/markdown"
 import { join_path, dirname, basename, extension } from "std/path"
 import { channel, send, recv, sleep_ms, spawn, await_task, schedule, cancel_schedule, parallel, race } from "std/concurrent"
-import { enqueue, enqueue_in, enqueue_at, enqueue_batch, configure_queue, work_async, work_jobs } from "std/jobs"
+import { enqueue, enqueue_in, enqueue_at, enqueue_batch, enqueue_into, batch, seal, batch_id, batch_status, configure_queue, work_async, work_jobs } from "std/jobs"
 import { job_status, cancel_job, retry_job, list_jobs, delete_jobs } from "std/jobs"
 import { scale_workers, worker_status, pause_queue, resume_queue } from "std/jobs"
 import { assert_enqueued, assert_not_enqueued, drain_jobs, clear_jobs } from "std/jobs"
