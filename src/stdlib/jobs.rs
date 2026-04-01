@@ -8982,12 +8982,26 @@ pub(crate) mod tests {
                 .iter()
                 .filter(|k| !k.contains("cb-"))
                 .filter_map(|k| k.strip_prefix("jobs:data:").map(|s| s.to_string()))
+                .filter(|jid| {
+                    // Only include jobs belonging to THIS batch (avoids cross-test pollution)
+                    matches!(
+                        kv::kv_get(kv, &format!("jobs:data:{}", jid)),
+                        Ok(Value::Map(ref m)) if matches!(m.get("batch_id"), Some(Value::String(ref b)) if b == &bid)
+                    )
+                })
                 .collect();
-            assert_eq!(job_ids.len(), 2, "expected 2 job data entries");
+            assert_eq!(
+                job_ids.len(),
+                2,
+                "expected 2 job data entries for batch {}",
+                bid
+            );
 
             for jid in &job_ids {
-                let mut jd = HashMap::new();
-                jd.insert("batch_id".to_string(), Value::String(bid.clone()));
+                let jd = match kv::kv_get(kv, &format!("jobs:data:{}", jid)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map for job {}", jid),
+                };
                 update_batch_on_terminal(kv, &jd, jid, "succeeded").unwrap();
             }
 
