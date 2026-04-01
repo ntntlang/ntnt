@@ -5289,7 +5289,7 @@ pub fn init() -> HashMap<String, Value> {
     // Uses thread-local context set by the worker loop. Returns None when called outside a batch job.
     // @returns Option<String> — Some(batch_id) or None
     // @example let bid = batch_id() ~ "Get current job's batch ID"
-    // @see_also batch, enqueue
+    // @see_also batch, enqueue, enqueue_into
     module.insert(
         "batch_id".to_string(),
         Value::NativeFunction {
