@@ -896,7 +896,11 @@ fn update_batch_on_terminal(
 
     // Ensure counter keys exist (handles race where worker runs before seal()
     // finishes initializing counters). kv_set_nx is a no-op if already set.
-    for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
+    // Note: counter:total must be initialized to total_jobs (from metadata),
+    // not 0 — legacy Phase 1-2 batches don't have counter:total, and
+    // initializing to 0 would break on_success (succeeded can never == 0 for
+    // a non-empty batch) and make batch_status() report total: 0.
+    for suffix in &["pending", "succeeded", "dead", "cancelled"] {
         let _ = kv::kv_set_nx(
             kv_handle,
             &format!("{}:{}", counter_prefix, suffix),
@@ -904,6 +908,12 @@ fn update_batch_on_terminal(
             None,
         );
     }
+    let _ = kv::kv_set_nx(
+        kv_handle,
+        &format!("{}:total", counter_prefix),
+        &Value::Int(total_jobs),
+        None,
+    );
 
     let pending_raw =
         kv::kv_incr(kv_handle, &format!("{}:pending", counter_prefix), -1).map_err(|e| {
@@ -988,7 +998,12 @@ fn update_batch_on_terminal(
             &Value::Bool(true),
             batch_ttl,
         )
-        .unwrap_or(false);
+        .map_err(|e| {
+            IntentError::runtime_error(format!(
+                "batch '{}' closed flag set failed: {}",
+                batch_id, e
+            ))
+        })?;
         if !we_closed {
             // Another worker already closed — skip callbacks but still
             // update metadata so batch_status() shows correct state.
@@ -1122,7 +1137,12 @@ fn update_batch_on_terminal(
         }
 
         let meta_write_ttl = if did_close { Some(24 * 3600i64) } else { None };
-        let _ = kv::kv_set(kv_handle, &meta_key, &Value::Map(meta), meta_write_ttl);
+        if let Err(e) = kv::kv_set(kv_handle, &meta_key, &Value::Map(meta), meta_write_ttl) {
+            eprintln!(
+                "[ntnt] warning: batch '{}' metadata update failed: {} — batch_status() may show stale data",
+                batch_id, e
+            );
+        }
     }
 
     if did_close {
@@ -9967,6 +9987,88 @@ pub(crate) mod tests {
                 _ => panic!("expected Ok"),
             };
             assert!(matches!(status_map_a.get("status"), Some(Value::String(s)) if s == "complete"), "parent batch should still be complete");
+        });
+    }
+
+    /// Legacy batch compatibility: batches sealed before Phase 3 don't have
+    /// counter:total. Verify that update_batch_on_terminal falls back to
+    /// metadata total and initializes counter:total from it, so on_success
+    /// fires correctly and batch_status reports the right total.
+    #[test]
+    fn test_legacy_batch_without_counter_total() {
+        with_temp_kv("ntnt_legacy_batch_total_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+
+            // Simulate a Phase 1-2 batch: metadata with total=2, counter keys
+            // for pending/succeeded/dead/cancelled but NO counter:total.
+            let bid = "legacy-batch-test";
+            let meta_key = format!("jobs:batch:{}", bid);
+            let cp = format!("jobs:batch:{}:counter", bid);
+
+            let meta = build_batch_meta(bid, "legacy-test", "0", "sealed", 2, 2);
+            kv::kv_set(kv, &meta_key, &Value::Map(meta), None).unwrap();
+            kv::kv_set(kv, &format!("{}:pending", cp), &Value::Int(2), None).unwrap();
+            kv::kv_set(kv, &format!("{}:succeeded", cp), &Value::Int(0), None).unwrap();
+            kv::kv_set(kv, &format!("{}:dead", cp), &Value::Int(0), None).unwrap();
+            kv::kv_set(kv, &format!("{}:cancelled", cp), &Value::Int(0), None).unwrap();
+            // Deliberately NOT setting counter:total — this is the legacy case.
+
+            // Write two fake jobs with batch_id
+            let module = init();
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let job1_id = "legacy-job-1";
+            let job2_id = "legacy-job-2";
+            for (jid, val) in &[(job1_id, 1), (job2_id, 2)] {
+                let mut jdata = HashMap::new();
+                jdata.insert("type".to_string(), Value::String("ProcessRow".to_string()));
+                jdata.insert("status".to_string(), Value::String("pending".to_string()));
+                jdata.insert("batch_id".to_string(), Value::String(bid.to_string()));
+                jdata.insert("queue".to_string(), Value::String("imports".to_string()));
+                jdata.insert("payload".to_string(), Value::Map({
+                    let mut p = HashMap::new();
+                    p.insert("x".to_string(), Value::Int(*val));
+                    p
+                }));
+                kv::kv_set(kv, &format!("jobs:data:{}", jid), &Value::Map(jdata), None).unwrap();
+            }
+
+            // Complete both jobs
+            let jd1 = match kv::kv_get(kv, &format!("jobs:data:{}", job1_id)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
+            update_batch_on_terminal(kv, &jd1, job1_id, "succeeded").unwrap();
+
+            // After first completion, counter:total should have been initialized
+            // from metadata (total_jobs=2), not 0.
+            let total_after_first = kv::kv_get(kv, &format!("{}:total", cp)).unwrap();
+            assert!(
+                matches!(total_after_first, Value::Int(2)),
+                "counter:total should be 2 (from metadata fallback), got {:?}",
+                total_after_first
+            );
+
+            let jd2 = match kv::kv_get(kv, &format!("jobs:data:{}", job2_id)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
+            update_batch_on_terminal(kv, &jd2, job2_id, "succeeded").unwrap();
+
+            // After both complete, on_success should have fired
+            let meta_after = match kv::kv_get(kv, &meta_key).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected metadata map"),
+            };
+            assert!(
+                matches!(meta_after.get("fired_success"), Some(Value::Bool(true))),
+                "on_success should fire for legacy batch — succeeded(2) == total(2)"
+            );
+            assert!(
+                matches!(meta_after.get("fired_complete"), Some(Value::Bool(true))),
+                "on_complete should fire for legacy batch"
+            );
         });
     }
 }
