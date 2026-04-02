@@ -33,6 +33,7 @@ use crate::stdlib::concurrent::{
 };
 use crate::stdlib::kv;
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
@@ -372,21 +373,21 @@ impl JobRuntime {
 
     /// Get or lazily initialize the KV handle.
     ///
-    /// Uses double-checked locking to avoid holding locks during I/O:
-    /// 1. Check kv_handle_info (fast path — already initialized)
-    /// 2. Clone URL under kv_url lock, drop it
-    /// 3. Open KV connection (slow I/O, no locks held)
-    /// 4. Store result under kv_handle_info lock (short critical section)
+    /// Get (or lazily create) the KV handle for job storage.
+    ///
+    /// Holds the kv_handle_info lock across the entire init to prevent the
+    /// TOCTOU race where two concurrent callers both see None, both call
+    /// open_kv(), and end up with different store_ids (especially fatal with
+    /// sqlite::memory: where each open creates a separate in-memory DB).
     pub fn get_or_init_kv(&self) -> Result<Value> {
+        let mut info = self.kv_handle_info.lock().map_err(|e| {
+            IntentError::runtime_error(format!("Job KV handle lock poisoned: {}", e))
+        })?;
+
         // Fast path: already initialized
-        {
-            let info = self.kv_handle_info.lock().map_err(|e| {
-                IntentError::runtime_error(format!("Job KV handle lock poisoned: {}", e))
-            })?;
-            if let Some(ref h) = *info {
-                return Ok(h.to_value());
-            }
-        } // drop kv_handle_info lock
+        if let Some(ref h) = *info {
+            return Ok(h.to_value());
+        }
 
         // Clone URL under its own lock, then drop
         let url = {
@@ -396,17 +397,13 @@ impl JobRuntime {
             url_guard.clone()
         }; // drop kv_url lock
 
-        // Open KV connection — no locks held during I/O
+        // Open KV connection (holds kv_handle_info lock during I/O —
+        // acceptable because this only happens once per URL change)
         let kv_handle_value = kv::open_kv(&url)?;
         let handle_info = extract_kv_handle_info(&kv_handle_value)?;
 
-        // Store result (short critical section)
-        {
-            let mut info = self.kv_handle_info.lock().map_err(|e| {
-                IntentError::runtime_error(format!("Job KV handle lock poisoned: {}", e))
-            })?;
-            *info = Some(handle_info);
-        }
+        // Store result (still under same lock — no race window)
+        *info = Some(handle_info);
 
         Ok(kv_handle_value)
     }
@@ -480,6 +477,16 @@ pub static JOB_RUNTIME: LazyLock<JobRuntime> = LazyLock::new(JobRuntime::new);
 // Batch Runtime — in-memory state for open (unsealed) batches
 // ============================================================================
 
+/// Result of an enqueue operation, distinguishing new jobs from dedup collisions.
+/// Used by `enqueue_into()` to roll back batch counters on dedup.
+#[derive(Debug)]
+enum EnqueueResult {
+    /// A new job was created and written to KV.
+    Created(String),
+    /// A dedup collision occurred — the returned ID is the existing job.
+    Deduplicated(String),
+}
+
 #[derive(Clone)]
 struct BufferedJob {
     job_type: String,
@@ -538,6 +545,22 @@ impl BatchRuntime {
 }
 
 pub(crate) static BATCH_RUNTIME: LazyLock<BatchRuntime> = LazyLock::new(BatchRuntime::new);
+
+// Thread-local batch ID context for batch_id() — set by worker loop before
+// execute_in_worker(), read by batch_id() stdlib function.
+thread_local! {
+    static CURRENT_BATCH_ID: RefCell<Option<String>> = RefCell::new(None);
+}
+
+/// RAII guard that unconditionally clears CURRENT_BATCH_ID on drop.
+/// Guarantees cleanup even on panic (panic=unwind) or early return.
+struct BatchIdGuard;
+
+impl Drop for BatchIdGuard {
+    fn drop(&mut self) {
+        CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = None);
+    }
+}
 
 /// Extract KvHandleInfo from a Value::Map returned by kv::open_kv.
 fn extract_kv_handle_info(handle: &Value) -> Result<KvHandleInfo> {
@@ -675,6 +698,205 @@ fn fire_batch_callback(
     Ok(())
 }
 
+fn try_fire_batch_callback(
+    batch_id: &str,
+    callback_type: &str,
+    meta_snapshot: &Option<HashMap<String, Value>>,
+) -> bool {
+    if let Some(ref snap) = meta_snapshot {
+        if let Ok(()) = fire_batch_callback(batch_id, callback_type, snap) {
+            return true;
+        }
+        eprintln!(
+            "[ntnt] warning: failed to enqueue {} callback for batch '{}'",
+            callback_type, batch_id
+        );
+    }
+    false
+}
+
+/// Dynamically add a job to a sealed batch. Writes directly to KV and
+/// atomically increments pending + total counters.
+///
+/// Returns `Ok(job_id)` on success, or an error if the batch doesn't exist,
+/// is complete, or is closed.
+fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Result<String> {
+    // Step 1: Validate job type is registered (before any KV access).
+    let job_def = JOB_RUNTIME.get_job(job_name)?.ok_or_else(|| {
+        IntentError::runtime_error(format!(
+            "Unknown job type '{}' — define it with a job block before enqueueing",
+            job_name
+        ))
+    })?;
+
+    let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+    let meta_key = format!("jobs:batch:{}", batch_id);
+
+    // Step 2: Read metadata and validate status.
+    let meta_total = match kv::kv_get(&kv_handle, &meta_key)? {
+        Value::Map(m) => {
+            let status = match m.get("status") {
+                Some(Value::String(s)) => s.clone(),
+                _ => {
+                    return Err(IntentError::runtime_error(format!(
+                        "batch '{}' has missing or invalid status",
+                        batch_id
+                    )));
+                }
+            };
+            if status == "complete" {
+                return Err(IntentError::runtime_error(format!(
+                    "batch '{}' is complete — cannot add jobs after all jobs have reached terminal state",
+                    batch_id
+                )));
+            }
+            if status != "sealing" && status != "sealed" {
+                return Err(IntentError::runtime_error(format!(
+                    "batch '{}' has status '{}' — dynamic adds only allowed for sealing/sealed batches",
+                    batch_id, status
+                )));
+            }
+            // Extract metadata total for legacy counter seeding below.
+            match m.get("total") {
+                Some(Value::Int(n)) => *n,
+                _ => 0,
+            }
+        }
+        _ => {
+            return Err(IntentError::runtime_error(format!(
+                "batch '{}' not found — it may have expired or the ID is invalid",
+                batch_id
+            )));
+        }
+    };
+
+    // Step 3: Pre-check dedup BEFORE any counter mutation.
+    // If this job type has a `unique` option and the dedup key already exists,
+    // return the existing job ID immediately — no counters touched, no rollback
+    // needed, no risk of absorbing a concurrent completion decrement.
+    let unique_secs = match job_def.options.get("unique") {
+        Some(JobOptionValue::Int(n)) if *n > 0 => Some(*n),
+        _ => None,
+    };
+    if let Some(_ttl) = unique_secs {
+        let pjson = serde_json::to_string(&crate::stdlib::kv::value_to_json_public(&payload))
+            .map_err(|e| {
+                IntentError::runtime_error(format!(
+                    "Failed to serialize payload for dedup hash: {}",
+                    e
+                ))
+            })?;
+        let mut hasher = Sha256::new();
+        // Include batch_id so dedup is scoped per-batch (matches enqueue_internal_with_def).
+        hasher.update(format!("{}:{}:{}", job_name, batch_id, pjson).as_bytes());
+        let full_hash = format!("{:x}", hasher.finalize());
+        let dedup_key = format!("jobs:unique:{}:{}", job_name, &full_hash[..32]);
+
+        // If the dedup key exists and references a live (non-terminal) job,
+        // this is a duplicate — return the existing ID without touching counters.
+        if let Ok(Value::String(existing_id)) = kv::kv_get(&kv_handle, &dedup_key) {
+            let data_key = format!("jobs:data:{}", existing_id);
+            let is_terminal = match kv::kv_get(&kv_handle, &data_key) {
+                Ok(Value::Map(data)) => match data.get("status") {
+                    Some(Value::String(s)) => {
+                        matches!(s.as_str(), "cancelled" | "dead" | "expired" | "failed")
+                    }
+                    _ => true,
+                },
+                _ => false,
+            };
+            if !is_terminal {
+                return Ok(existing_id);
+            }
+        }
+    }
+
+    let counter_prefix = format!("jobs:batch:{}:counter", batch_id);
+
+    // Step 4: Seed counter:total for legacy Phase 2 batches.
+    // Phase 2 batches don't have counter:total — kv_incr on a missing key
+    // initializes to 1, not metadata.total+1. Seed with kv_set_nx so the
+    // first increment produces the correct value. No-op if already set.
+    let _ = kv::kv_set_nx(
+        &kv_handle,
+        &format!("{}:total", counter_prefix),
+        &Value::Int(meta_total),
+        Some(30 * 24 * 3600),
+    );
+
+    // Step 5: Increment counters BEFORE checking closed flag.
+    // This ordering prevents the TOCTOU race: if we checked closed first, then
+    // incremented, the last job could complete between those two steps — setting
+    // closed=true and firing callbacks while our increment hadn't happened yet.
+    // By incrementing first, a concurrent completion sees pending=N+1 (not N-1→0)
+    // and defers callback firing to our job's eventual completion.
+    kv::kv_incr(&kv_handle, &format!("{}:pending", counter_prefix), 1).map_err(|e| {
+        IntentError::runtime_error(format!(
+            "batch '{}' pending counter increment failed: {}",
+            batch_id, e
+        ))
+    })?;
+    kv::kv_incr(&kv_handle, &format!("{}:total", counter_prefix), 1).map_err(|e| {
+        // Roll back pending on total increment failure.
+        let _ = kv::kv_incr(&kv_handle, &format!("{}:pending", counter_prefix), -1);
+        IntentError::runtime_error(format!(
+            "batch '{}' total counter increment failed: {}",
+            batch_id, e
+        ))
+    })?;
+
+    // Step 6: Check closed flag AFTER incrementing counters.
+    // If closed, roll back and return error. The batch completed between our
+    // metadata read and counter increment — our increment is stale.
+    let closed_key = format!("jobs:batch:{}:closed", batch_id);
+    match kv::kv_get(&kv_handle, &closed_key) {
+        Ok(Value::Bool(true)) => {
+            rollback_batch_counters(&kv_handle, &counter_prefix);
+            return Err(IntentError::runtime_error(format!(
+                "batch '{}' is closing — a completion callback is in flight, cannot add jobs",
+                batch_id
+            )));
+        }
+        Ok(_) => {} // Key missing (Unit) or false — batch is open, proceed
+        Err(e) => {
+            rollback_batch_counters(&kv_handle, &counter_prefix);
+            return Err(IntentError::runtime_error(format!(
+                "batch '{}' closed flag check failed: {} — refusing to add jobs during KV error",
+                batch_id, e
+            )));
+        }
+    }
+
+    // Step 7: Write job to KV.
+    let result = enqueue_internal_with_def(
+        &job_def,
+        job_name,
+        payload,
+        &timestamp_key(),
+        None,
+        Some(batch_id),
+        None,
+    );
+
+    match result {
+        Ok(EnqueueResult::Created(job_id)) => Ok(job_id),
+        Ok(EnqueueResult::Deduplicated(existing_id)) => {
+            // Dedup collision (shouldn't happen after pre-check, but defensive).
+            rollback_batch_counters(&kv_handle, &counter_prefix);
+            Ok(existing_id)
+        }
+        Err(e) => {
+            rollback_batch_counters(&kv_handle, &counter_prefix);
+            Err(e)
+        }
+    }
+}
+
+fn rollback_batch_counters(kv_handle: &Value, counter_prefix: &str) {
+    let _ = kv::kv_incr(kv_handle, &format!("{}:pending", counter_prefix), -1);
+    let _ = kv::kv_incr(kv_handle, &format!("{}:total", counter_prefix), -1);
+}
+
 /// Update batch counters when a job reaches a terminal state.
 ///
 /// Called from every terminal path in the worker loop and from `cancel_job_by_id`.
@@ -728,42 +950,57 @@ fn update_batch_on_terminal(
         return Ok(());
     }
 
-    // Read total from metadata for the succeeded==total check (avoids TOCTOU
-    // race on fire_success — see Greptile review).
-    let meta_key = format!("jobs:batch:{}", batch_id);
-    let total_jobs = match kv::kv_get(kv_handle, &meta_key) {
-        Ok(Value::Map(ref m)) => match m.get("total") {
-            Some(Value::Int(n)) => *n,
-            _ => 0,
-        },
-        _ => {
-            // Metadata missing — release the done-set claim so a future retry
-            // can attempt this update once the metadata reappears.
-            let _ = kv::kv_del(kv_handle, &done_key);
-            eprintln!(
-                "[ntnt] warning: batch metadata not found for batch '{}' (job '{}'), released done-set",
-                batch_id, job_id
-            );
-            return Ok(());
-        }
-    };
-
     // --- Atomic counter updates via kv_incr ---
     // Each counter lives in its own KV key so concurrent workers can't race
     // on a shared metadata map. kv_incr is atomic per-call. Errors propagate
     // rather than silently becoming 0 (which would falsely trigger on_complete).
     let counter_prefix = format!("jobs:batch:{}:counter", batch_id);
 
+    // Read total from atomic counter key (not metadata) — dynamic adds
+    // increment counter:total, making the metadata total stale.
+    let meta_key = format!("jobs:batch:{}", batch_id);
+    let total_jobs = match kv::kv_get(kv_handle, &format!("{}:total", counter_prefix)) {
+        Ok(Value::Int(n)) => n,
+        _ => {
+            // Counter key missing — fall back to metadata total for
+            // backwards compatibility with batches sealed before Phase 3.
+            match kv::kv_get(kv_handle, &meta_key) {
+                Ok(Value::Map(ref m)) => match m.get("total") {
+                    Some(Value::Int(n)) => *n,
+                    _ => 0,
+                },
+                _ => {
+                    let _ = kv::kv_del(kv_handle, &done_key);
+                    eprintln!(
+                        "[ntnt] warning: batch metadata not found for batch '{}' (job '{}'), released done-set",
+                        batch_id, job_id
+                    );
+                    return Ok(());
+                }
+            }
+        }
+    };
+
     // Ensure counter keys exist (handles race where worker runs before seal()
     // finishes initializing counters). kv_set_nx is a no-op if already set.
+    // Note: counter:total must be initialized to total_jobs (from metadata),
+    // not 0 — legacy Phase 1-2 batches don't have counter:total, and
+    // initializing to 0 would break on_success (succeeded can never == 0 for
+    // a non-empty batch) and make batch_status() report total: 0.
     for suffix in &["pending", "succeeded", "dead", "cancelled"] {
         let _ = kv::kv_set_nx(
             kv_handle,
             &format!("{}:{}", counter_prefix, suffix),
             &Value::Int(0),
-            None,
+            batch_ttl,
         );
     }
+    let _ = kv::kv_set_nx(
+        kv_handle,
+        &format!("{}:total", counter_prefix),
+        &Value::Int(total_jobs),
+        batch_ttl,
+    );
 
     let pending_raw =
         kv::kv_incr(kv_handle, &format!("{}:pending", counter_prefix), -1).map_err(|e| {
@@ -833,10 +1070,34 @@ fn update_batch_on_terminal(
     // on_success:  succeeded==total is race-free — if every job succeeded,
     //              there's no room for dead/cancelled. Avoids the TOCTOU race
     //              of reading dead/cancelled as separate non-atomic KV gets.
-    let fire_death = terminal_type == "dead" && new_dead == 1;
-    let fire_complete = new_pending == 0 && !pending_underflow;
-    let fire_success = fire_complete && terminal_type == "succeeded" && new_succeeded == total_jobs;
+    let mut fire_death = terminal_type == "dead" && new_dead == 1;
+    let mut fire_complete = new_pending == 0 && !pending_underflow;
+    let mut fire_success =
+        fire_complete && terminal_type == "succeeded" && new_succeeded == total_jobs;
 
+    // Set closed flag atomically BEFORE firing callbacks.
+    // Only the worker that sets this flag proceeds with callbacks.
+    // enqueue_into() checks this flag to reject dynamic adds after completion.
+    let did_close = if fire_complete {
+        let closed_key = format!("jobs:batch:{}:closed", batch_id);
+        let we_closed = kv::kv_set_nx(kv_handle, &closed_key, &Value::Bool(true), batch_ttl)
+            .map_err(|e| {
+                IntentError::runtime_error(format!(
+                    "batch '{}' closed flag set failed: {}",
+                    batch_id, e
+                ))
+            })?;
+        if !we_closed {
+            // Another worker already closed — skip callbacks but still
+            // update metadata so batch_status() shows correct state.
+            fire_complete = false;
+            fire_death = false;
+            fire_success = false;
+        }
+        we_closed
+    } else {
+        false
+    };
     // --- Callback firing: enqueue FIRST, then set fired flags ---
     // This ordering is safe because:
     //   - fire_batch_callback checks if jobs:data:<cb_id> exists → skip if present (idempotent enqueue)
@@ -865,40 +1126,13 @@ fn update_batch_on_terminal(
     let mut did_fire_success = false;
 
     if fire_death {
-        if let Some(ref snap) = meta_snapshot {
-            if let Ok(()) = fire_batch_callback(&batch_id, "on_death", snap) {
-                did_fire_death = true;
-            } else {
-                eprintln!(
-                    "[ntnt] warning: failed to enqueue on_death callback for batch '{}'",
-                    batch_id
-                );
-            }
-        }
+        did_fire_death = try_fire_batch_callback(&batch_id, "on_death", &meta_snapshot);
     }
     if fire_complete {
-        if let Some(ref snap) = meta_snapshot {
-            if let Ok(()) = fire_batch_callback(&batch_id, "on_complete", snap) {
-                did_fire_complete = true;
-            } else {
-                eprintln!(
-                    "[ntnt] warning: failed to enqueue on_complete callback for batch '{}'",
-                    batch_id
-                );
-            }
-        }
+        did_fire_complete = try_fire_batch_callback(&batch_id, "on_complete", &meta_snapshot);
     }
     if fire_success {
-        if let Some(ref snap) = meta_snapshot {
-            if let Ok(()) = fire_batch_callback(&batch_id, "on_success", snap) {
-                did_fire_success = true;
-            } else {
-                eprintln!(
-                    "[ntnt] warning: failed to enqueue on_success callback for batch '{}'",
-                    batch_id
-                );
-            }
-        }
+        did_fire_success = try_fire_batch_callback(&batch_id, "on_success", &meta_snapshot);
     }
 
     // Step 2: Set fired flags AFTER successful enqueue (or skip if enqueue failed).
@@ -958,7 +1192,34 @@ fn update_batch_on_terminal(
             meta.insert("fired_success".to_string(), Value::Bool(true));
         }
 
-        let _ = kv::kv_set(kv_handle, &meta_key, &Value::Map(meta), None);
+        // Non-closing workers must preserve the existing TTL — writing with None
+        // strips any TTL set by the closing worker (race: Worker A slow to write
+        // metadata after Worker B already set 24h TTL). Use batch_ttl (30d) for
+        // non-closing writes so they never remove a shorter TTL.
+        let meta_write_ttl = if did_close {
+            Some(24 * 3600i64)
+        } else {
+            batch_ttl
+        };
+        if let Err(e) = kv::kv_set(kv_handle, &meta_key, &Value::Map(meta), meta_write_ttl) {
+            eprintln!(
+                "[ntnt] warning: batch '{}' metadata update failed: {} — batch_status() may show stale data",
+                batch_id, e
+            );
+        }
+    }
+
+    if did_close {
+        let completion_ttl = 24 * 3600i64;
+        for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
+            let _ = kv::kv_expire(
+                kv_handle,
+                &format!("{}:{}", counter_prefix, suffix),
+                completion_ttl,
+            );
+        }
+        let closed_key = format!("jobs:batch:{}:closed", batch_id);
+        let _ = kv::kv_expire(kv_handle, &closed_key, completion_ttl);
     }
 
     Ok(())
@@ -1151,6 +1412,16 @@ fn execute_on_failure_in_worker(
     }
 }
 
+/// Convert an `EnqueueResult` to the `Value::ok(Value::String(job_id))` format
+/// expected by ntnt stdlib callers.
+fn enqueue_result_to_value(result: EnqueueResult) -> Value {
+    match result {
+        EnqueueResult::Created(id) | EnqueueResult::Deduplicated(id) => {
+            Value::ok(Value::String(id))
+        }
+    }
+}
+
 /// Core implementation shared by `enqueue()`, `enqueue_at()`, and `enqueue_in()`.
 ///
 /// `pending_ts` is the timestamp portion used for the pending key (controls
@@ -1163,7 +1434,7 @@ fn enqueue_internal(
     scheduled_at: Option<&str>,
     batch_id: Option<&str>,
     override_job_id: Option<&str>,
-) -> Result<Value> {
+) -> Result<EnqueueResult> {
     // Look up job in registry
     let job_def = JOB_RUNTIME.get_job(job_name)?;
     let job_def = match job_def {
@@ -1176,6 +1447,26 @@ fn enqueue_internal(
         }
     };
 
+    enqueue_internal_with_def(
+        &job_def,
+        job_name,
+        payload,
+        pending_ts,
+        scheduled_at,
+        batch_id,
+        override_job_id,
+    )
+}
+
+fn enqueue_internal_with_def(
+    job_def: &JobDefinition,
+    job_name: &str,
+    payload: Value,
+    pending_ts: &str,
+    scheduled_at: Option<&str>,
+    batch_id: Option<&str>,
+    override_job_id: Option<&str>,
+) -> Result<EnqueueResult> {
     // Resolve numeric priority from job options
     // Named: critical=5, high=25, normal=50 (default), low=85
     // Numeric: 0-99 inclusive
@@ -1226,7 +1517,15 @@ fn enqueue_internal(
                 ))
             })?;
         let mut hasher = Sha256::new();
-        hasher.update(format!("{}:{}", job_name, pjson).as_bytes());
+        // Include batch_id in hash so the same job type + payload in different
+        // batches gets distinct dedup keys. Without this, seal() could count a
+        // job that deduplicates against a different batch's job, leaving the
+        // batch stuck with pending > 0 forever.
+        let hash_input = match batch_id {
+            Some(bid) => format!("{}:{}:{}", job_name, bid, pjson),
+            None => format!("{}:{}", job_name, pjson),
+        };
+        hasher.update(hash_input.as_bytes());
         let full_hash = format!("{:x}", hasher.finalize());
         Some(format!("jobs:unique:{}:{}", job_name, &full_hash[..32]))
     } else {
@@ -1306,7 +1605,7 @@ fn enqueue_internal(
             // Concurrent enqueue already holds the slot — return existing job_id.
             match kv::kv_get(&kv_handle, dk) {
                 Ok(Value::String(existing_id)) => {
-                    return Ok(Value::ok(Value::String(existing_id)));
+                    return Ok(EnqueueResult::Deduplicated(existing_id));
                 }
                 _ => {
                     // Key vanished between set_nx and get (TTL race).
@@ -1337,7 +1636,7 @@ fn enqueue_internal(
                 queue: job_def.queue.clone(),
                 payload_json,
             });
-            return Ok(Value::ok(Value::String(job_id)));
+            return Ok(EnqueueResult::Created(job_id));
         }
     }
 
@@ -1433,7 +1732,7 @@ fn enqueue_internal(
         ],
     );
 
-    Ok(Value::ok(Value::String(job_id)))
+    Ok(EnqueueResult::Created(job_id))
 }
 
 fn reenqueue_job(kv_handle: &Value, job_data: &HashMap<String, Value>, job_id: &str) {
@@ -1926,6 +2225,15 @@ fn worker_loop(kv_info: KvHandleInfo, band: BandConfig, queues: Option<Vec<Strin
 
         // Record start time for timeout detection and duration stats
         let start = std::time::Instant::now();
+
+        // Set batch context for batch_id() — read batch_id from job_data.
+        // Explicitly set None for non-batch jobs to clear any stale value.
+        let batch_id_for_context = match job_data.get("batch_id") {
+            Some(Value::String(bid)) => Some(bid.clone()),
+            _ => None,
+        };
+        CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = batch_id_for_context);
+        let _batch_guard = BatchIdGuard;
 
         let exec_result = execute_in_worker(&mut interp, &def, &payload);
 
@@ -3134,6 +3442,7 @@ pub(crate) fn resume_queue_impl(queue_name: &str) -> crate::error::Result<Value>
 
 const PAUSE_CACHE_STALE_SECS: u64 = 5;
 
+#[cfg(test)]
 fn mark_pause_cache_stale() {
     if let Ok(mut ts) = JOB_RUNTIME.paused_cache_updated_at.lock() {
         *ts =
@@ -3355,6 +3664,7 @@ pub fn init() -> HashMap<String, Value> {
                             }
                         };
                         enqueue_internal(&job_name, payload, &timestamp_key(), None, None, None)
+                            .map(enqueue_result_to_value)
                     }
                     3 => {
                         // Batch enqueue: (batch_handle, job_name, args)
@@ -3609,6 +3919,7 @@ pub fn init() -> HashMap<String, Value> {
                     None,
                     None,
                 )
+                .map(enqueue_result_to_value)
             },
         },
     );
@@ -3683,6 +3994,7 @@ pub fn init() -> HashMap<String, Value> {
                     None,
                     None,
                 )
+                .map(enqueue_result_to_value)
             },
         },
     );
@@ -4622,7 +4934,9 @@ pub fn init() -> HashMap<String, Value> {
                 for (i, item) in items.into_iter().enumerate() {
                     let ts = format!("{:020}", base_nanos + i as u128);
                     // Wrap errors with item index so callers know which item failed
-                    let result = enqueue_internal(&job_name, item, &ts, None, None, None).map_err(|e| {
+                    let result = enqueue_internal(&job_name, item, &ts, None, None, None)
+                        .map(enqueue_result_to_value)
+                        .map_err(|e| {
                         IntentError::runtime_error(format!(
                             "enqueue_batch: item {} failed: {}",
                             i, e
@@ -4856,11 +5170,13 @@ pub fn init() -> HashMap<String, Value> {
                 // On failure, clean up KV and reset batch to Open for retry.
                 let kv_result: Result<()> = (|| {
                     let kv_handle = JOB_RUNTIME.get_or_init_kv()?;
+                    let batch_ttl_30d: Option<i64> = Some(30 * 24 * 3600);
                     let meta_key = format!("jobs:batch:{}", batch_id);
                     let total = batch_state.buffered.len() as i64;
 
                     if total == 0 {
-                        // Empty batch → immediately complete
+                        // Empty batch → immediately complete — use 24h TTL (completes at seal time)
+                        let completion_ttl: Option<i64> = Some(24 * 3600);
                         let mut meta = build_batch_meta(
                             &batch_id, &batch_state.name, &batch_state.created_at,
                             "complete", 0, 0,
@@ -4870,13 +5186,14 @@ pub fn init() -> HashMap<String, Value> {
                         let now = timestamp_key();
                         meta.insert("sealed_at".to_string(), Value::String(now.clone()));
                         meta.insert("completed_at".to_string(), Value::String(now));
-                        kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
+                        kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), completion_ttl)?;
                         // Initialize atomic counter keys at 0 for consistency.
                         let cp = format!("jobs:batch:{}:counter", batch_id);
-                        kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(0), None)?;
-                        kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), None)?;
-                        kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), None)?;
-                        kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), None)?;
+                        kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(0), completion_ttl)?;
+                        kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), completion_ttl)?;
+                        kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), completion_ttl)?;
+                        kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), completion_ttl)?;
+                        kv::kv_set(&kv_handle, &format!("{}:total", cp), &Value::Int(0), completion_ttl)?;
                         return Ok(());
                     }
 
@@ -4905,24 +5222,28 @@ pub fn init() -> HashMap<String, Value> {
                         prepared.push((i, job.job_type.clone(), payload, ts));
                     }
 
-                    // Write "sealing" metadata BEFORE flushing jobs.
-                    // This ensures batch_status() can always find the batch even if
-                    // a crash occurs mid-flush (prevents orphaned jobs with batch_id
-                    // but no batch metadata).
+                    // Initialize atomic counter keys BEFORE writing "sealing" metadata.
+                    // A concurrent enqueue_into() observes "sealing" and immediately
+                    // kv_incr's counter keys — they must already exist so the increment
+                    // adds to N rather than creating a new key at value 1 (which seal
+                    // would then overwrite back to N, losing the dynamic add).
+                    let cp = format!("jobs:batch:{}:counter", batch_id);
+                    kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(total), batch_ttl_30d)?;
+                    kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), batch_ttl_30d)?;
+                    kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), batch_ttl_30d)?;
+                    kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), batch_ttl_30d)?;
+                    kv::kv_set(&kv_handle, &format!("{}:total", cp), &Value::Int(total), batch_ttl_30d)?;
+
+                    // Write "sealing" metadata AFTER counter keys are ready.
+                    // batch_status() can find the batch even if a crash occurs mid-flush
+                    // (prevents orphaned jobs with batch_id but no batch metadata).
+                    // Any enqueue_into() that reads "sealing" is guaranteed to find
+                    // initialized counters above.
                     let meta = build_batch_meta(
                         &batch_id, &batch_state.name, &batch_state.created_at,
                         "sealing", total, total,
                     );
-                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
-
-                    // Initialize atomic counter keys BEFORE flushing jobs.
-                    // Workers can claim jobs as soon as pending keys exist —
-                    // counters must be ready before the first job is written.
-                    let cp = format!("jobs:batch:{}:counter", batch_id);
-                    kv::kv_set(&kv_handle, &format!("{}:pending", cp), &Value::Int(total), None)?;
-                    kv::kv_set(&kv_handle, &format!("{}:succeeded", cp), &Value::Int(0), None)?;
-                    kv::kv_set(&kv_handle, &format!("{}:dead", cp), &Value::Int(0), None)?;
-                    kv::kv_set(&kv_handle, &format!("{}:cancelled", cp), &Value::Int(0), None)?;
+                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), batch_ttl_30d)?;
 
                     // Flush jobs to KV.
                     // Mark each flushed so retries skip already-written jobs.
@@ -4938,7 +5259,7 @@ pub fn init() -> HashMap<String, Value> {
                         "sealed", total, total,
                     );
                     meta.insert("sealed_at".to_string(), Value::String(sealed_at));
-                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), None)?;
+                    kv::kv_set(&kv_handle, &meta_key, &Value::Map(meta), batch_ttl_30d)?;
 
                     Ok(())
                 })();
@@ -5062,7 +5383,7 @@ pub fn init() -> HashMap<String, Value> {
                     Value::Map(mut m) => {
                         // Merge authoritative counter values from atomic keys.
                         let cp = format!("jobs:batch:{}:counter", batch_id);
-                        for counter in &["pending", "succeeded", "dead", "cancelled"] {
+                        for counter in &["pending", "succeeded", "dead", "cancelled", "total"] {
                             if let Ok(Value::Int(n)) =
                                 kv::kv_get(&kv_handle, &format!("{}:{}", cp, counter))
                             {
@@ -5085,10 +5406,10 @@ pub fn init() -> HashMap<String, Value> {
     // Available inside a job's perform block when the job belongs to a batch.
     // Use this to dynamically add more jobs to the same batch from within a job.
     // Returns None for jobs not associated with a batch.
-    // Phase 1: always returns None. Phase 2 wires up thread-local job context.
+    // Uses thread-local context set by the worker loop. Returns None when called outside a batch job.
     // @returns Option<String> — Some(batch_id) or None
     // @example let bid = batch_id() ~ "Get current job's batch ID"
-    // @see_also batch, enqueue
+    // @see_also batch, enqueue, enqueue_into
     module.insert(
         "batch_id".to_string(),
         Value::NativeFunction {
@@ -5096,7 +5417,76 @@ pub fn init() -> HashMap<String, Value> {
             arity: 0,
             max_arity: 0,
             requires: None,
-            func: |_args| Ok(Value::none()),
+            func: |_args| {
+                let bid = CURRENT_BATCH_ID.with(|c| c.borrow().clone());
+                match bid {
+                    Some(id) => Ok(Value::some(Value::String(id))),
+                    None => Ok(Value::none()),
+                }
+            },
+        },
+    );
+
+    // @ntnt enqueue_into
+    // @module std/jobs
+    // @signature enqueue_into(batch_id_or_handle: String | Map, job_type: String, args: Map) -> Result<String, String>
+    // Dynamically add a job to a sealed batch.
+    //
+    // Writes the job directly to KV and atomically increments the batch's
+    // pending and total counters. Use this from within a batch job's perform
+    // block to add more work to the same batch.
+    // @param batch_id_or_handle Batch ID string or batch handle map (from batch_id() or batch())
+    // @param job_type The registered job type name
+    // @param args The job payload map
+    // @returns Result<String, String> — Ok(job_id) or Err(message)
+    // @example enqueue_into(unwrap(batch_id()), "ProcessChild", map { "id": child.id }) ~ "Add a child job to the current batch"
+    // @see_also batch, batch_id, enqueue, seal
+    module.insert(
+        "enqueue_into".to_string(),
+        Value::NativeFunction {
+            name: "enqueue_into".to_string(),
+            arity: 3,
+            max_arity: 3,
+            requires: Some(crate::interpreter::RuntimeCapability::JobEnqueue),
+            func: |args| {
+                if args.len() != 3 {
+                    return Err(IntentError::type_error(
+                        "enqueue_into() requires 3 arguments (batch_id, job_type, args)"
+                            .to_string(),
+                    ));
+                }
+                let batch_id =
+                    match &args[0] {
+                        Value::String(s) => s.clone(),
+                        Value::Map(m) => match m.get("_batch_id") {
+                            Some(Value::String(bid)) => bid.clone(),
+                            _ => return Err(IntentError::type_error(
+                                "enqueue_into() first argument must be a batch ID string or handle"
+                                    .to_string(),
+                            )),
+                        },
+                        _ => {
+                            return Err(IntentError::type_error(
+                                "enqueue_into() first argument must be a batch ID string or handle"
+                                    .to_string(),
+                            ))
+                        }
+                    };
+                let job_type = match &args[1] {
+                    Value::String(s) => s.clone(),
+                    _ => {
+                        return Err(IntentError::type_error(
+                            "enqueue_into() second argument must be a job type string".to_string(),
+                        ))
+                    }
+                };
+                let payload = args[2].clone();
+
+                match enqueue_to_sealed_batch(&batch_id, &job_type, payload) {
+                    Ok(job_id) => Ok(Value::ok(Value::String(job_id))),
+                    Err(e) => Err(e),
+                }
+            },
         },
     );
 
@@ -5136,30 +5526,23 @@ pub(crate) mod tests {
         f();
     }
 
-    /// Set up a temp SQLite KV store for the duration of a test, then clean up.
-    fn with_temp_kv<F: FnOnce(&Value)>(db_name: &str, f: F) {
+    /// Set up an isolated in-memory SQLite KV store for the duration of a test.
+    /// Uses `sqlite::memory:` for a clean, isolated DB per test.
+    /// The `db_name` parameter is kept for API compatibility but is ignored.
+    fn with_temp_kv<F: FnOnce(&Value)>(_db_name: &str, f: F) {
         with_clean_runtime(|| {
-            let tmp = std::env::temp_dir().join(db_name);
-            // Delete before opening so stale data from a previous failed run
-            // can't interfere (e.g. done-set entries causing early returns).
-            let _ = std::fs::remove_file(&tmp);
-            let url = format!("sqlite:{}", tmp.display());
             if let Ok(mut u) = JOB_RUNTIME.kv_url.lock() {
-                *u = url.clone();
+                *u = "sqlite::memory:".to_string();
             }
             let kv = JOB_RUNTIME.get_or_init_kv().unwrap();
             f(&kv);
-            // Clear the cached KV handle on exit so that concurrent tests (running
-            // outside TEST_LOCK) cannot inherit a stale handle pointing to this
-            // temp DB — which would cause spurious `jobs:data:` key counts in
-            // parallel test runs (e.g. test_batch_seal_through_terminal_integration).
+            // Clear the cached handle so the next test gets a fresh in-memory DB.
             if let Ok(mut h) = JOB_RUNTIME.kv_handle_info.lock() {
                 *h = None;
             }
             if let Ok(mut u) = JOB_RUNTIME.kv_url.lock() {
                 *u = "sqlite:./jobs.db".to_string();
             }
-            let _ = std::fs::remove_file(&tmp);
         });
     }
 
@@ -6078,6 +6461,16 @@ pub(crate) mod tests {
         match module.get(name).unwrap() {
             Value::NativeFunction { func, .. } => *func,
             _ => panic!("Expected NativeFunction for {}", name),
+        }
+    }
+
+    fn batch_id_from_handle(handle: &Value) -> String {
+        match handle {
+            Value::Map(m) => match m.get("_batch_id") {
+                Some(Value::String(s)) => s.clone(),
+                _ => panic!("no _batch_id"),
+            },
+            _ => panic!("not a map"),
         }
     }
 
@@ -8226,6 +8619,38 @@ pub(crate) mod tests {
         m
     }
 
+    /// Get the KV handle from JOB_RUNTIME — the SAME handle that seal(), enqueue(),
+    /// and enqueue_into() use internally. Tests should use this instead of the `kv`
+    /// closure param from with_temp_kv() to avoid handle mismatch issues where the
+    /// closure's handle and the runtime's cached handle point to different store_ids.
+    fn runtime_kv() -> Value {
+        JOB_RUNTIME.get_or_init_kv().unwrap()
+    }
+
+    /// Find all non-callback job IDs belonging to a specific batch.
+    fn batch_job_ids(_kv: &Value, batch_id: &str) -> Vec<String> {
+        let kv = runtime_kv();
+        let data_keys = kv::kv_list(&kv, Some("jobs:data:")).unwrap_or_default();
+        let mut result = Vec::new();
+        for key in &data_keys {
+            let jid = match key.strip_prefix("jobs:data:") {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if jid.starts_with("cb-") {
+                continue;
+            }
+            if let Ok(Value::Map(m)) = kv::kv_get(&kv, key) {
+                if let Some(Value::String(bid)) = m.get("batch_id") {
+                    if bid == batch_id {
+                        result.push(jid);
+                    }
+                }
+            }
+        }
+        result
+    }
+
     /// Initialize the atomic counter keys that seal() normally creates.
     /// Tests that bypass seal() must call this.
     fn init_batch_counters(kv: &Value, batch_id: &str, pending: i64) {
@@ -8517,13 +8942,7 @@ pub(crate) mod tests {
             let seal_fn = get_fn(&module, "seal");
 
             let handle = batch_fn(&[Value::String("flushed-retry".to_string())]).unwrap();
-            let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => panic!("no _batch_id"),
-                },
-                _ => panic!("not a map"),
-            };
+            let bid = batch_id_from_handle(&handle);
 
             // Enqueue 3 jobs
             for i in 0..3 {
@@ -8691,17 +9110,19 @@ pub(crate) mod tests {
             );
 
             // Simulate both jobs completing.
-            let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
-            let job_ids: Vec<String> = data_keys
-                .iter()
-                .filter(|k| !k.contains("cb-"))
-                .filter_map(|k| k.strip_prefix("jobs:data:").map(|s| s.to_string()))
-                .collect();
-            assert_eq!(job_ids.len(), 2, "expected 2 job data entries");
+            let job_ids = batch_job_ids(kv, &bid);
+            assert_eq!(
+                job_ids.len(),
+                2,
+                "expected 2 job data entries for batch {}",
+                bid
+            );
 
             for jid in &job_ids {
-                let mut jd = HashMap::new();
-                jd.insert("batch_id".to_string(), Value::String(bid.clone()));
+                let jd = match kv::kv_get(kv, &format!("jobs:data:{}", jid)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map for job {}", jid),
+                };
                 update_batch_on_terminal(kv, &jd, jid, "succeeded").unwrap();
             }
 
@@ -8722,6 +9143,1473 @@ pub(crate) mod tests {
             assert!(
                 matches!(meta.get("fired_success"), Some(Value::Bool(true))),
                 "fired_success must be true"
+            );
+        });
+    }
+
+    // ── batch_id() thread-local tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_batch_id_returns_none_outside_job() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+            let result = batch_id_fn(&[]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "None"),
+                "batch_id() must return None outside a job perform block"
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_id_returns_id_inside_batch_job() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+
+            CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = Some("test-batch-123".to_string()));
+            let _guard = BatchIdGuard;
+
+            let result = batch_id_fn(&[]).unwrap();
+            match result {
+                Value::EnumValue {
+                    ref variant,
+                    ref values,
+                    ..
+                } if variant == "Some" && values.len() == 1 => match &values[0] {
+                    Value::String(s) => assert_eq!(s, "test-batch-123"),
+                    other => panic!("batch_id() Some must wrap String, got {:?}", other),
+                },
+                _ => panic!(
+                    "batch_id() must return Some(String) inside a batch job, got {:?}",
+                    result
+                ),
+            }
+        });
+    }
+
+    #[test]
+    fn test_batch_id_cleared_after_job_execution() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+
+            {
+                CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = Some("batch-abc".to_string()));
+                let _guard = BatchIdGuard;
+            }
+
+            let result = batch_id_fn(&[]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "None"),
+                "batch_id() must return None after guard drops"
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_id_none_for_non_batch_job() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+
+            {
+                CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = Some("batch-xyz".to_string()));
+                let _guard = BatchIdGuard;
+            }
+            {
+                CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = None);
+                let _guard = BatchIdGuard;
+
+                let result = batch_id_fn(&[]).unwrap();
+                assert!(
+                    matches!(result, Value::EnumValue { ref variant, .. } if variant == "None"),
+                    "batch_id() must return None for non-batch job"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_batch_id_cleared_on_panic() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = Some("panic-batch".to_string()));
+                let _guard = BatchIdGuard;
+                panic!("simulated panic in perform block");
+            }));
+            assert!(result.is_err(), "should have caught panic");
+
+            let result = batch_id_fn(&[]).unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "None"),
+                "batch_id() must return None after panic (guard cleanup)"
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_id_available_in_on_failure() {
+        with_clean_runtime(|| {
+            let module = init();
+            let batch_id_fn = get_fn(&module, "batch_id");
+
+            CURRENT_BATCH_ID.with(|c| *c.borrow_mut() = Some("failure-batch".to_string()));
+            let _guard = BatchIdGuard;
+
+            let result1 = batch_id_fn(&[]).unwrap();
+            match &result1 {
+                Value::EnumValue {
+                    variant, values, ..
+                } if variant == "Some" && values.len() == 1 => match &values[0] {
+                    Value::String(s) => assert_eq!(s, "failure-batch"),
+                    other => panic!("batch_id() Some must wrap String, got {:?}", other),
+                },
+                _ => panic!("batch_id() must return Some(String), got {:?}", result1),
+            }
+
+            let result2 = batch_id_fn(&[]).unwrap();
+            match &result2 {
+                Value::EnumValue {
+                    variant, values, ..
+                } if variant == "Some" && values.len() == 1 => match &values[0] {
+                    Value::String(s) => assert_eq!(s, "failure-batch"),
+                    other => panic!("batch_id() Some must wrap String, got {:?}", other),
+                },
+                _ => panic!(
+                    "batch_id() must still return Some(String) in on_failure context, got {:?}",
+                    result2
+                ),
+            }
+        });
+    }
+
+    #[test]
+    fn test_total_counter_initialized_at_seal() {
+        with_temp_kv("ntnt_total_counter_seal_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("total-ctr-test".to_string())]).unwrap();
+            for i in 0..5 {
+                let mut payload = HashMap::new();
+                payload.insert("x".to_string(), Value::Int(i));
+                enqueue_fn(&[
+                    handle.clone(),
+                    Value::String("ProcessRow".to_string()),
+                    Value::Map(payload),
+                ])
+                .unwrap();
+            }
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+            let cp = format!("jobs:batch:{}:counter", bid);
+            let total = kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap();
+            assert!(
+                matches!(total, Value::Int(5)),
+                "counter:total must be 5 after sealing 5 jobs, got {:?}",
+                total
+            );
+        });
+    }
+
+    #[test]
+    fn test_batch_status_includes_total_counter() {
+        with_temp_kv("ntnt_batch_status_total_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let status_fn = get_fn(&module, "batch_status");
+
+            let handle = batch_fn(&[Value::String("status-total-test".to_string())]).unwrap();
+            for i in 0..3 {
+                let mut payload = HashMap::new();
+                payload.insert("x".to_string(), Value::Int(i));
+                enqueue_fn(&[
+                    handle.clone(),
+                    Value::String("ProcessRow".to_string()),
+                    Value::Map(payload),
+                ])
+                .unwrap();
+            }
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let status = status_fn(&[handle.clone()]).unwrap();
+            let status_map = match status {
+                Value::EnumValue { ref values, .. } => match values.first() {
+                    Some(Value::Map(m)) => m.clone(),
+                    _ => panic!("expected map in Ok, got {:?}", values),
+                },
+                _ => panic!("expected Ok variant"),
+            };
+            assert!(
+                matches!(status_map.get("total"), Some(Value::Int(3))),
+                "batch_status total must be 3 (from counter), got {:?}",
+                status_map.get("total")
+            );
+        });
+    }
+
+    #[test]
+    fn test_closed_flag_set_on_completion() {
+        with_temp_kv("ntnt_closed_flag_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("closed-flag-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let job_ids = batch_job_ids(kv, &bid);
+            let job_id = job_ids
+                .into_iter()
+                .next()
+                .expect("should find a non-callback job");
+
+            let job_data =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_id)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+
+            update_batch_on_terminal(&runtime_kv(), &job_data, &job_id, "succeeded").unwrap();
+
+            let closed_key = format!("jobs:batch:{}:closed", bid);
+            let closed = kv::kv_get(&runtime_kv(), &closed_key).unwrap();
+            assert!(
+                matches!(closed, Value::Bool(true)),
+                "closed flag must be set after batch completion"
+            );
+        });
+    }
+
+    #[test]
+    fn test_seal_sets_30d_ttl_on_metadata() {
+        with_temp_kv("ntnt_seal_ttl_meta_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("ttl-meta-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+            let meta_key = format!("jobs:batch:{}", bid);
+            let ttl = kv::kv_ttl(&runtime_kv(), &meta_key).unwrap();
+            let thirty_days = 30 * 24 * 3600;
+            match ttl {
+                Some(t) => assert!(
+                    t > thirty_days - 60 && t <= thirty_days,
+                    "metadata TTL should be ~30 days, got {} seconds",
+                    t
+                ),
+                None => panic!("metadata key should have a TTL after seal"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_seal_sets_30d_ttl_on_counters() {
+        with_temp_kv("ntnt_seal_ttl_counters_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("ttl-counters-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+            let cp = format!("jobs:batch:{}:counter", bid);
+            let thirty_days = 30 * 24 * 3600;
+            for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
+                let ttl = kv::kv_ttl(&runtime_kv(), &format!("{}:{}", cp, suffix)).unwrap();
+                match ttl {
+                    Some(t) => assert!(
+                        t > thirty_days - 60 && t <= thirty_days,
+                        "counter:{} TTL should be ~30 days, got {}s",
+                        suffix,
+                        t
+                    ),
+                    None => panic!("counter:{} should have TTL after seal", suffix),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_completion_shortens_ttl_to_24h() {
+        with_temp_kv("ntnt_completion_ttl_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("completion-ttl-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let job_ids = batch_job_ids(kv, &bid);
+            let job_id = job_ids.into_iter().next().expect("should find a job");
+            let job_data =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_id)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+            update_batch_on_terminal(&runtime_kv(), &job_data, &job_id, "succeeded").unwrap();
+
+            let meta_key = format!("jobs:batch:{}", bid);
+            let twenty_four_hours = 24 * 3600;
+            let meta_ttl = kv::kv_ttl(&runtime_kv(), &meta_key).unwrap();
+            match meta_ttl {
+                Some(t) => assert!(
+                    t > twenty_four_hours - 60 && t <= twenty_four_hours,
+                    "metadata TTL should be ~24h after completion, got {}s",
+                    t
+                ),
+                None => panic!("metadata should have TTL after completion"),
+            }
+
+            let cp = format!("jobs:batch:{}:counter", bid);
+            for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
+                let ttl = kv::kv_ttl(&runtime_kv(), &format!("{}:{}", cp, suffix)).unwrap();
+                match ttl {
+                    Some(t) => assert!(
+                        t > twenty_four_hours - 60 && t <= twenty_four_hours,
+                        "counter:{} TTL should be ~24h after completion, got {}s",
+                        suffix,
+                        t
+                    ),
+                    None => panic!("counter:{} should have TTL after completion", suffix),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn test_closed_flag_has_ttl() {
+        with_temp_kv("ntnt_closed_flag_ttl_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("closed-ttl-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let job_ids = batch_job_ids(kv, &bid);
+            let job_id = job_ids.into_iter().next().expect("should find a job");
+            let job_data =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_id)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+            update_batch_on_terminal(&runtime_kv(), &job_data, &job_id, "succeeded").unwrap();
+
+            let closed_key = format!("jobs:batch:{}:closed", bid);
+            let twenty_four_hours = 24 * 3600;
+            let ttl = kv::kv_ttl(&runtime_kv(), &closed_key).unwrap();
+            match ttl {
+                Some(t) => assert!(
+                    t > twenty_four_hours - 60 && t <= twenty_four_hours,
+                    "closed flag TTL should be ~24h, got {}s",
+                    t
+                ),
+                None => panic!("closed flag should have TTL"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_empty_batch_gets_24h_ttl() {
+        with_temp_kv("ntnt_empty_batch_ttl_test.db", |_kv| {
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("empty-ttl-test".to_string())]).unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+            let meta_key = format!("jobs:batch:{}", bid);
+            let twenty_four_hours = 24 * 3600;
+            let ttl = kv::kv_ttl(&runtime_kv(), &meta_key).unwrap();
+            match ttl {
+                Some(t) => assert!(
+                    t > twenty_four_hours - 60 && t <= twenty_four_hours,
+                    "empty batch metadata TTL should be ~24h, got {}s",
+                    t
+                ),
+                None => panic!("empty batch metadata should have 24h TTL"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_only_one_worker_fires_callbacks() {
+        with_temp_kv("ntnt_one_worker_callbacks_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+
+            let handle = batch_fn(&[Value::String("one-worker-test".to_string())]).unwrap();
+            for i in 0..2 {
+                let mut payload = HashMap::new();
+                payload.insert("x".to_string(), Value::Int(i));
+                enqueue_fn(&[
+                    handle.clone(),
+                    Value::String("ProcessRow".to_string()),
+                    Value::Map(payload),
+                ])
+                .unwrap();
+            }
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let job_ids = batch_job_ids(kv, &bid);
+            assert_eq!(job_ids.len(), 2);
+
+            let job_data_1 =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_ids[0])).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+            update_batch_on_terminal(&runtime_kv(), &job_data_1, &job_ids[0], "succeeded").unwrap();
+
+            let job_data_2 =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_ids[1])).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+            update_batch_on_terminal(&runtime_kv(), &job_data_2, &job_ids[1], "succeeded").unwrap();
+
+            let cb_keys = kv::kv_list(&runtime_kv(), Some(&format!("jobs:data:cb-{}", bid)))
+                .unwrap_or_default();
+            let complete_cbs: Vec<&String> = cb_keys
+                .iter()
+                .filter(|k| k.contains("on_complete"))
+                .collect();
+            assert!(
+                complete_cbs.len() <= 1,
+                "at most one on_complete callback should be enqueued, got {}",
+                complete_cbs.len()
+            );
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_rejects_invalid_batch_id() {
+        with_temp_kv("ntnt_enqueue_into_invalid_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let result = enqueue_into_fn(&[
+                Value::String("nonexistent-batch-id".to_string()),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(
+                result.is_err(),
+                "enqueue_into with invalid batch_id must error"
+            );
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(
+                err_msg.contains("not found"),
+                "error must mention 'not found', got: {}",
+                err_msg
+            );
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_rejects_unknown_job_type() {
+        with_temp_kv("ntnt_enqueue_into_unknown_type_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("unknown-type-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid),
+                Value::String("NonExistentJob".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(
+                result.is_err(),
+                "enqueue_into with unknown job type must error"
+            );
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_writes_job_and_increments_counters() {
+        with_temp_kv("ntnt_enqueue_into_counters_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("dynamic-add-test".to_string())]).unwrap();
+            let mut payload = HashMap::new();
+            payload.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+            let cp = format!("jobs:batch:{}:counter", bid);
+            assert!(matches!(
+                kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap(),
+                Value::Int(1)
+            ));
+            assert!(matches!(
+                kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap(),
+                Value::Int(1)
+            ));
+
+            let mut payload2 = HashMap::new();
+            payload2.insert("x".to_string(), Value::Int(2));
+            let result = enqueue_into_fn(&[
+                Value::String(bid.clone()),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(payload2),
+            ])
+            .unwrap();
+            assert!(
+                matches!(result, Value::EnumValue { ref variant, .. } if variant == "Ok"),
+                "enqueue_into must return Ok"
+            );
+
+            assert!(
+                matches!(
+                    kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap(),
+                    Value::Int(2)
+                ),
+                "total should be 2"
+            );
+            assert!(
+                matches!(
+                    kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap(),
+                    Value::Int(2)
+                ),
+                "pending should be 2"
+            );
+
+            let job_ids = batch_job_ids(kv, &bid);
+            assert_eq!(job_ids.len(), 2, "should have 2 jobs in KV");
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_returns_job_id() {
+        with_temp_kv("ntnt_enqueue_into_returns_id_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("returns-id-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+
+            match result {
+                Value::EnumValue {
+                    ref variant,
+                    ref values,
+                    ..
+                } => {
+                    assert_eq!(variant, "Ok");
+                    assert!(
+                        matches!(values.first(), Some(Value::String(_))),
+                        "enqueue_into must return Ok(String(job_id))"
+                    );
+                }
+                _ => panic!("expected EnumValue Ok"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_rejects_complete_batch() {
+        with_temp_kv("ntnt_enqueue_into_complete_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("complete-reject-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let job_ids = batch_job_ids(kv, &bid);
+            let job_id = job_ids.into_iter().next().expect("should find a job");
+            let job_data =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_id)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+            update_batch_on_terminal(&runtime_kv(), &job_data, &job_id, "succeeded").unwrap();
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(result.is_err(), "enqueue_into to complete batch must error");
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(
+                err_msg.contains("complete") || err_msg.contains("closing"),
+                "error should mention complete or closing, got: {}",
+                err_msg
+            );
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_rejects_closed_batch() {
+        with_temp_kv("ntnt_enqueue_into_closed_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("closed-reject-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let closed_key = format!("jobs:batch:{}:closed", bid);
+            kv::kv_set(&runtime_kv(), &closed_key, &Value::Bool(true), None).unwrap();
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(result.is_err(), "enqueue_into to closed batch must error");
+            let err_msg = format!("{}", result.unwrap_err());
+            assert!(
+                err_msg.contains("closing"),
+                "error should mention 'closing', got: {}",
+                err_msg
+            );
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_allowed_during_sealing() {
+        with_temp_kv("ntnt_enqueue_into_sealing_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let bid = "test-sealing-batch";
+            let meta = build_batch_meta(bid, "sealing-test", "0", "sealing", 1, 1);
+            kv::kv_set(
+                &runtime_kv(),
+                &format!("jobs:batch:{}", bid),
+                &Value::Map(meta),
+                None,
+            )
+            .unwrap();
+            let cp = format!("jobs:batch:{}:counter", bid);
+            for suffix in &["pending", "total", "succeeded", "dead", "cancelled"] {
+                let val = if *suffix == "pending" || *suffix == "total" {
+                    1
+                } else {
+                    0
+                };
+                kv::kv_set(
+                    &runtime_kv(),
+                    &format!("{}:{}", cp, suffix),
+                    &Value::Int(val),
+                    None,
+                )
+                .unwrap();
+            }
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid.to_string()),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(
+                result.is_ok(),
+                "enqueue_into during sealing should succeed, got: {:?}",
+                result.err()
+            );
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_allowed_when_sealed() {
+        with_temp_kv("ntnt_enqueue_into_sealed_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("sealed-add-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let result = enqueue_into_fn(&[
+                Value::String(bid),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ]);
+            assert!(
+                result.is_ok(),
+                "enqueue_into on sealed batch should succeed, got: {:?}",
+                result.err()
+            );
+        });
+    }
+
+    #[test]
+    fn test_enqueue_into_dedup_rolls_back_counters() {
+        with_temp_kv("ntnt_enqueue_into_dedup_test.db", |_kv| {
+            let mut opts = HashMap::new();
+            opts.insert("unique".to_string(), JobOptionValue::Int(3600));
+            JOB_RUNTIME
+                .register_job(test_job_def_with_opts("UniqueJob", "default", opts))
+                .unwrap();
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("dedup-rollback-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+            let cp = format!("jobs:batch:{}:counter", bid);
+
+            // Initial: total=1, pending=1
+            assert!(matches!(
+                kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap(),
+                Value::Int(1)
+            ));
+            assert!(matches!(
+                kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap(),
+                Value::Int(1)
+            ));
+
+            // First unique job add — should succeed, counters go to 2
+            let mut unique_payload = HashMap::new();
+            unique_payload.insert("key".to_string(), Value::String("same".to_string()));
+            enqueue_into_fn(&[
+                Value::String(bid.clone()),
+                Value::String("UniqueJob".to_string()),
+                Value::Map(unique_payload.clone()),
+            ])
+            .unwrap();
+            assert!(matches!(
+                kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap(),
+                Value::Int(2)
+            ));
+            assert!(matches!(
+                kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap(),
+                Value::Int(2)
+            ));
+
+            // Second identical unique job — should dedup, counters should stay at 2
+            enqueue_into_fn(&[
+                Value::String(bid.clone()),
+                Value::String("UniqueJob".to_string()),
+                Value::Map(unique_payload),
+            ])
+            .unwrap();
+            let total_after = kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap();
+            let pending_after = kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap();
+            assert!(
+                matches!(total_after, Value::Int(2)),
+                "total should still be 2 after dedup, got {:?}",
+                total_after
+            );
+            assert!(
+                matches!(pending_after, Value::Int(2)),
+                "pending should still be 2 after dedup, got {:?}",
+                pending_after
+            );
+        });
+    }
+
+    #[test]
+    fn test_dynamic_add_then_complete_fires_callbacks() {
+        with_temp_kv("ntnt_dynamic_add_callbacks_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("dynamic-callback-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            let mut p2 = HashMap::new();
+            p2.insert("x".to_string(), Value::Int(2));
+            enqueue_into_fn(&[
+                Value::String(bid.clone()),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p2),
+            ])
+            .unwrap();
+
+            // Now total=2, pending=2. Complete both jobs.
+            let job_ids = batch_job_ids(kv, &bid);
+            assert_eq!(job_ids.len(), 2, "should have 2 jobs");
+
+            let jd1 = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_ids[0])).unwrap()
+            {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
+            update_batch_on_terminal(&runtime_kv(), &jd1, &job_ids[0], "succeeded").unwrap();
+
+            let cp = format!("jobs:batch:{}:counter", bid);
+            assert!(
+                matches!(
+                    kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap(),
+                    Value::Int(1)
+                ),
+                "pending should be 1 after first completion"
+            );
+
+            let jd2 = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_ids[1])).unwrap()
+            {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
+            update_batch_on_terminal(&runtime_kv(), &jd2, &job_ids[1], "succeeded").unwrap();
+
+            let meta = match kv::kv_get(&runtime_kv(), &format!("jobs:batch:{}", bid)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected metadata map"),
+            };
+            assert!(
+                matches!(meta.get("status"), Some(Value::String(s)) if s == "complete"),
+                "batch status should be complete"
+            );
+            assert!(
+                matches!(meta.get("fired_complete"), Some(Value::Bool(true))),
+                "fired_complete should be true"
+            );
+            assert!(
+                matches!(meta.get("fired_success"), Some(Value::Bool(true))),
+                "fired_success should be true"
+            );
+
+            let total = kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap();
+            assert!(
+                matches!(total, Value::Int(2)),
+                "counter:total should be 2, got {:?}",
+                total
+            );
+        });
+    }
+
+    #[test]
+    fn test_on_success_uses_counter_total() {
+        with_temp_kv("ntnt_on_success_counter_total_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("success-counter-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            enqueue_into_fn(&[
+                Value::String(bid.clone()),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(HashMap::new()),
+            ])
+            .unwrap();
+
+            // counter:total = 2, metadata total = 1 (stale)
+            let job_ids = batch_job_ids(kv, &bid);
+
+            for jid in &job_ids {
+                let jd = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", jid)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+                update_batch_on_terminal(&runtime_kv(), &jd, jid, "succeeded").unwrap();
+            }
+
+            let meta = match kv::kv_get(&runtime_kv(), &format!("jobs:batch:{}", bid)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected metadata"),
+            };
+            assert!(
+                matches!(meta.get("fired_success"), Some(Value::Bool(true))),
+                "on_success should fire — succeeded(2) == counter:total(2), not metadata total(1)"
+            );
+        });
+    }
+
+    #[test]
+    fn test_total_counter_incremented_on_dynamic_add() {
+        with_temp_kv("ntnt_total_counter_dynamic_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let enqueue_into_fn = get_fn(&module, "enqueue_into");
+
+            let handle = batch_fn(&[Value::String("total-dynamic-test".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
+            seal_fn(&[handle.clone()]).unwrap();
+
+            let bid = match &handle {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+            let cp = format!("jobs:batch:{}:counter", bid);
+
+            for i in 0..3 {
+                let mut pp = HashMap::new();
+                pp.insert("y".to_string(), Value::Int(i));
+                enqueue_into_fn(&[
+                    Value::String(bid.clone()),
+                    Value::String("ProcessRow".to_string()),
+                    Value::Map(pp),
+                ])
+                .unwrap();
+            }
+
+            let total = kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap();
+            assert!(
+                matches!(total, Value::Int(4)),
+                "counter:total should be 4 (1 sealed + 3 dynamic), got {:?}",
+                total
+            );
+        });
+    }
+
+    #[test]
+    fn test_nested_batch_via_callback() {
+        with_temp_kv("ntnt_nested_batch_test.db", |kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+            let module = init();
+            let batch_fn = get_fn(&module, "batch");
+            let enqueue_fn = get_fn(&module, "enqueue");
+            let seal_fn = get_fn(&module, "seal");
+            let status_fn = get_fn(&module, "batch_status");
+
+            // Batch A: 1 job
+            let handle_a = batch_fn(&[Value::String("parent-batch".to_string())]).unwrap();
+            let mut p = HashMap::new();
+            p.insert("x".to_string(), Value::Int(1));
+            enqueue_fn(&[
+                handle_a.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(p),
+            ])
+            .unwrap();
+            seal_fn(&[handle_a.clone()]).unwrap();
+
+            let bid_a = match &handle_a {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            // Complete batch A
+            let job_ids_a = batch_job_ids(kv, &bid_a);
+            let job_id_a = job_ids_a.into_iter().next().expect("should find a job");
+            let jd_a = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_id_a)).unwrap()
+            {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
+            update_batch_on_terminal(&runtime_kv(), &jd_a, &job_id_a, "succeeded").unwrap();
+
+            // Batch A is now complete. Simulate callback creating batch B.
+            let handle_b = batch_fn(&[Value::String("child-batch".to_string())]).unwrap();
+            let mut pb = HashMap::new();
+            pb.insert("y".to_string(), Value::Int(2));
+            enqueue_fn(&[
+                handle_b.clone(),
+                Value::String("ProcessRow".to_string()),
+                Value::Map(pb),
+            ])
+            .unwrap();
+            seal_fn(&[handle_b.clone()]).unwrap();
+
+            let bid_b = match &handle_b {
+                Value::Map(m) => match m.get("_batch_id") {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => panic!("no _batch_id"),
+                },
+                _ => panic!("not a map"),
+            };
+
+            // Batch B is independent
+            let status_b = status_fn(&[Value::String(bid_b.clone())]).unwrap();
+            let status_map = match status_b {
+                Value::EnumValue { ref values, .. } => match values.first() {
+                    Some(Value::Map(m)) => m.clone(),
+                    _ => panic!("expected map"),
+                },
+                _ => panic!("expected Ok"),
+            };
+            assert!(
+                matches!(status_map.get("status"), Some(Value::String(s)) if s == "sealed"),
+                "child batch should be sealed"
+            );
+            assert!(
+                matches!(status_map.get("total"), Some(Value::Int(1))),
+                "child batch total should be 1"
+            );
+
+            // Batch A status is still complete
+            let status_a = status_fn(&[Value::String(bid_a.clone())]).unwrap();
+            let status_map_a = match status_a {
+                Value::EnumValue { ref values, .. } => match values.first() {
+                    Some(Value::Map(m)) => m.clone(),
+                    _ => panic!("expected map"),
+                },
+                _ => panic!("expected Ok"),
+            };
+            assert!(
+                matches!(status_map_a.get("status"), Some(Value::String(s)) if s == "complete"),
+                "parent batch should still be complete"
+            );
+        });
+    }
+
+    /// Legacy batch compatibility: batches sealed before Phase 3 don't have
+    /// counter:total. Verify that update_batch_on_terminal falls back to
+    /// metadata total and initializes counter:total from it, so on_success
+    /// fires correctly and batch_status reports the right total.
+    #[test]
+    fn test_legacy_batch_without_counter_total() {
+        with_temp_kv("ntnt_legacy_batch_total_test.db", |_kv| {
+            JOB_RUNTIME
+                .register_job(test_job_def("ProcessRow", "imports"))
+                .unwrap();
+
+            // Simulate a Phase 1-2 batch: metadata with total=2, counter keys
+            // for pending/succeeded/dead/cancelled but NO counter:total.
+            let bid = "legacy-batch-test";
+            let meta_key = format!("jobs:batch:{}", bid);
+            let cp = format!("jobs:batch:{}:counter", bid);
+
+            let meta = build_batch_meta(bid, "legacy-test", "0", "sealed", 2, 2);
+            kv::kv_set(&runtime_kv(), &meta_key, &Value::Map(meta), None).unwrap();
+            kv::kv_set(
+                &runtime_kv(),
+                &format!("{}:pending", cp),
+                &Value::Int(2),
+                None,
+            )
+            .unwrap();
+            kv::kv_set(
+                &runtime_kv(),
+                &format!("{}:succeeded", cp),
+                &Value::Int(0),
+                None,
+            )
+            .unwrap();
+            kv::kv_set(&runtime_kv(), &format!("{}:dead", cp), &Value::Int(0), None).unwrap();
+            kv::kv_set(
+                &runtime_kv(),
+                &format!("{}:cancelled", cp),
+                &Value::Int(0),
+                None,
+            )
+            .unwrap();
+            // Deliberately NOT setting counter:total — this is the legacy case.
+
+            // Write two fake jobs with batch_id directly to KV
+            let job1_id = "legacy-job-1";
+            let job2_id = "legacy-job-2";
+            for (jid, val) in &[(job1_id, 1), (job2_id, 2)] {
+                let mut jdata = HashMap::new();
+                jdata.insert("type".to_string(), Value::String("ProcessRow".to_string()));
+                jdata.insert("status".to_string(), Value::String("pending".to_string()));
+                jdata.insert("batch_id".to_string(), Value::String(bid.to_string()));
+                jdata.insert("queue".to_string(), Value::String("imports".to_string()));
+                jdata.insert(
+                    "payload".to_string(),
+                    Value::Map({
+                        let mut p = HashMap::new();
+                        p.insert("x".to_string(), Value::Int(*val));
+                        p
+                    }),
+                );
+                kv::kv_set(
+                    &runtime_kv(),
+                    &format!("jobs:data:{}", jid),
+                    &Value::Map(jdata),
+                    None,
+                )
+                .unwrap();
+            }
+
+            // Complete both jobs
+            let jd1 = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job1_id)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
+            update_batch_on_terminal(&runtime_kv(), &jd1, job1_id, "succeeded").unwrap();
+
+            // After first completion, counter:total should have been initialized
+            // from metadata (total_jobs=2), not 0.
+            let total_after_first = kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap();
+            assert!(
+                matches!(total_after_first, Value::Int(2)),
+                "counter:total should be 2 (from metadata fallback), got {:?}",
+                total_after_first
+            );
+
+            let jd2 = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job2_id)).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected map"),
+            };
+            update_batch_on_terminal(&runtime_kv(), &jd2, job2_id, "succeeded").unwrap();
+
+            // After both complete, on_success should have fired
+            let meta_after = match kv::kv_get(&runtime_kv(), &meta_key).unwrap() {
+                Value::Map(m) => m,
+                _ => panic!("expected metadata map"),
+            };
+            assert!(
+                matches!(meta_after.get("fired_success"), Some(Value::Bool(true))),
+                "on_success should fire for legacy batch — succeeded(2) == total(2)"
+            );
+            assert!(
+                matches!(meta_after.get("fired_complete"), Some(Value::Bool(true))),
+                "on_complete should fire for legacy batch"
             );
         });
     }

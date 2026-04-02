@@ -379,12 +379,12 @@ Inside a job's perform block, `batch_id()` returns the batch ID if the job belon
 - [x] Tests: success callback fires, complete callback fires, death callback fires
 
 **Phase 3: Dynamic additions + edge cases**
-- [ ] `batch_id()` available in perform block context
-- [ ] `enqueue(batch_id, job_type, args)` from within a batch job — increments pending atomically
+- [x] `batch_id()` available in perform block context
+- [x] `enqueue_into(batch_id, job_type, args)` from within a batch job — increments pending atomically
 - [x] Empty batch: seal with 0 jobs → immediate callbacks
-- [ ] Batch expiry: TTL on completed batches (24h), abandoned batches (30d)
+- [x] Batch expiry: TTL on completed batches (24h), abandoned batches (30d)
 - [x] Idempotent seal
-- [ ] Tests: dynamic job addition, empty batch, nested batches via callbacks
+- [x] Tests: dynamic job addition, empty batch, nested batches via callbacks
 
 **Phase 4: CLI + observability**
 - [ ] `ntnt jobs batches` — list active batches with counters

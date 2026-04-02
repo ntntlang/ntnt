@@ -351,9 +351,9 @@ git tag v0.X.Y -a -m "v0.X.Y: description" && git push origin v0.X.Y
 
 ## Agent Instruction Sync
 
-`docs/AI_AGENT_GUIDE.md` syncs to `.github/copilot-instructions.md` via `<!-- BEGIN/END NTNT CODING GUIDE -->` markers. `CLAUDE.md` is manually maintained (condensed version with references).
+Agent file auto-sync is disabled (`AGENT_FILES` is empty in `src/main.rs`). `CLAUDE.md` and `.github/copilot-instructions.md` are manually maintained condensed versions that reference `docs/AI_AGENT_GUIDE.md` instead of embedding the full guide.
 
-Edit the source, run `ntnt docs --generate`.
+`ntnt docs --generate` regenerates `STDLIB_REFERENCE.md`, `SYNTAX_REFERENCE.md`, `IAL_REFERENCE.md`, and `RUNTIME_REFERENCE.md` from source.
 
 ## Roadmap
 

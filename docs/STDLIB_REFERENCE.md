@@ -6161,6 +6161,7 @@ import { configure_queue, enqueue, job_status } from "std/jobs"
 | [`enqueue_at`](#enqueueat) | Enqueue a job to run at a specific future time. |
 | [`enqueue_batch`](#enqueuebatch) | Enqueue multiple jobs of the same type in one call. |
 | [`enqueue_in`](#enqueuein) | Enqueue a job to run after a delay in seconds. |
+| [`enqueue_into`](#enqueueinto) | Dynamically add a job to a sealed batch. |
 | [`job_status`](#jobstatus) | Get the current status and data for a job by its ID. |
 | [`list_jobs`](#listjobs) | List jobs with optional status and queue filters. |
 | [`pause_queue`](#pausequeue) | Pause a queue — workers stop executing jobs from it. |
@@ -6267,7 +6268,7 @@ batch_id() -> Option<String>
 
 Returns the batch ID of the currently-executing job, or None.
 
-Available inside a job's perform block when the job belongs to a batch. Use this to dynamically add more jobs to the same batch from within a job. Returns None for jobs not associated with a batch. Phase 1: always returns None. Phase 2 wires up thread-local job context.
+Available inside a job's perform block when the job belongs to a batch. Use this to dynamically add more jobs to the same batch from within a job. Returns None for jobs not associated with a batch. Uses thread-local context set by the worker loop. Returns None when called outside a batch job.
 
 **Returns:** Option<String> — Some(batch_id) or None
 
@@ -6277,7 +6278,7 @@ Available inside a job's perform block when the job belongs to a batch. Use this
 let bid = batch_id()  // Get current job's batch ID
 ```
 
-**See also:** `batch`, `enqueue`
+**See also:** `batch`, `enqueue`, `enqueue_into`
 
 ---
 
@@ -6551,6 +6552,34 @@ enqueue_in("PurgeCache", 300, map {})  // Purge cache in 5 minutes
 ```
 
 **See also:** `enqueue_at`, `enqueue`
+
+---
+
+#### `enqueue_into`
+
+```ntnt
+enqueue_into(batch_id_or_handle: String | Map, job_type: String, args: Map) -> Result<String, String>
+```
+
+Dynamically add a job to a sealed batch.
+
+Writes the job directly to KV and atomically increments the batch's pending and total counters. Use this from within a batch job's perform block to add more work to the same batch.
+
+**Parameters:**
+
+- `batch_id_or_handle` — Batch ID string or batch handle map (from batch_id() or batch())
+- `job_type` — The registered job type name
+- `args` — The job payload map
+
+**Returns:** Result<String, String> — Ok(job_id) or Err(message)
+
+**Examples:**
+
+```ntnt
+enqueue_into(unwrap(batch_id()), "ProcessChild", map { "id": child.id })  // Add a child job to the current batch
+```
+
+**See also:** `batch`, `batch_id`, `enqueue`, `seal`
 
 ---
 

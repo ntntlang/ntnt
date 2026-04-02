@@ -2321,6 +2321,31 @@ pub fn kv_expire(handle: &Value, key: &str, seconds: i64) -> Result<bool> {
     }
 }
 
+/// Read the remaining TTL (in seconds) for a key.
+/// Returns `Ok(Some(seconds))` if a TTL is set, `Ok(None)` if the key has no expiry.
+/// Also returns `Ok(None)` if the key does not exist (callers should check existence
+/// separately with `kv_get` if the distinction matters).
+/// Returns an error on backend failure.
+pub fn kv_ttl(handle: &Value, key: &str) -> Result<Option<i64>> {
+    let backend = get_backend_type(handle)?;
+    match backend {
+        KVBackend::SQLite => {
+            let kv_arc = get_sqlite_kv(handle)?;
+            let kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.ttl(key)
+        }
+        KVBackend::Redis => {
+            let kv_arc = get_redis_kv(handle)?;
+            let mut kv = kv_arc
+                .lock()
+                .map_err(|e| IntentError::runtime_error(format!("KV lock error: {}", e)))?;
+            kv.ttl(key)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
