@@ -698,6 +698,23 @@ fn fire_batch_callback(
     Ok(())
 }
 
+fn try_fire_batch_callback(
+    batch_id: &str,
+    callback_type: &str,
+    meta_snapshot: &Option<HashMap<String, Value>>,
+) -> bool {
+    if let Some(ref snap) = meta_snapshot {
+        if let Ok(()) = fire_batch_callback(batch_id, callback_type, snap) {
+            return true;
+        }
+        eprintln!(
+            "[ntnt] warning: failed to enqueue {} callback for batch '{}'",
+            callback_type, batch_id
+        );
+    }
+    false
+}
+
 /// Dynamically add a job to a sealed batch. Writes directly to KV and
 /// atomically increments pending + total counters.
 ///
@@ -705,7 +722,7 @@ fn fire_batch_callback(
 /// is complete, or is closed.
 fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Result<String> {
     // Step 1: Validate job type is registered (before any counter mutation).
-    let _job_def = JOB_RUNTIME.get_job(job_name)?.ok_or_else(|| {
+    let job_def = JOB_RUNTIME.get_job(job_name)?.ok_or_else(|| {
         IntentError::runtime_error(format!(
             "Unknown job type '{}' — define it with a job block before enqueueing",
             job_name
@@ -785,7 +802,8 @@ fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Re
     })?;
 
     // Step 8: Write job to KV via enqueue_internal.
-    let result = enqueue_internal(
+    let result = enqueue_internal_with_def(
+        &job_def,
         job_name,
         payload,
         &timestamp_key(),
@@ -798,17 +816,20 @@ fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Re
         Ok(EnqueueResult::Created(job_id)) => Ok(job_id),
         Ok(EnqueueResult::Deduplicated(existing_id)) => {
             // Dedup collision — roll back both counters.
-            let _ = kv::kv_incr(&kv_handle, &format!("{}:pending", counter_prefix), -1);
-            let _ = kv::kv_incr(&kv_handle, &format!("{}:total", counter_prefix), -1);
+            rollback_batch_counters(&kv_handle, &counter_prefix);
             Ok(existing_id)
         }
         Err(e) => {
             // Enqueue failed — roll back both counters.
-            let _ = kv::kv_incr(&kv_handle, &format!("{}:pending", counter_prefix), -1);
-            let _ = kv::kv_incr(&kv_handle, &format!("{}:total", counter_prefix), -1);
+            rollback_batch_counters(&kv_handle, &counter_prefix);
             Err(e)
         }
     }
+}
+
+fn rollback_batch_counters(kv_handle: &Value, counter_prefix: &str) {
+    let _ = kv::kv_incr(kv_handle, &format!("{}:pending", counter_prefix), -1);
+    let _ = kv::kv_incr(kv_handle, &format!("{}:total", counter_prefix), -1);
 }
 
 /// Update batch counters when a job reaches a terminal state.
@@ -1040,40 +1061,13 @@ fn update_batch_on_terminal(
     let mut did_fire_success = false;
 
     if fire_death {
-        if let Some(ref snap) = meta_snapshot {
-            if let Ok(()) = fire_batch_callback(&batch_id, "on_death", snap) {
-                did_fire_death = true;
-            } else {
-                eprintln!(
-                    "[ntnt] warning: failed to enqueue on_death callback for batch '{}'",
-                    batch_id
-                );
-            }
-        }
+        did_fire_death = try_fire_batch_callback(&batch_id, "on_death", &meta_snapshot);
     }
     if fire_complete {
-        if let Some(ref snap) = meta_snapshot {
-            if let Ok(()) = fire_batch_callback(&batch_id, "on_complete", snap) {
-                did_fire_complete = true;
-            } else {
-                eprintln!(
-                    "[ntnt] warning: failed to enqueue on_complete callback for batch '{}'",
-                    batch_id
-                );
-            }
-        }
+        did_fire_complete = try_fire_batch_callback(&batch_id, "on_complete", &meta_snapshot);
     }
     if fire_success {
-        if let Some(ref snap) = meta_snapshot {
-            if let Ok(()) = fire_batch_callback(&batch_id, "on_success", snap) {
-                did_fire_success = true;
-            } else {
-                eprintln!(
-                    "[ntnt] warning: failed to enqueue on_success callback for batch '{}'",
-                    batch_id
-                );
-            }
-        }
+        did_fire_success = try_fire_batch_callback(&batch_id, "on_success", &meta_snapshot);
     }
 
     // Step 2: Set fired flags AFTER successful enqueue (or skip if enqueue failed).
@@ -1388,6 +1382,26 @@ fn enqueue_internal(
         }
     };
 
+    enqueue_internal_with_def(
+        &job_def,
+        job_name,
+        payload,
+        pending_ts,
+        scheduled_at,
+        batch_id,
+        override_job_id,
+    )
+}
+
+fn enqueue_internal_with_def(
+    job_def: &JobDefinition,
+    job_name: &str,
+    payload: Value,
+    pending_ts: &str,
+    scheduled_at: Option<&str>,
+    batch_id: Option<&str>,
+    override_job_id: Option<&str>,
+) -> Result<EnqueueResult> {
     // Resolve numeric priority from job options
     // Named: critical=5, high=25, normal=50 (default), low=85
     // Numeric: 0-99 inclusive
@@ -6374,6 +6388,16 @@ pub(crate) mod tests {
         }
     }
 
+    fn batch_id_from_handle(handle: &Value) -> String {
+        match handle {
+            Value::Map(m) => match m.get("_batch_id") {
+                Some(Value::String(s)) => s.clone(),
+                _ => panic!("no _batch_id"),
+            },
+            _ => panic!("not a map"),
+        }
+    }
+
     fn setup_memory_kv() {
         let module = init();
         let configure_fn = get_fn(&module, "configure_queue");
@@ -8842,13 +8866,7 @@ pub(crate) mod tests {
             let seal_fn = get_fn(&module, "seal");
 
             let handle = batch_fn(&[Value::String("flushed-retry".to_string())]).unwrap();
-            let bid = match &handle {
-                Value::Map(m) => match m.get("_batch_id") {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => panic!("no _batch_id"),
-                },
-                _ => panic!("not a map"),
-            };
+            let bid = batch_id_from_handle(&handle);
 
             // Enqueue 3 jobs
             for i in 0..3 {
