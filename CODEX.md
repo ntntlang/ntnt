@@ -30,7 +30,7 @@ ntnt intent check file.tnt          # Verify code matches intent specs
 
 ## Documentation References
 
-Read these files for full language details. Do NOT rely solely on this CLAUDE.md for NTNT syntax — consult the references when writing non-trivial NTNT code.
+Read these files for full language details. Do NOT rely solely on this CODEX.md for NTNT syntax — consult the references when writing non-trivial NTNT code.
 
 | Document | Contents |
 |----------|----------|
