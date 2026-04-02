@@ -5463,7 +5463,10 @@ pub(crate) mod tests {
             if let Ok(mut u) = JOB_RUNTIME.kv_url.lock() {
                 *u = "sqlite:./jobs.db".to_string();
             }
-            let _ = std::fs::remove_file(&tmp);
+            // Don't delete the temp DB file here — the SQLite connection in the
+            // global KV store registry may still hold an open file descriptor,
+            // and deleting the file while it's open can cause subsequent reads
+            // on a reused store_id to return empty results. Let the OS clean /tmp.
         });
     }
 
@@ -8530,12 +8533,18 @@ pub(crate) mod tests {
         m
     }
 
+    /// Get the KV handle from JOB_RUNTIME — the SAME handle that seal(), enqueue(),
+    /// and enqueue_into() use internally. Tests should use this instead of the `kv`
+    /// closure param from with_temp_kv() to avoid handle mismatch issues where the
+    /// closure's handle and the runtime's cached handle point to different store_ids.
+    fn runtime_kv() -> Value {
+        JOB_RUNTIME.get_or_init_kv().unwrap()
+    }
+
     /// Find all non-callback job IDs belonging to a specific batch.
-    /// Filters kv_list("jobs:data:") results by reading each job's batch_id field,
-    /// avoiding cross-test pollution from parallel test runs that share the global
-    /// JOB_RUNTIME KV handle.
-    fn batch_job_ids(kv: &Value, batch_id: &str) -> Vec<String> {
-        let data_keys = kv::kv_list(kv, Some("jobs:data:")).unwrap_or_default();
+    fn batch_job_ids(_kv: &Value, batch_id: &str) -> Vec<String> {
+        let kv = runtime_kv();
+        let data_keys = kv::kv_list(&kv, Some("jobs:data:")).unwrap_or_default();
         let mut result = Vec::new();
         for key in &data_keys {
             if key.contains("cb-") {
@@ -8545,7 +8554,7 @@ pub(crate) mod tests {
                 Some(s) => s.to_string(),
                 None => continue,
             };
-            if let Ok(Value::Map(m)) = kv::kv_get(kv, key) {
+            if let Ok(Value::Map(m)) = kv::kv_get(&kv, key) {
                 if let Some(Value::String(bid)) = m.get("batch_id") {
                     if bid == batch_id {
                         result.push(jid);
@@ -9214,7 +9223,7 @@ pub(crate) mod tests {
                 _ => panic!("not a map"),
             };
             let cp = format!("jobs:batch:{}:counter", bid);
-            let total = kv::kv_get(kv, &format!("{}:total", cp)).unwrap();
+            let total = kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap();
             assert!(
                 matches!(total, Value::Int(5)),
                 "counter:total must be 5 after sealing 5 jobs, got {:?}",
@@ -9300,15 +9309,16 @@ pub(crate) mod tests {
                 .next()
                 .expect("should find a non-callback job");
 
-            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
-                Value::Map(m) => m,
-                _ => panic!("expected map"),
-            };
+            let job_data =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_id)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
 
-            update_batch_on_terminal(kv, &job_data, &job_id, "succeeded").unwrap();
+            update_batch_on_terminal(&runtime_kv(), &job_data, &job_id, "succeeded").unwrap();
 
             let closed_key = format!("jobs:batch:{}:closed", bid);
-            let closed = kv::kv_get(kv, &closed_key).unwrap();
+            let closed = kv::kv_get(&runtime_kv(), &closed_key).unwrap();
             assert!(
                 matches!(closed, Value::Bool(true)),
                 "closed flag must be set after batch completion"
@@ -9346,7 +9356,7 @@ pub(crate) mod tests {
                 _ => panic!("not a map"),
             };
             let meta_key = format!("jobs:batch:{}", bid);
-            let ttl = kv::kv_ttl(kv, &meta_key).unwrap();
+            let ttl = kv::kv_ttl(&runtime_kv(), &meta_key).unwrap();
             let thirty_days = 30 * 24 * 3600;
             match ttl {
                 Some(t) => assert!(
@@ -9391,7 +9401,7 @@ pub(crate) mod tests {
             let cp = format!("jobs:batch:{}:counter", bid);
             let thirty_days = 30 * 24 * 3600;
             for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
-                let ttl = kv::kv_ttl(kv, &format!("{}:{}", cp, suffix)).unwrap();
+                let ttl = kv::kv_ttl(&runtime_kv(), &format!("{}:{}", cp, suffix)).unwrap();
                 match ttl {
                     Some(t) => assert!(
                         t > thirty_days - 60 && t <= thirty_days,
@@ -9437,15 +9447,16 @@ pub(crate) mod tests {
 
             let job_ids = batch_job_ids(kv, &bid);
             let job_id = job_ids.into_iter().next().expect("should find a job");
-            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
-                Value::Map(m) => m,
-                _ => panic!("expected map"),
-            };
-            update_batch_on_terminal(kv, &job_data, &job_id, "succeeded").unwrap();
+            let job_data =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_id)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+            update_batch_on_terminal(&runtime_kv(), &job_data, &job_id, "succeeded").unwrap();
 
             let meta_key = format!("jobs:batch:{}", bid);
             let twenty_four_hours = 24 * 3600;
-            let meta_ttl = kv::kv_ttl(kv, &meta_key).unwrap();
+            let meta_ttl = kv::kv_ttl(&runtime_kv(), &meta_key).unwrap();
             match meta_ttl {
                 Some(t) => assert!(
                     t > twenty_four_hours - 60 && t <= twenty_four_hours,
@@ -9457,7 +9468,7 @@ pub(crate) mod tests {
 
             let cp = format!("jobs:batch:{}:counter", bid);
             for suffix in &["pending", "succeeded", "dead", "cancelled", "total"] {
-                let ttl = kv::kv_ttl(kv, &format!("{}:{}", cp, suffix)).unwrap();
+                let ttl = kv::kv_ttl(&runtime_kv(), &format!("{}:{}", cp, suffix)).unwrap();
                 match ttl {
                     Some(t) => assert!(
                         t > twenty_four_hours - 60 && t <= twenty_four_hours,
@@ -9503,15 +9514,16 @@ pub(crate) mod tests {
 
             let job_ids = batch_job_ids(kv, &bid);
             let job_id = job_ids.into_iter().next().expect("should find a job");
-            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
-                Value::Map(m) => m,
-                _ => panic!("expected map"),
-            };
-            update_batch_on_terminal(kv, &job_data, &job_id, "succeeded").unwrap();
+            let job_data =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_id)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+            update_batch_on_terminal(&runtime_kv(), &job_data, &job_id, "succeeded").unwrap();
 
             let closed_key = format!("jobs:batch:{}:closed", bid);
             let twenty_four_hours = 24 * 3600;
-            let ttl = kv::kv_ttl(kv, &closed_key).unwrap();
+            let ttl = kv::kv_ttl(&runtime_kv(), &closed_key).unwrap();
             match ttl {
                 Some(t) => assert!(
                     t > twenty_four_hours - 60 && t <= twenty_four_hours,
@@ -9542,7 +9554,7 @@ pub(crate) mod tests {
             };
             let meta_key = format!("jobs:batch:{}", bid);
             let twenty_four_hours = 24 * 3600;
-            let ttl = kv::kv_ttl(kv, &meta_key).unwrap();
+            let ttl = kv::kv_ttl(&runtime_kv(), &meta_key).unwrap();
             match ttl {
                 Some(t) => assert!(
                     t > twenty_four_hours - 60 && t <= twenty_four_hours,
@@ -9589,20 +9601,22 @@ pub(crate) mod tests {
             let job_ids = batch_job_ids(kv, &bid);
             assert_eq!(job_ids.len(), 2);
 
-            let job_data_1 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[0])).unwrap() {
-                Value::Map(m) => m,
-                _ => panic!("expected map"),
-            };
-            update_batch_on_terminal(kv, &job_data_1, &job_ids[0], "succeeded").unwrap();
+            let job_data_1 =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_ids[0])).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+            update_batch_on_terminal(&runtime_kv(), &job_data_1, &job_ids[0], "succeeded").unwrap();
 
-            let job_data_2 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[1])).unwrap() {
-                Value::Map(m) => m,
-                _ => panic!("expected map"),
-            };
-            update_batch_on_terminal(kv, &job_data_2, &job_ids[1], "succeeded").unwrap();
+            let job_data_2 =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_ids[1])).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+            update_batch_on_terminal(&runtime_kv(), &job_data_2, &job_ids[1], "succeeded").unwrap();
 
-            let cb_keys =
-                kv::kv_list(kv, Some(&format!("jobs:data:cb-{}", bid))).unwrap_or_default();
+            let cb_keys = kv::kv_list(&runtime_kv(), Some(&format!("jobs:data:cb-{}", bid)))
+                .unwrap_or_default();
             let complete_cbs: Vec<&String> = cb_keys
                 .iter()
                 .filter(|k| k.contains("on_complete"))
@@ -9717,11 +9731,11 @@ pub(crate) mod tests {
             };
             let cp = format!("jobs:batch:{}:counter", bid);
             assert!(matches!(
-                kv::kv_get(kv, &format!("{}:total", cp)).unwrap(),
+                kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap(),
                 Value::Int(1)
             ));
             assert!(matches!(
-                kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(),
+                kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap(),
                 Value::Int(1)
             ));
 
@@ -9740,14 +9754,14 @@ pub(crate) mod tests {
 
             assert!(
                 matches!(
-                    kv::kv_get(kv, &format!("{}:total", cp)).unwrap(),
+                    kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap(),
                     Value::Int(2)
                 ),
                 "total should be 2"
             );
             assert!(
                 matches!(
-                    kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(),
+                    kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap(),
                     Value::Int(2)
                 ),
                 "pending should be 2"
@@ -9846,11 +9860,12 @@ pub(crate) mod tests {
 
             let job_ids = batch_job_ids(kv, &bid);
             let job_id = job_ids.into_iter().next().expect("should find a job");
-            let job_data = match kv::kv_get(kv, &format!("jobs:data:{}", job_id)).unwrap() {
-                Value::Map(m) => m,
-                _ => panic!("expected map"),
-            };
-            update_batch_on_terminal(kv, &job_data, &job_id, "succeeded").unwrap();
+            let job_data =
+                match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_id)).unwrap() {
+                    Value::Map(m) => m,
+                    _ => panic!("expected map"),
+                };
+            update_batch_on_terminal(&runtime_kv(), &job_data, &job_id, "succeeded").unwrap();
 
             let result = enqueue_into_fn(&[
                 Value::String(bid),
@@ -9899,7 +9914,7 @@ pub(crate) mod tests {
             };
 
             let closed_key = format!("jobs:batch:{}:closed", bid);
-            kv::kv_set(kv, &closed_key, &Value::Bool(true), None).unwrap();
+            kv::kv_set(&runtime_kv(), &closed_key, &Value::Bool(true), None).unwrap();
 
             let result = enqueue_into_fn(&[
                 Value::String(bid),
@@ -9927,7 +9942,13 @@ pub(crate) mod tests {
 
             let bid = "test-sealing-batch";
             let meta = build_batch_meta(bid, "sealing-test", "0", "sealing", 1, 1);
-            kv::kv_set(kv, &format!("jobs:batch:{}", bid), &Value::Map(meta), None).unwrap();
+            kv::kv_set(
+                &runtime_kv(),
+                &format!("jobs:batch:{}", bid),
+                &Value::Map(meta),
+                None,
+            )
+            .unwrap();
             let cp = format!("jobs:batch:{}:counter", bid);
             for suffix in &["pending", "total", "succeeded", "dead", "cancelled"] {
                 let val = if *suffix == "pending" || *suffix == "total" {
@@ -9935,7 +9956,13 @@ pub(crate) mod tests {
                 } else {
                     0
                 };
-                kv::kv_set(kv, &format!("{}:{}", cp, suffix), &Value::Int(val), None).unwrap();
+                kv::kv_set(
+                    &runtime_kv(),
+                    &format!("{}:{}", cp, suffix),
+                    &Value::Int(val),
+                    None,
+                )
+                .unwrap();
             }
 
             let result = enqueue_into_fn(&[
@@ -10034,11 +10061,11 @@ pub(crate) mod tests {
 
             // Initial: total=1, pending=1
             assert!(matches!(
-                kv::kv_get(kv, &format!("{}:total", cp)).unwrap(),
+                kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap(),
                 Value::Int(1)
             ));
             assert!(matches!(
-                kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(),
+                kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap(),
                 Value::Int(1)
             ));
 
@@ -10052,11 +10079,11 @@ pub(crate) mod tests {
             ])
             .unwrap();
             assert!(matches!(
-                kv::kv_get(kv, &format!("{}:total", cp)).unwrap(),
+                kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap(),
                 Value::Int(2)
             ));
             assert!(matches!(
-                kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(),
+                kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap(),
                 Value::Int(2)
             ));
 
@@ -10067,8 +10094,8 @@ pub(crate) mod tests {
                 Value::Map(unique_payload),
             ])
             .unwrap();
-            let total_after = kv::kv_get(kv, &format!("{}:total", cp)).unwrap();
-            let pending_after = kv::kv_get(kv, &format!("{}:pending", cp)).unwrap();
+            let total_after = kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap();
+            let pending_after = kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap();
             assert!(
                 matches!(total_after, Value::Int(2)),
                 "total should still be 2 after dedup, got {:?}",
@@ -10126,28 +10153,30 @@ pub(crate) mod tests {
             let job_ids = batch_job_ids(kv, &bid);
             assert_eq!(job_ids.len(), 2, "should have 2 jobs");
 
-            let jd1 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[0])).unwrap() {
+            let jd1 = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_ids[0])).unwrap()
+            {
                 Value::Map(m) => m,
                 _ => panic!("expected map"),
             };
-            update_batch_on_terminal(kv, &jd1, &job_ids[0], "succeeded").unwrap();
+            update_batch_on_terminal(&runtime_kv(), &jd1, &job_ids[0], "succeeded").unwrap();
 
             let cp = format!("jobs:batch:{}:counter", bid);
             assert!(
                 matches!(
-                    kv::kv_get(kv, &format!("{}:pending", cp)).unwrap(),
+                    kv::kv_get(&runtime_kv(), &format!("{}:pending", cp)).unwrap(),
                     Value::Int(1)
                 ),
                 "pending should be 1 after first completion"
             );
 
-            let jd2 = match kv::kv_get(kv, &format!("jobs:data:{}", job_ids[1])).unwrap() {
+            let jd2 = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_ids[1])).unwrap()
+            {
                 Value::Map(m) => m,
                 _ => panic!("expected map"),
             };
-            update_batch_on_terminal(kv, &jd2, &job_ids[1], "succeeded").unwrap();
+            update_batch_on_terminal(&runtime_kv(), &jd2, &job_ids[1], "succeeded").unwrap();
 
-            let meta = match kv::kv_get(kv, &format!("jobs:batch:{}", bid)).unwrap() {
+            let meta = match kv::kv_get(&runtime_kv(), &format!("jobs:batch:{}", bid)).unwrap() {
                 Value::Map(m) => m,
                 _ => panic!("expected metadata map"),
             };
@@ -10164,7 +10193,7 @@ pub(crate) mod tests {
                 "fired_success should be true"
             );
 
-            let total = kv::kv_get(kv, &format!("{}:total", cp)).unwrap();
+            let total = kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap();
             assert!(
                 matches!(total, Value::Int(2)),
                 "counter:total should be 2, got {:?}",
@@ -10215,14 +10244,14 @@ pub(crate) mod tests {
             let job_ids = batch_job_ids(kv, &bid);
 
             for jid in &job_ids {
-                let jd = match kv::kv_get(kv, &format!("jobs:data:{}", jid)).unwrap() {
+                let jd = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", jid)).unwrap() {
                     Value::Map(m) => m,
                     _ => panic!("expected map"),
                 };
-                update_batch_on_terminal(kv, &jd, jid, "succeeded").unwrap();
+                update_batch_on_terminal(&runtime_kv(), &jd, jid, "succeeded").unwrap();
             }
 
-            let meta = match kv::kv_get(kv, &format!("jobs:batch:{}", bid)).unwrap() {
+            let meta = match kv::kv_get(&runtime_kv(), &format!("jobs:batch:{}", bid)).unwrap() {
                 Value::Map(m) => m,
                 _ => panic!("expected metadata"),
             };
@@ -10276,7 +10305,7 @@ pub(crate) mod tests {
                 .unwrap();
             }
 
-            let total = kv::kv_get(kv, &format!("{}:total", cp)).unwrap();
+            let total = kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap();
             assert!(
                 matches!(total, Value::Int(4)),
                 "counter:total should be 4 (1 sealed + 3 dynamic), got {:?}",
@@ -10320,11 +10349,12 @@ pub(crate) mod tests {
             // Complete batch A
             let job_ids_a = batch_job_ids(kv, &bid_a);
             let job_id_a = job_ids_a.into_iter().next().expect("should find a job");
-            let jd_a = match kv::kv_get(kv, &format!("jobs:data:{}", job_id_a)).unwrap() {
+            let jd_a = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job_id_a)).unwrap()
+            {
                 Value::Map(m) => m,
                 _ => panic!("expected map"),
             };
-            update_batch_on_terminal(kv, &jd_a, &job_id_a, "succeeded").unwrap();
+            update_batch_on_terminal(&runtime_kv(), &jd_a, &job_id_a, "succeeded").unwrap();
 
             // Batch A is now complete. Simulate callback creating batch B.
             let handle_b = batch_fn(&[Value::String("child-batch".to_string())]).unwrap();
@@ -10398,11 +10428,29 @@ pub(crate) mod tests {
             let cp = format!("jobs:batch:{}:counter", bid);
 
             let meta = build_batch_meta(bid, "legacy-test", "0", "sealed", 2, 2);
-            kv::kv_set(kv, &meta_key, &Value::Map(meta), None).unwrap();
-            kv::kv_set(kv, &format!("{}:pending", cp), &Value::Int(2), None).unwrap();
-            kv::kv_set(kv, &format!("{}:succeeded", cp), &Value::Int(0), None).unwrap();
-            kv::kv_set(kv, &format!("{}:dead", cp), &Value::Int(0), None).unwrap();
-            kv::kv_set(kv, &format!("{}:cancelled", cp), &Value::Int(0), None).unwrap();
+            kv::kv_set(&runtime_kv(), &meta_key, &Value::Map(meta), None).unwrap();
+            kv::kv_set(
+                &runtime_kv(),
+                &format!("{}:pending", cp),
+                &Value::Int(2),
+                None,
+            )
+            .unwrap();
+            kv::kv_set(
+                &runtime_kv(),
+                &format!("{}:succeeded", cp),
+                &Value::Int(0),
+                None,
+            )
+            .unwrap();
+            kv::kv_set(&runtime_kv(), &format!("{}:dead", cp), &Value::Int(0), None).unwrap();
+            kv::kv_set(
+                &runtime_kv(),
+                &format!("{}:cancelled", cp),
+                &Value::Int(0),
+                None,
+            )
+            .unwrap();
             // Deliberately NOT setting counter:total — this is the legacy case.
 
             // Write two fake jobs with batch_id directly to KV
@@ -10422,33 +10470,39 @@ pub(crate) mod tests {
                         p
                     }),
                 );
-                kv::kv_set(kv, &format!("jobs:data:{}", jid), &Value::Map(jdata), None).unwrap();
+                kv::kv_set(
+                    &runtime_kv(),
+                    &format!("jobs:data:{}", jid),
+                    &Value::Map(jdata),
+                    None,
+                )
+                .unwrap();
             }
 
             // Complete both jobs
-            let jd1 = match kv::kv_get(kv, &format!("jobs:data:{}", job1_id)).unwrap() {
+            let jd1 = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job1_id)).unwrap() {
                 Value::Map(m) => m,
                 _ => panic!("expected map"),
             };
-            update_batch_on_terminal(kv, &jd1, job1_id, "succeeded").unwrap();
+            update_batch_on_terminal(&runtime_kv(), &jd1, job1_id, "succeeded").unwrap();
 
             // After first completion, counter:total should have been initialized
             // from metadata (total_jobs=2), not 0.
-            let total_after_first = kv::kv_get(kv, &format!("{}:total", cp)).unwrap();
+            let total_after_first = kv::kv_get(&runtime_kv(), &format!("{}:total", cp)).unwrap();
             assert!(
                 matches!(total_after_first, Value::Int(2)),
                 "counter:total should be 2 (from metadata fallback), got {:?}",
                 total_after_first
             );
 
-            let jd2 = match kv::kv_get(kv, &format!("jobs:data:{}", job2_id)).unwrap() {
+            let jd2 = match kv::kv_get(&runtime_kv(), &format!("jobs:data:{}", job2_id)).unwrap() {
                 Value::Map(m) => m,
                 _ => panic!("expected map"),
             };
-            update_batch_on_terminal(kv, &jd2, job2_id, "succeeded").unwrap();
+            update_batch_on_terminal(&runtime_kv(), &jd2, job2_id, "succeeded").unwrap();
 
             // After both complete, on_success should have fired
-            let meta_after = match kv::kv_get(kv, &meta_key).unwrap() {
+            let meta_after = match kv::kv_get(&runtime_kv(), &meta_key).unwrap() {
                 Value::Map(m) => m,
                 _ => panic!("expected metadata map"),
             };
