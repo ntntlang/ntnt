@@ -787,7 +787,8 @@ fn enqueue_to_sealed_batch(batch_id: &str, job_name: &str, payload: Value) -> Re
                 ))
             })?;
         let mut hasher = Sha256::new();
-        hasher.update(format!("{}:{}", job_name, pjson).as_bytes());
+        // Include batch_id so dedup is scoped per-batch (matches enqueue_internal_with_def).
+        hasher.update(format!("{}:{}:{}", job_name, batch_id, pjson).as_bytes());
         let full_hash = format!("{:x}", hasher.finalize());
         let dedup_key = format!("jobs:unique:{}:{}", job_name, &full_hash[..32]);
 
@@ -1516,7 +1517,15 @@ fn enqueue_internal_with_def(
                 ))
             })?;
         let mut hasher = Sha256::new();
-        hasher.update(format!("{}:{}", job_name, pjson).as_bytes());
+        // Include batch_id in hash so the same job type + payload in different
+        // batches gets distinct dedup keys. Without this, seal() could count a
+        // job that deduplicates against a different batch's job, leaving the
+        // batch stuck with pending > 0 forever.
+        let hash_input = match batch_id {
+            Some(bid) => format!("{}:{}:{}", job_name, bid, pjson),
+            None => format!("{}:{}", job_name, pjson),
+        };
+        hasher.update(hash_input.as_bytes());
         let full_hash = format!("{:x}", hasher.finalize());
         Some(format!("jobs:unique:{}:{}", job_name, &full_hash[..32]))
     } else {
