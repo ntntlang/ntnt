@@ -5439,34 +5439,27 @@ pub(crate) mod tests {
         f();
     }
 
-    /// Set up a temp SQLite KV store for the duration of a test, then clean up.
-    /// Each invocation gets a UUID-suffixed filename to prevent collisions from
-    /// stale DB files left by panicked tests or rapid re-runs.
-    fn with_temp_kv<F: FnOnce(&Value)>(db_name: &str, f: F) {
+    /// Set up an isolated in-memory SQLite KV store for the duration of a test.
+    /// Uses `sqlite::memory:` so each invocation gets a completely separate DB
+    /// with no file I/O, no stale files, and no cross-test contamination.
+    /// The `db_name` parameter is kept for API compatibility but is ignored.
+    fn with_temp_kv<F: FnOnce(&Value)>(_db_name: &str, f: F) {
         with_clean_runtime(|| {
-            let unique_name = format!("{}-{}.db", db_name.trim_end_matches(".db"), Uuid::new_v4());
-            let tmp = std::env::temp_dir().join(&unique_name);
-            let _ = std::fs::remove_file(&tmp);
-            let url = format!("sqlite:{}", tmp.display());
+            // Use in-memory SQLite — each open_kv(":memory:") creates a fresh,
+            // isolated DB with a unique store_id in the global registry.
+            let url = "sqlite::memory:".to_string();
             if let Ok(mut u) = JOB_RUNTIME.kv_url.lock() {
-                *u = url.clone();
+                *u = url;
             }
             let kv = JOB_RUNTIME.get_or_init_kv().unwrap();
             f(&kv);
-            // Clear the cached KV handle on exit so that concurrent tests (running
-            // outside TEST_LOCK) cannot inherit a stale handle pointing to this
-            // temp DB — which would cause spurious `jobs:data:` key counts in
-            // parallel test runs (e.g. test_batch_seal_through_terminal_integration).
+            // Clear the cached handle so the next test gets a fresh in-memory DB.
             if let Ok(mut h) = JOB_RUNTIME.kv_handle_info.lock() {
                 *h = None;
             }
             if let Ok(mut u) = JOB_RUNTIME.kv_url.lock() {
                 *u = "sqlite:./jobs.db".to_string();
             }
-            // Don't delete the temp DB file here — the SQLite connection in the
-            // global KV store registry may still hold an open file descriptor,
-            // and deleting the file while it's open can cause subsequent reads
-            // on a reused store_id to return empty results. Let the OS clean /tmp.
         });
     }
 
